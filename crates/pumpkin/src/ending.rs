@@ -1,3 +1,6 @@
+//! Following a run until it ends, and saying how it ended: its outcome, its summary, and the
+//! commands to run next.
+
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read as _};
@@ -9,16 +12,14 @@ use stdx::Context;
 
 use crate::{Reader, advise, escaped, next, print_outcome, progress, say, tell, to_stderr};
 
-/// The most bytes of a final judge's standard error that a run's ending shows ([`end`]): one
-/// that holds more is named, and not shown.
-// A judge's diagnostic, such as a traceback, fits many times over; more is a log, which the record
-// keeps for reading, rather than a message for a terminal.
+/// The most bytes of a final judge's standard error that an ending shows ([`end`]): one that
+/// holds more is named, and not shown.
+// A judge's diagnostic, such as a traceback, fits many times over; more is a log, which the
+// record keeps for reading, rather than a message for a terminal.
 const JUDGE_STDERR_SHOWN_BYTES: u64 = 1 << 20;
 
-/// Waits until the run of `record`, in `runs`, as commands name it ([`end`]), has ended, saying
-/// first, if it is live, that ending `pumpkin command` does not stop it ([`following`]), then its
-/// milestones as they come ([`followed`]), and prints its outcome; returns the exit status that
-/// `wait`'s help gives.
+/// Says how `record`'s run ended, following it first if it is live. `command` is the command that
+/// follows it, which the following names, and `runs` is as [`crate::runs_dir`]'s second.
 pub(crate) fn follow(
     record: &Record,
     command: &str,
@@ -38,9 +39,8 @@ pub(crate) fn follow(
 const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
-/// says each of its milestones meanwhile, as its log records it ([`progress::milestones`]), and,
-/// once, the parts of its log that can't be read, if any ([`progress::unread`]), to `reader`.
-/// Fails if a follower can't be told.
+/// says each of its milestones meanwhile, once, and the parts of its log that can't be read, if
+/// any, to `reader`. Fails if a follower can't be told.
 pub(crate) fn followed(record: &Record, reader: Reader) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
@@ -82,8 +82,6 @@ pub(crate) fn followed(record: &Record, reader: Reader) -> Result<Ending, String
     }
 }
 
-/// Says that `pumpkin command` follows the run of `record`, and that ending it does not stop
-/// the run.
 pub(crate) fn following(record: &Record, command: &str) {
     say(format_args!(
         "following run {}, recorded in {}: ending `pumpkin {command}` does not stop it",
@@ -92,13 +90,9 @@ pub(crate) fn following(record: &Record, command: &str) {
     ));
 }
 
-/// Prints the outcome of `record`, a run that has `ended`, then says its summary
-/// ([`summarize`]) and how it ended ([`closing`]), after the standard error of a final judge
-/// that returned no result ([`show_judge_stderr`]), or why it can't be found; or of a lost run,
-/// says its summary, and that it is lost. Ends with the command that runs it again with `args`
-/// ([`again`]), and of a lost run, those that remove what it left, which name its runs directory
-/// `runs`, absolute, or none if it is the default. Returns the exit status that `run`'s and
-/// `wait`'s help give.
+/// Prints the run's outcome and says how it ended, with the commands to run next, and gives the
+/// exit code: success if the run was scored, 3 if it ended unscored or without a result, and
+/// failure if it failed, was interrupted or was lost. `args` are those that run it again.
 pub(crate) fn end(
     record: &Record,
     ending: &Ending,
@@ -147,8 +141,6 @@ pub(crate) fn end(
     Ok(exit)
 }
 
-/// Says the summary of the run of `record`, which has ended ([`progress::summary`]), if it has a
-/// log, or why it can't be read.
 fn summarize(record: &Record) {
     match progress::summary(record) {
         Ok(Some(summary)) => {
@@ -160,7 +152,6 @@ fn summarize(record: &Record) {
     }
 }
 
-/// Says the command that runs the run of `record` again, with `args`, those of a `pumpkin run`.
 fn again(record: &Record, args: &[String]) {
     if let Some(build) = record.other_build() {
         say(format_args!(
@@ -172,16 +163,10 @@ fn again(record: &Record, args: &[String]) {
     advise("run it again", &next::run_again(args));
 }
 
-/// The line that closes a run's ending on the standard error: the run `id`, `how` it ended, as
-/// an [`Ending`] says, and where its record is, `dir`.
 pub(crate) fn closing(id: &str, how: &str, dir: &Path) -> String {
     format!("run {id} {how}; its record is {}", dir.display())
 }
 
-/// Shows on the standard error the final judge's standard error, which its record holds at
-/// `path`, under a line that names it ([`indented`]). One of more than
-/// [`JUDGE_STDERR_SHOWN_BYTES`], or that can't be read, is named alone; one that is empty, or
-/// wasn't collected, is not shown.
 fn show_judge_stderr(path: &Path) {
     let named = format!("the final judge's standard error, {},", path.display());
     let mut bytes = Vec::new();
@@ -208,8 +193,6 @@ fn show_judge_stderr(path: &Path) {
     }
 }
 
-/// `bytes`, which a sandbox wrote, as text for a terminal: each line indented, and each control
-/// character but a tab escaped.
 fn indented(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut shown = String::new();

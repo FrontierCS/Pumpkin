@@ -1,7 +1,3 @@
-//! The workspace's `.pumpkin` directory, which holds all that `pumpkin` writes on this machine
-//! ([`Workspace`]), so that what a repository's Pumpkin builds, records and fetches stays with
-//! the repository, apart from every other's, and goes with the directory.
-
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -10,27 +6,20 @@ use tempfile::TempDir;
 
 pub(crate) const DIR: &str = ".pumpkin";
 
-/// The runs directory of a workspace's [`DIR`], its default one.
 pub(crate) const RUNS: &str = "runs";
 
-/// The workspace's `.pumpkin` directory: the nearest one of that name that holds the executable
-/// of this `pumpkin`, which a repository's `./pumpkin` builds in its `.pumpkin/<commit>/bin`, and
-/// `cargo xtask install` puts in a checkout's `.pumpkin/bin`. It holds the default runs
-/// directory, [`RUNS`]; `tmp/`, in which a command makes a directory of its own for what it needs
-/// only while it runs; `controller/`, the connections that its commands share to a controller;
-/// and a directory for the providers of each kind, by its name.
+/// The nearest [`DIR`] above the executable of this `pumpkin`: all that `pumpkin` writes on this
+/// machine is below it, so that what a repository's Pumpkin builds and records goes with the
+/// repository.
 pub(crate) struct Workspace(PathBuf);
 
-/// This `pumpkin`'s executable, by its canonical path, as Linux gives it. If it can't be found,
-/// the error says what was `expected` of it.
+/// The path of this executable. `expected` ends the message of a failure to find it.
 pub(crate) fn exe(expected: &str) -> Result<PathBuf, String> {
     let exe = env::current_exe();
     exe.map_err(|error| format!("this `pumpkin`'s executable can't be found ({error}): {expected}"))
 }
 
 impl Workspace {
-    /// The workspace's directory of this `pumpkin`. Fails if its executable is in no `.pumpkin`
-    /// directory.
     pub(crate) fn find() -> Result<Self, String> {
         let exe = exe(&format!(
             "expected it in a workspace's `{DIR}` directory, which holds all it writes"
@@ -49,7 +38,7 @@ impl Workspace {
         Ok(Self(dir.to_owned()))
     }
 
-    /// The directory that holds it, the repository whose `./pumpkin` builds this `pumpkin`.
+    /// The directory that holds [`DIR`]: the repository whose `./pumpkin` builds this `pumpkin`.
     pub(crate) fn repository(&self) -> &Path {
         self.0.parent().unwrap_or(&self.0)
     }
@@ -58,14 +47,12 @@ impl Workspace {
         self.0.join(RUNS)
     }
 
-    /// The directory in which a command makes a directory of its own for what it needs only
-    /// while it runs.
     pub(crate) fn tmp(&self) -> PathBuf {
         self.0.join("tmp")
     }
 
-    /// A directory of this command's own, 0700, named from `prefix`, in [`Self::tmp`], which
-    /// dropping removes.
+    /// A directory of this command's own, 0700, named from `prefix`, below [`Self::tmp`]; dropping
+    /// it removes the directory.
     pub(crate) fn scratch(&self, prefix: &str) -> Result<TempDir, String> {
         let tmp = self.tmp();
         fs::create_dir_all(&tmp).context(tmp.display())?;
@@ -73,30 +60,22 @@ impl Workspace {
         made.context(tmp.display())
     }
 
-    /// The directory of the build slots, of which a controller's job takes one while it builds
-    /// (`crate::job`).
     pub(crate) fn slots(&self) -> PathBuf {
         self.0.join("slots")
     }
 
-    /// The directory of the connections that the commands share to a controller
-    /// ([`crate::controller`]).
     pub(crate) fn controller(&self) -> PathBuf {
         self.0.join("controller")
     }
 
-    /// The directory of what the Docker engine writes on this machine ([`engine::Engine`]).
     pub(crate) fn docker(&self) -> PathBuf {
         self.0.join("docker")
     }
 
-    /// The directory of what providers of kind `ec2` write on this machine ([`ec2::Ec2`]).
     pub(crate) fn ec2(&self) -> PathBuf {
         self.0.join("ec2")
     }
 
-    /// The directory of what providers of kind `modal` write on this machine
-    /// ([`modal::Modal`]).
     pub(crate) fn modal(&self) -> PathBuf {
         self.0.join("modal")
     }

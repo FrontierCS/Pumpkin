@@ -1,8 +1,8 @@
-//! A trace's statistics: each step's tokens, cost, times and calls, and their folds by turn, by
-//! thread and over the caller, from the held pass alone and the prices that the run's record keeps.
+//! What a trace measures of its requests: tokens, cost and the time each part of a request took,
+//! by step, turn or thread.
 //!
-//! An unknown value stays unknown: a fold sums the values its steps know and says how many of
-//! its steps lacked one, and a rate or share is the fold's sums divided, never an average of its
+//! An unknown value stays unknown: a fold sums the values its steps know and says how many of its
+//! steps lacked one, and a rate or share is the fold's sums divided, never an average of its
 //! steps' own. A time is a span between two of the log's times, in nanoseconds.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,14 +13,14 @@ use serde_json::{Map, Value, json};
 
 use super::{Exchanges, Trace, nanos};
 
-/// The shortest decode whose rate of output tokens is said: over a shorter one, the network's
-/// timing outweighs the model's.
+/// The shortest decode time over which a rate of tokens is given: over a shorter one, the
+/// network's timing outweighs the model's.
 const RATE_DECODE_NS: u64 = 100_000_000;
 
-/// The tokens a step's usage reports, each `<name>_tokens` in the log.
+/// The kinds of tokens, in the order of `Measured::tokens`.
 const TOKENS: [&str; 5] = ["input", "cached", "cache_write", "output", "reasoning"];
 
-/// What a fold by turn or thread groups.
+/// What the rows of `stats_json` group the steps by.
 #[derive(Clone, Copy)]
 pub(in crate::view) enum By {
     Step,
@@ -28,7 +28,6 @@ pub(in crate::view) enum By {
     Thread,
 }
 
-/// How a step's request ended.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Outcome {
     /// Answered with a success.
@@ -41,13 +40,11 @@ enum Outcome {
     InFlight,
 }
 
-/// A step's measures, each `None` if unknown.
 #[derive(Default)]
 struct Measured {
     request: u64,
     thread: Option<u64>,
     turn: Option<u64>,
-    /// In the order of [`TOKENS`].
     tokens: [Option<u64>; 5],
     usd: Option<f64>,
     start: Option<u64>,
@@ -67,15 +64,13 @@ struct Measured {
     repeat_of: Option<u64>,
 }
 
-/// The span from `from` to `to`, if both are known and in that order.
+/// The time from `from` to `to`, or `None` if either is unknown or `to` is earlier.
 pub(super) fn span(from: Option<u64>, to: Option<u64>) -> Option<u64> {
     to?.checked_sub(from?)
 }
 
 impl Trace {
-    /// The statistics of the trace's steps, as rows of columns, a step's each or a fold's of
-    /// `by`'s groups, and the fold of them all; each model's tokens cost `prices`, by the route's
-    /// name for it.
+    /// One row for each step, turn or thread of the trace, as columns, and the totals of all.
     pub(super) fn stats_json(
         &self,
         exchanges: &Exchanges,
@@ -132,7 +127,6 @@ impl Trace {
         json!({ "caller": self.caller, "by": by, "rows": rows, "totals": totals })
     }
 
-    /// Each step's measures, in the order of their requests.
     fn measured(
         &self,
         exchanges: &Exchanges,
@@ -143,7 +137,6 @@ impl Trace {
             .collect()
     }
 
-    /// The measures of step `index`, if the log names its request.
     fn measure(
         &self,
         exchanges: &Exchanges,
@@ -211,7 +204,7 @@ impl Trace {
         })
     }
 
-    /// The statistics of step `index`, as the `stats` reply's row of it gives them, as an object.
+    /// The row of step `index`, or `null` if the log has nothing of it.
     pub(super) fn step_stats(
         &self,
         exchanges: &Exchanges,
@@ -224,8 +217,7 @@ impl Trace {
             })
     }
 
-    /// The span of each of `threads`, as the `stats` reply's fold by thread gives it, from its
-    /// steps' first start to their last end, as columns `thread` and `span_ns`.
+    /// For each thread of `threads`, the time from the first start to the last end of its steps.
     pub(super) fn thread_spans(&self, exchanges: &Exchanges, threads: &BTreeSet<u64>) -> Value {
         let mut bounds: BTreeMap<u64, (Option<u64>, Option<u64>)> = threads
             .iter()
@@ -250,7 +242,6 @@ impl Trace {
     }
 }
 
-/// The output tokens a second over `decode`, if it is long enough to say ([`RATE_DECODE_NS`]).
 #[expect(
     clippy::cast_precision_loss,
     reason = "a rate: tokens and nanoseconds past 2^52 are past any run"
@@ -259,16 +250,15 @@ fn rate(output: u64, decode: u64) -> Option<f64> {
     (decode >= RATE_DECODE_NS).then(|| output as f64 * 1e9 / decode as f64)
 }
 
-/// `part` as a fraction of `whole`, if `whole` isn't 0.
 #[expect(
     clippy::cast_precision_loss,
     reason = "a share: tokens past 2^52 are past any run"
 )]
+/// `part` of `whole`, or `None` if `whole` is zero.
 pub(super) fn share(part: u64, whole: u64) -> Option<f64> {
     (whole > 0).then(|| part as f64 / whole as f64)
 }
 
-/// The count of each name among `calls`.
 fn by_name<'c>(calls: impl Iterator<Item = &'c String>) -> Value {
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for call in calls {
@@ -277,7 +267,6 @@ fn by_name<'c>(calls: impl Iterator<Item = &'c String>) -> Value {
     json!(counts)
 }
 
-/// The row of `step`'s measures.
 fn step_row(step: &Measured) -> Vec<(String, Value)> {
     let [input, cached, ..] = step.tokens;
     let output = step.tokens[3];
@@ -321,8 +310,6 @@ fn step_row(step: &Measured) -> Vec<(String, Value)> {
     row
 }
 
-/// The row of the group of `steps` whose turn or thread, as `by` groups, is `key`: its key, its
-/// thread, and their fold.
 fn group_row(by: By, key: Option<u64>, steps: &[&Measured]) -> Vec<(String, Value)> {
     let mut row = vec![];
     if matches!(by, By::Turn) {
@@ -334,7 +321,6 @@ fn group_row(by: By, key: Option<u64>, steps: &[&Measured]) -> Vec<(String, Valu
     row
 }
 
-/// The sum of the known among `values`, `null` if none is, and the count of those unknown.
 fn sum(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
     let (mut sum, mut known, mut unknown) = (0_u64, false, 0);
     for value in values {
@@ -346,8 +332,6 @@ fn sum(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
     (if known { json!(sum) } else { Value::Null }, unknown)
 }
 
-/// The sum of the known among `values`, in dollars, `null` if none is, and the count of those
-/// unknown.
 fn sum_usd(values: impl Iterator<Item = Option<f64>>) -> (Value, usize) {
     let (mut sum, mut known, mut unknown) = (0.0, false, 0);
     for value in values {
@@ -359,8 +343,8 @@ fn sum_usd(values: impl Iterator<Item = Option<f64>>) -> (Value, usize) {
     (if known { json!(sum) } else { Value::Null }, unknown)
 }
 
-/// The median of the known among `values`, the lower of the middle two of an even count, and
-/// the count of those unknown.
+/// The median of the known among `values`, the lower of the middle two of an even count, and the
+/// count of those unknown.
 fn median(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
     let values: Vec<Option<u64>> = values.collect();
     let mut known: Vec<u64> = values.iter().flatten().copied().collect();
@@ -369,12 +353,9 @@ fn median(values: impl Iterator<Item = Option<u64>>) -> (Value, usize) {
     (json!(middle), values.len() - known.len())
 }
 
-/// The fold of `steps`: their count and first request, their span from first start to last end,
-/// their sums of tokens, cost, and the queue, decode and model times, the medians of their times to
-/// a first byte and token, each with the count that lacked it; the cache's share of the input
-/// and the rate of output, of the steps that know both; their calls by name, and how many were
-/// retries, repeats, refused, failed and in flight.
 #[expect(clippy::too_many_lines, reason = "a column of the fold after another")]
+/// The row of totals for `steps`. Each sum or median that some step doesn't know is followed by
+/// how many steps didn't, as `<name>_unknown`.
 fn fold(steps: &[&Measured]) -> Vec<(String, Value)> {
     let mut row = vec![
         ("steps".to_owned(), json!(steps.len())),

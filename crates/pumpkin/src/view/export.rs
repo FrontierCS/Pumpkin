@@ -1,28 +1,12 @@
 //! `pumpkin view --export <dir>`: the replies that the view's page reads, of every run, as files
 //! that a static copy of the page reads in their place, each made by the code that answers its
 //! request, as the controller's view answers it. Each file below `runs/`, and `runs.json`, holds
-//! its reply in zlib's format, which HTTP's `Content-Encoding: deflate` names.
+//! its reply in zlib's format, which HTTP's `Content-Encoding: deflate` names, scrubbed.
 //!
-//! Each row gives a key below `<dir>`, the request whose reply the file holds (below
-//! `/api/runs/<id>/` unless it starts `/api/`), and when it is written: when its bytes change,
-//! or, of a reply that can't change, once. `<c>` is each caller in the run's `lanes`; `<b>`, `<e>`
-//! and `<k>` are 0 and each `next` after it. A reply that the view refuses has no file:
-//!
-//! | key | reply | written |
-//! |---|---|---|
-//! | `runs.json` | `/api/runs`, of every run that has its `run.json`, with `next` `null` | when changed, last |
-//! | `runs/<id>/run.json` | `/api/runs/<id>` | when changed, the run's last |
-//! | `runs/<id>/log/<b>.json` | `log?at=<b>` | when changed |
-//! | `runs/<id>/trace/<c>/steps.json`, `…/ops.json`, `…/stats-<by>.json` | `trace/<c>/steps`, `trace/<c>/ops`, `trace/<c>/stats?by=<by>` of `step`, `turn` and `thread` | when changed |
-//! | `runs/<id>/trace/<c>/entries/<n>-<e>.json` | `trace/<c>/entries?from=<n>&to=<n>&entry=<e>`, of each step's request `<n>` | when changed |
-//! | `runs/<id>/trace/<c>/entry/<at>.json` | `trace/<c>/entry?at=<at>`, of each entry whose text those cut | when changed |
-//! | `runs/<id>/trace/<c>/search/<k>.json` | chunk `<k>` of the text that the trace's search reads, in the form it matches in | when changed |
-//! | `runs/<id>/exchange/<n>.json` | `exchange/<n>` | once |
-//! | `runs/<id>/diff/<a>-<b>-<part>.json` | `diff?a=<a>&b=<b>&part=<part>`, of each step `<b>` whose `differs` names `<part>` of its parent `<a>` | once |
-//! | `runs/<id>/kept/<n>.response`, `…/<n>.request` | `exchange/<n>/response`; request `<n>` as the record keeps it, its items apart, in place of `exchange/<n>/request` | once |
-//! | `runs/<id>/kept/items/<hex>` | `item/<hex>`, of each item that a `kept/<n>.request` names | once |
-//! | `index.html`, `<digest>/<file>` | the page, as it is served, its `index.html` marked to read these files | `<digest>/` once |
-//! | `robots.txt` | what asks every crawler to stay out | when changed |
+//! A file is written when its bytes change; one whose reply can't change is written once: a run's
+//! `exchange/`, `diff/` and `kept/` files, and the page's files below a directory named by their
+//! digest. A reply that the view refuses has no file. A run's `run.json` is the last of its files,
+//! and `runs.json`, which lists only the runs that have their `run.json`, the last of all.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -48,9 +32,8 @@ use crate::say;
 /// <https://github.com/UKGovernmentBEIS/inspect_ai/blob/7cf09c929b3ea9138762ca9e4d8d23f119554ee6/src/inspect_ai/log/_bundle.py#L246-L257>.
 const ROBOTS: &str = "User-agent: *\nDisallow: /\n";
 
-/// Writes the runs in the directory `runs` names, or the default one, into `to`, as [`exported`]
-/// does, and says each run it left out, the replies refused, and the counts of what it exported,
-/// left out and wrote.
+/// Exports the runs of `runs` into `to` and says what was written; the flag's help is the
+/// interface.
 pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<ExitCode, String> {
     let (runs, _) = crate::runs_dir(runs)?;
     let exported = exported(Path::new(&runs), to, scrub, None)?;
@@ -70,19 +53,20 @@ pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<Ex
     Ok(ExitCode::SUCCESS)
 }
 
+/// The runs an export wrote, and those it left out or had refused.
 pub(crate) struct Exported {
-    /// The id of each run that it exported, newest first, as `runs.json` lists them.
+    /// The runs whose files are in the export.
     pub(crate) ids: Vec<RunTag>,
-    /// Each run that it left out, which has no `run.json` and no row of `runs.json`, with why.
+    /// Why each run that has no files was left out.
     pub(crate) left_out: Vec<String>,
+    /// How many files were written, not counting those whose bytes did not change.
     pub(crate) written: usize,
-    /// Each reply that the view refused, with its request, which has no file.
+    /// Each request whose reply was refused, and so has no file.
     pub(crate) refused: Vec<String>,
 }
 
 impl Exported {
-    /// Says each run left out, with why, and how many replies were refused, and the first, if
-    /// any was.
+    /// Says on the standard error what was left out or refused.
     pub(crate) fn say_refused(&self) {
         for left_out in &self.left_out {
             say(format_args!("left out {left_out}"));
@@ -96,9 +80,15 @@ impl Exported {
     }
 }
 
-/// Writes the runs in `runs` into `to`, as the module's doc says, each reply with what `scrub` and
-/// each run's record name replaced ([`Scrub::of_run`]); a run that started before `since`, a time
-/// since the Unix epoch, is skipped.
+/// Writes into `to` the page, a `robots.txt`, `runs.json` and each run's files, with the values of
+/// `scrub`, and those that each run names, replaced by their stand-ins.
+///
+/// Only runs minted at `since` or later are exported, if it is given. A run whose files say it
+/// had ended is not read again, and a file is rewritten only if its bytes changed.
+///
+/// # Errors
+///
+/// Fails if a file of `to` can't be read or written, or a run's record can't be read.
 pub(crate) fn exported(
     runs: &Path,
     to: &Path,
@@ -127,18 +117,18 @@ pub(crate) fn exported(
     }
     out.put("robots.txt", ROBOTS.as_bytes())?;
     let mut rows = rows(&mut view)?;
-    // A run's id starts with the time its run started.
     rows.retain(|row| {
+        // A run's id starts with the time its run started.
         let minted = row["id"].as_str().and_then(runtime::minted);
         since.is_none_or(|since| minted.is_some_and(|minted| minted >= since))
     });
-    // Only a run that has its `run.json` is a row of `runs.json`, and counted.
     let (mut listed, mut ids, mut left_out) = (Vec::new(), Vec::new(), Vec::new());
     for row in rows {
         let Some(Ok(id)) = row["id"].as_str().map(|id| RunTag::try_from(id.to_owned())) else {
             continue;
         };
         match out.run(&mut view, &id)? {
+            // Only a run that has its `run.json` is a row of `runs.json`, and counted.
             Ok(()) => {
                 listed.push(row);
                 ids.push(id);
@@ -160,7 +150,6 @@ pub(crate) fn exported(
     })
 }
 
-/// Every run's row of the list, newest first, as the pages of `/api/runs` give them.
 fn rows(view: &mut View) -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
     let mut before: Option<String> = None;
@@ -174,7 +163,6 @@ fn rows(view: &mut View) -> Result<Vec<Value>, String> {
     }
 }
 
-/// The body of `response`, or, if it is no `200 OK`, its status and body.
 fn reply(response: Response) -> Result<Vec<u8>, String> {
     let sent = response.sent(false);
     if sent.status != "200 OK" {
@@ -189,15 +177,15 @@ fn reply_json(response: Response) -> Result<Value, String> {
     serde_json::from_slice(&body).map_err(|error| format!("the reply is no JSON: {error}"))
 }
 
+/// The export in progress: its directory and the values to scrub.
 struct Out {
     dir: PathBuf,
     written: usize,
-    /// The key of each file it found or wrote, which it then knows to be there.
     files: BTreeSet<String>,
     refused: Vec<String>,
     /// What the export was given to replace.
     given: Scrub,
-    /// What the next reply written has replaced: its run's, and, for `runs.json`, every run's.
+    /// What the next reply written replaces: its run's and, for `runs.json`, every run's.
     scrub: Scrub,
     /// What every run's record names, and what it was given.
     every: Scrub,
@@ -240,15 +228,12 @@ impl Out {
         Ok(())
     }
 
-    /// Writes `body`, scrubbed ([`Self::scrub`]) and deflated, at `key`, as [`Self::put`] does.
     fn put_deflated(&mut self, key: &str, body: &[u8]) -> Result<(), String> {
         let body = self.scrub.scrubbed(body);
         let deflated = compress_to_vec_zlib(&body, CompressionLevel::DefaultLevel as u8);
         self.put(key, &deflated)
     }
 
-    /// The reply to `target`, a `GET` of the view's data, of `view`, or `None`, its refusal
-    /// noted.
     fn get(&mut self, view: &mut View, target: &str) -> Result<Option<Vec<u8>>, String> {
         let request = Request::get(target, false).map_err(|refused| {
             let body = refused.sent(false).body;
@@ -263,8 +248,6 @@ impl Out {
         }
     }
 
-    /// Writes at `key` the reply to `target`, a `GET` of the view's data, of `view`, deflated, or
-    /// notes its refusal; returns the reply, if any.
     fn put_reply(
         &mut self,
         view: &mut View,
@@ -278,8 +261,6 @@ impl Out {
         Ok(body)
     }
 
-    /// Writes at `key` the body of `response`, the answer to `asked`, deflated, or notes its
-    /// refusal; returns the body, if any.
     fn put_answered(
         &mut self,
         key: &str,
@@ -298,7 +279,6 @@ impl Out {
         }
     }
 
-    /// Writes at `key`, unless a file is there, the reply to `target`, as [`Self::put_reply`].
     fn put_once(&mut self, view: &mut View, key: &str, target: &str) -> Result<(), String> {
         if !self.has(key)? {
             self.put_reply(view, key, target)?;
@@ -307,7 +287,7 @@ impl Out {
     }
 
     /// Whether the run whose `run.json` is at `key` had ended, and was not lost, as of the last
-    /// export.
+    /// export: a reap changes a lost run, and no later export changes the rest.
     fn ended(&mut self, key: &str) -> Result<bool, String> {
         let path = self.path(key)?;
         let deflated = match fs::read(&path) {
@@ -324,8 +304,8 @@ impl Out {
         Ok(ended)
     }
 
-    /// The path of the file at `key`, a relative path of plain names, or the refusal of a key
-    /// that names another place, as a part that a record names may.
+    /// The path of the file at `key`, below the export's directory; refused if `key` names another
+    /// place, as a part that a record names may.
     fn path(&self, key: &str) -> Result<PathBuf, String> {
         let plain = Path::new(key)
             .components()
@@ -338,14 +318,10 @@ impl Out {
         Ok(self.dir.join(key))
     }
 
-    /// Writes run `id`'s files, of `view`, as the module's doc says, but none of a run whose
-    /// `run.json` said it had ended, and not that it was lost, which a reap changes; returns
-    /// why the run has no `run.json`, if it has none.
     fn run(&mut self, view: &mut View, id: &RunTag) -> Result<Result<(), String>, String> {
         let base = format!("runs/{}", id.as_str());
         let api = format!("/api/runs/{}", id.as_str());
         if self.ended(&format!("{base}/run.json"))? {
-            // `runs.json`, which lists the run, replaces what the run's record names too.
             let record = Record::open(&view.runs.join(id.as_str()))?;
             match self.given.of_run(&record, []) {
                 Ok(scrub) => self.every = std::mem::take(&mut self.every).with(&scrub),
@@ -376,6 +352,7 @@ impl Out {
             Ok(scrub) => scrub,
             Err(error) => return Ok(Err(error)),
         };
+        // `runs.json`, which lists the run, replaces what the run's record names too.
         self.every = std::mem::take(&mut self.every).with(&self.scrub);
         for (key, window, _) in &windows {
             self.put_deflated(key, window)?;
@@ -390,10 +367,6 @@ impl Out {
         Ok(Ok(()))
     }
 
-    /// Writes caller `caller`'s files of run `id`, of `view`, as the module's doc says: those of
-    /// `kept/` once their request was answered, and of `exchange/` and `diff/` once every request
-    /// of the caller up to their own was, as an earlier one answered later may place a step
-    /// elsewhere in the trace.
     fn trace(&mut self, view: &mut View, id: &RunTag, caller: &str) -> Result<(), String> {
         let base = format!("runs/{}", id.as_str());
         let api = format!("/api/runs/{}", id.as_str());
@@ -426,7 +399,9 @@ impl Out {
         let (requests, ends) = (column("request"), column("end_ns"));
         let (kept_requests, kept_responses) = (column("kept_bytes"), column("back_bytes"));
         let (parents, differs) = (column("parent"), column("differs"));
-        // Whether every request up to this row's was answered, as the module's doc says.
+        // `exchange/` and `diff/` files are written once every request of the caller up to their
+        // own is answered, as an earlier one answered later may place a step elsewhere in the
+        // trace; a `kept/` file, once its own is.
         let mut settled = true;
         for (row, request) in requests.iter().enumerate() {
             let Some(n) = request.as_u64() else {
@@ -466,7 +441,6 @@ impl Out {
         self.search(view, id, caller)
     }
 
-    /// Writes the chunks of the text that caller `caller`'s search of run `id` reads, of `view`.
     fn search(&mut self, view: &mut View, id: &RunTag, caller: &str) -> Result<(), String> {
         let trace_base = format!("runs/{}/trace/{caller}", id.as_str());
         let trace_api = format!("/api/runs/{}/trace/{caller}", id.as_str());
@@ -496,8 +470,6 @@ impl Out {
         }
     }
 
-    /// Writes the entries of step `n` of the trace whose files are at `base` and whose
-    /// replies at `api`, and each entry of them that the window cut, of `view`.
     fn entries(&mut self, view: &mut View, base: &str, api: &str, n: u64) -> Result<(), String> {
         let mut entry = 0;
         loop {
@@ -524,8 +496,6 @@ impl Out {
         }
     }
 
-    /// Writes, each once, request `n`'s response and request as run `id`'s record keeps them,
-    /// each if `kept` says the record keeps it, and each item that the request names, of `view`.
     fn kept(
         &mut self,
         view: &mut View,
@@ -554,7 +524,6 @@ impl Out {
             asked,
         };
         let what = format!("{api}, request {n} as kept");
-        // Its items first, so that a request's file names only items written.
         let body = match reply(answered(asked, view)) {
             Ok(body) => body,
             Err(refused) => {
@@ -568,6 +537,7 @@ impl Out {
             .into_iter()
             .flatten())
         .chain(kept["fields"].as_array().into_iter().flatten());
+        // Its items first, so that a request's file names only items written.
         for hex in items.filter_map(|part| part["item"].as_str()) {
             self.put_once(
                 view,

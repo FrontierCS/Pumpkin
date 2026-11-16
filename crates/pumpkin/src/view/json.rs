@@ -1,6 +1,5 @@
-//! The JSON forms of what the view answers with: a run, the list's row of one, and the records
-//! of its log, each said as `ls` says it where `ls` says it ([`progress`]). Which request each
-//! answers, and what the view holds to make it from, is the parent module's.
+//! The JSON that the view answers with for a run and its log: the forms of what `runtime` reads
+//! from a record and of what [`super::talk`] folds from its log.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,18 +13,15 @@ use super::{Held, when};
 use crate::progress::{self, Listed};
 use crate::{controller, next};
 
-/// The most bytes of a string of a log's record that an answer holds; it says how long the string
-/// is in all.
+/// The longest string a reply carries whole; a longer one is cut, and its entry is read apart.
 const STRING_CUT_BYTES: usize = 8 * 1024;
 
-/// The most times of model answers that a lane holds, each the start of one of as many equal
-/// spans of the run so far that holds an answer: a lane's track on a page is about a thousand
-/// pixels wide, and a run makes thousands of requests.
+/// How many marks at most a lane's answers and failures are drawn as across the run's time: a
+/// lane's track on a page is about a thousand pixels wide, and a run makes thousands of requests.
 const LANE_TICKS: u32 = 500;
 
-/// The record that `line` of a log holds, which starts at `byte`, as an answer holds it: with
-/// `"byte"`, and `"when"`, its time since the run started in seconds, its strings cut
-/// ([`cut`]); or `{"byte": b, "unread": text}` if it is no JSON object.
+/// A log line as the page reads it: its fields, each string cut, with the byte it starts at and
+/// its `when`. A line that is no JSON object comes as `unread` text.
 pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
     if let Ok(Value::Object(fields)) = serde_json::from_slice(line) {
         let mut record = cut(Value::Object(fields));
@@ -37,8 +33,8 @@ pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
     json!({ "byte": byte, "unread": text })
 }
 
-/// `value` with each string longer than [`STRING_CUT_BYTES`] cut there, at a character's start,
-/// and the bytes it holds in all said after it.
+/// `value` with each string longer than [`STRING_CUT_BYTES`] cut, at a character, and marked with
+/// its length in all, which [`was_cut`] reads.
 pub(super) fn cut(value: Value) -> Value {
     match value {
         Value::String(text) if text.len() > STRING_CUT_BYTES => {
@@ -55,7 +51,7 @@ pub(super) fn cut(value: Value) -> Value {
     }
 }
 
-/// Whether `text` is a string that [`cut`] cut: it ends with the length of the whole.
+/// Whether `text` ends with the mark that [`cut`] puts on a string.
 pub(super) fn was_cut(text: &str) -> bool {
     let Some(rest) = text.strip_suffix(" bytes in all]") else {
         return false;
@@ -64,7 +60,7 @@ pub(super) fn was_cut(text: &str) -> bool {
     length.is_some_and(|length| length.parse::<usize>().is_ok())
 }
 
-/// The list's row of `held`, a live run, as JSON.
+/// The row of the run list for a run that has not ended.
 pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     let progress = held.readout.progress.clone();
     let model = progress.as_ref().map(|progress| progress.model.clone());
@@ -79,13 +75,14 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     row
 }
 
-/// Whether a run that ended as `ending` says, if it has, finished with a score.
+/// Whether `ending` is a score.
 pub(super) fn scored(ending: Option<&Ending>) -> bool {
     matches!(ending, Some(Ending::Scored { .. }))
 }
 
-/// Run `id`, `listed`, as `ls` lists it at `now`, as JSON; `scored` is whether it finished with a
-/// score, which its state doesn't say.
+/// The row of the run list for `id`, as `ls` shows it, at `now`.
+///
+/// `named` is the runs directory as commands name it, `None` for the default.
 pub(super) fn listed_json(
     id: &str,
     listed: &Listed,
@@ -112,9 +109,8 @@ pub(super) fn listed_json(
     })
 }
 
-/// The `tokens` that `requests` model requests reported, as JSON: `{"input", "output",
-/// "cached"}`, each `null` that no response gave, and `input` and `output` too where requests
-/// were made and no response reported its tokens, which is not none used.
+/// A run's tokens, where `input` and `output` are `null` if requests were made and no response
+/// reported its tokens, which is not none used.
 pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
     let Tokens {
         reported,
@@ -132,7 +128,6 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
     })
 }
 
-/// How a run that ended as `ending` says ended, in words that follow its id.
 fn how(ending: &Ending) -> String {
     match ending {
         Ending::Scored { score, after } => format!(
@@ -145,12 +140,10 @@ fn how(ending: &Ending) -> String {
     }
 }
 
-/// The run of `held`, as JSON, as of its last look: `{"id", "task", "live", "state", "scored",
-/// "verdict", "again", "other_build", "times", "lanes", "talk", "model", "cost", "summary",
-/// "unread", "end", "log_epoch"}`, where `again` is `{"command": c}`, the command that runs it
-/// again from here, or `{"error": e}`, why none can be made, and left out unless `again`; its runs
-/// directory is `named`, as commands name it, if not by default.
 #[expect(clippy::too_many_lines, reason = "a field of the reply after another")]
+/// The reply for one run: its state and verdict, times, lanes, talk, model use, cost and log end.
+///
+/// `again` adds the command that starts the run over.
 pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     let record = &held.record;
     let id = record.id();
@@ -227,8 +220,6 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     run
 }
 
-/// `cost`, a run's, as JSON: `{"shown", "said"}`, the whole as `ls`'s Cost column shows it, and
-/// what a summary's cost line says of it, after `cost: `.
 fn cost_json(cost: &Cost) -> Value {
     json!({
         "shown": progress::usd(cost.usd(), cost.unpriced()),
@@ -236,12 +227,6 @@ fn cost_json(cost: &Cost) -> Value {
     })
 }
 
-/// `model`, a run's or a judge call's model requests, as JSON: how many, how many stated a
-/// failure, by code, how many were not forwarded whole with a 2xx status, those in flight with
-/// when each went, the medians of how long the good ones took to their end and to their first
-/// token, with how many each is of, the tokens reported, and the names of the request headers
-/// that the route left behind, the first [`route::MAX_DROPPED_HEADERS`] by name, with whether it
-/// left more.
 fn model_json(model: &ModelUse) -> Value {
     let ModelUse {
         requests,
@@ -277,12 +262,6 @@ fn model_json(model: &ModelUse) -> Value {
     })
 }
 
-/// The lanes of the run's sandboxes, of the record in `dir`, as its summary orders them: the
-/// agent's, then each judge call's and lease's, by when the core began it, a lease under the call
-/// that holds it; each with what the summary says of it, and each caller's with its `caller`,
-/// as a trace names it (`agent`, `job-<n>`), and its model answers: `"answers": {"count",
-/// "failed"}`, how many, and `"answered"` and `"failed"`, a time of each of [`LANE_TICKS`] spans
-/// of the run so far that holds one ([`ticks`]).
 fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
@@ -350,10 +329,8 @@ fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         .collect()
 }
 
-/// Of `answered`, times in seconds since the run's start, one in each of the spans `span` seconds
-/// long from the run's start that holds one, at most [`LANE_TICKS`], as a time past the last span
-/// is put in it: the first of `failed`, a part of `answered`, that the span holds, else its first;
-/// and those of `failed`.
+/// The marks of a lane's `answered` and `failed` times: one per span of the run's time, at the
+/// span's first failure if it has one, else its first answer.
 fn ticks(answered: &[f64], failed: &[f64], span: f64) -> (Vec<f64>, Vec<f64>) {
     #[expect(
         clippy::cast_possible_truncation,

@@ -1,21 +1,17 @@
-//! The controller target: with `[controller]` in its configuration ([`config::Client`]), this
-//! machine sends `run` and `build` to the person's controller, an EC2 instance that the module in
-//! `deploy/aws/` makes, and follows them, lists, stops and reaps its runs, there, with the same
-//! commands as it would run them itself.
+//! Reaching a person's controller from this machine, and the `ssh` connections that a
+//! workspace's commands share to it.
 //!
-//! Each command reaches the controller over the connections that the workspace's commands share
-//! to it, master `ssh`es to the controller's user through SSM's `AWS-StartSSHSession`, each `ssh`
-//! over one with a session free. With no master to share, it finds the controller by its tag,
-//! starts it if it is stopped, waits until SSM sees it, and opens one, with this machine's key,
-//! which it enrols through EC2 Instance Connect once the controller refuses it. A follow of a
-//! run, a send and a copy whose connection ends go on over another, a few times. What runs there
-//! is the controller's own side ([`crate::job`]), whose layout below the user's home its module
-//! doc gives.
+//! A controller is one EC2 instance, found by its tag and reached by `ssh` through SSM's
+//! `AWS-StartSSHSession`. A workspace keeps up to `MASTERS` master `ssh` connections per
+//! controller, each carrying up to `SESSIONS` sessions at once. A session is held by a lock on a
+//! file of the workspace, so the commands of separate `pumpkin` processes share the connections
+//! and none takes a session that another holds. With no connection to share, a command starts
+//! the controller if it is stopped, waits until SSM sees it, and opens one with this machine's
+//! key, which it enrols through EC2 Instance Connect once the controller refuses it. What goes
+//! over the connections is the submodules': `send`, `copy`, `listing`, `viewing` and `commands`.
 //!
-//! What each command does over the connections is a module's of its own: a run's or a build's
-//! send of its job ([`send`]), the copy of an ended run's record ([`copy`]), `ls`'s listing of the
-//! runs ([`listing`]), `view`'s channel to the view there ([`viewing`]), and the other commands
-//! ([`commands`]).
+//! A command on the controller is cut when its connection ends, and then says nothing of how far
+//! it got, so a command repeats only where its caller knows that running it again is safe.
 
 mod commands;
 mod copy;
@@ -47,54 +43,51 @@ use crate::job::JOBS;
 use crate::workspace::Workspace;
 use crate::{config, manifest, next, say};
 
-/// The controller's user, which runs every Pumpkin process there.
+// The user that every session logs in as on the controller, and that runs every Pumpkin process
+// there.
 const USER: &str = "pumpkin";
 
-/// The tag by which the module names the controller of a name.
+// The tag that `deploy/aws` puts on the controller's instance, valued with the controller's name.
 const TAG: &str = "pumpkin:controller";
 
-/// How long a controller may take to start, and SSM to see it, before the command gives up.
-// An instance that EC2 starts runs in about a minute, and its SSM agent registers in seconds
-// more; past 10 minutes something else is wrong.
+// How long a stopped controller has to run and be seen by SSM. An instance that EC2 starts runs
+// and registers with SSM within a few minutes; past this, something else is wrong.
 const START_TIMEOUT: Duration = Duration::from_mins(10);
 
 const START_POLL: Duration = Duration::from_secs(5);
 
-/// How long a send of a task's files may move no byte before it gives up.
-// There is no bound on a send's whole time: SSM carries well under 1 MB a second, so a dataset
-// of a GB or more takes as long as it takes. A dead connection ends by itself, as
-// `ServerAliveInterval` gives `ssh` 90 s, so this is a little beyond that, to ride out an SSM
-// session that pauses.
+// How long a send may move no byte before it is given up. A send has no bound on its whole time,
+// as its size sets it over a link of under 1 MB a second. `ssh` ends a dead connection by itself
+// in 90 s (a `ServerAliveInterval` of 30 s and the default of 3 misses), so this is a little
+// beyond that, to ride out an SSM session that pauses.
 const STALL_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// How long a short command on the controller, such as the listing of its runs, may take.
+// The bound of a command whose time its input doesn't set.
 const SHORT_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// How long a master of the [`Shared`] connections lasts with no command going over it.
-// Long enough for a batch of commands that start at once, and each command's calls one after
-// another, to share it; short enough that none lingers long once they are done.
+// How long a master stays open after its last session ends: long enough for a batch of commands
+// that start at once, and each command's calls one after another, to share it, and short enough
+// that none lingers once they are done.
 const PERSIST: Duration = Duration::from_mins(1);
 
-/// How many masters the workspace's commands open to a controller at most.
-// So that a batch can't open SSM sessions without end: 16 masters of `SESSIONS` each take 80
-// commands at once, a run of every task at once; a command past that waits.
+// The most master connections to one controller, so that a batch can't open SSM sessions without
+// end: `MASTERS` x `SESSIONS` commands go at once, and one past that waits.
 const MASTERS: usize = 16;
 
-/// How many commands go over one master at once: half the sessions that `sshd` takes on one
-/// connection by default (`MaxSessions 10`).
-// `sshd` frees a session that has closed only once it has handled all it has read, so a session
-// that one command closes and one that the next opens, in what it reads at once, both count for
-// a moment: 5 at a time each take 2 at most, which 10 still takes.
+// Half of the 10 sessions that `sshd` takes on one connection by default (`MaxSessions`). It
+// frees a session that has closed only once it has handled all it has read, so a session that one
+// command closes and one that the next opens, in what it reads at once, both count for a moment:
+// `SESSIONS` commands at a time each take 2 at most, which 10 still takes.
+// https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/servconf.h#L42
 const SESSIONS: usize = 5;
 
 // A send's streams each go over a master of their own.
 const _: () = assert!(manifest::STREAMS <= MASTERS);
 
-/// How long a call whose connection ended waits before each attempt it makes again, over a
-/// session of a master that answers, and so how many it makes ([`Reached::pause`]).
-// The first at once, as one master's end leaves the controller reachable over another; then
-// long enough in all, about 4 minutes, for SSM to carry a session again after a pause of its own,
-// and short enough that a connection that keeps ending ends the command soon after.
+// The pauses before each repeat of a command whose connection ended. The first is at once, as one
+// connection's end leaves the controller reachable over another. The rest add up to about four
+// minutes, long enough for SSM to carry a session again after a pause of its own, and short
+// enough that a connection that keeps ending ends the command soon after.
 const AGAIN: [Duration; 6] = [
     Duration::ZERO,
     Duration::from_secs(5),
@@ -104,13 +97,12 @@ const AGAIN: [Duration; 6] = [
     Duration::from_mins(2),
 ];
 
-/// The exit status of `ssh`'s own failure, by which it says that its connection ended.
+// The status with which `ssh` ends when it fails itself, not the command it ran.
 const SSH_FAILED: i32 = 255;
 
 const SESSION_POLL: Duration = Duration::from_millis(500);
 
-/// The name of a person's controller, as the module's `name` variable takes it: 1 to 16 of
-/// `a-z`, `0-9` and `-`, starting with a letter and ending with no `-`.
+/// A controller's name: the `name` that `deploy/aws` was applied with.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
 pub(crate) struct Name(String);
@@ -143,7 +135,6 @@ impl fmt::Display for Name {
     }
 }
 
-/// What `aws ec2 describe-instances` prints of the instances it finds.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Reservations {
@@ -169,7 +160,6 @@ struct State {
     name: String,
 }
 
-/// What `aws ssm describe-instance-information` prints of the instances SSM sees.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Information {
@@ -182,9 +172,9 @@ struct Seen {
     ping_status: String,
 }
 
-/// The directory of this machine's key to its controllers, `$HOME/.config/pumpkin/ssh/`: the
-/// key, `key` and `key.pub`, which this makes if it has none, and `known_hosts`, which pins the
-/// host key that each controller showed first, by its [`Reached::alias`].
+/// The directory that holds this machine's `ssh` key to its controllers, `key` and `key.pub`,
+/// which this makes if there is none, and `known_hosts`, which pins the host key that each
+/// controller showed first, by its [`Reached::alias`]. Processes may call it at once.
 // A credential, so beside the configuration, outside every workspace; one for the machine, so
 // that each controller enrols it once, whatever workspace reaches it.
 fn kept() -> Result<PathBuf, String> {
@@ -201,8 +191,8 @@ fn kept() -> Result<PathBuf, String> {
         .recursive(true)
         .create(&config);
     made.context(config.display())?;
-    // Made apart and moved in whole, so that of the commands that start at once on a new
-    // machine, the first to move its key in is the one all of them use; the others' go.
+    // Made apart and moved in whole, so that of the commands that start at once on a new machine,
+    // the first to move its key in is the one all of them use; the others' go.
     let mut made = tempfile::Builder::new();
     let made = made
         .prefix(".ssh-")
@@ -224,37 +214,32 @@ fn kept() -> Result<PathBuf, String> {
     Ok(kept)
 }
 
-/// The connections that the workspace's commands share to a controller, in a directory of its own
-/// in the workspace's `controller/` ([`Workspace::controller`]), `<name>.<region>/`: up to
-/// [`MASTERS`] master `ssh`es, each by its socket there, named by its index, `0` and on, and its
-/// [`SESSIONS`] sessions, each an `flock` on a file beside it, `<index>-<session>` ([`Slot`]),
-/// which a command holds while its `ssh` goes over the master, and its log,
-/// `<index>.log`, which says why it ended, kept until the master opens again; the lock on opening
-/// one, `lock` ([`Lock`]), so that a batch of commands that start at once open them one at a time;
-/// the lock on sending the controller what its store lacks, `upload` ([`Shared::upload`]); and
-/// what `ls` keeps of its records, `ended/`, `live/` and their lock `listed` ([`Shared::listing`]).
-// Each `ssh` runs in that directory, and names a socket by its name alone: so its path, with the
-// suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace
-// is.
+/// The connections that the workspace's commands share to one controller, in
+/// `controller/<name>.<region>/` of the workspace: up to `MASTERS` masters, each by its control
+/// socket, named by its index, its `SESSIONS` session locks, `<index>-<session>`, and its log,
+/// `<index>.log`; the locks `lock`, `upload` and `listed`; and what `ls` keeps, `ended/` and
+/// `live/`.
+// Each `ssh` runs in that directory and names a socket by its name alone, so its path, with the
+// suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace is.
 struct Shared {
     dir: PathBuf,
 }
 
-/// The lock on opening a [`Shared`] master, an exclusive `flock`, held until it is dropped. It
-/// holds the instance that the masters reach, which an opener writes before it opens one, so
-/// that while a master answers, it names that master's instance.
+/// The lock that serialises opening connections to a controller. Its file holds the id of the
+/// instance that they reach, which an opener writes before it opens one, so that while a
+/// connection answers, the file names its instance.
 struct Lock {
     file: File,
     path: PathBuf,
 }
 
-/// A session of a [`Shared`] master, held until it is dropped.
+/// A session of connection `master`, held for as long as the slot lives.
 struct Slot {
     master: usize,
     _file: File,
 }
 
-/// What [`Shared::scan`] finds: a free session on a master that answers, else the first master
+/// What `Shared::scan` finds: a free session on a master that answers, else the first master
 /// that doesn't, to open, else that every session is held.
 enum Found {
     Free(Slot),
@@ -263,8 +248,6 @@ enum Found {
 }
 
 impl Shared {
-    /// The connections to the controller of `alias`, `<name>.<region>`, whose directory, which
-    /// only this user may enter, this makes if need be.
     fn new(workspace: &Workspace, alias: &str) -> Result<Self, String> {
         let dir = workspace.controller().join(alias);
         let made = DirBuilder::new().mode(0o700).recursive(true).create(&dir);
@@ -272,7 +255,6 @@ impl Shared {
         Ok(Self { dir })
     }
 
-    /// Takes the lock on opening a master, waiting while another command holds it.
     fn lock(&self) -> Result<Lock, String> {
         let path = self.dir.join("lock");
         let file = private(&path)?;
@@ -280,22 +262,16 @@ impl Shared {
         Ok(Lock { file, path })
     }
 
-    /// The directory of the files that `ls` reads of each record that ended on the controller,
-    /// which never change, so that the controller sends them once.
     fn ended(&self) -> PathBuf {
         self.dir.join("ended")
     }
 
-    /// The directory of the copies of what `ls` reads of each record that was live on the
-    /// controller as it was last listed, which the next listing grows.
     fn live(&self) -> PathBuf {
         self.dir.join("live")
     }
 
-    /// Takes the lock on changing what `ls` keeps of the controller's records ([`Self::ended`],
-    /// [`Self::live`]), saying, once, that it waits while another `ls` holds it, so that two at
-    /// once take turns, and neither grows a copy that the other has grown since it read the copy's
-    /// length.
+    // Two `ls` take turns, so that neither grows a copy that the other has grown since it read the
+    // copy's length.
     fn listing(&self, name: &Name) -> Result<File, String> {
         let path = self.dir.join("listed");
         let file = private(&path)?;
@@ -311,23 +287,16 @@ impl Shared {
         Ok(file)
     }
 
-    /// The log of `master`, as `ssh` and its proxy write it.
     fn log(&self, master: usize) -> PathBuf {
         self.dir.join(format!("{master}.log"))
     }
 
-    /// Takes the lock on sending the controller what its store lacks, saying, once, that it waits
-    /// while another command holds it: a command that holds it asks again what the store lacks,
-    /// so that of the commands that start at once, each sends only what the others haven't.
-    // One send at a time: the sends of a workspace go one after another, so a batch's sends that
-    // each lack a piece's worth or less go in turn, each over one connection, where they could go
-    // at once over one each. In return no piece goes twice, and a batch's starts don't refuse one:
-    // GNU tar replaces a file by removing it, then writing a new one, so of a piece that two sends
-    // wrote at once, a start could take one part written, and so refuse its blob, which it checks
-    // under a name of its own. A send from another workspace, which this lock doesn't hold back,
-    // can still fail a start so, never the store: sent again, it is whole. And a send holds a
-    // session for each of its streams, `manifest::STREAMS` at most of the `MASTERS` x `SESSIONS`,
-    // so the rest stay for the workspace's other commands.
+    // One send at a time in a workspace, so that no piece goes twice and a batch's starts don't
+    // refuse a blob that two sends wrote at once, part written, as `ARCHITECTURE.md`'s invariant
+    // on the store says. A send from another workspace can still make a start refuse it, and
+    // sending again mends that. In return, sends that each lack little go in turn rather than at
+    // once, and a send holds a session for each of its streams, so the rest stay for the
+    // workspace's other commands.
     fn upload(&self, name: &Name) -> Result<File, String> {
         let path = self.dir.join("upload");
         let file = private(&path)?;
@@ -344,14 +313,12 @@ impl Shared {
         Ok(file)
     }
 
-    /// `program`, as [`Cli::proxied`] makes it, run in the connections' directory.
     fn command(&self, program: &str) -> Command {
         let mut command = Cli::proxied(program);
         command.current_dir(&self.dir);
         command
     }
 
-    /// Whether `master` answers on its socket, as `ssh -O check` of `host` finds it.
     fn answers(&self, master: usize, host: &str) -> bool {
         if !self.dir.join(master.to_string()).exists() {
             return false;
@@ -366,9 +333,6 @@ impl Shared {
         (0..MASTERS).any(|master| self.answers(master, host))
     }
 
-    /// Looks at each master in turn, of `host`, but those of `held`: one whose sessions are all
-    /// held is in use, and so open; of one with a session free, it takes that session, if the
-    /// master answers.
     fn scan(&self, host: &str, held: &BTreeSet<usize>) -> Result<Found, String> {
         let mut closed = None;
         for master in (0..MASTERS).filter(|master| !held.contains(master)) {
@@ -376,6 +340,7 @@ impl Shared {
                 closed = closed.or(Some(master));
                 continue;
             }
+            // A master whose sessions are all held is in use, so it is open.
             let Some(slot) = self.free(master)? else {
                 continue;
             };
@@ -387,7 +352,6 @@ impl Shared {
         Ok(closed.map_or(Found::Held, Found::Closed))
     }
 
-    /// A session of `master` that no other command holds, if any.
     fn free(&self, master: usize) -> Result<Option<Slot>, String> {
         for session in 0..SESSIONS {
             let path = self.dir.join(format!("{master}-{session}"));
@@ -407,7 +371,6 @@ impl Shared {
     }
 }
 
-/// The file `path`, made if need be, which only this user may read.
 fn private(path: &Path) -> Result<File, String> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -420,8 +383,6 @@ fn private(path: &Path) -> Result<File, String> {
 }
 
 impl Lock {
-    /// The instance that the last master opened reaches, as [`note`](Self::note) wrote it; none
-    /// before the first.
     fn instance(&self) -> Result<Option<String>, String> {
         let mut text = Vec::new();
         (&self.file)
@@ -433,7 +394,6 @@ impl Lock {
             .map(str::to_owned))
     }
 
-    /// Notes `instance` as the one that the master about to be opened reaches.
     fn note(&self, instance: &str) -> Result<(), String> {
         let noted = self.file.set_len(0);
         let noted = noted.and_then(|()| self.file.write_all_at(instance.as_bytes(), 0));
@@ -441,15 +401,14 @@ impl Lock {
     }
 }
 
-/// An `ssh` to the controller, as [`Command`], with the session of the master it goes
-/// over, which it holds until it is dropped.
+/// A `ssh` command to run over the connection that `slot` holds a session of, held until the
+/// session is dropped.
 struct Session {
     command: Command,
     slot: Slot,
 }
 
 impl Session {
-    /// What the command gives, with `input`, if any, on its standard input, killed `by`.
     fn output(&mut self, input: Option<&[u8]>, by: Deadline) -> io::Result<Option<Output>> {
         match input {
             Some(input) => stdx::process::fed(&mut self.command, input, by),
@@ -472,25 +431,23 @@ impl DerefMut for Session {
     }
 }
 
-/// How a command on the controller that [`Reached::attached`] ran ended, and the shared master
-/// that it went over.
+/// How an `ssh` run with this process's own streams ended, and the connection it went over.
 #[derive(Clone, Copy)]
 struct Attached {
     status: ExitStatus,
     master: usize,
 }
 
-/// What starting a shared master came to ([`Reached::master`]), but a failure.
+/// What opening a master connection came to.
 enum Master {
     Open,
-    /// The controller refused this machine's key, which it hasn't enrolled, as this error says.
+    /// The controller refused this machine's key, as the error says.
     Unenrolled(String),
-    /// The controller showed a host key other than the one pinned for it.
+    /// The controller's host key isn't the one pinned for it.
     HostKeyChanged,
 }
 
-/// The controller, reached: running, seen by SSM, over the connection that the workspace's
-/// commands share to it, with this machine's key, for opening it again.
+/// A controller that this machine has found, and its connections.
 pub(crate) struct Reached {
     cli: Cli,
     name: Name,
@@ -502,15 +459,14 @@ pub(crate) struct Reached {
 }
 
 impl Reached {
-    /// Reaches the controller that `settings` name, with this machine's key, made if need be:
-    /// over the workspace's connections to it if a master answers there; else finds it by its
-    /// tag, starts it if it is stopped, waits until SSM sees it, and opens a master
-    /// ([`open`](Self::open)), holding the lock on opening one throughout.
+    /// Finds the controller that `settings` names and has it ready: starts it if it is stopped,
+    /// waits for SSM to see it, and opens a connection that accepts this machine's key, enrolling
+    /// the key if the controller doesn't know it.
     ///
     /// # Errors
     ///
-    /// Fails if the Session Manager plugin isn't on `PATH`, the tag names no one instance, or SSM
-    /// sees none by [`START_TIMEOUT`].
+    /// Fails if the Session Manager plugin isn't on `PATH`, if no one live instance carries the
+    /// controller's tag, if the instance doesn't run in time, or if no connection opens.
     pub(crate) fn reach(settings: &config::Controller) -> Result<Self, String> {
         let config::Controller {
             name,
@@ -564,7 +520,6 @@ impl Reached {
     }
 }
 
-/// The instances that `filter`, of `aws ec2 describe-instances`, finds.
 fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
     let args = ["ec2", "describe-instances", "--filters", filter];
     let found: Reservations = cli.json(&args, Bound::Call)?;
@@ -575,8 +530,6 @@ fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
         .collect())
 }
 
-/// Waits until controller `name`, instance `id`, runs, and SSM sees it, starting it first if it
-/// is stopped, for [`START_TIMEOUT`] at most.
 fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
     let by = Deadline::after(START_TIMEOUT);
     let mut started = false;
@@ -614,7 +567,6 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
     }
 }
 
-/// Whether SSM sees the instance `id` online.
 fn seen(cli: &Cli, id: &str) -> Result<bool, String> {
     let filter = format!("Key=InstanceIds,Values={id}");
     let args = ["ssm", "describe-instance-information", "--filters", &filter];
@@ -625,7 +577,6 @@ fn seen(cli: &Cli, id: &str) -> Result<bool, String> {
         .any(|seen| seen.ping_status == "Online"))
 }
 
-/// Checks that the Session Manager plugin, which `aws ssm start-session` runs, is on `PATH`.
 fn plugin() -> Result<(), String> {
     let path = env::var_os("PATH").unwrap_or_default();
     if env::split_paths(&path).any(|dir| dir.join("session-manager-plugin").is_file()) {
@@ -639,8 +590,8 @@ fn plugin() -> Result<(), String> {
     )
 }
 
-/// Runs `command`, shown as `shown`, killing it after `timeout`, and returns its standard
-/// output.
+/// Runs `command` to its end and returns its standard output, or an error that names the command
+/// as `shown` if it fails or is still running after `timeout`, when it is killed.
 pub(crate) fn bounded(
     command: &mut Command,
     shown: &str,
@@ -653,7 +604,6 @@ pub(crate) fn bounded(
     )
 }
 
-/// What [`bounded`] returns of `output`.
 fn finished(
     output: io::Result<Option<Output>>,
     shown: &str,
@@ -677,17 +627,13 @@ fn finished(
 }
 
 impl Reached {
-    /// A session of a master that answers on the shared connections, for one `ssh`:
-    /// one free on a master that is open; else, with the lock on opening one, one on the first
-    /// master that is closed, which this opens; else, once every master's sessions are held, the
-    /// first to be let go, which it says it waits for.
     fn slot(&self) -> Result<Slot, String> {
         self.slot_apart(&BTreeSet::new())
     }
 
-    /// A session as [`slot`](Self::slot) gives one, but of a master other than those of `held`,
-    /// as long as one can be had; else, once every other master's sessions are held, or the
-    /// master to open can't be opened, which it says, of any.
+    /// Takes a session over a connection that isn't in `held`, so as to run beside the sessions
+    /// of those, opening a connection if none is open and waiting while every one is held. When
+    /// no such connection can be had, it takes a session over any.
     fn slot_apart(&self, held: &BTreeSet<usize>) -> Result<Slot, String> {
         let host = self.host();
         let mut waiting = None;
@@ -749,11 +695,8 @@ impl Reached {
         slot
     }
 
-    /// Opens shared master `master`, with the lock on opening one, `lock`: notes the instance
-    /// there, and starts the master ([`master`](Self::master)); if the controller hasn't enrolled
-    /// this machine's key, as on a new machine, or once the controller is made anew, it pushes
-    /// the key through EC2 Instance Connect, starts the master with it, and enrols the key over
-    /// it ([`enrol`](Self::enrol)).
+    /// Opens connection `master`, enrolling this machine's key with the controller if it refuses
+    /// it. The `lock` is the one that serialises this.
     fn open(&self, lock: &Lock, master: usize) -> Result<(), String> {
         lock.note(&self.instance)?;
         match self.master(master)? {
@@ -774,8 +717,6 @@ impl Reached {
         }
     }
 
-    /// The refusal of a controller whose host key isn't the one pinned for it, as the log of
-    /// shared master `master` says, which says what to do.
     fn host_key_changed(&self, master: usize) -> String {
         let known_hosts = self.kept.join("known_hosts");
         format!(
@@ -792,8 +733,6 @@ impl Reached {
         )
     }
 
-    /// Adds this machine's key to the `authorized_keys` of the controller's user, over shared
-    /// master `master`, which the key pushed through EC2 Instance Connect opened.
     fn enrol(&self, master: usize) -> Result<(), String> {
         let public = self.kept.join("key.pub");
         let public = fs::read(&public).context(public.display())?;
@@ -804,9 +743,9 @@ impl Reached {
         finished(fed, "ssh", SHORT_TIMEOUT).map(|_| ())
     }
 
-    /// Starts shared master `master`, which returns once it has authenticated, and goes on in
-    /// the background until it has had no command for [`PERSIST`]; says, if it didn't start,
-    /// whether the controller refused the key, or the host key, as its log says, or else fails.
+    /// Starts connection `master`, which `ssh` leaves in the background once it has authenticated,
+    /// until it has had no session for `PERSIST`. If it doesn't start, says whether the controller
+    /// refused the key or the host key, as its log says, and otherwise fails.
     fn master(&self, master: usize) -> Result<Master, String> {
         // The last master's log goes as this one opens.
         let log = self.shared.log(master);
@@ -821,9 +760,8 @@ impl Reached {
         ssh.args(["-E", &named, "-o", "LogLevel=INFO", "-o", &proxy]);
         ssh.args(self.ssh_options(master));
         let persist = format!("ControlPersist={}", PERSIST.as_secs());
-        // `auto` rather than `yes`, so that `ssh` removes a socket that a killed master left,
-        // which would keep it from listening, and leave it a connection of its own that never
-        // returns.
+        // `auto` rather than `yes`, so that `ssh` removes a socket that a killed master left, which
+        // would keep it from listening, and leave it a connection of its own that never returns.
         ssh.args(["-N", "-o", "ControlMaster=auto", "-o", &persist]);
         ssh.arg(self.host());
         let Err(error) = bounded(&mut ssh, "ssh", SHORT_TIMEOUT) else {
@@ -844,9 +782,8 @@ impl Reached {
         Err(error)
     }
 
-    /// Runs `session` as [`bounded`] does, with `input`, if any, on its standard input; if it
-    /// fails, saying where the log of the master it went over is, if that has ended since
-    /// ([`lost`](Self::lost)).
+    /// Runs the session to its end within `timeout` and returns its standard output; an error says
+    /// if the connection it went over has ended.
     fn call(
         &self,
         session: &mut Session,
@@ -859,10 +796,11 @@ impl Reached {
         finished(output, shown, timeout).map_err(|error| self.lost(master, error))
     }
 
-    /// Runs the session that `make` makes, `shown`, with `input`, if any, on its standard input,
-    /// as [`call`](Self::call) does, killed after `timeout`; and again, saying it does `what`,
-    /// each time it exited with one of `ended`, as its connection ended, as
-    /// [`pause`](Self::pause) allows.
+    /// Runs the session that `make` makes, and again after a pause if the connection ended with a
+    /// status in `ended`, up to the pauses of `AGAIN`; `what` says in the message what is repeated.
+    /// `input` goes to each run's standard input.
+    ///
+    /// The command must be safe to run again: a cut connection says nothing of how far it got.
     fn again(
         &self,
         make: impl Fn() -> Result<Session, String>,
@@ -886,17 +824,16 @@ impl Reached {
         }
     }
 
-    /// Whether `status`, of a call over shared master `master`, says that its connection ended,
-    /// as one of `codes` does, and the master no longer answers.
+    /// Whether `status` is one of `codes` and the connection `master` no longer answers, so that
+    /// the command was cut rather than failed.
     fn ended_connection(&self, status: ExitStatus, codes: &[i32], master: usize) -> bool {
         status.code().is_some_and(|code| codes.contains(&code))
             && !self.shared.answers(master, &self.host())
     }
 
-    /// Whether a call whose connection over shared master `master` ended is to be made again,
-    /// after attempt `attempt` in a row, counted from 0 since the call last moved what it does on:
-    /// once it has said so, saying where the master's log is and `what` it does again, and has
-    /// waited [`AGAIN`]'s pause for it; not once those have run out.
+    /// Whether a call whose connection ended goes on again: after attempt `attempt` in a row,
+    /// counted from 0 since the call last made progress, it says where the connection's log is and
+    /// `what` it does again, and waits `AGAIN`'s pause. False once the pauses have run out.
     fn pause(&self, attempt: usize, master: usize, what: &str) -> bool {
         let Some(pause) = AGAIN.get(attempt) else {
             return false;
@@ -917,8 +854,8 @@ impl Reached {
         true
     }
 
-    /// `error`, of a call over shared master `master`, with where that master's log is, if it
-    /// has ended since, which says why.
+    /// `error`, with where the log of connection `master` is if the connection has ended, which
+    /// says why.
     fn lost(&self, master: usize, error: String) -> String {
         if self.shared.answers(master, &self.host()) {
             return error;
@@ -929,8 +866,8 @@ impl Reached {
         )
     }
 
-    /// Pushes this machine's key through EC2 Instance Connect, for a connection that begins
-    /// within the minute that the push is good for.
+    /// Pushes this machine's public key to the instance with EC2 Instance Connect, which accepts it
+    /// for a minute: the connection that uses it must begin within.
     fn push(&self) -> Result<(), String> {
         let public = format!("file://{}", self.kept.join("key.pub").display());
         let args = [
@@ -946,8 +883,6 @@ impl Reached {
         self.cli.run(&args, Bound::Call).map(|_| ())
     }
 
-    /// The options of each `ssh` to the controller, which goes over shared master `master`, as
-    /// the directory it runs in names it ([`Shared::command`]).
     fn ssh_options(&self, master: usize) -> Vec<String> {
         let mut words = vec!["-F".to_owned(), "/dev/null".to_owned(), "-i".to_owned()];
         words.push(self.kept.join("key").display().to_string());
@@ -955,9 +890,9 @@ impl Reached {
         words.extend([
             "-o".to_owned(),
             format!("UserKnownHostsFile={known_hosts}"),
+            "-o".to_owned(),
             // By the controller's name, rather than the instance that the tag finds, so that the
             // tag that names the controller can't lead this machine's key to another instance.
-            "-o".to_owned(),
             format!("HostKeyAlias={}", self.alias),
         ]);
         let options = [
@@ -965,12 +900,12 @@ impl Reached {
             "BatchMode=yes",
             "StrictHostKeyChecking=accept-new",
             "LogLevel=ERROR",
-            // So that a connection whose other end is gone, as when this machine slept, ends
-            // within minutes, rather than when TCP gives up.
+            // So that a connection whose other end is gone, as when this machine slept, ends within
+            // minutes, rather than when TCP gives up.
             "ServerAliveInterval=30",
-            // An SSM session carries under 1 MB a second, far less than zlib compresses in one,
-            // so what compression saves in bytes it saves in time. A master compresses its whole
-            // connection, so each command that joins it sends compressed, as ssh_config(5) says:
+            // An SSM session carries under 1 MB a second, less than zlib compresses in one, so
+            // what compression saves in bytes it saves in time. A master compresses its whole
+            // connection, so each command that joins it sends compressed, as `ssh_config(5)` says:
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/ssh_config.5#L685-L693
             "Compression=yes",
         ];
@@ -986,18 +921,14 @@ impl Reached {
         words
     }
 
-    /// The controller's user at its instance, as `ssh` names it.
     fn host(&self) -> String {
         format!("{USER}@{}", self.instance)
     }
 
-    /// `ssh` that runs `script` on the controller, as its user's shell runs it, over a session of
-    /// a shared master ([`slot`](Self::slot)).
     fn ssh(&self, script: &str) -> Result<Session, String> {
         Ok(self.session(script, self.slot()?))
     }
 
-    /// `ssh` that runs `script` on the controller, as [`ssh`](Self::ssh) does, over `slot`.
     fn session(&self, script: &str, slot: Slot) -> Session {
         let mut command = self.shared.command("ssh");
         let options = self.ssh_options(slot.master);
@@ -1005,9 +936,8 @@ impl Reached {
         Session { command, slot }
     }
 
-    /// Runs `script` on the controller, with this machine's standard output and error, and
-    /// `input` on its standard input, if any, else this machine's, until it ends, however long
-    /// that takes.
+    /// Runs `script` with this process's standard output and error, and `input` on its standard
+    /// input if there is any, until it ends, however long that takes.
     fn attached(&self, script: &str, input: Option<&[u8]>) -> Result<Attached, String> {
         let mut ssh = self.ssh(script)?;
         let Some(input) = input else {
@@ -1033,9 +963,8 @@ impl Reached {
         })
     }
 
-    /// Runs `script` on the controller, as [`attached`](Self::attached) does with no input, but
-    /// hands `line` each line of its standard output, with its newline, as it comes; returns how
-    /// it ended, and what it printed after its last newline.
+    /// Runs `script` and hands `line` each complete line of its standard output as it arrives.
+    /// Returns how it ended, and what it wrote after its last newline.
     fn relayed(
         &self,
         script: &str,
@@ -1064,12 +993,9 @@ impl Reached {
         Ok((Attached { status, master }, read))
     }
 
-    /// The exit status that `attached`, a command on the controller that [`attached`] ran,
-    /// gives this command, if it ended so: `ssh`'s own failure, or its end by a signal, is an
-    /// error that says how to `follow` it again, and where the log of its master is, if that has
-    /// ended.
-    ///
-    /// [`attached`]: Self::attached
+    /// The exit code of what `attached` ran. `ssh`'s own failure, or its end by a signal, is an
+    /// error that ends with `again`, which says how to go on, and says where the connection's log
+    /// is if it has ended: the command's own code never says that.
     fn ended(&self, attached: Attached, again: &str) -> Result<i32, String> {
         let Attached { status, master } = attached;
         match status.code() {
@@ -1084,8 +1010,7 @@ impl Reached {
         }
     }
 
-    /// The id of the job of the controller's that `run`, an id, a prefix of one or of its random
-    /// digits, names, as [`runtime::named`] finds it.
+    /// The id of the job on the controller that `run` names, which may be a prefix of it.
     fn resolve(&self, run: &str) -> Result<String, String> {
         let script = format!("ls --format=single-column \"$HOME/{JOBS}\" 2>/dev/null || true");
         let listed = self.call(&mut self.ssh(&script)?, None, "ssh", SHORT_TIMEOUT)?;

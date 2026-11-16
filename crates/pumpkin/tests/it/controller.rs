@@ -1,9 +1,3 @@
-//! `controller`, the controller's own side of the controller target, which runs as the
-//! controller's user would, with a home and a runtime directory of the scratch directory's, on
-//! a stand-in `aws` for the controller's settings ([`AWS`]), a stand-in `curl` for the instance
-//! metadata service, a stand-in `df`, and the stand-in `docker` ([`StandIn`]). And the client's
-//! side: what it refuses before it reaches a controller, and what it sends one, and where.
-
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
 use std::io::{BufRead as _, BufReader, Read};
@@ -27,8 +21,6 @@ use super::{
     workflow, write_run,
 };
 
-/// The controller's settings, as the module renders its SSM parameter: the engine, the provider
-/// `aws` of kind `ec2`, and the `images` of the provider `gpus` of kind `modal`.
 fn parameter() -> String {
     let images = MODAL
         .lines()
@@ -40,16 +32,12 @@ fn parameter() -> String {
     )
 }
 
-/// The Modal provider that the client sends, as its `[controller.modal]` gives it.
 const SENT_MODAL: &str = r#"[modal]
 profile = "alice"
 classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
 "#;
 
-/// The stand-in `aws`, which answers `--version`, and `ssm get-parameter` with what
-/// `parameter.json` beside it holds ([`write_parameter`]), fails any other call, and notes each
-/// call in `calls` beside it, its command and then its arguments, a line each, and the call
-/// ended by an empty line.
+// Notes each call in `calls`, and answers only `--version` and `ssm get-parameter`.
 const AWS: &str = r#"#!/bin/sh
 { echo aws; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
 case "$*" in
@@ -59,15 +47,11 @@ case "$*" in
 esac
 "#;
 
-/// Writes the controller's settings, `text`, as the stand-in `aws` gives them ([`AWS`]).
 fn write_parameter(scratch: &Scratch, text: &str) {
     let parameter = json!({ "Parameter": { "Name": "/pumpkin-alice/settings", "Type": "String", "Value": text } });
     scratch.write("bin/parameter.json", &parameter);
 }
 
-/// The stand-in `curl`, which answers as the instance metadata service of an instance whose
-/// private IPv4 address is 172.31.5.6 and whose public one is 198.51.100.9, and notes each call
-/// in `calls` beside it, as [`AWS`] does.
 const CURL: &str = r#"#!/bin/sh
 { echo curl; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
 for url; do :; done
@@ -79,9 +63,8 @@ case $url in
 esac
 "#;
 
-/// The stand-in `df`, which says that the disk is of the size and has as much available, in
-/// bytes, as `disk` beside it says, then, if `disk.next` is there, takes it as `disk`; and notes
-/// each call in `calls`, as [`CURL`] does.
+// Answers the size and the bytes available that `disk` holds; a `disk.next` then replaces `disk`,
+// so that the space changes between two reads.
 const DF: &str = r#"#!/bin/sh
 { echo df; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
 echo '1B-blocks Avail'
@@ -89,7 +72,6 @@ cat "${0%/*}/disk"
 [ ! -e "${0%/*}/disk.next" ] || mv "${0%/*}/disk.next" "${0%/*}/disk"
 "#;
 
-/// The id of a run `days` ago, as `pumpkin run` mints one, with `random` as its random digits.
 fn id_ago(days: u64, random: &str) -> String {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -106,15 +88,10 @@ fn id_ago(days: u64, random: &str) -> String {
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}-{random}")
 }
 
-/// An image's ID, of 64 of `digit`.
 fn image(digit: char) -> String {
     format!("sha256:{}", digit.to_string().repeat(64))
 }
 
-/// Sets `scratch`, which holds the stand-in `docker` ([`StandIn`]), up as the controller: the
-/// other stand-ins in `bin`, the controller user's home in `home`, with the `pumpkin` of
-/// [`PINNED`] built in its one workspace, and its runtime directory in `run`, with the module's
-/// parameter, and a disk that is half used.
 fn set_up(scratch: &Scratch) {
     scratch.write_executable("bin/aws", AWS.as_bytes());
     scratch.write_executable("bin/curl", CURL.as_bytes());
@@ -127,18 +104,14 @@ fn set_up(scratch: &Scratch) {
     scratch.write(&empty, "pumpkin-tree/1\n");
 }
 
-/// The SHA-256 of the manifest of a tree of no files, `pumpkin-tree/1` and a newline, which
-/// [`set_up`] keeps in the controller's store.
 const EMPTY_TREE: &str = "dff3cfced0b99bbac128797b268e1756972cb1285a305e2dc1b9d96e97e6eb5e";
 
-/// The `pumpkin` that [`set_up`] built on the controller.
 fn controllers(scratch: &Scratch) -> PathBuf {
     scratch
         .0
         .join(format!("home/.pumpkin/{PINNED}/bin/pumpkin"))
 }
 
-/// `pumpkin` with `args`, as the controller's user runs it in a unit of its own.
 fn on_controller(scratch: &Scratch, args: &[&str]) -> Command {
     let mut command = scratch.program(controllers(scratch), args);
     command
@@ -151,8 +124,6 @@ fn on_controller(scratch: &Scratch, args: &[&str]) -> Command {
     command
 }
 
-/// Writes what the client sends with job `id`: what it sends of its configuration, `config`, the
-/// key of upstream `gateway`, and, if `modal`, its Modal configuration file.
 fn send(scratch: &Scratch, id: &str, config: &str, modal: bool) {
     let sent = format!("run/pumpkin/{id}");
     scratch.write(&format!("{sent}/config.toml"), config);
@@ -166,15 +137,12 @@ fn send(scratch: &Scratch, id: &str, config: &str, modal: bool) {
     fs::set_permissions(scratch.0.join(sent), Permissions::from_mode(0o700)).unwrap();
 }
 
-/// The upstreams that the client sends, each `key_file` a file it sends beside them.
 const UPSTREAMS: &str = r#"[upstreams.gateway]
 url = "https://gateway.example/v1"
 key_file = "gateway.key"
 models = [{ name = "model-a", upstream_name = "provider/model-a" }]
 "#;
 
-/// What the stand-ins noted, `calls`, `aws`'s, `curl`'s and `df`'s, and `docker.pruned`, each
-/// taken.
 fn noted(scratch: &Scratch) -> Vec<String> {
     let taken = |file: &str| {
         let path = scratch.0.join(file);
@@ -190,14 +158,13 @@ fn noted(scratch: &Scratch) -> Vec<String> {
     lines
 }
 
-/// Checks `text`, with the scratch directory as `<scratch>`, against `expect`.
 fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
     let mut text = text.replace(scratch.0.to_str().unwrap(), "<scratch>");
     text = text.replace(EMPTY_TREE, "<empty tree>");
     for (value, name) in shown {
         text = text.replace(value, name);
     }
-    // How long this machine has been up, which the controller's health says of the stand-in.
+    // The uptime that the controller's health reports varies.
     let lines = text.lines().map(|line| match line.split_once("`: up ") {
         Some((before, after)) => {
             let rest = after.split_once(',').map_or("", |(_, rest)| rest);
@@ -228,29 +195,23 @@ fn job() {
         let roles = digits.chars().map(|digit| json!({ "image": image(digit) }));
         json!({ "roles": roles.collect::<Vec<_>>() })
     };
-    // A run of 3 days ago, naming the stand-in's image and another in its record's IR, and one of
-    // 30, naming one; a build of 1 day ago naming one in its `out`, and a failed one of 2, whose
-    // `out` is empty.
     for (run, digits) in [(&recent, "0a"), (&old, "b")] {
         scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), "");
         let record = format!("home/.pumpkin/runs/{run}");
         scratch.write(&format!("{record}/ir.json"), &ir(digits));
     }
-    // Jobs of 30 days ago and of 1 that ended before their runs made a record.
     let (stale, fresh) = (id_ago(30, "0b00000a"), id_ago(1, "0b00000b"));
     for unstarted in [&stale, &fresh] {
         scratch.write(&format!("home/jobs/{unstarted}/log"), "");
     }
     scratch.write(&format!("home/builds/{built}/out"), &ir("c"));
     scratch.write(&format!("home/builds/{failed}/out"), "");
-    // Image c bears the tag that the other job below holds.
     let held = format!("pumpkin/held:{}", "c".repeat(64));
     let sized = ['0', 'a', 'b', 'c', 'd'].map(|digit| match digit {
         'c' => format!("{} 100 {held}\n", image(digit)),
         _ => format!("{} 100\n", image(digit)),
     });
     scratch.write("images", &sized.concat());
-    // 850 of its 1000 bytes used.
     scratch.write("bin/disk", "1000 150\n");
     for tree in [&recent, &old, &".pumpkin".to_owned()] {
         scratch.write(&format!("home/trees/tasks/{tree}/pumpkin"), "");
@@ -298,7 +259,7 @@ fn job() {
     };
     lines.push(format!("trees: {}", names("home/trees/tasks")));
     lines.push(format!("jobs: {}", names("home/jobs")));
-    // Another job's directory in tmpfs, as while it runs, its run started, with the volume full.
+    // Another job is running, its run started, and the volume is full.
     send(&scratch, &recent, UPSTREAMS, false);
     let log = format!("home/.pumpkin/runs/{recent}/log.jsonl");
     scratch.write(&log, "");
@@ -546,8 +507,7 @@ fn job_refusals() {
     unset.env_remove("XDG_RUNTIME_DIR");
     let invoked = invocation(&unset);
     lines.push(report(invoked, &unset.output().unwrap(), &scratch.0, false));
-    // A tree with a file below its `.pumpkin`, the controller's workspace; one made in the
-    // scratch directory, which is no job's tree.
+    // Trees that no job makes: a file below the controller's `.pumpkin`, and one outside any tree.
     let planted = sha256(b"planted\n");
     scratch.write(&format!("home/store/{planted}"), "planted\n");
     let mut shown = vec![
@@ -611,8 +571,8 @@ fn job_refusals() {
     );
 }
 
-/// `controller job` `id` of `build built/task.star`, started as the controller's user runs it,
-/// but on one CPU of those the tests may run on, so with one build slot.
+// A job's build slots are one for every two CPUs it may use, and one at least: on one CPU there
+// is one, so a second job waits.
 fn on_one_cpu(scratch: &Scratch, id: &str) -> Child {
     let status = fs::read_to_string("/proc/self/status").unwrap();
     let allowed = status
@@ -647,9 +607,6 @@ fn on_one_cpu(scratch: &Scratch, id: &str) -> Child {
     on_one.spawn().unwrap()
 }
 
-/// How `child`, a job that [`on_one_cpu`] started, ended: its exit status; what it said, `said`
-/// and then the rest from `stderr`; and whether it printed an IR that names the image that the
-/// stand-in builds.
 fn job_ended(child: Child, stderr: impl Read, said: String) -> String {
     let output = ended(child, stderr, said);
     let mut lines = vec![format!("exit status: {:?}", output.status.code())];
@@ -668,7 +625,6 @@ fn job_ended(child: Child, stderr: impl Read, said: String) -> String {
     lines.join("\n")
 }
 
-/// How `child`, a job that [`on_one_cpu`] started, ended, as [`job_ended`] says.
 fn job_ended_whole(mut child: Child) -> String {
     let stderr = child.stderr.take().unwrap();
     job_ended(child, stderr, String::new())
@@ -711,7 +667,6 @@ fn job_admission() {
         marks(&first)
     ));
     let tag = held.lines().next().unwrap().to_owned();
-    // Image e bears the tag that the first holds, f another, and the stand-in's own none.
     scratch.write(
         "images",
         &format!(
@@ -765,8 +720,8 @@ fn job_admission() {
             .into_iter()
             .filter(|line| line.starts_with("docker")),
     );
+    // How long the second waited varies.
     let mut text = lines.join("\n");
-    // How long the second waited.
     let at = text.find("after waiting ").unwrap() + "after waiting ".len();
     let seconds = text[at..].split(' ').next().unwrap().to_owned();
     text.replace_range(at..at + seconds.len(), "<n>");
@@ -824,7 +779,7 @@ fn job_admission() {
 )]
 fn job_publish_wait() {
     let scratch = Scratch::new("controller-job-publish-wait");
-    // Rootful, as the controller's engine is, of which the job says nothing.
+    // The controller's engine is rootful, of which the job says nothing.
     let rootful = INFO.replace(r#","name=rootless""#, "");
     let _stand_in = StandIn::with(&scratch, &rootful, IMAGE);
     set_up(&scratch);
@@ -883,8 +838,6 @@ fn job_publish_wait() {
         .unwrap()
         .trim_start_matches("pumpkin/built:");
     let hex = hex.to_owned();
-    // The image the run publishes, which another build's tag has moved off, and one that
-    // another task's tag names, which no job holds, on a volume past 80% used.
     scratch.write(
         "images",
         &format!(
@@ -1060,8 +1013,6 @@ fn job_publish_fails() {
     );
 }
 
-// Root's runtime directory, as the boot's unit has it; no prune, as a job that a client started as
-// the controller came up may hold an image that no IR names yet.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1167,25 +1118,17 @@ fn boot() {
 
 const PINNED: &str = "1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8";
 
-/// The controller's instance, which carries the tag of controller `alice`.
 const INSTANCE: &str = "i-0c00000000000a11c";
 
-/// The shared connections of the client's workspace to controller `alice`, below the scratch
-/// directory.
 const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 
-/// The client's key, of its upstream `gateway`.
 const KEY: &str = "sk-client-stand-in";
 
-/// The stand-in `ssh` to the controller, of shared masters that answer: one that `-N` opens makes
-/// its socket, unless `refused-<m>` is there for master `<m>`, which then fails as one whose
-/// connection closes; `-O check` of one succeeds, but once after a cut over it; and any other call
-/// notes its arguments in `argv` and the first line of its command but a `set` in `scripts`, runs
-/// `before-<n>` once, if there, before the `<n>`th call that `scripts` notes, then runs its command
-/// as the controller's user, in `home`, with runtime directory `run`. A receive over master `<m>`
-/// adds what it is sent to `received-<m>`, and is cut, if `cut-<m>` is there, after as many bytes
-/// as it says, as a connection that ends; any other call is cut so by `cut-out-<m>`, its output
-/// counted in `counted` while `count-out` is there, or its output, once, `answer`'s, if there.
+// Stands in for `ssh` over shared masters that answer, and runs a command on this machine as the
+// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that opens
+// master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
+// command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
+// holds, `cut-out-M` ends any other command's output so, and `answer` is one command's output.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1226,21 +1169,10 @@ fi
 tee --append "$dir/received-$master" | sh -c "$*"
 "#;
 
-/// The stand-in `systemctl`, which answers that no unit runs.
 const SYSTEMCTL: &str = "#!/bin/sh\n";
 
-/// The stand-in `systemd-run`, which notes its arguments in `argv` beside it, as [`SSH`] does,
-/// and runs nothing.
 const SYSTEMD_RUN: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/argv\"\n";
 
-/// Sets `scratch` up as the client and its controller: in `bin`, the stand-ins for `aws`
-/// ([`AWS`]), `ssh` ([`SSH`]), `systemctl` ([`SYSTEMCTL`]), `systemd-run` ([`SYSTEMD_RUN`]) and
-/// the Session Manager plugin;
-/// the controller user's home, `home`, and runtime directory, `run`; the client's home, `client`,
-/// whose configuration names controller `alice`, beside its upstream, whose key is [`KEY`]; and
-/// its task's repository, `repo`, pinning Pumpkin [`PINNED`], with the `pumpkin` of it that
-/// `./pumpkin` builds in the repository's workspace, and the bundle of it that it keeps, and the
-/// task `stand-in`. Returns the client's environment.
 fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
     for (name, script) in [
         ("aws", AWS),
@@ -1276,7 +1208,6 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
         &format!("controller-candidate {PINNED}\n"),
     );
     scratch.write("repo/.pumpkin/.gitignore", "*\n");
-    // A file of the repository's that the task doesn't reach, as another task's data.
     scratch.write("repo/other/data", "another task's\n");
     scratch.write(
         &format!("repo/.pumpkin/{PINNED}/pumpkin.bundle"),
@@ -1292,8 +1223,6 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
     ]
 }
 
-/// `pumpkin` with `args`, as the client runs it, in its task's repository, as its `./pumpkin`
-/// built it there.
 fn on_client(scratch: &Scratch, environment: &[(String, String); 2], args: &[&str]) -> Command {
     let pumpkin = scratch
         .0
@@ -1305,7 +1234,6 @@ fn on_client(scratch: &Scratch, environment: &[(String, String); 2], args: &[&st
     command
 }
 
-/// The files below `dir`, each with its mode, sorted; or that there is none.
 fn modes(dir: &Path) -> String {
     let Ok(entries) = fs::read_dir(dir) else {
         return "gone".to_owned();
@@ -1321,26 +1249,20 @@ fn modes(dir: &Path) -> String {
     files.join(", ")
 }
 
-/// `dir` with its mode, then [`modes`] of what it holds.
 fn mode_and_modes(dir: &Path) -> String {
     let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
     format!("{mode:o}: {}", modes(dir))
 }
 
-/// Sets `scratch` up as [`set_up_client`] does, then has the client start a job of the task
-/// `stand-in` on its controller, over a shared master that answers, as a later command finds one
-/// that an earlier opened: its first command makes this machine's key and the workspace's shared
-/// connections, and finds no controller, as the stand-in `aws` describes none; the test then
-/// notes the controller's instance and the master's socket there, and `pumpkin run` sends the
-/// task. Returns the client's environment, the job's id and how the run ended.
 fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     let client = set_up_client(scratch);
     let (id, ran) = start(scratch, &client);
     (client, id, ran)
 }
 
-/// Has the client of `client`'s environment, which [`set_up_client`] set up, find its controller
-/// over a shared master that answers, as [`started_job`] says, unless it has.
+// The first `ls` makes the client's key and the shared connections and finds no controller, as the
+// stand-in `aws` describes none; the lock and socket written then are what a controller found
+// over a master that answers leaves.
 fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     let socket = scratch.0.join(SHARED).join("0");
     if socket.exists() {
@@ -1354,9 +1276,6 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
 }
 
-/// Has the client of `client`'s environment, which [`set_up_client`] set up, start a job of the
-/// task `stand-in`, as [`started_job`] says. Returns the job's id, if it started, and how the run
-/// ended, with the id as `<id>`.
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
     connect(scratch, client);
     let mut run = on_client(scratch, client, &["run", "stand-in/task.star"]);
@@ -1429,7 +1348,7 @@ fn keys_on_standard_input() {
     );
 }
 
-// None that another user may read, but a public key.
+// No file of the client's that another user may read, but a public key.
 #[test]
 fn modes_of_what_the_client_keeps() {
     let scratch = Scratch::new("controller-modes");
@@ -1564,15 +1483,12 @@ fn target_refusals() {
     );
 }
 
-/// The lowercase hexadecimal digits of the SHA-256 of `bytes`.
 fn sha256(bytes: &[u8]) -> String {
     use sha2::Digest as _;
     let digest = <[u8; 32]>::from(sha2::Sha256::digest(bytes));
     Sha256Digest::from(digest).hex().to_owned()
 }
 
-/// The paths below `dir`, of files and symbolic links, relative to it, sorted, but those below a
-/// directory named one of `skipped`.
 fn walked(dir: &Path, skipped: &[&str]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut dirs = vec![PathBuf::new()];
@@ -1593,9 +1509,6 @@ fn walked(dir: &Path, skipped: &[&str]) -> Vec<PathBuf> {
     paths
 }
 
-/// The task's files, of the repository that [`set_up_client`] made, each by the SHA-256 of what it
-/// holds, a symbolic link's target for a link, named: as `named` names it, else by the files of
-/// the repository that hold the same; and Pumpkin's bundle, and the tree of no files.
 fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)> {
     let repo = scratch.0.join("repo");
     let mut holders: Vec<(String, String)> = (named.iter())
@@ -1618,9 +1531,6 @@ fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)>
     holders
 }
 
-/// What the controller's store holds, a line each: each blob by the files that `holders` gives
-/// it, with its mode and its count of links, a copy of one at 0555 as such; and its manifests,
-/// and the files of its `incoming/`. Asserts that each blob and manifest is named by its SHA-256.
 fn stored(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
     let store = scratch.0.join("home/store");
     let named = |hex: &str| {
@@ -1677,8 +1587,6 @@ fn stored(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
     lines
 }
 
-/// The scripts that the stand-in `ssh` ran since this was last called, each by what it does, as
-/// its first line, which [`SSH`] notes, says.
 fn calls(scratch: &Scratch) -> String {
     let path = scratch.0.join("bin/scripts");
     let text = fs::read_to_string(&path).unwrap_or_default();
@@ -1696,7 +1604,6 @@ fn calls(scratch: &Scratch) -> String {
     format!("the calls: {}", calls.join(", "))
 }
 
-/// The tree's SHA-256 that the last job that the stand-in `systemd-run` noted was started with.
 fn last_tree(scratch: &Scratch) -> String {
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     let lines: Vec<&str> = argv.lines().collect();
@@ -1704,8 +1611,6 @@ fn last_tree(scratch: &Scratch) -> String {
     lines[at + 1].to_owned()
 }
 
-/// `controller job` of `id`, of tree `tree`, as its unit runs it, in its tree, building the task
-/// `stand-in`: its output.
 fn job_of(scratch: &Scratch, id: &str, tree: &str) -> std::process::Output {
     let mut job = on_controller(
         scratch,
@@ -1728,9 +1633,6 @@ fn job_of(scratch: &Scratch, id: &str, tree: &str) -> std::process::Output {
     job.output().unwrap()
 }
 
-/// Writes into the task `stand-in` of the client's repository a file its owner may execute, a
-/// symbolic link, a name with a space, an empty file, and one that git lists, as it is in its
-/// index, but that is gone.
 fn write_files(scratch: &Scratch) {
     scratch.write_executable("repo/stand-in/run.sh", b"#!/bin/sh\necho run\n");
     symlink("Dockerfile", scratch.0.join("repo/stand-in/CLAUDE.md")).unwrap();
@@ -1745,8 +1647,6 @@ fn write_files(scratch: &Scratch) {
     fs::remove_file(scratch.0.join("repo/stand-in/gone")).unwrap();
 }
 
-/// The files of the job's tree at `dir`, a line each: each as a link of its blob in the store,
-/// or of the blob's copy to run, with its mode, or a symbolic link with its target.
 fn tree_files(scratch: &Scratch, dir: &Path) -> Vec<String> {
     let store = scratch.0.join("home/store");
     let mut lines = vec!["the job's tree:".to_owned()];
@@ -1869,7 +1769,7 @@ fn send_refused_piece() {
     let scratch = Scratch::new("controller-send-refused");
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
-    // A piece of it, whole as its size goes, left with other bytes, as by a file changed meanwhile.
+    // A piece whole as its size goes, left with other bytes, as by a file changed meanwhile.
     let hex = sha256(b"noted\n");
     scratch.write(&format!("home/store/incoming/{hex}.00000"), "Noted\n");
     let (_, refused) = start(&scratch, &client);
@@ -1907,8 +1807,7 @@ fn send_refused_piece() {
     );
 }
 
-/// Writes the file `name` of the client's task, of `size_bytes`, each its index's remainder by
-/// `modulus`.
+// One stream per 16 MiB that a file holds: 17 MiB takes two.
 fn write_big(scratch: &Scratch, name: &str, size_bytes: u32, modulus: u32) {
     let big: Vec<u8> = (0..size_bytes)
         .map(|index| u8::try_from(index % modulus).unwrap())
@@ -1916,8 +1815,6 @@ fn write_big(scratch: &Scratch, name: &str, size_bytes: u32, modulus: u32) {
     fs::write(scratch.0.join("repo/stand-in").join(name), &big).unwrap();
 }
 
-/// What each receive over a shared master was sent, a line each: by master, each member of the
-/// `tar` stream by the file that `holders` gives its blob, with its piece's index and its bytes.
 fn received(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
     let mut lines = Vec::new();
     for master in 0..16 {
@@ -1944,13 +1841,12 @@ fn received(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
     lines
 }
 
-// The connection that carries the first piece of a file of 17 MiB ends part way through it, while
-// the other, of its second piece and the rest, ends whole.
 #[test]
 fn send_carries_on() {
     let scratch = Scratch::new("controller-send-carries-on");
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
+    // The connection that carries the first piece ends part way through it; the other ends whole.
     scratch.write("bin/cut-0", &(64 << 10).to_string());
     let (_, sent) = start(&scratch, &client);
     let mut lines = vec![sent, calls(&scratch)];
@@ -1990,11 +1886,11 @@ fn send_carries_on() {
     );
 }
 
-// Files of 20, 8 and 5 MiB, with the task's few small ones, are 3 streams' worth.
 #[test]
 fn send_over_streams() {
     let scratch = Scratch::new("controller-send-streams");
     let client = set_up_client(&scratch);
+    // With the task's few small files, 33 MiB is three streams' worth.
     let files = [
         ("a.bin", 20 << 20, 251),
         ("b.bin", 8 << 20, 241),
@@ -2047,8 +1943,6 @@ fn send_over_streams() {
     );
 }
 
-// Files of 17 MiB, 2 streams' worth, while every session of masters 1 to 15 is held, as by
-// other commands: both streams go over master 0.
 #[test]
 fn send_over_one_connection() {
     let scratch = Scratch::new("controller-send-one-connection");
@@ -2057,6 +1951,7 @@ fn send_over_one_connection() {
     let shared = scratch.0.join(SHARED);
     fs::create_dir_all(&shared).unwrap();
     fs::set_permissions(&shared, Permissions::from_mode(0o700)).unwrap();
+    // Every session of masters 1 to 15 is held, as by other commands.
     let mut held = Vec::new();
     for master in 1..16 {
         fs::write(shared.join(master.to_string()), "").unwrap();
@@ -2107,12 +2002,12 @@ fn send_over_one_connection() {
     );
 }
 
-// Files of 17 MiB, 2 streams' worth, while master 1 can't be opened: both go over master 0.
 #[test]
 fn send_over_the_connection_held() {
     let scratch = Scratch::new("controller-send-connection-held");
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
+    // Master 1 can't be opened, so both streams go over master 0.
     scratch.write("bin/refused-1", "");
     let (_, sent) = start(&scratch, &client);
     let mut lines = vec![sent, calls(&scratch)];
@@ -2220,8 +2115,6 @@ fn send_changed_file() {
     );
 }
 
-// A new bundle of the same commit replaces the workspace's; then the prune, as it were, removes
-// a file and the bundle that the controller said it holds before the start takes them.
 #[test]
 fn send_bundle_and_gone() {
     let scratch = Scratch::new("controller-send-gone");
@@ -2239,6 +2132,7 @@ fn send_bundle_and_gone() {
     let store = scratch.0.join("home/store");
     let removed = [sha256(b"noted\n"), sha256(b"another bundle of Pumpkin\n")];
     let removed = removed.map(|hex| format!("rm '{}'\n", store.join(hex).display()));
+    // The prune, as it were, removes a blob and the bundle that the controller said it holds.
     scratch.write("bin/before-2", &removed.concat());
     let (_, gone) = start(&scratch, &client);
     lines.extend([gone, calls(&scratch)]);
@@ -2336,7 +2230,6 @@ fn store_collection() {
         (stored(&scratch, &holders(&scratch, &named)).into_iter())
             .filter(|line| shown.iter().any(|name| line.contains(name))),
     );
-    // The third's again, once the manifest of another form is gone.
     fs::remove_file(scratch.0.join(planted)).unwrap();
     let (fourth, ran) = start(&scratch, &client);
     assert!(ran.contains("exit status: Some(0)"), "{ran}");
@@ -2387,8 +2280,6 @@ fn store_collection() {
     );
 }
 
-/// Plants job `id` on the controller, with log `log`, whose run has ended, and its own `pumpkin`,
-/// whose follower says the lines it returns each time, then that the run has ended.
 fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
@@ -2418,8 +2309,6 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
     said
 }
 
-// A job whose log holds a NUL-ended line, a line twice and an unfinished last line, followed cut
-// inside a log line, at the end of one, inside the last, and inside a line its follower says.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn follow_carries_on() {
@@ -2437,6 +2326,7 @@ fn follow_carries_on() {
     ];
     let said = ended_job(&scratch, &id, &log.concat());
     let logged = log[..5].concat().len();
+    // `before-N` cuts the follower's connection: the second script of a `wait`, after `calls` ran.
     let cuts = [
         ("inside the log's second line", log[0].len() + 5),
         (
@@ -2525,7 +2415,6 @@ fn follow_carries_on() {
     );
 }
 
-// A follow cut more times than it makes attempts in a row, each cut after a line it showed.
 #[test]
 fn follow_cut_often() {
     let scratch = Scratch::new("controller-follow-cut-often");
@@ -2584,8 +2473,6 @@ fn follow_cut_often() {
     );
 }
 
-// Connections each cut before their first line: the attempts count on, until the third, which
-// is said before its pause of 5 s, which the test doesn't wait out.
 #[test]
 fn follow_cut_before_a_line() {
     let scratch = Scratch::new("controller-follow-cut-before-a-line");
@@ -2610,6 +2497,7 @@ fn follow_cut_before_a_line() {
     let mut shown = Vec::new();
     for line in stderr.lines() {
         let line = line.unwrap();
+        // The third attempt is said before its pause, which the test doesn't wait out.
         let third = line.ends_with("attempt 3 of 7");
         shown.push(line);
         if third {
@@ -2628,8 +2516,6 @@ fn follow_cut_before_a_line() {
     );
 }
 
-/// Plants run `id` in the controller's runs, live as long as the lock it returns is held, as its
-/// driver holds it, with a log of `lines_count` lines of 100 bytes ([`grow`]).
 fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
     let record = format!("home/.pumpkin/runs/{id}");
     let args = ["stand-in/task.star"];
@@ -2646,8 +2532,6 @@ fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
     driver
 }
 
-/// Appends to run `id`'s log on the controller `lines_count` lines of 100 bytes, then `part`: JSON
-/// records that no reader of a log reads, which `ls` says of each run ([`say_listed`]).
 fn grow(scratch: &Scratch, id: &str, lines_count: usize, part: &str) {
     let path = scratch.0.join(format!("home/.pumpkin/runs/{id}/log.jsonl"));
     let mut text = String::new();
@@ -2664,9 +2548,6 @@ fn grow(scratch: &Scratch, id: &str, lines_count: usize, part: &str) {
     std::io::Write::write_all(&mut log, text.as_bytes()).unwrap();
 }
 
-/// Runs `pumpkin ls` on the client, and says how it ended, how many bytes the listing carried,
-/// and, of each of `ids`, where `ls` keeps its copy and whether that copy's log is the
-/// controller's, to the end of its last line.
 fn listed(scratch: &Scratch, client: &[(String, String); 2], ids: &[&str]) -> Vec<String> {
     let ls = on_client(scratch, client, &["ls"]).output().unwrap();
     let mut lines = vec![say_listed(scratch, &ls)];
@@ -2674,7 +2555,6 @@ fn listed(scratch: &Scratch, client: &[(String, String); 2], ids: &[&str]) -> Ve
     lines
 }
 
-/// How `ls` ended, as [`listed`] says it.
 fn say_listed(scratch: &Scratch, ls: &std::process::Output) -> String {
     let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
     let _ = fs::remove_file(scratch.0.join("bin/counted"));
@@ -2692,7 +2572,6 @@ fn say_listed(scratch: &Scratch, ls: &std::process::Output) -> String {
     lines.join("\n")
 }
 
-/// Where `ls` keeps the copy of each of `ids`, or `wait` its copy (`runs`), as [`listed`] says.
 fn kept(scratch: &Scratch, ids: &[&str]) -> Vec<String> {
     let mut lines = Vec::new();
     for id in ids {
@@ -2727,8 +2606,6 @@ fn kept(scratch: &Scratch, ids: &[&str]) -> Vec<String> {
     lines
 }
 
-// Three live runs of 100 lines each, listed again and again as they grow, are replaced, end,
-// as two `ls` list them at once, and once `wait` copied one.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn ls_by_offsets() {
@@ -2814,7 +2691,6 @@ fn ls_by_offsets() {
     );
     scratch.write(&format!("{job}/log"), "");
     scratch.write(&format!("{job}/out"), &format!("{}\n", ids[2]));
-    // The job's own `pumpkin`, whose follower says that the run has ended.
     scratch.write_executable(&format!("{job}/pumpkin"), b"#!/bin/sh\nexit 102\n");
     scratch.write(
         &format!("{record}/outcome.json"),
@@ -2890,8 +2766,6 @@ fn ls_by_offsets() {
     );
 }
 
-// A live run whose log holds no whole line yet, listed three times, and once its line is whole,
-// twice.
 #[test]
 fn ls_before_a_line() {
     let scratch = Scratch::new("controller-ls-before-a-line");
@@ -2931,8 +2805,6 @@ fn ls_before_a_line() {
     );
 }
 
-// A listing that names runs by `../x` and by an absolute path, and sends one run's log, and
-// another run, as symbolic links out of the copies' directory, listed twice.
 #[test]
 fn ls_refusals() {
     let scratch = Scratch::new("controller-ls-refusals");
@@ -2941,7 +2813,6 @@ fn ls_refusals() {
     let (linked, link) = (id_ago(0, "0e000001"), id_ago(0, "0e000002"));
     let outside = scratch.0.join("outside");
     scratch.write("outside/log.jsonl", "kept, with no newline");
-    // Where `live/../x` and the absolute path lead.
     scratch.write(&format!("{SHARED}/x/kept"), "kept\n");
     scratch.write("outside-abs/kept", "kept\n");
     let archive = scratch.0.join("archive");
@@ -3005,8 +2876,6 @@ fn ls_refusals() {
     );
 }
 
-/// The files below `dir`, each by its mode, size, modification time in whole seconds, SHA-256
-/// and path, escaped, sorted by path.
 fn record_files(dir: &Path) -> Vec<String> {
     let files = walked(dir, &[]).into_iter().map(|path| {
         let metadata = fs::symlink_metadata(dir.join(&path)).unwrap();
@@ -3024,7 +2893,6 @@ fn record_files(dir: &Path) -> Vec<String> {
     files.collect()
 }
 
-/// The inode of each file below `dir`, by its path.
 fn inodes(dir: &Path) -> Vec<(PathBuf, u64)> {
     let inodes = walked(dir, &[]).into_iter().map(|path| {
         let inode = fs::symlink_metadata(dir.join(&path)).unwrap().ino();
@@ -3033,9 +2901,6 @@ fn inodes(dir: &Path) -> Vec<(PathBuf, u64)> {
     inodes.collect()
 }
 
-/// `pumpkin` with `args`, by the client of `client`'s environment, which copies a run's record
-/// into `copy`: how it exited, the calls it made, and the files of `copy` that it wrote, by their
-/// inodes, which a copied file's rename changes.
 fn copied_record(
     scratch: &Scratch,
     client: &[(String, String); 2],
@@ -3066,8 +2931,6 @@ fn copied_record(
     lines
 }
 
-// A record copied by `wait` with a file unreadable there, one changing, then whole; by `cancel`,
-// unchanged, changed, cut and then refused, then cut.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy() {
@@ -3160,8 +3023,8 @@ fn record_copy() {
         let path = record.join("model").join(big);
         fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
     }
-    let cut = scratch.0.join("bin/cut-out-0");
     // The calls of `cancel`: the run's id, the cancel, the list, then the archive.
+    let cut = scratch.0.join("bin/cut-out-0");
     scratch.write(
         "bin/before-4",
         &format!("echo 150000 > '{}'\n", cut.display()),
@@ -3259,8 +3122,6 @@ fn record_copy() {
     );
 }
 
-// A record's list that names a path above it, or more files than a copy takes; and its archive
-// with a member above it, or with a symbolic link for a file it was asked for.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy_refusals() {
@@ -3361,11 +3222,6 @@ fn record_copy_refusals() {
     );
 }
 
-/// Sets `scratch` up as [`set_up_client`] does, with a shared master that answers, and the
-/// `pumpkin` of this build's commit in the controller's workspace, as a job that pins it builds
-/// it there; and plants in the controller's runs one that ended, with a log of 300 KB, and one
-/// that is live, whose driver's lock it returns, held. Returns the client's environment, the
-/// lock, and the two runs' ids.
 fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2]) {
     let client = set_up_client(scratch);
     connect(scratch, &client);
@@ -3386,6 +3242,7 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
         .append(true)
         .open(dir.join("log.jsonl"))
         .unwrap();
+    // More than a read of the log holds.
     for index in 0..3000 {
         let padding = format!("{index:0>85}");
         std::io::Write::write_all(
@@ -3408,8 +3265,6 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
     (client, driver, [ended, live])
 }
 
-/// The status line of the answer to a `GET` of `path` from `served`, and of its body, its
-/// error if it has one, else its fields `fields`.
 fn got(served: &Served, path: &str, fields: &[&str]) -> String {
     let (status, body) = served.ask("GET", path, &[]);
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();

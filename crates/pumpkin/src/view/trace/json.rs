@@ -1,6 +1,5 @@
-//! The JSON forms of a trace's answers: its steps as columns, windows and searches of its
-//! entries, one entry, and what the log says of an exchange. What each answer reads is the
-//! parent module's; which request it answers, [`ask`](super::ask)'s.
+//! The JSON forms of a trace's answers: its steps, entries, searches, exchanges and the parts of a
+//! request as the record kept them.
 
 use std::collections::BTreeSet;
 
@@ -13,27 +12,27 @@ use super::super::Failed;
 use super::super::json::cut;
 use super::{Address, Exchanges, Said, Step, Trace, api_of, diff, stats};
 
-/// The most bytes of the text that the `entry` reply gives of one entry, past which it cuts the
-/// text and says its length: a judge's prompt, the largest entry a run's record holds, is tens
-/// of KiB.
+/// The most bytes of one entry's text that `entry_json` gives; `text_bytes` gives the whole.
 const ENTRY_TEXT_BYTES: usize = 1 << 20;
 
-/// The most entries that a window of a trace's entries holds.
+/// The most entries in one reply of `entries_json`, which says where the next begins.
 const ENTRIES_WINDOW_ENTRIES: usize = 500;
 
-/// The most places of a search that its answer lists; it counts them all.
+/// The most hits that `search_json` gives, of however many it counts.
 const SEARCH_HITS: usize = 1000;
 
-/// The most bytes of an entry's text that a place of a search shows on each side of it.
+/// The bytes of text on each side of a hit that `search_json` gives.
 const SEARCH_CONTEXT_BYTES: usize = 80;
 
-/// How many steps a chunk of a trace's searchable text holds ([`Trace::search_chunk_json`]).
-// A page searches a static copy of a trace by reading every chunk once, so fewer, larger chunks
-// cost fewer requests; a live run's copy rewrites only its last chunk as it grows, so smaller ones
-// cost fewer bytes.
+/// How many steps' entries one chunk of searchable text holds.
+///
+/// A page searches a static copy of a trace by reading every chunk once, so fewer, larger chunks
+/// cost fewer requests; a live run's copy rewrites only its last chunk as it grows, so smaller ones
+/// cost fewer bytes.
 const SEARCH_CHUNK_STEPS: usize = 256;
 
-/// The columns of a trace's steps.
+/// The columns of the steps reply, which holds one array for each, in this order: row `i` of each
+/// is step `i`.
 const STEP_COLUMNS: [&str; 36] = [
     "request",
     "thread",
@@ -73,21 +72,18 @@ const STEP_COLUMNS: [&str; 36] = [
     "notes",
 ];
 
-/// The JSON of `value`, an `Option` of times in nanoseconds, as the log's decimal strings.
 fn time(value: Option<u64>) -> Value {
     value.map_or(Value::Null, |ns| json!(ns.to_string()))
 }
 
 impl Trace {
-    /// The steps, as columns of equal length, in the order of their requests; with `since`, those
-    /// of the steps that a line at or past byte `since` started, answered or changed. Column
-    /// `added` counts the items past the parent's list, `added_entries` the entries `entries`
-    /// gives of them (less those sending back the parent's answer, with the fields that differ),
-    /// `cache_hit` the fraction of the input tokens cached, and `answers` a step's answer
-    /// entries; of a step in flight, those so far, which grow with no line of the log, so `since`
-    /// sends its row again only once a line answers it. Column `tools` indexes `tool_lists` in the
-    /// order this view read the lists, so it is stable within one session only: one view's
-    /// process and `log_epoch`.
+    /// The steps' columns, with the thread of each and its span, and the tool lists that they name.
+    ///
+    /// With `since`, only the steps that started, were answered or were derived anew at a log byte
+    /// of `since` or later. The answers of a step in flight grow with no line of the log, so its
+    /// row is sent again only once a line answers it. Column `tools` indexes `tool_lists` in the
+    /// order this view read the lists, so it is stable within one session only: one view's process
+    /// and `log_epoch`.
     pub(super) fn steps_json(&self, exchanges: &Exchanges, since: Option<u64>) -> Value {
         let mut columns: Vec<Vec<Value>> = vec![Vec::new(); STEP_COLUMNS.len()];
         let mut threads = BTreeSet::new();
@@ -107,6 +103,7 @@ impl Trace {
                     continue;
                 }
             }
+            // Of the threads of the rows sent.
             threads.extend(step.thread);
             let row = self.row(exchanges, step, said);
             for (column, value) in columns.iter_mut().zip(row) {
@@ -126,14 +123,12 @@ impl Trace {
         json!({
             "caller": self.caller,
             "threads": count,
-            // Of the threads of the rows sent.
             "thread_spans": self.thread_spans(exchanges, &threads),
             "steps": steps,
             "tool_lists": tools,
         })
     }
 
-    /// The row of `step`, of which the log said `said`, in the order of [`STEP_COLUMNS`].
     fn row(&self, exchanges: &Exchanges, step: &Step, said: &Said) -> [Value; STEP_COLUMNS.len()] {
         let (started, answered) = (said.started, said.answered.as_ref());
         let event = &said.event();
@@ -200,8 +195,8 @@ impl Trace {
         ]
     }
 
-    /// The requests that `step` is a retry of, and a repeat of: of the step that sent its list
-    /// last before it, as that one failed or not.
+    /// The earlier request that sent `step`'s list last before it, as `(retry_of, repeat_of)`: a
+    /// retry if that request did not succeed, else a repeat.
     pub(super) fn same(&self, exchanges: &Exchanges, step: &Step) -> (Option<u64>, Option<u64>) {
         match step.same_as {
             Some(other) if self.answered_ok(exchanges, other) == Some(false) => {
@@ -224,8 +219,8 @@ impl Trace {
         (count > 0).then_some(count)
     }
 
-    /// Which of `system` and `tools` `step` sent other than its parent did; `None` for a step
-    /// with no parent.
+    /// Which of `system` and `tools` `step` sent other than its parent did; `None` for a step with
+    /// no parent.
     fn differs(&self, step: &Step) -> Option<Vec<&'static str>> {
         let parent = &self.steps[step.parent?];
         let system =
@@ -240,7 +235,8 @@ impl Trace {
         )
     }
 
-    /// Whether step `index`'s request was answered with a success; `None` while in flight.
+    /// Whether step `index`'s request was answered by a forwarded 2xx with no failure, or `None`
+    /// if it has no answer yet.
     pub(super) fn answered_ok(&self, exchanges: &Exchanges, index: usize) -> Option<bool> {
         let said = exchanges.by_request.get(&self.steps[index].request)?;
         said.answered.as_ref()?;
@@ -253,8 +249,6 @@ impl Trace {
         )
     }
 
-    /// The entries of `step`, each with its index among them, its address, the entry or why it
-    /// can't be read, and its digest if it is a kept item's: what it added, then its answer.
     fn entries_of<'s>(
         &'s self,
         step: &'s Step,
@@ -281,8 +275,6 @@ impl Trace {
         })
     }
 
-    /// The entries of `step` that a search reads, each with its index among them, its address,
-    /// its kind and its text, or why it can't be read.
     fn searched<'s>(
         &'s self,
         step: &'s Step,
@@ -299,9 +291,8 @@ impl Trace {
         })
     }
 
-    /// The places where `query` is, in the text of an entry of `kind` and of thread `thread` if
-    /// given, as [`searchable`] matches them: their count, and the first [`SEARCH_HITS`], each
-    /// with [`SEARCH_CONTEXT_BYTES`] of the text on each side.
+    /// The places, in the entries of the steps of `thread` (every thread if `None`) and of `kind`
+    /// (every kind if `None`), where `query` is found with the case ignored.
     pub(super) fn search_json(
         &self,
         query: &str,
@@ -338,12 +329,10 @@ impl Trace {
         json!({ "count": count, "hits": hits })
     }
 
-    /// Chunk `chunk` of the text that a search reads, the entries of [`SEARCH_CHUNK_STEPS`] steps
-    /// in the order of their requests, as JSON: `{"steps": [{"request": n, "thread": t,
-    /// "entries": [[index, at, kind, text], ...]}], "next": c}`, each text in its [`searchable`]
-    /// form, an entry with no text left out, and `c` the next chunk, or `null` after the last.
-    /// [`Self::search_json`] finds a query in an entry where it is a substring of that text, at
-    /// the same byte.
+    /// Chunk `chunk` of the text that a search reads: the entries of [`SEARCH_CHUNK_STEPS`] steps,
+    /// each as `[index, at, kind, text]` with the text in its [`searchable`] form and an entry with
+    /// no text left out, and the next chunk, if there is one. [`Self::search_json`] finds a query
+    /// in an entry where it is a substring of that text, at the same byte.
     pub(super) fn search_chunk_json(&self, chunk: usize) -> Value {
         let first = chunk.saturating_mul(SEARCH_CHUNK_STEPS);
         let chunked = self.at.values().skip(first).take(SEARCH_CHUNK_STEPS);
@@ -363,9 +352,8 @@ impl Trace {
         json!({ "steps": steps, "next": more.then_some(chunk + 1) })
     }
 
-    /// The entries of the steps of requests `from` to `to`, of thread `thread` and of `kind` if
-    /// given, from the `entry`th of the first on, at most [`ENTRIES_WINDOW_ENTRIES`]: each step's
-    /// added entries, then its answer's.
+    /// The entries of the requests `from` to `to`, starting at entry `entry` of the first, with
+    /// each string cut ([`cut`]).
     pub(super) fn entries_json(
         &self,
         from: u64,
@@ -398,9 +386,7 @@ impl Trace {
         json!({ "entries": entries, "next": next })
     }
 
-    /// The entry of step `request`'s at `address`, uncut up to [`ENTRY_TEXT_BYTES`] of its text,
-    /// with `text_bytes`, the length of its text whole; or the refusal of an address that names
-    /// none.
+    /// The entry at `address` of `request`, whole up to [`ENTRY_TEXT_BYTES`].
     pub(super) fn entry_json(&self, request: u64, address: &Address) -> Result<Value, Failed> {
         let step = self.at.get(&request).map(|&index| &self.steps[index]);
         let found =
@@ -421,8 +407,6 @@ impl Trace {
         Ok(json)
     }
 
-    /// The entry `at` of step `request`'s, at `address`, as JSON: `item`'s fields, or why it
-    /// can't be read, with where it is, its kind, its digest and its call's or output's address.
     fn entry_of(
         &self,
         request: u64,
@@ -467,12 +451,10 @@ pub(in crate::view) fn searchable(text: &str) -> String {
     text.to_ascii_lowercase()
 }
 
-/// The side an address names: `head`, `in` or `out`.
 fn address_side(address: &str) -> &str {
     address.split('/').nth(1).unwrap_or_default()
 }
 
-/// The name of `item`'s kind.
 fn kind_name(item: &Item) -> &'static str {
     match item {
         Item::System { .. } => "system",
@@ -485,7 +467,6 @@ fn kind_name(item: &Item) -> &'static str {
     }
 }
 
-/// `item`'s own fields, as JSON.
 fn item_json(item: &Item) -> Value {
     match item {
         Item::System { text }
@@ -512,11 +493,8 @@ fn item_json(item: &Item) -> Value {
     }
 }
 
-/// `kept`, a request's body as the record keeps it, as JSON: `{"conversation": {"field": f,
-/// "items": [part, ...]}, "fields": [{"name": n, ...part}, ...]}`, each part `{"item": hex}`, kept
-/// apart as the item that `hex` names, or `{"sent": v}`, held as sent, and `conversation` `null`
-/// if the record kept no items apart. The body is `fields`, each part's value in place, with `f`
-/// holding `items`' values in their order.
+/// A request as the record kept it: its conversation's items and its other fields, each by its
+/// digest or as sent. `conversation` is `null` if the record kept no items apart.
 pub(super) fn kept_json(kept: KeptRequest) -> Value {
     let KeptRequest {
         conversation,
@@ -540,8 +518,7 @@ pub(super) fn kept_json(kept: KeptRequest) -> Value {
     json!({ "conversation": conversation, "fields": fields })
 }
 
-/// What the log says of request `request` of `exchanges`, of `record`, which it names, and what
-/// its body asked, as JSON.
+/// What the log says of request `request`, and its configuration read from the record.
 pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64) -> Value {
     let said = &exchanges.by_request[&request];
     let event = &said.event();
@@ -568,8 +545,6 @@ pub(super) fn exchange_json(record: &Record, exchanges: &Exchanges, request: u64
     })
 }
 
-/// What request `request` of `record`, of `api`, asked of the model, if `answered`, as JSON, or
-/// why it can't be read.
 fn config_json(record: &Record, request: u64, api: Option<Api>, answered: bool) -> Value {
     match (api, answered) {
         (Some(api), true) => match record.model_request(request) {

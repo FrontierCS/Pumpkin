@@ -1,10 +1,11 @@
-//! `pumpkin ls` on the controller: the controller lists its runs, and its jobs yet to start one,
-//! with its own health, and sends the files of each record that `ls` reads, from which this
-//! machine reads each run as it reads its own.
+//! `ls` of a machine whose runs go to a controller: the controller lists its runs, and its jobs
+//! yet to start one, with its own health, and sends the files of each record that `ls` reads, from
+//! which this machine reads each run as it reads its own.
 //!
-//! The files of a record that ended are kept in the workspace's connections to the controller
-//! ([`super::Shared::ended`]), as they never change, so the controller sends them once. What a
-//! listing shows, and how, is [`crate::progress`]'s.
+//! A run that has ended is copied once, and the copy is kept. A run that is live has a copy that
+//! each `ls` grows: the controller is told what each copy holds, and sends only the log past its
+//! last whole line and the small files it lacks. So what a listing carries is what changed since
+//! the last, whatever the runs' number.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,23 +24,19 @@ use crate::job::{JOBS, WAITING};
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
-/// How long a listing of the controller's runs may take to arrive before `ls` says when it was
-/// made: a person reads the rows of a listing as they are now.
+// How long a listing may take before `ls` says when it was made: a person reads the rows of a
+// listing as they are now.
 const STALE: Duration = Duration::from_secs(10);
 
-/// A directory of this command's own, 0700, in the workspace's `tmp/` ([`Workspace::scratch`]).
+/// A directory in the workspace for what a command makes and throws away, removed when dropped.
 pub(crate) fn scratch() -> Result<TempDir, String> {
     Workspace::find()?.scratch("pumpkin-")
 }
 
-/// `pumpkin ls` on the controller: lists its runs whose ids start with one of `prefixes`, or
-/// every run without any but those that ended over a day ago ([`progress::listed_since`]), the
-/// jobs yet to start one as `waiting` for a build slot, or else `building`, or `unstarted` once
-/// they have ended, beside the copies in this machine's default runs directory, by id, the
-/// controller's of a run that both hold. Each run is read here, from the files of its record that
-/// `ls` reads, which the controller sends once the record has ended unless its copy here has.
-///
-/// [`progress::listed_since`]: crate::progress::listed_since
+/// Lists the runs of the controller whose ids start with one of `prefixes`, or, with none, all but
+/// those that ended over a day ago (`progress::listed_since`), as `ls` lists those of this machine,
+/// and the jobs yet to start a run, as `waiting` for a build slot, `building`, or `unstarted` once
+/// they have ended. Fails, after listing the rest, if a run can't be listed.
 pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
@@ -77,8 +74,8 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
                 asked: runtime::minted(id),
             }),
             "unstarted" => Ok(crate::progress::Listed::Unstarted),
-            // The lock that says a run is live is the controller's, so its copy here is read
-            // as live.
+            // The lock that says a run is live is the controller's, so its copy here is read as
+            // live.
             "live" => copied(&reached.name, (&sent, &live), id, from)
                 .and_then(|id| runtime::Record::open(&live.join(id.as_str())))
                 .and_then(|record| crate::progress::Listed::run(&record, None)),
@@ -113,10 +110,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// What `ls` lists, given `prefixes` and `since` ([`crate::listed_in`]), of the runs that this
-/// machine holds what it needs of: the copies in the default runs directory, and what `ls` kept
-/// in `kept` of each record that ended; a copy, which `wait` made, rather than what was kept of
-/// the same run. Says each run that can't be listed, and returns how many.
+/// The runs that this workspace's copies, ended and live, list, and how many it couldn't list.
 fn listed_here(
     kept: &Path,
     prefixes: &[String],
@@ -134,8 +128,6 @@ fn listed_here(
     Ok((listing, unlisted + ended_unlisted))
 }
 
-/// Says when the controller began a listing, at `began`, since the Unix epoch, if it took
-/// [`STALE`] or more to arrive.
 fn said_when(began: Duration) {
     let took = crate::unix_now().since_epoch().saturating_sub(began);
     if took < STALE {
@@ -154,8 +146,8 @@ fn said_when(began: Duration) {
     ));
 }
 
-/// The record of run `id` that ended, as `ls` keeps it in `live` ([`grown`]), moved into `kept`,
-/// which [`Shared::ended`](super::Shared::ended) names, and read there.
+/// Moves run `id`'s copy, which has ended, from the live copies to the kept ones, which no
+/// listing changes again.
 fn keep(live: &Path, kept: &Path, id: &RunTag) -> Result<runtime::Record, String> {
     let to = kept.join(id.as_str());
     let moved = fs::create_dir_all(kept).and_then(|()| fs::rename(live.join(id.as_str()), &to));
@@ -163,7 +155,6 @@ fn keep(live: &Path, kept: &Path, id: &RunTag) -> Result<runtime::Record, String
     runtime::Record::open(&to)
 }
 
-/// What to do once `ls` failed to keep its copy of run `id` in `live`.
 fn afresh(live: &Path, id: &RunTag) -> String {
     let copy = live.join(id.as_str());
     format!(
@@ -172,8 +163,8 @@ fn afresh(live: &Path, id: &RunTag) -> String {
     )
 }
 
-/// Run `id`, which controller `name` listed, once its copy in `live` is grown by what was `sent`
-/// of it ([`grown`]); refuses an `id` that is no run's, and so names no copy here.
+/// Places what the controller sent of run `id`, in `sent`, in its live copy. `from` is the byte
+/// of the log that the sent part of it starts at, none if the run is new here.
 fn copied(
     name: &Name,
     (sent, live): (&Path, &Path),
@@ -192,9 +183,6 @@ fn copied(
     Ok(tag)
 }
 
-/// What [`listing`] prints on `reached` of the runs whose ids start with one of `prefixes`, or
-/// every run without any, of those that ended at `since` or after, in seconds since the Unix
-/// epoch, given what this machine holds of them, `held` ([`holding`]).
 fn listed_there(
     reached: &Reached,
     prefixes: &[String],
@@ -225,12 +213,10 @@ fn listed_there(
     Ok(output.stdout)
 }
 
-/// What [`listing`] reads on its standard input of what this machine holds: a line `<id>` for each
-/// run that `listing`, which [`listed_here`] made, has ended or older, then one for each copy in
-/// `live` ([`Shared::live`](super::Shared::live)), `<id> <byte> <file>...`: the length of its
-/// log, as [`whole`] cuts it, then each of [`LISTED_FILES`] but the log that it holds.
-/// Removes each copy in `live` of a run that `listing` has ended or older, as `wait` copied it
-/// since.
+/// What this machine holds, in the form that the controller's script reads on its standard input:
+/// a line `<id>` for each run held as ended or too old to list, and `<id> <bytes> <file>…` for
+/// each live copy, with the length of its log up to its last whole line (which it is cut to) and
+/// the other files it holds. A live copy of a run held as ended is removed.
 fn holding(listing: &crate::progress::Listing, live: &Path) -> Result<String, String> {
     let ended = (listing.runs.iter()).filter_map(|(id, run)| run.ended().then_some(id));
     let ended: BTreeSet<&String> = ended.chain(&listing.older).collect();
@@ -265,12 +251,12 @@ fn holding(listing: &crate::progress::Listing, live: &Path) -> Result<String, St
     Ok(held)
 }
 
-/// How many bytes of a copy's log [`whole`] reads at a time, from its end back, to find its last
-/// newline: more than most of a log's lines hold, and a longer line takes another read.
+// How much of a log `whole` reads at a time, backwards from its end, to find a newline: more than
+// most of a log's lines hold, and a longer line takes another read.
 const TAIL_BYTES: u64 = 4096;
 
-/// The length of `log`, a copy of a run's log, once what follows its last newline, if anything,
-/// is cut off; 0 if there is none.
+/// The length of the copy of a log up to its last newline, to which it cuts it, so that what is
+/// appended to it later starts a line; 0 if it has none.
 fn whole(log: &Path) -> Result<u64, String> {
     let metadata = match fs::symlink_metadata(log) {
         Ok(metadata) => metadata,
@@ -307,10 +293,10 @@ fn whole(log: &Path) -> Result<u64, String> {
     Ok(whole)
 }
 
-/// Grows the copy of run `id` in `live` by what [`listing`] `sent` of it, whose log starts at byte
-/// `from` of the controller's: appends that to the copy's log, and moves in each other file; or
-/// makes what was sent the copy, if there is none, or `from` is 0 or none, as the controller then
-/// sent the run whole.
+/// Grows the copy of run `id` in `live` by what the controller sent of it, whose log starts at
+/// byte `from` of the controller's: appends that to the copy's log, and moves in each other file;
+/// or makes what was sent the copy, if there is none, or `from` is 0 or none, as the controller
+/// then sent the run whole.
 fn grown(sent: &Path, live: &Path, id: &RunTag, from: Option<u64>) -> Result<(), String> {
     let (sent, copy) = (sent.join(id.as_str()), live.join(id.as_str()));
     let entries = sent_files(&sent, id)?;
@@ -318,8 +304,6 @@ fn grown(sent: &Path, live: &Path, id: &RunTag, from: Option<u64>) -> Result<(),
     grew.map_err(|error| format!("{error}: {}", afresh(live, id)))
 }
 
-/// The files that [`listing`] sent of run `id`, in `sent`, none if it sent nothing; refuses what
-/// isn't a directory of regular files, as no run's record is.
 fn sent_files(sent: &Path, id: &RunTag) -> Result<Vec<fs::DirEntry>, String> {
     let refused = |what: String| {
         format!(
@@ -352,7 +336,6 @@ fn sent_files(sent: &Path, id: &RunTag) -> Result<Vec<fs::DirEntry>, String> {
     Ok(entries)
 }
 
-/// What [`grown`] does with the `entries` of `sent`, but for saying what to do once it fails.
 fn growing(
     sent: &Path,
     copy: &Path,
@@ -385,8 +368,8 @@ fn growing(
     Ok(())
 }
 
-/// What the controller said of itself as it listed its runs ([`listing`]): how long it has been
-/// up, the state of its boot's unit, `pumpkin-boot.service`, and how full its disk is.
+/// What the controller says of itself as it lists its runs: how long it has been up, the state of
+/// its boot's unit, `pumpkin-boot.service`, and how full its disk is.
 #[derive(Default)]
 struct Health {
     up: Option<Duration>,
@@ -397,8 +380,6 @@ struct Health {
 }
 
 impl Health {
-    /// Takes in a line that [`listing`] printed, its first word `word` and then `rest`, if it is
-    /// one of the controller's health; returns whether it was.
     fn take(&mut self, word: &str, rest: &str) -> bool {
         match word {
             "up" => {
@@ -419,7 +400,6 @@ impl Health {
         true
     }
 
-    /// The line that says the health of controller `name`, which runs `jobs` jobs.
     fn line(&self, name: &Name, jobs: usize) -> String {
         let mut said = Vec::new();
         if let Some(up) = self.up {
@@ -444,18 +424,16 @@ impl Health {
     }
 }
 
-/// The files of a record that `ls` reads, which the controller sends.
+// The files of a record that `ls` reads. `log.jsonl` is the one that grows, so it goes by offset.
 const LISTED_FILES: &str = "record.json ir.json provider.json log.jsonl outcome.json driver.pid";
 
-/// What a command on the controller runs to list its runs whose ids start with one of
-/// `prefixes`, or every run without any: its health, `up <seconds>`, `boot <property>=<value>` of
-/// its boot's unit, and `disk <used>%`; for each job yet to start its run, `<id> waiting` for a
-/// build slot, or else `<id> building`, or `<id> unstarted` once it has ended; for each run that
-/// its standard input ([`holding`]) does not hold as ended, `<id> <live or ended> <byte>`, or
-/// `<id> old` if it, or its job, ended before `since`, as its `outcome.json`, or its log, was last
-/// written, and it holds no copy of; then `tar`, and an archive of each run's files that `ls`
-/// reads ([`LISTED_FILES`]): its log from `<byte>`, its copy's length if over 0 and its log is
-/// that long, else 0 and every file, to its last newline if live, and the files its copy lacks.
+/// The script that runs on the controller and lists its runs whose ids start with one of
+/// `prefixes`, or all: its health, as `up <seconds>`, `boot <property>=<value>` and `disk <used>%`;
+/// each job yet to start its run, as `<id> waiting`, `<id> building` or `<id> unstarted`; each run
+/// that its standard input (`holding`) doesn't hold as ended, as `<id> <live or ended> <byte>`, or
+/// `<id> old` if nothing of it or its job was written since Unix second `since` and no copy is
+/// held; then `tar` and an archive of the `LISTED_FILES` that the copy lacks, with the log from
+/// `<byte>`, which is the copy's length if it is over 0 and the log is that long, else 0.
 fn listing(prefixes: &[String], since: u64) -> String {
     let picked = if prefixes.is_empty() {
         String::new()
@@ -528,8 +506,8 @@ ls "$sent" | tar --create --blocking-factor=1 --dereference --warning=no-file-ch
     )
 }
 
-/// The lines of the states that [`listing`] printed, once the archive after them is extracted
-/// into `sent`, a new directory.
+/// Unpacks into `sent` the archive that follows the line `tar` of what `listing`'s script
+/// printed, and returns the lines before it.
 fn extract<'p>(printed: &'p [u8], sent: &Path) -> Result<&'p [u8], String> {
     let mut at = 0;
     let mut archive: &[u8] = &[];

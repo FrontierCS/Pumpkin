@@ -1,7 +1,3 @@
-//! `view`, which serves the runs' records as JSON on the loopback interface: the list of runs,
-//! a run's page, the poll of a live run, which answers from what its log gained, and windows of
-//! its log; and the page that reads them, its files served without the token.
-
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead as _, BufReader, Read as _, Write as IoWrite};
@@ -17,12 +13,14 @@ use super::{
     write_record, write_run,
 };
 
-/// A `pumpkin view` of `scratch`'s `runs`, killed as it is dropped.
+/// A `pumpkin view` process that listens on loopback, and is killed when dropped.
+///
+/// `said` is what the process printed as it started, with its port and token replaced by
+/// `<port>` and `<token>`.
 pub(super) struct Served {
     child: Child,
     pub(super) port: u16,
     token: String,
-    /// What the view printed as it started, its port and token as `<port>` and `<token>`.
     pub(super) said: String,
 }
 
@@ -31,7 +29,7 @@ impl Served {
         Self::of(scratch.pumpkin(&["view", "--runs", "runs"]))
     }
 
-    /// The view that `command`, a `pumpkin view`, serves.
+    /// Starts `command`, which must run `pumpkin view`, and waits for the address it prints.
     pub(super) fn of(mut command: Command) -> Self {
         command.stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
@@ -51,13 +49,12 @@ impl Served {
         }
     }
 
-    /// The status line and the body of a `GET` of `path` with `headers`, as [`Self::ask`].
     fn get_with(&self, path: &str, headers: &[(&str, &str)]) -> (String, String) {
         self.ask("GET", path, headers)
     }
 
-    /// The status line and the body of a request of `path` by `method` with `headers`, as
-    /// [`Self::exchange`] sends them.
+    /// Sends a request with the token and a loopback `Host`, except for a header that `headers`
+    /// names; a header whose value is empty is left out. Returns the status line and the body.
     pub(super) fn ask(
         &self,
         method: &str,
@@ -68,14 +65,11 @@ impl Served {
         (head.lines().next().unwrap().to_owned(), body)
     }
 
-    /// The head and the body of the answer to a request of `path` by `method` with `headers`, as
-    /// `Host: 127.0.0.1` and the token are given unless `headers` names them.
     fn exchange(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> (String, String) {
         let (head, body) = self.exchange_bytes(method, path, headers);
         (head, String::from_utf8(body).unwrap())
     }
 
-    /// The head and the body's bytes of the answer, as [`Self::exchange`].
     fn exchange_bytes(
         &self,
         method: &str,
@@ -104,8 +98,6 @@ impl Served {
         (head, answer[at + 4..].to_vec())
     }
 
-    /// The answer to a `GET` of `target`, which accepts deflate if `deflate`, as the head and the
-    /// body of a reply of `pumpkin controller view`.
     fn as_frame(&self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
         let accepts: &[(&str, &str)] = if deflate {
             &[("Accept-Encoding", "deflate")]
@@ -133,7 +125,6 @@ impl Served {
         serde_json::from_str(&body).unwrap()
     }
 
-    /// How many bytes the view has read, of every file and socket, as Linux counts them.
     fn read_bytes(&self) -> u64 {
         let io = fs::read_to_string(format!("/proc/{}/io", self.child.id())).unwrap();
         let rchar = io.lines().find_map(|line| line.strip_prefix("rchar: "));
@@ -148,8 +139,8 @@ impl Drop for Served {
     }
 }
 
-/// `value`'s fields, one a line, as `name: json`, and each element of an array field `lines`
-/// names on a line of its own.
+/// The fields of `value`, one on each line as `name: json`, but for each array field that
+/// `lines` names, which has one line for each element.
 fn fields(value: &Value, lines: &[&str]) -> String {
     let mut text = String::new();
     for (name, value) in value.as_object().unwrap() {
@@ -168,15 +159,12 @@ fn fields(value: &Value, lines: &[&str]) -> String {
     text
 }
 
-/// The run that ended, of those [`write_served`] writes.
 const SERVED_ENDED: &str = "20261110-090000-0000000a";
 
-/// The run that is live, of those [`write_served`] writes.
 const SERVED_LIVE: &str = "20261110-110000-0000000c";
 
-/// Writes into `scratch`'s `runs` a run of each kind that the list shows: one that ended, one
-/// that is lost, one that is live, whose driver's lock it returns, held, one with no log, two
-/// that used no tokens that anyone counted, and a directory that holds no record.
+/// Writes the runs that the tests of the served page share, and returns the lock on the live
+/// run's `driver.pid`, which keeps `SERVED_LIVE` live until it is dropped.
 fn write_served(scratch: &Scratch) -> File {
     let priced = lease_places(Prices::Both);
     let ended = SERVED_ENDED;
@@ -218,6 +206,7 @@ fn write_served(scratch: &Scratch) -> File {
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
+    // A record with no log.
     write_record(scratch, "20261110-120000-0000000d", true, None);
     // A run whose agent made no model request used no tokens; one whose requests none of the
     // responses reported their tokens for used some that no one counted.
@@ -236,6 +225,7 @@ fn write_served(scratch: &Scratch) -> File {
         });
         write_record(scratch, id, true, Some(outcome));
     }
+    // A directory with no record.
     fs::create_dir_all(scratch.0.join("runs/20261110-130000-0000000e")).unwrap();
     driver
 }
@@ -249,7 +239,6 @@ fn serves_runs() {
     let scratch = Scratch::new("serves-runs");
     let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
     let driver = write_served(&scratch);
-    // And the ended run priced otherwise: its tokens alone, its sandboxes alone, and nothing.
     let others = [
         ("20261110-060000-00000005", Prices::Tokens),
         ("20261110-050000-00000006", Prices::Sandboxes),
@@ -283,7 +272,6 @@ fn serves_runs() {
     let page = served.get(&format!("/api/runs?before={live}"));
     steps.push(format!("GET /api/runs?before=<live>\n{page}"));
     let mut run = served.get(&format!("/api/runs/{ended}"));
-    // The summary is what `wait` says of the run.
     let waited = scratch
         .pumpkin(&["wait", "--runs", "runs", ended])
         .output()
@@ -425,8 +413,8 @@ fn serves_runs() {
     );
 }
 
-/// `pumpkin controller view` of the runs in `scratch`'s default runs directory, asked over its
-/// standard input.
+/// A `pumpkin controller view` process, which answers a request on each line of its standard
+/// input.
 pub(super) struct Piped {
     child: Child,
     stdin: ChildStdin,
@@ -445,7 +433,7 @@ impl Piped {
         }
     }
 
-    /// The reply to a request of `target`, deflated if `deflate`: its head, then its body.
+    /// Returns the head and the body of the answer to a request for `target`.
     pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
         let asking = json!({ "target": target, "deflate": deflate });
         writeln!(self.stdin, "{asking}").unwrap();
@@ -492,8 +480,7 @@ fn answers_over_a_pipe() {
             }
         }
     }
-    // A run's reply, which holds no command to run it again, as it would name the controller's
-    // paths.
+    // A run's reply holds no command to run it again, as it would name the controller's paths.
     for (target, run) in [
         (format!("/api/runs/{ended}"), ""),
         (format!("/api/runs/{ended}/since?log=0"), "/run"),
@@ -581,7 +568,6 @@ fn follows_a_live_run() {
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
-    // 3,000 lines more, of model requests started and answered, each pair a second on.
     let mut grown = Vec::new();
     for request in 0..1500 {
         let caller = json!({ "caller": "agent", "request": request });
@@ -627,8 +613,7 @@ fn follows_a_live_run() {
         "the first poll: {}",
         fields(&first["run"]["model"], &[])
     ));
-    // 250 lines at once, more than the view holds of a log's last lines, so that it reads the
-    // first 150 again.
+    // More lines at once than the view holds of a log's last lines.
     log.write_all(lines[1..251].concat().as_bytes()).unwrap();
     let answer = poll(&mut next, &mut taken);
     said.push(format!(
@@ -637,7 +622,7 @@ fn follows_a_live_run() {
         answer["next"],
         answer["end"]
     ));
-    // Then in 29 parts of at most 97 lines, each polled with the half of its last line written.
+    // Each chunk ends in half a line, which no poll may report before its other half is written.
     for part in lines[251..].chunks(97) {
         let (whole, cut) = part.split_at(part.len() - 1);
         log.write_all(whole.concat().as_bytes()).unwrap();
@@ -651,8 +636,8 @@ fn follows_a_live_run() {
     polls += 1;
     let read = served.read_bytes() - before;
     let size = fs::metadata(&log_path).unwrap().len();
+    // Every byte is read once, as the polls ask only for what is new, and not much more.
     assert_eq!(taken, lines.concat());
-    // Each byte of the log once, and per poll no more than its own request and a few small files.
     assert!(
         read >= size && read < size + 2048 * polls,
         "{read} bytes read over {polls} polls of a log of {size}"
@@ -721,9 +706,9 @@ fn cancels_a_run() {
     let scratch = Scratch::new("cancels-a-run");
     let id = "20261110-160000-00000011";
     write_record(&scratch, id, true, None);
-    // A driver: the process that holds the record's lock, which ignores SIGTERM, so that a
-    // cancel goes on until the test kills it.
     let pid_path = scratch.0.join(format!("runs/{id}/driver.pid"));
+    // A driver: the process that holds the record's lock, which ignores `SIGTERM`, so that a
+    // cancel goes on until the test kills it.
     let mut driver = scratch.program("flock", &["--no-fork", pid_path.to_str().unwrap()]);
     driver.args(["sh", "-c", "trap '' TERM; echo locked; exec sleep 600"]);
     let mut driver = driver.stdout(Stdio::piped()).spawn().unwrap();
@@ -754,8 +739,8 @@ fn cancels_a_run() {
     let unknown = "/api/runs/20261110-170000-00000012/cancel";
     ask("POST", unknown, &[("Origin", &page)]);
     let from_page = |steps: &mut Vec<String>| {
+        // Only the status: what it has said so far depends on how far the child has got.
         let (status, _) = served.ask("POST", &cancel, &[("Origin", &page)]);
-        // What it has said so far depends on how far the child has got.
         steps.push(format!("POST {cancel} from the page\n{status}"));
     };
     let ended = |steps: &mut Vec<String>| {
@@ -767,7 +752,6 @@ fn cancels_a_run() {
         ));
     };
     from_page(&mut steps);
-    // Once it has signalled the driver, which it waits for then.
     poll(|| {
         let said = served.get(&cancelling)["said"].as_str().unwrap().to_owned();
         said.contains("stopping run").then_some(())
@@ -875,9 +859,9 @@ fn starts_over_a_shortened_log() {
     ));
     let records = served.get(&format!("/api/runs/{id}/since?log=0"))["records"].clone();
     let byte = &records[20]["byte"];
-    // The log cut back to its first 30 lines, so that the byte still starts one.
     let log_path = dir.join("log.jsonl");
     let log = fs::read_to_string(&log_path).unwrap();
+    // The log cut back to its first 30 lines, so that the byte still starts one.
     let kept: String = log.split_inclusive('\n').take(30).collect();
     fs::write(&log_path, kept).unwrap();
     for path in [
@@ -925,6 +909,7 @@ fn windows_a_log_by_its_bytes() {
     let scratch = Scratch::new("windows-a-log");
     let id = "20261110-190000-00000014";
     let tick = logged(1, json!({ "kind": "tick" }), json!([]));
+    // One record of a megabyte, which a window holds alone.
     let mut padded = tick.clone();
     padded["pad"] = json!("x".repeat(1024 * 1024));
     let mut log = vec![tick; 20_000];
@@ -954,7 +939,6 @@ fn windows_a_log_by_its_bytes() {
             break;
         }
     }
-    // Each record once, the run's start too.
     assert_eq!(records, log.len() + 1);
     check(
         &scratch,
@@ -968,8 +952,7 @@ fn windows_a_log_by_its_bytes() {
     );
 }
 
-/// The paths of the files that the page's file at `path` names: those `index.html` names, the
-/// modules a module imports and the files a style names, each beside it.
+/// The paths of the files that the page's file at `path`, whose text is `body`, names.
 fn loaded(path: &str, body: &str) -> Vec<String> {
     let dir = &path[..=path.rfind('/').unwrap()];
     let named = |prefix: &'static str, base: &str| {
@@ -1013,12 +996,9 @@ fn serves_the_page() {
             header("Cache-Control"),
         ));
         assert_eq!(header("Content-Length"), body.len().to_string(), "{path}");
-        // Each file carries the policy, shown once.
         let policy = format!("policy: {}", header("Content-Security-Policy"));
         if path == "/" {
             steps.push(policy.clone());
-            // What the head loads, in its order: the scheme's classic script first, so that it
-            // runs before the first paint, and a preload of each module.
             let page = String::from_utf8_lossy(&body);
             let head = page
                 .lines()
@@ -1230,7 +1210,6 @@ fn pages_the_list() {
             };
             page = served.get(&format!("/api/runs?before={next}"));
         }
-        // Each run once, newest first.
         let mut sorted = listed.clone();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         sorted.dedup();
@@ -1252,14 +1231,15 @@ fn pages_the_list() {
     );
 }
 
-/// The model files of a record in the making, `model/` of `dir`: its items, each named by its
-/// number, as a test needs no SHA-256, and each request's and response's file.
+/// The model exchanges that a run's record keeps under `model/`, with each item stored once and
+/// named by its number, as a test needs no SHA-256.
 pub(super) struct Model {
     dir: std::path::PathBuf,
     items: Vec<String>,
 }
 
 impl Model {
+    /// Starts the store in the run's directory `dir`.
     pub(super) fn new(dir: &std::path::Path) -> Self {
         fs::create_dir_all(dir.join("model/items")).unwrap();
         Self {
@@ -1268,7 +1248,6 @@ impl Model {
         }
     }
 
-    /// `value`'s digest, once kept as an item.
     fn item(&mut self, value: &Value) -> Value {
         let text = value.to_string();
         let index = self.items.iter().position(|item| *item == text);
@@ -1281,9 +1260,11 @@ impl Model {
         json!(format!("sha256:{hex}"))
     }
 
-    /// Keeps request `n`, whose conversation is `items` in `field`, with its fields `whole`
-    /// kept whole, if this build's form, and `rest` as sent, and its response `response`; the
-    /// `kept` of its `model_answered`.
+    /// Writes request `n` and its response, and returns the `kept` field that `model_answered`
+    /// carries.
+    ///
+    /// The request holds `items` in its `field`, each of `whole` as one item of its own, and
+    /// `rest`. A response of `None` is named by `kept` but not written.
     pub(super) fn keep(
         &mut self,
         n: u64,
@@ -1315,7 +1296,7 @@ impl Model {
     }
 }
 
-/// The `model_request_started` of `caller`'s request `n`, at `seconds`.
+/// The record of `caller` starting model request `n` at `seconds`.
 pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
     let event = json!({ "kind": "model_request_started", "caller": caller, "request": n });
     let mut record = logged(seconds, event, json!([]));
@@ -1323,8 +1304,10 @@ pub(super) fn started(seconds: u64, caller: &str, n: u64) -> Value {
     record
 }
 
-/// The `model_answered` of `caller`'s request `n`, at `seconds`, with `status`, kept as `kept`;
-/// one that names its `api` names its model too, `model-a`.
+/// The record of model request `n` answered with `status` and `kept`.
+///
+/// With an `api`, the record also names the upstream and model and times the first byte and
+/// token, as a forwarded answer does.
 pub(super) fn answered(
     seconds: u64,
     caller: &str,
@@ -1347,7 +1330,6 @@ pub(super) fn answered(
     logged(seconds, event, json!([]))
 }
 
-/// The reply `reply` of columns in its `field`, a row a line, and its other fields.
 fn columns_text(reply: &Value, field: &str) -> String {
     let columns = reply[field].as_object().unwrap();
     let mut text = String::new();
@@ -1370,7 +1352,6 @@ fn columns_text(reply: &Value, field: &str) -> String {
     text
 }
 
-/// The entries reply `entries`, an entry a line.
 fn entries_text(entries: &Value) -> String {
     let mut text = String::new();
     for entry in entries["entries"].as_array().unwrap() {
@@ -1380,9 +1361,8 @@ fn entries_text(entries: &Value) -> String {
     text
 }
 
-/// Asserts that each of `steps`'s rows, a steps reply of trace `trace`, counts as
-/// `added_entries` and `answers` the added and answer entries that the entries reply gives of its
-/// step.
+/// Asserts that each row of the steps reply `steps` of `trace` counts as `added_entries` and
+/// `answers` the entries that the entries reply gives of its step.
 fn entries_counted(served: &Served, trace: &str, steps: &Value) {
     let columns = &steps["steps"];
     let column = |name: &str| columns[name].as_array().unwrap();
@@ -1404,12 +1384,12 @@ fn entries_counted(served: &Served, trace: &str, steps: &Value) {
     }
 }
 
-/// A user's message, in the Responses API's form.
+/// A user message of the Responses API.
 pub(super) fn user(text: &str) -> Value {
     json!({ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] })
 }
 
-/// An assistant's message, in the Responses API's form.
+/// An assistant message of the Responses API.
 pub(super) fn said(text: &str) -> Value {
     json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": text }] })
 }
@@ -1495,8 +1475,7 @@ fn traces_a_caller() {
     fs::write(&outside, "not the record's").unwrap();
     std::os::unix::fs::symlink(&outside, dir.join("model/5.response")).unwrap();
     log.push(answered(12, "agent", 5, 200, kept, Some("responses")));
-    // A judge's Chat Completions, by a build that kept its tools in every request and named no
-    // API.
+    // A judge's Chat Completions request, which names no API and keeps its tools in each request.
     let system = json!({ "role": "system", "content": "judge it" });
     let asked = json!({ "role": "user", "content": "is it right?" });
     let calls = |id: &str| {
@@ -1620,9 +1599,9 @@ fn traces_a_caller() {
         };
         said.push(format!("{path}: {status}\n{body}"));
     }
-    // The view drops the run's fold as other ended runs are read, and the log is cut back while
-    // no fold holds it: the trace is read again from the log as it is.
     served.get(&format!("{run}/trace/agent/steps"));
+    // The view drops the run's held trace as other ended runs are read, and the log is cut back
+    // while none holds it: the trace is read again from the log as it stands.
     for other in 0..9 {
         let other = format!("20261110-170100-{other:08x}");
         let outcome = Some(json!({ "state": "failed" }));
@@ -2324,17 +2303,14 @@ fn diffs_two_requests() {
     );
 }
 
-/// A call of tool `exec`, `id`, in the Responses API's form.
 fn call(id: &str) -> Value {
     json!({ "type": "function_call", "call_id": id, "name": "exec", "arguments": "{}" })
 }
 
-/// The output of call `id`, in the Responses API's form.
 fn output(id: &str) -> Value {
     json!({ "type": "function_call_output", "call_id": id, "output": format!("ran {id}") })
 }
 
-/// The rows of `reply`'s steps, by request, each as its columns.
 fn rows(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
     let columns = reply["steps"].as_object().unwrap();
     let requests = columns["request"].as_array().unwrap();
@@ -2349,7 +2325,6 @@ fn rows(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
         .collect()
 }
 
-/// The span of each thread that a steps reply gives, by its root.
 fn thread_spans(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
     let spans = &reply["thread_spans"];
     let threads = spans["thread"].as_array().unwrap().iter();
@@ -2429,8 +2404,8 @@ fn places_steps_whatever_their_answers_order() {
         &places,
     );
     let dir = write_run(&scratch, live, started_at, &lines, None, &places);
-    // The live run's log grows a line at a time, from the first answer on.
     let log_path = dir.join("log.jsonl");
+    // The live run's log grows a line at a time, from the first answer on.
     let whole = fs::read_to_string(&log_path).unwrap();
     let whole: Vec<&str> = whole.split_inclusive('\n').collect();
     let first = whole.len() - order.len();

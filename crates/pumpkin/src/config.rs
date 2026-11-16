@@ -1,15 +1,8 @@
-//! The configuration of the machine that `pumpkin run` runs on, as TOML: the machine's Docker
-//! engine, by the context that reaches it, in `[docker]`; the providers that a run may place its
-//! roles on, each a table of its own, `[providers.<name>]`, which holds one table, named for the
-//! provider's kind, and holding that kind's own settings ([`Kind`]), whose classes of sandbox a
-//! run's roles are placed in; the addresses where the gateway meets the sandboxes that dial it
-//! over a network, in `[gateway]`; and the model upstreams that a workflow's model route may
-//! reach, each a table of its own, `[upstreams.<name>]`; and, on a controller, where its runs'
-//! jobs publish the runs, in `[publish]`. [`Config`] and the types it holds say what each key
-//! means; every key is required, but for `gateway`'s, `upstreams`, `publish`, `publish.since` and
-//! `docker.cpus`, and any other refused. A machine whose runs go to the person's controller has
-//! `[controller]` instead of `[docker]`, `[providers]` and `[gateway]`, beside its upstreams
-//! ([`Client`]), so where its runs go has one home.
+//! The machine's configuration, `pumpkin.toml`: [`Config`] for a machine whose runs go to its
+//! own providers, or [`Client`] for one whose runs go to a controller.
+//!
+//! `pumpkin help config` is the home of what each key means and which are optional; this module
+//! refuses any other key, and a file that mixes the two forms.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,18 +18,16 @@ use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, de};
 use stdx::Context;
 
-/// The configuration of a machine, which every run on it reads.
 pub(crate) struct Config {
     pub(crate) docker: Docker,
     pub(crate) providers: Providers<Kind>,
     pub(crate) gateway: Gateway,
     pub(crate) upstreams: Upstreams,
-    /// Where a run's job publishes the runs, if anywhere.
     pub(crate) publish: Option<crate::publish::Settings>,
 }
 
-/// The configuration of a machine whose runs go to the person's controller, which `run` and
-/// `build` send what of it each job needs.
+/// A machine whose runs go to a controller: its `[controller]`, and the `[upstreams]` and
+/// `[controller.modal]` that each job is sent.
 pub(crate) struct Client {
     pub(crate) controller: Controller,
     /// The `[upstreams]` tables as the file holds them.
@@ -54,70 +45,48 @@ enum Target {
 #[serde(deny_unknown_fields)]
 struct Tables {
     docker: Option<Docker>,
-    /// TOML refuses two tables of one name.
     providers: Option<BTreeMap<Name, Kind>>,
     gateway: Option<Gateway>,
-    /// Empty if absent.
     #[serde(default)]
     upstreams: Upstreams,
     controller: Option<Controller>,
     publish: Option<crate::publish::Settings>,
 }
 
-/// The person's controller, which `deploy/aws` made, and to which the machine's runs go.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Controller {
-    /// The `name` that the module was applied with.
     pub(crate) name: crate::controller::Name,
-    /// The region it was applied in.
     pub(crate) region: aws::Region,
-    /// The Modal provider that its jobs may place roles on, if any.
     pub(crate) modal: Option<ClientModal>,
 }
 
-/// The Modal provider of a client's jobs: the settings of a provider of kind
-/// [`modal`](Kind::Modal) but `images`, which the controller's settings give, and `dials_from`,
-/// which each job sets ([`crate::job`]), so its `profile` and `classes` are checked there.
+/// The Modal provider of a client's jobs. A job completes it with `images`, which the
+/// controller's settings give, and `dials_from` ([`crate::job`]), and so checks `profile` and
+/// `classes` there, where they are the provider's own settings.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientModal {
-    /// Modal's configuration file, which each job is sent, below the configuration's directory
-    /// unless absolute; if absent, `$HOME/.modal.toml`, sent only if it is there.
     config: Option<PathBuf>,
     profile: String,
     classes: toml::Table,
 }
 
-/// The machine's Docker engine, which every provider of kind [`docker`](Kind::Docker) runs its
-/// sandboxes on.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Docker {
-    /// The context that reaches it, as `docker context ls` lists it.
     pub(crate) context: ContextName,
-    /// The CPUs that its sandboxes may be given, such as all but those the machine's other work
-    /// runs on; absent, all that are online.
     pub(crate) cpus: Option<CpuList>,
 }
 
-/// A provider that the machine's runs may place roles on: what kind it is, as the name of its
-/// table's one table, whose keys are that kind's own settings.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Kind {
-    /// The machine's Docker engine, [`Docker`], which takes no settings of its own.
     Docker(Empty),
-    /// An envelope on EC2, which its settings name, whose sandboxes pull what they run from it
-    /// and dial the gateway at [`private`](Gateway::private).
     Ec2(ec2::Settings),
-    /// A Modal workspace, which its settings' profile reaches, whose sandboxes run images that
-    /// Modal imports from an ECR repository, and listen behind Modal's tunnels, which the
-    /// gateway dials.
     Modal(modal::Settings),
 }
 
-/// The table of a kind that takes no settings, which holds no key.
 #[derive(Deserialize)]
 #[serde(
     deny_unknown_fields,
@@ -125,57 +94,39 @@ pub(crate) enum Kind {
 )]
 pub(crate) struct Empty {}
 
-/// Where the gateway meets the sandboxes that dial it over a network, by where their providers
-/// reach it ([`Meeting`](provider::Meeting)).
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Gateway {
-    /// The address, `ip:port`, that a private provider's sandboxes dial, read by [`address`]: an
-    /// address of this machine's on the network it shares with them, which a run that places a
-    /// role on such a provider listens at. `None` if absent.
     #[serde(default, deserialize_with = "address")]
     pub(crate) private: Option<GatewayAddress>,
 }
 
-/// The providers of a machine, by name, each a `T`, such as its [`Kind`]: one of kind
-/// [`docker`](Kind::Docker) at most.
 pub(crate) struct Providers<T>(BTreeMap<Name, T>);
 
-/// The model upstreams of a machine, by name, in which each model's name reaches one upstream:
-/// no model is listed twice, under one upstream or two. TOML refuses two upstreams of one name.
 #[derive(Default, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct Upstreams(BTreeMap<Name, Upstream>);
 
-/// An API that serves models: a provider's own, or a gateway's to several.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Upstream {
-    /// The base URL of the API, below which each API's endpoint is ([`endpoint`]).
     #[serde(deserialize_with = "base")]
     url: String,
-    /// The file that holds the API's key, which [`read`] puts below the configuration's
-    /// directory unless it is absolute.
-    // The configuration names a key by its file, and holds none, so that it can be shown and
-    // kept whole.
+    // The configuration names a key by its file, and holds none, so that it can be shown and kept
+    // whole.
     key_file: PathBuf,
     models: Vec<Model>,
 }
 
-/// A model that the upstream that lists it serves, by the name with which a workflow's route
-/// allows it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Model {
     name: ModelName,
-    /// The name that the upstream takes for it.
     upstream_name: ModelName,
     usd_per_mtok: Option<TokenPrices>,
 }
 
 impl Providers<Kind> {
-    /// The providers that `providers`, a configuration's tables, name. Fails, naming them, if
-    /// more than one provider is of kind `docker`, or one is beside a provider of another kind.
     fn new(providers: BTreeMap<Name, Kind>) -> Result<Self, String> {
         let (mut docker, mut remote) = (Vec::new(), Vec::new());
         for (name, kind) in &providers {
@@ -210,7 +161,7 @@ impl Providers<Kind> {
         Ok(Self(providers))
     }
 
-    /// The providers, each made a `T` by `connect`, from its name and kind, in the order of their
+    /// The providers, each made a `T` by `connect` from its name and kind, in the order of their
     /// names. Fails as the first `connect` that fails, making no more.
     pub(crate) fn connect<T>(
         self,
@@ -233,9 +184,8 @@ impl<T> Providers<T> {
 }
 
 impl Upstreams {
-    /// How a run serves `route`: each of its entries, in its order, through the upstream that
-    /// serves every model the entry allows, with the key read from its file. Fails if no upstream
-    /// serves every model of an entry.
+    /// The upstream for each entry of `route`, in its order: the one that serves every model the
+    /// entry allows. Fails if there is none.
     pub(crate) fn serving(&self, route: &ModelRoute) -> Result<Vec<Serving>, String> {
         route
             .as_slice()
@@ -244,14 +194,12 @@ impl Upstreams {
             .collect()
     }
 
-    /// The price of each model that is given one, by its name.
     pub(crate) fn prices(&self) -> BTreeMap<ModelName, TokenPrices> {
         let models = self.0.values().flat_map(|upstream| &upstream.models);
         let priced = models.filter_map(|model| Some((model.name.clone(), model.usd_per_mtok?)));
         priced.collect()
     }
 
-    /// How a run serves `entry`, an entry of a route, as [`Upstreams::serving`] says.
     fn serves(&self, entry: &ApiRoute) -> Result<Serving, String> {
         let ApiRoute {
             api,
@@ -303,12 +251,10 @@ impl Upstreams {
     }
 }
 
-/// An upstream's base URL, without its ending `/`, if it has one, and refused if it has a query
-/// or a fragment, or as [`UpstreamUrl`] refuses it.
 fn base<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let url = String::deserialize(deserializer)?;
-    // The path added would end up within a query or a fragment. The URL itself isn't repeated,
-    // as `UpstreamUrl` doesn't repeat it, since it may name a user's credential.
+    // The path added would end up within a query or a fragment. The URL itself isn't repeated, as
+    // `UpstreamUrl` doesn't repeat it, since it may name a user's credential.
     if url.contains(['?', '#']) {
         return Err(de::Error::custom(
             "the upstream's URL has a query or a fragment: name the API's base URL alone, below \
@@ -320,9 +266,6 @@ fn base<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> 
     Ok(base)
 }
 
-/// The endpoint of `api` below `base`, an upstream's base URL: `/responses` for
-/// [`Api::Responses`], `/chat/completions` for [`Api::Chat`], and `/messages` for
-/// [`Api::Messages`].
 fn endpoint(base: &str, api: Api) -> String {
     let path = match api {
         Api::Responses => "/responses",
@@ -332,8 +275,6 @@ fn endpoint(base: &str, api: Api) -> String {
     format!("{base}{path}")
 }
 
-/// A [`Gateway`] address, read from `ip:port`, such as `172.31.0.10:7433`, and refused if
-/// unspecified, as [`GatewayAddress`] says.
 fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayAddress>, D::Error> {
     let address = String::deserialize(deserializer)?;
     let parsed: SocketAddr = address.parse().map_err(|_| {
@@ -347,9 +288,8 @@ fn address<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<GatewayA
         .map_err(de::Error::custom)
 }
 
-/// The configuration in the file at `path`, a machine's. Fails, naming the file, if it isn't a
-/// machine's configuration, as one that names `[controller]`; a TOML error is `toml`'s own, with
-/// the line it points at.
+/// The machine's configuration in the file at `path`. Fails, naming the file, if it isn't one, as
+/// when it names `[controller]`.
 pub(crate) fn read(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|error| {
         format!(
@@ -361,9 +301,7 @@ pub(crate) fn read(path: &Path) -> Result<Config, String> {
     parse(path, &text)
 }
 
-/// The configuration that `text`, the file at `path`, holds, a machine's. Fails, naming the file,
-/// if `text` isn't a machine's configuration, as one that names `[controller]`; a TOML error is
-/// `toml`'s own, with the line it points at.
+/// The machine's configuration that `text`, the file at `path`, holds, failing as [`read`] does.
 pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     match target(path, text)? {
         Target::Machine(config) => Ok(config),
@@ -375,10 +313,9 @@ pub(crate) fn parse(path: &Path, text: &str) -> Result<Config, String> {
     }
 }
 
-/// The client's configuration at `config`, or the default one, if it parses as one that names
-/// `[controller]`; `None` if it can't be read, as when there is none, or names no
-/// `[controller]`. Fails, naming the file, if it names `[controller]` but isn't a client's
-/// configuration.
+/// The client's configuration at `config`, or at the default path, and `None` for a machine whose
+/// runs don't go to a controller: the file can't be read, or doesn't name `[controller]`. Fails,
+/// naming the file, if it names `[controller]` but isn't a client's configuration.
 pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
     let path = match config {
         Some(config) => PathBuf::from(config),
@@ -420,8 +357,8 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         .context(path.display())?;
     unique(&upstreams).context(path.display())?;
     // Below the file's directory, rather than the working directory or `HOME`, so that a
-    // configuration and its keys move together, and no variable of the environment changes
-    // which file a key is in. A file that was read has a parent: `""` for a bare file name.
+    // configuration and its keys move together, and no variable of the environment changes which
+    // file a key is in. A file that was read has a parent: `""` for a bare file name.
     let dir = path.parent().unwrap_or(Path::new(""));
     if let Some(mut controller) = controller {
         let beside: Vec<&str> = [
@@ -479,10 +416,8 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
 }
 
 impl Client {
-    /// What a job is sent of the configuration, as TOML: the `[upstreams]` tables, each
-    /// `key_file` a file sent beside it, `<upstream>.key`, and the Modal provider's `profile` and
-    /// `classes`, in `[modal]`, if it names one; and the key file, below the configuration's
-    /// directory unless absolute, that each such name stands for.
+    /// The configuration that a job reads, as TOML, and the key files to send with it: each with
+    /// the name that the text gives it, and the path of its source.
     pub(crate) fn sent(&self) -> Result<(String, Vec<(String, PathBuf)>), String> {
         let mut upstreams = self.upstreams.clone();
         let mut keys = Vec::new();
@@ -515,8 +450,8 @@ impl Client {
         Ok((text, keys))
     }
 
-    /// What the client sends of Modal's configuration file, if there is one: with a Modal
-    /// provider, its `config`, or `$HOME/.modal.toml` if it is there.
+    /// The contents of Modal's configuration file, or `None` if `[controller.modal]` is absent or
+    /// names no file and `~/.modal.toml` doesn't exist.
     pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
         let Some(modal) = &self.controller.modal else {
             return Ok(None);

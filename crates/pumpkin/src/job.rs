@@ -1,18 +1,19 @@
-//! The controller's own side of the controller target, as `pumpkin controller --help` says: the
-//! job that the client starts in a unit of its own, and the controller's boot.
+//! The jobs of a controller: what `pumpkin controller job`, which the unit of each job runs, does
+//! on the controller, and the prune that keeps the controller's volume from filling.
 //!
 //! What they read and write lies below the controller user's home: the store of the files that
-//! clients sent ([`STORE`]), each named by its SHA-256, as [`crate::manifest`] lays it out; each
-//! job's tree, `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`,
-//! and each build's in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no
-//! secret, and its unit's standard error and output, `log` and `out`; the one workspace,
-//! `.pumpkin/` ([`crate::workspace`]), that every tree's `.pumpkin` links to, where each job's
-//! Pumpkin is built, which keeps the runs' records in its runs directory ([`runs`]) and the build
-//! slots ([`Workspace::slots`]); and `current-pumpkin`, the `pumpkin` that the last job ran. What
-//! the client sent with a job ([`SENT_CONFIG`], [`SENT_MODAL`] and the upstreams' key files) is in
-//! the job's directory below `$XDG_RUNTIME_DIR/pumpkin/` ([`jobs`]), a tmpfs that the job's unit
-//! removes as it ends, so a job that still runs is one whose directory is there, as is what images
-//! the job holds ([`HELD`]), so what a job holds goes with it, however it ends.
+//! clients sent, each named by its SHA-256, as `crate::manifest` lays it out; each job's tree,
+//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each
+//! build's in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and
+//! its unit's standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that
+//! every tree's `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs'
+//! records and the build slots; and `current-pumpkin`, the `pumpkin` that the last job ran.
+//!
+//! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
+//! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
+//! as it ends, so a job that still runs is one whose directory is there, as is what images the
+//! job holds (`HELD`): what a job holds goes with it, however it ends. Which of these a prune may
+//! remove is `ARCHITECTURE.md`'s invariant on the prune.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -42,92 +43,88 @@ use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, publish, say, star};
 
-/// The directory of the runs' jobs, below the home.
 pub(crate) const JOBS: &str = "jobs";
 
-/// The directory of the builds' jobs, below the home.
 pub(crate) const BUILDS: &str = "builds";
 
-/// The directory of the trees that the client sent, below the home.
 pub(crate) const TREES: &str = "trees";
 
-/// The directory of the files that clients sent, each named by its SHA-256, below the home.
 pub(crate) const STORE: &str = "store";
 
-/// The files of a job's tree that its start links there, as its unit runs them, rather than the
-/// job: the consumer entry, which builds the job's `pumpkin`, and what it reads of which.
+// The files of a job's tree that its start links there, as its unit runs them rather than the
+// job: `pumpkin`, the consumer entry that builds the job's Pumpkin, and `.pumpkinversion`, which
+// it reads. `materialize` links the others.
 pub(crate) const STARTED: [&str; 2] = ["pumpkin", ".pumpkinversion"];
 
-/// The link to the `pumpkin` that the last job ran, below the home, which the controller's boot
-/// runs.
+// The link in the home to the `pumpkin` of the last job started, which the controller's boot and
+// the commands that act on runs there run.
 pub(crate) const CURRENT: &str = "current-pumpkin";
 
-/// The runs directory of the controller's one workspace, below the home: that of every job's
-/// `pumpkin`, as each is built in that workspace.
+/// The runs directory of the controller's one workspace, relative to the user's home: that of
+/// every job's `pumpkin`, as each is built in that workspace.
 pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
-/// The link, in a job's directory, to the `pumpkin` that the job runs.
+// The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
 
-/// The exit status of `pumpkin controller follow` ([`follow`]) and `pumpkin controller cancel`
-/// ([`cancel`]) once the run has ended, whose ending the client says from its copy of the record.
+// The exit status of `controller follow` and `cancel` once the run has ended, and the record is
+// the client's to copy.
 pub(crate) const ENDED: u8 = 102;
 
-/// The exit status of `pumpkin controller cancel` once the run has ended, but its provider
-/// couldn't be reached to remove what it left.
+// The exit status of `controller cancel` once the run ended but its provider couldn't be
+// reached, so that what it left isn't removed.
 pub(crate) const ENDED_UNREACHED: u8 = 103;
 
-/// The file that holds what the client sent of its configuration ([`Sent`]).
 pub(crate) const SENT_CONFIG: &str = "config.toml";
 
-/// The copy of the client's Modal configuration file, which the job's Modal providers read.
 pub(crate) const SENT_MODAL: &str = "modal.toml";
 
-/// The file, beside what the client sent, of what images the job holds, a line each, by its tag
-/// or its ID, which no prune removes while the job runs ([`Admission`]).
+// The file of a job's tmpfs directory that names the images and tags it holds, a line each, which
+// no prune removes while the job runs.
 const HELD: &str = "held";
 
-/// The file, beside what the client sent, that is there while the job holds a build slot, so
-/// may build an image that no tag names yet, which no prune then removes ([`Slot`]).
+// The file of a job's tmpfs directory that exists while the job holds a build slot, so may build
+// an image that no tag names yet, which no prune then removes.
 const BUILDING: &str = "building";
 
-/// The file, beside what the client sent, that is there while the job waits for a build slot
-/// ([`take_slot`]), so `ls` lists it as waiting.
+// The file of a job's tmpfs directory that exists while the job waits for a build slot, so that
+// `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
 
-/// How long a job's tree is kept after its start.
-// A run's record names its entry in its tree, to run it again, and a tree is links into the
-// store, so it holds no bytes of its own.
+// How long a job's tree and directory last, by the time in its id. A run's record names its entry
+// in its tree, to run it again, and a tree is links into the store, so it holds no bytes of its
+// own.
 const KEPT: Duration = Duration::from_hours(14 * 24);
 
-/// How long the store keeps a manifest, and so what no tree links of the files it names, and a
-/// piece, or a file of a start's, in its `incoming/`.
-// A day: long enough that a send cut off, or a start that failed, carries on the next day from
-// what had arrived; short enough that what no tree links, as of an edit made and undone, is gone
-// soon. A tree, which a run's record names, keeps its files for `KEPT` by its links.
+// How long a manifest or an unchecked piece lasts in the store, and so what no tree links of the
+// files a manifest names. A day is long enough that a send cut off, or a start that failed,
+// carries on the next day from what had arrived, and short enough that what no tree links, as of
+// an edit made and undone, is gone soon. A tree, which a run's record names, keeps its files for
+// `KEPT` by its links.
 const STORE_KEPT: Duration = Duration::from_hours(24);
 
-/// A path on the controller's one volume, which holds the engine's images and build cache, the
-/// trees and the records, as `deploy/aws` makes it.
+// The path on the controller's one volume, which holds the engine's images and build cache, the
+// store, the trees and the records, as `deploy/aws` makes it.
 const VOLUME: &str = "/";
 
-/// How long `df` may take to say how much of the volume is used.
+// The bound of `df`, which reads only the volume's counters.
 const DF_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The instance metadata service, as its version 2, `IMDSv2`, serves it.
+// The instance metadata service, as its version 2, `IMDSv2`, serves it, which only the instance
+// itself reaches.
 const IMDS: &str = "http://169.254.169.254/latest";
 
-/// How long `curl` may take to answer from the instance metadata service, which is the
-/// instance's own.
+// How long `curl` may take to answer from the instance metadata service, which is the instance's
+// own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs the job that `job` asks for: makes its tree in the working directory ([`materialize`]),
-/// points [`CURRENT`] at this `pumpkin`, writes the job's configuration ([`assemble`]), prunes,
-/// builds its task's images ([`build_first`]), then runs its command with it, a run to its end,
-/// which finds each image by its tag, publishing the runs meanwhile if the configuration has
-/// `[publish]` ([`publish::until_ended`]); returns the exit status of its command.
+/// Runs job `job`, in its tree and as its unit does: it points `CURRENT` at this `pumpkin`,
+/// assembles the job's configuration, prunes, builds the task's images under the controller's
+/// build slots, and then runs the task, or builds it for a build job, as the job's command says,
+/// publishing the runs meanwhile if the settings have `[publish]`. Returns the command's exit
+/// status.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -148,8 +145,8 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
-    // So that a client that follows the run has it followed by the `pumpkin` it sent the job
-    // with, as `current-pumpkin` may be another job's by then.
+    // So that a client that follows the run has it followed by the `pumpkin` it sent the job with,
+    // as `current-pumpkin` may be another job's by then.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
@@ -175,8 +172,8 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             };
             // Only one who follows the run reads the job's log.
             let exit = crate::start(&id, run, crate::Reader::Follower)?;
-            // The run's end is the job's, so that the unit lasts as long as the run, and its
-            // last publish is of the run ended.
+            // The run's end is the job's, so that the unit lasts as long as the run, and its last
+            // publish is of the run ended.
             if exit == ExitCode::SUCCESS {
                 let runs = crate::default_runs()?;
                 let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
@@ -199,16 +196,16 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
 }
 
 /// Makes the tree named `tree` in `dir`, job `id`'s tree below `home`, of links into the store
-/// there, as its manifest names each file, but those that the start linked ([`STARTED`]): a file
-/// to its blob, one that its owner may execute to the blob's copy at 0555, made if need be, and a
+/// there, as its manifest names each file, but those that the start linked (`STARTED`): a file to
+/// its blob, one that its owner may execute to the blob's copy at 0555, made if need be, and a
 /// symbolic link to its blob's text.
 ///
 /// # Errors
 ///
 /// Fails before it writes anything if `dir` isn't `trees/<repo>/<id>` below `home`, as a job run
 /// by hand elsewhere would write the task's files there.
-// Links, not copies, so that a tree costs no bytes, and in Rust, as a shell's `ln` for each of a
-// tree's thousands of files would take seconds.
+// Links, not copies, so that a tree costs no bytes, and in Rust rather than a shell's `ln` for
+// each of a tree's thousands of files.
 fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Result<(), String> {
     let store = home.join(STORE);
     let path = store.join(MANIFESTS).join(tree.hex());
@@ -255,8 +252,9 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
     Ok(())
 }
 
-/// The copy at 0555 of the blob `digest` in `store`, `<sha256>.x`, made aside and moved in if
-/// it isn't there, as another job may make it at once.
+/// The copy at 0555 of the blob `digest` in `store`, `<sha256>.x`, made aside and moved in if it
+/// isn't there, as another job may make it at once: a link shares its file's mode, so a file that
+/// the tree holds as executable needs a copy of its own.
 fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     let copy = store.join(format!("{}.x", digest.hex()));
     if copy.try_exists().context(copy.display())? {
@@ -275,9 +273,9 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
-/// The controller's boot: reaps what each run that has ended or is lost, but one that ended
-/// clean, may have left ([`crate::reap`], [`crate::Reaper::Boot`]), with the configuration of
-/// its job; returns the reap's exit status, 0 though a provider can't be reached.
+/// The controller's boot: reaps what each run that has ended or is lost, but one that ended clean,
+/// may have left, with the configuration of its job; returns the reap's exit status, 0 though a
+/// provider can't be reached.
 pub(crate) fn boot() -> Result<ExitCode, String> {
     // No prune, which each job's start makes: a client may start a job as soon as SSM sees the
     // controller, before the boot is done, and the boot, a unit of the system's, can't see that
@@ -291,14 +289,13 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     crate::reap(reap, crate::Reaper::Boot)
 }
 
-/// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends,
-/// but none of its ending; then exits [`ENDED`]. Fails at the first line that can't be written.
+/// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends, but
+/// none of its ending; then exits `ENDED`. Fails at the first line that can't be written. Ending
+/// it doesn't stop the run.
 pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
     let runs = crate::default_runs()?;
     let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
     if record.ending()?.is_none() {
-        // Of the client's `wait` or `run --wait`, which it doesn't know, and whose record is the
-        // copy that the client names as it ends.
         crate::tell(format_args!(
             "following run {}: ending this command does not stop it",
             record.id()
@@ -312,9 +309,9 @@ pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
     Ok(ExitCode::from(ENDED))
 }
 
-/// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of
-/// its ending; then exits [`ENDED`], or [`ENDED_UNREACHED`] if its provider couldn't be reached.
-/// Fails as `pumpkin cancel` does before the run's ending.
+/// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of its
+/// ending; then exits `ENDED`, or `ENDED_UNREACHED` if its provider couldn't be reached. Fails as
+/// `pumpkin cancel` does before the run's ending.
 pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     let (_, _, reached) = crate::cancelled(flags, crate::Reader::Follower)?;
     Ok(ExitCode::from(if reached {
@@ -324,12 +321,12 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     }))
 }
 
-/// The directory of every job's directory of what the client sent with it,
-/// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset
-/// or empty, as outside a user's systemd unit.
+/// The directory in tmpfs that holds each job's own directory of what the client sent with it,
+/// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
+/// empty, as outside a user's systemd unit.
 fn jobs() -> Result<PathBuf, String> {
-    // Every job's: the user's systemd gives each job's unit the user's runtime directory, as
-    // pam_systemd gives the session that makes the job's directory there.
+    // The same for every job: the user's systemd gives each job's unit the user's runtime
+    // directory, as `pam_systemd` gives the session that makes the job's directory there.
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty());
     let Some(runtime) = runtime else {
         return Err(
@@ -342,9 +339,9 @@ fn jobs() -> Result<PathBuf, String> {
 }
 
 /// What the jobs that run hold, of the directories of every job in `jobs`, and their runs'
-/// records in `runs`: the images that the IR of each run that has started names, whose
-/// record has its run log, which a run begins only once it has published every image it runs;
-/// each image or tag in a job's [`HELD`]; and whether one is [`BUILDING`]. A job that runs is
+/// records in `runs`: the images that the IR of each run that has started names, a run having
+/// started once its record has its log, which it begins only once it has published every image it
+/// runs; each image or tag in a job's `HELD`; and whether one is `BUILDING`. A job that runs is
 /// one whose directory is there, as a unit's end removes its directory.
 fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
     let mut held = Held::default();
@@ -375,29 +372,27 @@ fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
     Ok(held)
 }
 
-/// The directory of every job's directory in tmpfs, `jobs`, opened to be locked: a prune
-/// locks it while it reads what the jobs hold and removes what they don't ([`collect`]), and a
-/// job shares the lock while it adds to what it holds ([`Admission`]), so that no image a job
-/// has held before it looks it up is removed while the job runs.
+/// The directory of every job's directory in tmpfs, `jobs`, opened to be locked: a prune locks it
+/// while it reads what the jobs hold and removes what they don't (`collect`), and a job shares the
+/// lock while it adds to what it holds (`Admission`), so that no image a job has held before it
+/// looks it up is removed while the job runs.
 fn open_jobs(jobs: &Path) -> Result<File, String> {
     File::open(jobs).context(jobs.display())
 }
 
-/// Points [`CURRENT`] in `home` at this `pumpkin`, which job `id` runs.
 fn point_current(home: &Path, id: &RunTag) -> Result<(), String> {
     let staged = home.join(format!(".{CURRENT}.{}", id.as_str()));
     point(&home.join(CURRENT), &staged)
 }
 
-/// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a
-/// path beside it that no other job uses.
+/// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a path
+/// beside it that no other job uses.
 fn point(link: &Path, staged: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().context("finding this `pumpkin`'s executable failed")?;
     symlink(&exe, staged).context(staged.display())?;
     fs::rename(staged, link).context(link.display())
 }
 
-/// What `aws ssm get-parameter` prints.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct GotParameter {
@@ -410,7 +405,7 @@ struct Parameter {
     value: String,
 }
 
-/// What the client sent of its configuration ([`crate::config::Client::sent`]): its `[upstreams]`
+/// What the client sent of its configuration (`crate::config::Client::sent`): its `[upstreams]`
 /// tables, each `key_file` a file of the job's directory in tmpfs, and its Modal provider's
 /// settings, if it names one.
 #[derive(Deserialize)]
@@ -423,10 +418,13 @@ struct Sent {
 }
 
 /// A job's configuration, as TOML: the controller's settings, which `cli` reads from the SSM
-/// parameter `parameter`, with `[gateway] private` at the controller's private IPv4 address,
-/// port 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from`
-/// at the controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if
-/// any; and the client's `[upstreams]`, each `key_file` a file in `sent`.
+/// parameter `parameter`, with `[gateway] private` at the controller's private IPv4 address, port
+/// 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from` at the
+/// controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any; and
+/// the client's `[upstreams]`, each `key_file` a file in `sent`.
+///
+/// Fails if the settings set `gateway` or `upstreams`, which each job sets, or if the client sent
+/// a key file that isn't a file of `sent`.
 fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     let got: GotParameter =
         cli.json(&["ssm", "get-parameter", "--name", parameter], Bound::Call)?;
@@ -487,16 +485,16 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     toml::to_string(&tables).map_err(|error| format!("writing the job's configuration: {error}"))
 }
 
-/// Makes each Modal provider of the controller's settings, `tables`, the one that the client
-/// sent, `sent`, with the settings' `images`, or removes it if the client sent none. Fails,
-/// naming the settings as `named`, if the client sent one, but they name none.
+/// Makes each Modal provider of the controller's settings, `tables`, the one that the client sent,
+/// `sent`, with the settings' `images`, or removes it if the client sent none. Fails, naming the
+/// settings as `named`, if the client sent one, but they name none.
 fn take_modal(
     tables: &mut toml::Table,
     sent: Option<&toml::Table>,
     named: &str,
 ) -> Result<(), String> {
-    // What a Modal workspace offers is the client's to say, so that the person changes it with
-    // no apply; the controller's settings give the provider only what the module made.
+    // What a Modal workspace offers is the client's to say, so that the person changes it with no
+    // apply; the controller's settings give the provider only what the module made.
     let providers = tables
         .get_mut("providers")
         .and_then(toml::Value::as_table_mut);
@@ -527,8 +525,8 @@ fn take_modal(
     Ok(())
 }
 
-/// The instance's private and public IPv4 addresses, as the instance metadata service serves
-/// them, `local-ipv4` and `public-ipv4`, under an `IMDSv2` token, through `curl`.
+/// This instance's private and public IPv4 addresses, `local-ipv4` and `public-ipv4`, as its
+/// metadata service serves them under an `IMDSv2` token, through `curl`.
 pub(crate) fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
     // Long enough for the two reads that follow.
     let ttl = "X-aws-ec2-metadata-token-ttl-seconds: 60";
@@ -553,8 +551,6 @@ pub(crate) fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
     Ok((address("local-ipv4")?, address("public-ipv4")?))
 }
 
-/// What `curl` prints with `args`, after the options that make it read no configuration file,
-/// fail on an HTTP error, and give up after [`IMDS_SECONDS`].
 fn curl(args: &[&str]) -> Result<String, String> {
     // Only `PATH`, so that no proxy variable sends it elsewhere.
     let mut curl = stdx::process::command("curl", Environment::Only(&["PATH"]));
@@ -576,8 +572,8 @@ fn curl(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&printed).trim().to_owned())
 }
 
-/// The ids below `dir`, each a job's or a tree's, by name, which sort as their starts do; none
-/// if `dir` isn't there.
+/// The ids below `dir`, each a job's or a tree's, by name, which sort as their starts do: the names
+/// that begin with a digit, as an id does; none if `dir` isn't there.
 fn ids(dir: &Path) -> Result<Vec<String>, String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -600,10 +596,10 @@ fn ids(dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Prunes what the jobs keep on the controller's volume: removes each tree in `home` older than
-/// [`KEPT`], then what of its store no tree links nor needs ([`collect_store`]), and the directory
-/// of each run's job as old whose run has no record, which `ls` lists until then; then, once the
-/// volume is [full](Disk::full), the images and the build cache of the engine of the configuration
-/// at `config` ([`collect`]), sparing what the jobs in `jobs` hold.
+/// `KEPT`, then what of its store no tree links nor needs (`collect_store`), and the directory of
+/// each run's job as old whose run has no record, which `ls` lists until then; then, once the
+/// volume is full, the images and the build cache of the engine of the configuration at
+/// `config` (`collect`), sparing what the jobs in `jobs` hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
@@ -631,7 +627,7 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     collect(home, &engine(config)?, jobs)
 }
 
-/// Removes, of `store`, under its lock, each manifest older than [`STORE_KEPT`], each file of its
+/// Removes, of `store`, under its lock, each manifest older than `STORE_KEPT`, each file of its
 /// `incoming/` older than that, then each blob that no tree links and no manifest left names,
 /// unless a manifest left is of a form this Pumpkin can't read, which it says.
 // By reference, as Nix collects its store from its roots, of which a fresh manifest is one, as
@@ -698,7 +694,6 @@ fn collect_store(store: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The regular files in `dir`, with their metadata; none if `dir` isn't there.
 fn files(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -729,23 +724,20 @@ fn removed(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The Docker engine that the configuration at `config` names, as a job reaches it, for its
-/// follower ([`crate::Reader`]).
 fn engine(config: &Path) -> Result<Engine, String> {
     crate::configured_engine(config, crate::Reader::Follower)
 }
 
-/// Removes the images of `engine` that `engine::prune::evicted` picks, each last used by the
-/// newest job whose IR names it ([`last_used`]), sparing what the jobs that run hold
-/// ([`held`]), as each image is once picked, then prunes the build cache down to the same mark,
-/// all while the jobs' directory is locked ([`open_jobs`]), and only if the volume is
-/// [full](Disk::full) once it is, so a prune that waited for another's lock removes only what
-/// that one left.
+/// Removes the images of `engine` that `engine::prune::evicted` picks, each last used by the newest
+/// job whose IR names it (`last_used`), sparing what the jobs that run hold (`held`), then prunes
+/// the build cache down to the same mark, all while the jobs' directory is locked (`open_jobs`),
+/// and only if the volume is full once it is, so a prune that waited for another's lock removes
+/// only what that one left.
 fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
     let last_used = last_used(home, &runs)?;
-    // Before the lock, which the jobs' builds wait for: an image made since is in no list, and
-    // one held since is in what is read under it.
+    // Before the lock, which the jobs' builds wait for: an image made since is in no list, and one
+    // held since is in what is read under it.
     let images = engine.images()?;
     let locked = open_jobs(jobs)?;
     locked.lock().context(jobs_named(jobs))?;
@@ -756,9 +748,9 @@ fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     let held = held(jobs, &runs)?;
     let last_used = |image: &Image| last_used.get(image).cloned();
     let picked = engine::prune::evicted(disk, images, last_used, &held);
-    // Picked by tags listed before the lock: an image may have been tagged since, as a build
-    // that ended meanwhile tags what it built, so each is looked at again, now that nothing
-    // that a job holds can change, and the pick is made again of what they are now.
+    // Picked by tags listed before the lock: an image may have been tagged since, as a build that
+    // ended meanwhile tags what it built, so each is looked at again, now that nothing that a job
+    // holds can change, and the pick is made again of what they are now.
     let evicted = engine::prune::evicted(disk, engine.inspected(&picked)?, last_used, &held);
     engine.remove_images(&evicted)?;
     say(format_args!(
@@ -769,17 +761,15 @@ fn collect(home: &Path, engine: &Engine, jobs: &Path) -> Result<(), String> {
     engine.prune_build_cache(disk.low_free_bytes())
 }
 
-/// How the jobs' directory, `jobs`, is named in a failure to lock it.
 fn jobs_named(jobs: &Path) -> String {
     format!("locking {} failed", jobs.display())
 }
 
-/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`, on the
-/// engine of the configuration at `config`, each build as the job's [`Admission`] admits it, so
-/// that the job's command finds each by its tag; then, if it built one, lets go of the build
-/// slot that the admission took, and prunes. What the job holds, it holds until it ends. Fails as
-/// `star::checked` and the engine's reach do; gives the task's problems, or each build that
-/// failed, said.
+/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`, on the engine
+/// of the configuration at `config`, each build as the job's `Admission` admits it, so that the
+/// job's command finds each by its tag; then, if it built one, lets go of the build slot that the
+/// admission took, and prunes. What the job holds, it holds until it ends. Gives the task's
+/// problems, or each build that failed, said.
 fn build_first(
     id: &RunTag,
     home: &Path,
@@ -801,9 +791,9 @@ fn build_first(
             Ok((_, tags)) => tags,
             Err(problems) => return Ok(Err(problems)),
         };
-        // By their IDs too, until the job ends, as its run publishes them, however long it
-        // waits to: their tags are held already, but another build of the same inputs may
-        // move a tag to an image of its own.
+        // By their IDs too, until the job ends, as its run publishes them, however long it waits
+        // to: their tags are held already, but another build of the same inputs may move a tag to
+        // an image of its own.
         admission.held(tags.keys().map(Image::as_str))?;
         // A job that built took a slot, which goes before the prune, as a job that waits for it
         // needn't wait for that.
@@ -815,13 +805,12 @@ fn build_first(
     built.map_err(|problems| crate::task_problems(entry, &problems))
 }
 
-/// What admits the builds of job `id` ([`star::Admission`]): it holds each image that they look
-/// up, by its tag, in the job's [`HELD`] in its directory in `jobs`, sharing their lock
-/// ([`open_jobs`]), and once its builds have ended, each image they found or built, by its ID;
-/// takes one of the controller's build slots ([`take_slot`]) as the first build starts, and
-/// keeps it until its holder lets go; and prunes ([`collect`]) as each build starts
-/// and as each ends while others run, then refuses to start one while more than
-/// [`REFUSED_PERCENT`] of the volume is used ([`Disk::refused`]).
+/// What admits the builds of job `id` (`star::Admission`): it holds each image that they look up,
+/// by its tag, in the job's `HELD` in its directory in `jobs`, sharing their lock (`open_jobs`),
+/// and once its builds have ended, each image they found or built, by its ID; takes one of the
+/// controller's build slots (`take_slot`) as the first build starts, and keeps it until its holder
+/// lets go; and prunes (`collect`) as each build starts and as each ends while others run, then
+/// refuses to start one while more than `REFUSED_PERCENT` of the volume is used.
 struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
@@ -831,13 +820,12 @@ struct Admission<'j> {
 }
 
 impl Admission<'_> {
-    /// The job's directory of what the client sent.
     fn sent(&self) -> PathBuf {
         self.jobs.join(self.id.as_str())
     }
 
-    /// Prunes the images and the build cache of `engine`, once the volume is full, saying why
-    /// the prune failed, if it did, as the build goes on.
+    /// Prunes the images and the build cache of `engine`, once the volume is full, saying why the
+    /// prune failed, if it did, as the build goes on.
     fn prune(&self, engine: &Engine) {
         let pruned = disk(VOLUME).and_then(|disk| {
             if disk.full() {
@@ -851,8 +839,8 @@ impl Admission<'_> {
         }
     }
 
-    /// Holds each of `named`, an image's tag or ID, in the job's [`HELD`], sharing the jobs'
-    /// directory's lock.
+    /// Holds each of `named`, an image's tag or ID, in the job's `HELD`, sharing the jobs'
+    /// directory's lock, so that no prune picks it as it holds the lock.
     fn held<'n>(&self, named: impl Iterator<Item = &'n str>) -> Result<(), String> {
         let jobs = open_jobs(self.jobs)?;
         jobs.lock_shared().context(jobs_named(self.jobs))?;
@@ -903,8 +891,8 @@ impl star::Admission for Admission<'_> {
     }
 }
 
-/// A build slot that a job holds, until it is dropped, with the job's [`BUILDING`], which goes
-/// with it.
+/// A build slot that a job holds, until it is dropped, with the job's `BUILDING`, which goes with
+/// it.
 struct Slot {
     _locked: File,
     building: PathBuf,
@@ -912,16 +900,15 @@ struct Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        // One left by a failure here goes with the job's directory as the job ends; until then,
-        // it only spares untagged images, which no job may need.
+        // One left by a failure here goes with the job's directory as the job ends; until then, it
+        // only spares untagged images, which no job may need.
         let _ = fs::remove_file(&self.building);
     }
 }
 
-/// One of the controller's build slots, files of `dir`, as many as [`slots_count`] gives, taken
-/// as `stdx::slots::take` says, named by job `id`: saying, while each is held, which jobs hold
-/// them, with [`WAITING`] beside `sent`, then how long it waited; then with [`BUILDING`] beside
-/// `sent`.
+/// Takes one of the controller's build slots, files of `dir`, as many as `slots_count` gives, as
+/// `stdx::slots::take` says, named by job `id`: while each is held, it says which jobs hold them,
+/// with `WAITING` beside `sent`, then how long it waited; then it marks `BUILDING` beside `sent`.
 fn take_slot(dir: &Path, id: &RunTag, sent: &Path) -> Result<Slot, String> {
     let count = slots_count();
     let marked = sent.join(WAITING);
@@ -948,8 +935,8 @@ fn take_slot(dir: &Path, id: &RunTag, sent: &Path) -> Result<Slot, String> {
     })
 }
 
-/// How many jobs build at once ([`take_slot`]): one for every two CPUs that this process may run
-/// on, and one at least.
+/// How many jobs build at once (`take_slot`): one for every two CPUs that this process may run on,
+/// and one at least.
 // Not one for each: a build runs its recipe's independent stages at once, and a step may itself
 // use every CPU; and every build's cache takes from the one volume.
 fn slots_count() -> NonZeroUsize {
@@ -1005,9 +992,8 @@ fn disk(path: &str) -> Result<Disk, String> {
     })
 }
 
-/// The images that the IR at `path` names, none if there is no IR there, as of a job that
-/// ended before its run or build did, or a build's `out` that is empty, as a failed build leaves
-/// it.
+/// The images that the IR at `path` names, none if there is no IR there, as of a job that ended
+/// before its run or build did, or a build's `out` that is empty, as a failed build leaves it.
 fn images(path: &Path) -> Result<Vec<Image>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) if text.is_empty() => return Ok(Vec::new()),

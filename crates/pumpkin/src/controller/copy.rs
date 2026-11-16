@@ -1,13 +1,9 @@
-//! The copy of an ended run's record from the controller into this machine's runs directory.
+//! Copying an ended run's record from the controller to this machine.
 //!
-//! The controller lists the files and directories of the record; the files that differ from this
+//! The controller lists the files and directories of the record. The files that differ from this
 //! machine's copy, or that it lacks, come in one archive, which the controller's `tar` streams
-//! and this machine's extracts as it comes, into a directory beside the copy, from which
-//! [`placed`] moves each into it.
-//!
-//! The connections it goes over, and how often one that ends is asked again, are the parent's
-//! ([`super`]); the files of a live record that `ls` keeps are [`super::listing`]'s, which takes
-//! its extraction of an archive from here.
+//! and this machine's extracts as it comes, into a directory beside the copy, from which `placed`
+//! moves each into it.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -26,15 +22,12 @@ use super::{AGAIN, Name, Reached, SHORT_TIMEOUT, SSH_FAILED};
 use crate::say;
 
 impl Reached {
-    /// Copies the record of run `id` from the controller into this machine's default runs
-    /// directory, saying so first, as a large record takes a while: asks for the record's list
-    /// ([`listed_record`]), then for the files that differ from those here or that are missing,
-    /// as `rsync`'s quick check finds them, by size and modification time ([`held`]), and has
-    /// them placed ([`placed`]). Once a connection ends, it asks again, so only what is still
-    /// missing comes, as [`pause`](Self::pause) allows. A file that the controller no longer holds
-    /// stays here.
-    // rsync's quick check:
-    // https://github.com/RsyncProject/rsync/blob/6118037350efb253fdcc11139f1f58a2582d5fe7/generator.c#L666-L690
+    /// Copies run `id`'s record from the controller into this machine's runs directory, keeping the
+    /// files that an earlier copy placed whole. A connection that ends meanwhile is opened again,
+    /// and the copy goes on with the files it still lacks.
+    ///
+    /// A file that the controller no longer holds stays here. `record.json` is placed last, so
+    /// that a copy that reads as a record holds every file of it.
     pub(super) fn copy(&self, id: &str) -> Result<(), String> {
         let id = RunTag::try_from(id.to_owned()).map_err(|_| {
             format!(
@@ -70,7 +63,7 @@ impl Reached {
             }
             // Beside the copy, so that a file moves into it by a rename; its name starts with a
             // dot, which no run's id does, so no listing of the runs reads it. Locked while this
-            // copy lasts, so that another copy of the run leaves it ([`cleared`]).
+            // copy lasts, so that another copy of the run leaves it (`cleared`).
             let scratch = tempfile::Builder::new()
                 .prefix(&format!(".{}.", id.as_str()))
                 .rand_bytes(SCRATCH_RANDOM)
@@ -110,18 +103,13 @@ impl Reached {
         }
     }
 
-    /// What [`record_list`] prints of run `id`'s record, asked again, saying it does `what`, if
-    /// the connection that went over ends.
+    /// The listing of the record's files and directories, which `record_list` makes.
     fn list_record(&self, id: &RunTag, what: &str) -> Result<Vec<u8>, String> {
         let script = record_list(id);
         let listing = || self.ssh(&script);
         self.again(listing, None, "ssh", &[SSH_FAILED], SHORT_TIMEOUT, what)
     }
 
-    /// Extracts into `sent` below `scratch`, a new directory, the archive of the files of run
-    /// `id`'s record that `wanted` names, which the controller streams as it reads them, and
-    /// says what the call said, but the lines of the controller's `tar` that [`Archived::Unread`]
-    /// gives.
     fn archived(
         &self,
         id: &RunTag,
@@ -159,7 +147,7 @@ impl Reached {
         let written = stdin.write_all(&names);
         drop(stdin);
         // With no deadline, as a record takes as long as its size sets; a dead connection ends the
-        // call by itself (`STALL_TIMEOUT`).
+        // call by itself, as `ServerAliveInterval` says.
         let status = child.wait().context("running `ssh` failed")?;
         let master = ssh.slot.master;
         // Which holds the other end of `tar`'s standard input, which `tar` reads to its end.
@@ -207,8 +195,8 @@ impl Reached {
     }
 }
 
-/// What a call that ran `tar` on the controller said, `said`, but `tar`'s own lines, then those
-/// lines, but the last, which only says that it failed.
+/// Splits what `tar` on the controller wrote to its standard error into the lines that aren't
+/// its own, and its complaints, without the line that only says it failed.
 fn tar_said(said: &[u8]) -> (Vec<u8>, Vec<String>) {
     let (tar, other): (Vec<&[u8]>, Vec<&[u8]>) = said
         .split_inclusive(|byte| *byte == b'\n')
@@ -220,19 +208,18 @@ fn tar_said(said: &[u8]) -> (Vec<u8>, Vec<String>) {
     (other.concat(), tar.collect())
 }
 
-/// How an archive of a record's files ended ([`Reached::archived`]).
+/// How a transfer of an archive of the wanted files ended.
 enum Archived {
-    /// At the end of what it was asked for.
+    /// The archive arrived whole.
     Whole,
-    /// Cut part way, as the connection over this shared master ended.
+    /// The connection, which this is the number of, ended first.
     Cut(usize),
-    /// Without the files that the controller's `tar` couldn't read, as this error says, with what
-    /// `tar` said of each.
+    /// The controller's `tar` couldn't read some files; the error says which.
     Unread(String),
 }
 
-/// `tar` that extracts the archive on its standard input into `sent`, a new directory, 0700,
-/// which this makes: each member below it, as `tar` takes none above it.
+/// Makes the directory `sent`, for the owner alone, and returns the `tar` that extracts its
+/// standard input into it: each member below it, as `tar` takes none above it.
 pub(super) fn untar(sent: &Path) -> Result<Command, String> {
     DirBuilder::new()
         .mode(0o700)
@@ -243,16 +230,16 @@ pub(super) fn untar(sent: &Path) -> Result<Command, String> {
     Ok(tar)
 }
 
-/// How many files and directories a run's record holds at most for `wait` to copy it.
-// Several times what a run whose agent wrote many files holds; the list of a record is a line
-// an entry, about 100 bytes, so 10 MB at most.
+// The most files and directories of one record that a copy takes, several times what a run whose
+// agent wrote many files holds. The listing is a line an entry, about 100 bytes, so it stays
+// within about 10 MB.
 const RECORD_FILES: usize = 100_000;
 
-/// How many random letters end the name of the directory that a copy of a record extracts into,
-/// after `.<id>.`.
+// The length of the random part of a scratch directory's name, by which `cleared` tells the
+// leftovers of copies from other files.
 const SCRATCH_RANDOM: usize = 6;
 
-/// A file of a run's record, as [`record_list`] lists it.
+/// A file of a record on the controller, with what tells whether the copy holds it whole.
 struct Listed {
     size_bytes: u64,
     /// Its modification time, in whole seconds since the Unix epoch.
@@ -261,10 +248,9 @@ struct Listed {
     name: PathBuf,
 }
 
-/// What a command on the controller runs to list the regular files and the directories below
-/// run `id`'s record, each `<f or d> <size> <seconds>.<fraction> <path>`, ended by a NUL byte, as
-/// its name may hold a newline; [`RECORD_FILES`] and one more at most, so that a longer list
-/// shows itself.
+/// The script that lists the regular files and directories below run `id`'s record, each as
+/// `<f or d> <size> <seconds>.<fraction> <path>` ended by a NUL byte, as a name may hold a
+/// newline: `RECORD_FILES` and one more at most, so that a longer list shows itself.
 fn record_list(id: &RunTag) -> String {
     format!(
         "cd \"$HOME/{}/{}\" && find . -mindepth 1 \\( -type f -o -type d \\) -printf '%y %s %T@ \
@@ -275,9 +261,8 @@ fn record_list(id: &RunTag) -> String {
     )
 }
 
-/// The files and the directories that controller `name` listed of run `id`'s record
-/// ([`record_list`]); refuses a list past [`RECORD_FILES`], and a line that names no path below
-/// the record.
+/// The files and directories of the record, from what `record_list`'s script printed. Fails if
+/// there are more than `RECORD_FILES`, or a path isn't below the record.
 fn listed_record(
     name: &Name,
     id: &RunTag,
@@ -334,8 +319,10 @@ fn listed_record(
     Ok((files, dirs))
 }
 
-/// Whether `copy`, of a run's record, holds `file` as the controller listed it: a regular file
-/// of its size and modification time.
+/// Whether `copy` holds `file` as it is on the controller: a regular file of its size and
+/// modification time.
+// As `rsync`'s quick check finds a file unchanged:
+// https://github.com/RsyncProject/rsync/blob/6118037350efb253fdcc11139f1f58a2582d5fe7/generator.c#L666-L690
 fn held(copy: &Path, file: &Listed) -> Result<bool, String> {
     let path = copy.join(&file.name);
     match fs::symlink_metadata(&path) {
@@ -347,8 +334,8 @@ fn held(copy: &Path, file: &Listed) -> Result<bool, String> {
     }
 }
 
-/// Removes from `runs` each directory that a copy of run `id`'s record extracted into and left,
-/// as it was killed, named as [`SCRATCH_RANDOM`] says, whose lock no copy holds.
+/// Removes the scratch directories that earlier copies of run `id` left in `runs`, but not one
+/// that a copy running now holds.
 fn cleared(runs: &Path, id: &RunTag) -> Result<(), String> {
     let prefix = format!(".{}.", id.as_str());
     for entry in fs::read_dir(runs).context(runs.display())? {
@@ -373,7 +360,6 @@ fn cleared(runs: &Path, id: &RunTag) -> Result<(), String> {
     Ok(())
 }
 
-/// Makes each of `dirs`, below `copy`, of a run's record.
 fn made(copy: &Path, dirs: &[PathBuf]) -> Result<(), String> {
     for dir in dirs {
         let dir = copy.join(dir);
@@ -382,12 +368,11 @@ fn made(copy: &Path, dirs: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-/// Moves into `copy`, of run `id`'s record, each file below `sent` ([`Reached::archived`]) that
-/// is whole, as of its size and modification time in `wanted`, and drops the rest; once every
-/// other file of `wanted` is in place, makes each of `dirs`, then moves `record.json`, if wanted
-/// and whole; returns how many files it moved.
-/// Refuses, and moves nothing past, an entry that is neither a directory nor a regular file, or
-/// a file that `wanted` doesn't name, as controller `name` was not asked for it.
+/// Moves the files of `wanted` that `sent` holds whole, by their size and modification time, into
+/// `copy`, drops the rest, and returns how many it moved. `record.json` moves only when every
+/// other file of `wanted` is in the copy, with the directories. Fails, moving nothing past it, if
+/// `sent` holds a directory entry that isn't a directory or a regular file, or a file that
+/// `wanted` doesn't name.
 fn placed(
     name: &Name,
     id: &RunTag,
@@ -444,7 +429,7 @@ fn placed(
 }
 
 /// Moves file `below` of `sent` to the same path below `copy`, with the permission bits of its
-/// mode alone ([`schema::sandbox::tree_mode`]).
+/// mode alone (`schema::sandbox::tree_mode`).
 fn moved(sent: &Path, copy: &Path, below: &Path) -> Result<(), String> {
     let from = sent.join(below);
     let mode = fs::symlink_metadata(&from).context(from.display())?.mode();

@@ -2,27 +2,27 @@
 //! named by their SHA-256, which keeps each for every later send, whatever task, repository or
 //! commit names it.
 //!
-//! The client hashes each file it would send into a [`Manifest`], whose own SHA-256 names the
-//! tree, and sends it in one call ([`query`]); the controller keeps it, and answers with each
-//! blob its store lacks ([`missing`]), with the pieces of it that it already holds whole; the
-//! client deals the rest of those pieces ([`pieces`]) to several streams at once ([`deal`]), each
-//! with its pieces as members of a `tar` stream ([`stream`]), which the controller extracts into
-//! the store's [`INCOMING`] ([`receive`]); the job's start then takes each blob whose pieces have
-//! all arrived into the store, once its SHA-256 is its name ([`admit`]). This is REAPI's
-//! content-addressable storage and its `FindMissingBlobs`, the find-missing call before every
-//! upload that Bazel's remote execution makes:
+//! The client hashes each file into a [`Manifest`], whose own SHA-256 names the tree, and asks
+//! what the store lacks of it ([`query`]); the controller answers with each blob it lacks
+//! ([`missing`]), and the pieces of it that it holds whole. The client deals the rest of the
+//! pieces ([`pieces`]) to several streams at once ([`deal`]), each a `tar` stream ([`stream`])
+//! that the controller extracts into the store's [`INCOMING`] ([`receive`]); the job's start then
+//! takes each blob whose pieces have all arrived into the store, once its SHA-256 is its name
+//! ([`admit`]). This follows the content-addressable storage of Bazel's remote execution, and
+//! the find-missing call it makes before every upload, `FindMissingBlobs`:
 //! <https://github.com/bazelbuild/remote-apis/blob/c2c07e3d718d3d490a4958344d9c3e47de0bfaf3/build/bazel/remote/execution/v2/remote_execution.proto#L350-L362>,
-//! and Modal's check of a mount's every hash at once, then the put of each that it lacks:
+//! and Modal's check of a mount's hashes, then the put of each that it lacks:
 //! <https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/mount.py#L502-L536>.
 //! It turns down `BuildKit`'s kept context, a stream of each file's metadata against a copy kept
 //! by where it was sent, which resends a task's files once another task's were sent in between:
 //! <https://github.com/moby/buildkit/blob/1d510a3097d9fbd85a42d162d42c3a79eda1f795/vendor/github.com/tonistiigi/fsutil/receive.go#L1-L22>.
 //!
-//! The store, below the controller user's home ([`STORE`]), holds each blob as `<sha256>`, 0444;
-//! the same bytes as `<sha256>.x`, 0555, for a file that its owner may execute, as a link shares
-//! its file's mode; each manifest as [`MANIFESTS`]`/<sha256>`; and the pieces that have arrived,
-//! unchecked, as [`INCOMING`]`/<sha256>.<index>`. What this leaves to the job: making its tree of
-//! links into the store, and collecting what no tree links.
+//! The store holds each blob as `<sha256>`, 0444; the same bytes as `<sha256>.x`, 0555, for a
+//! file that its owner may execute, as a link shares its file's mode; each manifest as
+//! [`MANIFESTS`]`/<sha256>`; and the pieces that have arrived, unchecked, as
+//! [`INCOMING`]`/<sha256>.<index>`. The scripts are run over `ssh` by the controller's shell, not
+//! by a Pumpkin: the controller builds the tree's own Pumpkin only once the tree is there. Making
+//! the tree of links into the store, and collecting what no tree links, are the job's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -39,34 +39,32 @@ use stdx::Context as _;
 
 use crate::job::STORE;
 
-/// The first line of a manifest, which names its form: its number goes up with any change to
-/// what a line holds.
-// The client writes a manifest and the job of the Pumpkin it pins makes its tree, so those two
-// are of one commit; the prune of any job reads every manifest in the store, and keeps every
-// blob while one is of a form it can't read.
+// The first line of a manifest, which the scripts check too; any change to what a line holds
+// changes it. The client writes a manifest and the job of the Pumpkin it pins makes its tree, so
+// those two are of one commit; the prune of any job reads every manifest in the store, and keeps
+// every blob while one is of a form it can't read.
 const FORM: &str = "pumpkin-tree/1";
 
 /// The most bytes of a blob that one piece carries, and so of what a dropped connection loses.
 // About ten seconds of one session's work: small enough that a dropped connection loses little,
-// large enough that a GB of datasets is tens of pieces, not thousands.
+// large enough that a gigabyte of datasets is tens of pieces, not thousands.
 pub(crate) const PIECE_BYTES: u64 = 16 << 20;
 
-/// The digits of a piece's index in its name, `<sha256>.<index>`.
+// Enough digits for the index of each piece of a blob of `BLOB_BYTES`.
 const INDEX_DIGITS: usize = 5;
 
-/// The most bytes a blob may hold: as many pieces as [`INDEX_DIGITS`] can number.
+/// The most bytes of a file that a send carries: 100,000 pieces, which `INDEX_DIGITS` number.
 const BLOB_BYTES: u64 = 100_000 * PIECE_BYTES;
 
-/// What an [`Entry`] is, by its letter in a manifest's line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// `f`, a file, staged as 0644.
+    /// Staged as 0644.
     File,
-    /// `x`, a file its owner may execute, staged as 0755, as the builder reads that bit.
+    /// A file that its owner may execute, staged as 0755, as the builder reads that bit.
     Executable,
-    /// `l`, a symbolic link, whose blob is its target's text, as Git stores a link.
+    /// A symbolic link, whose blob is its target's text, as Git stores a link.
     Link,
-    /// `b`, the git bundle of the Pumpkin that the tree pins, whose path is that commit.
+    /// The git bundle of the Pumpkin that builds the tree, whose path is that commit's hash.
     Bundle,
 }
 
@@ -91,20 +89,16 @@ impl Kind {
     }
 }
 
-/// A line of a [`Manifest`]: a file of the tree, or the bundle, by its content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub(crate) kind: Kind,
     pub(crate) digest: Sha256Digest,
     pub(crate) size_bytes: u64,
-    /// Below the tree's top, `/`-separated, with no empty, `.` or `..` component and no newline
-    /// or tab; the commit, of the bundle.
     pub(crate) path: String,
 }
 
-/// A tree, as a manifest names it: text, its form's line, then a line for each entry,
-/// `<kind> <sha256> <size> <path>`, sorted by path; directories are implied by the paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The files of a tree, sorted by the bytes of their paths, so that equal trees have one text.
 pub(crate) struct Manifest {
     entries: Vec<Entry>,
 }
@@ -119,7 +113,7 @@ impl Manifest {
         &self.entries
     }
 
-    /// The manifest's bytes, which [`parse`](Self::parse) reads back as this manifest.
+    /// The text that is sent, and that [`Manifest::name`] hashes.
     pub(crate) fn text(&self) -> Vec<u8> {
         let lines = self.entries.iter().map(|entry| {
             let Entry {
@@ -134,17 +128,11 @@ impl Manifest {
         text.into_bytes()
     }
 
-    /// The tree's name: the SHA-256 of [`text`](Self::text), as REAPI's input root digest and a
-    /// Git tree's id each name a whole tree, under which the controller keeps the manifest.
+    /// The tree's name, by which the store keeps its manifest.
     pub(crate) fn name(&self) -> Sha256Digest {
         sha256(&self.text())
     }
 
-    /// The manifest whose bytes are `text`.
-    ///
-    /// # Errors
-    ///
-    /// Fails, saying the first line it can't read, if `text` isn't a manifest of this form.
     pub(crate) fn parse(text: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(text)
             .map_err(|error| format!("the manifest isn't UTF-8 ({error}): expected text"))?;
@@ -160,7 +148,6 @@ impl Manifest {
     }
 }
 
-/// The [`Entry`] that `line` of a manifest is.
 fn entry(line: &str) -> Result<Entry, String> {
     let wrong = || {
         format!(
@@ -196,7 +183,7 @@ fn entry(line: &str) -> Result<Entry, String> {
     })
 }
 
-/// The digest whose 64 lowercase hexadecimal digits are `hex`, if they are.
+/// The digest that `hex`, 64 lowercase hexadecimal digits, spells.
 pub(crate) fn digest(hex: &str) -> Option<Sha256Digest> {
     Sha256Digest::try_from(format!("sha256:{hex}")).ok()
 }
@@ -205,7 +192,6 @@ fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
 
-/// Whether `path`, a bundle's, is a commit of Pumpkin: 40 lowercase hexadecimal digits.
 fn commit(path: &str) -> bool {
     path.len() == 40
         && path
@@ -213,10 +199,6 @@ fn commit(path: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Checks that `path` can be a manifest's path: a [`RelativePath`] with no newline or tab, as a
-/// line of the manifest, and of the shell that reads it, carries it, and not below `.pumpkin`.
-// A job's tree has `.pumpkin` as a link to the controller's one workspace, which a file of the
-// tree's would be written through.
 fn sendable(path: &str) -> Result<(), String> {
     if path.contains(['\n', '\t']) || RelativePath::try_from(path.to_owned()).is_err() {
         return Err(format!(
@@ -225,6 +207,8 @@ fn sendable(path: &str) -> Result<(), String> {
             path.escape_debug()
         ));
     }
+    // A job's tree has `.pumpkin` as a link to the controller's one workspace, which a file of the
+    // tree's would be written through.
     if path.split('/').next() == Some(crate::workspace::DIR) {
         return Err(format!(
             "`{}` can't be sent to the controller, where a job's `{}` is the controller's own \
@@ -236,8 +220,8 @@ fn sendable(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Where the bytes of a blob are on this machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Where a blob's bytes are.
 pub(crate) enum Source {
     /// A file, the tree's or the bundle.
     File(PathBuf),
@@ -245,28 +229,27 @@ pub(crate) enum Source {
     Text(Vec<u8>),
 }
 
-/// A tree as [`hash`] read it: its manifest, and where the bytes of each of its blobs are.
+/// A manifest, and where the bytes of each blob that it names are.
 pub(crate) struct Hashed {
     pub(crate) manifest: Manifest,
     pub(crate) sources: BTreeMap<Sha256Digest, Source>,
 }
 
 impl Hashed {
-    /// Where this machine holds the blob `digest`, which the manifest names, for a person to read.
+    /// How a message names the blob with `digest`.
     pub(crate) fn shown(&self, digest: &Sha256Digest) -> String {
         (self.sources.get(digest)).map_or_else(|| format!("the blob {}", digest.hex()), shown)
     }
 }
 
-/// Hashes `files`, paths below `top`, each ended by a NUL, as `git ls-files -z` lists them, and
-/// the bundle at `bundle` of Pumpkin's commit `commit`, into a manifest: a link as a link, a
-/// file by whether its owner may execute it, a path listed twice once; a path that is gone, or a
-/// directory, as a submodule's is, is left out.
+/// The manifest of a tree, and where its blobs are: each file below `top` whose path is in
+/// `files`, which lists NUL-ended paths as `git ls-files -z` does, and the git `bundle`, as the
+/// path `commit`.
 ///
-/// # Errors
-///
-/// Fails, naming the path, if one can't be a manifest's path ([`sendable`]), isn't UTF-8, is
-/// neither a file nor a link, can't be read, or holds more than a send carries.
+/// A path listed twice is taken once; one that is gone, or is a directory, as a submodule's is, is
+/// left out. It fails on a path that a manifest
+/// can't hold, a file that is neither a regular file nor a symbolic link, or one over
+/// `BLOB_BYTES`.
 pub(crate) fn hash(
     top: &Path,
     files: &[u8],
@@ -344,7 +327,6 @@ pub(crate) fn hash(
     })
 }
 
-/// The SHA-256 of what `source` holds, and its size in bytes, read once.
 fn hashed(source: &Source) -> Result<(Sha256Digest, u64), String> {
     let (digest, size_bytes) = match source {
         Source::Text(text) => (sha256(text), text.len() as u64),
@@ -376,7 +358,6 @@ fn shown(source: &Source) -> String {
     }
 }
 
-/// A writer that hashes what is written to it, so that [`io::copy`] can read a file into it.
 struct Hasher(Sha256);
 
 impl Write for Hasher {
@@ -390,23 +371,21 @@ impl Write for Hasher {
     }
 }
 
-/// The store's directory of manifests, each named by its SHA-256, the name of its tree.
 pub(crate) const MANIFESTS: &str = "manifests";
 
-/// The store's directory of the pieces that have arrived, unchecked, each `<sha256>.<index>`.
 pub(crate) const INCOMING: &str = "incoming";
 
-/// The exit status of the start's [`admit`] once a blob it takes in isn't whole or isn't what its
-/// name says, as [`unadmitted`] reads what it printed.
+/// The exit status of [`admit`]'s script when it refuses a blob, after printing why for
+/// [`unadmitted`].
 pub(crate) const UNADMITTED: i32 = 102;
 
 /// The store's lock, which a command holds while it lists the store, or changes what it holds.
 pub(crate) const LOCK: &str = "lock";
 
-/// A shell function, `lacking <manifest>`, run in the store, that prints a line for each distinct
-/// blob that the manifest names and the store lacks, `missing <sha256> <size> <indices>`, the
-/// indices, `,`-separated, of the pieces of it whole in [`INCOMING`]; an executable's blob is
-/// held if its copy to run is. It fails, saying the line, if the manifest isn't of this form.
+/// A shell function that reads the manifest at `$1`, refuses one that isn't of this form, and
+/// prints `missing <sha256> <size> <indices>` for each blob that the store lacks, with the
+/// indices of its pieces in [`INCOMING`] that arrived whole. An executable's blob is held if its
+/// copy to run is.
 // A piece is whole if its size is what its blob's size gives it, so a stream cut off part way
 // through its last piece leaves that piece to be sent again. The listing and the manifest are
 // two inputs, so no name a listing holds is read as a manifest's line, and each digest is checked
@@ -442,11 +421,11 @@ fn lacking() -> String {
     )
 }
 
-/// What a command on the controller runs to be sent the tree named `tree`, whose manifest is on
-/// its standard input: once the manifest's SHA-256 is that name, and it is of this form, it prints
-/// what the store lacks of it, as `lacking` does ([`lacking`]), keeps it in the store's
-/// [`MANIFESTS`] under that name, then prints `end`, which [`missing`] reads.
-// One call for the whole manifest, as REAPI's FindMissingBlobs takes thousands of digests a call:
+/// A script that takes the manifest of `tree` on its standard input, stores it, and prints what
+/// the store lacks of the tree, one line for each blob and `end`, as [`missing`] reads it.
+///
+/// It fails if what it reads does not have the SHA-256 `tree`.
+// One call for the whole manifest, as REAPI's FindMissingBlobs takes many digests a call:
 // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/com/google/devtools/build/lib/remote/GrpcCacheClient.java#L182-L198
 // Under the store's lock, which the prune holds while it collects, so that the prune, which spares
 // what a manifest of the last day names, either ran before the listing or finds the manifest.
@@ -475,8 +454,7 @@ echo end
     )
 }
 
-/// What a command on the controller runs to take a stream of pieces on its standard input, as
-/// [`stream`] writes it, into the store's [`INCOMING`], unchecked: the start checks each blob.
+/// A script that extracts the tar archive on its standard input into [`INCOMING`].
 // `--touch`, as the stream's headers carry no time, and the prune collects a piece by its age.
 pub(crate) fn receive() -> String {
     format!(
@@ -485,11 +463,12 @@ pub(crate) fn receive() -> String {
     )
 }
 
-/// What the start of a job of the tree named `tree` runs, as a subshell, to take into the store
-/// each blob that the tree's manifest names, the store lacks, and [`INCOMING`] holds every piece
-/// of: their pieces, in order, are its bytes, which it keeps once their SHA-256 is its name, and
-/// removes otherwise. If one isn't whole, or isn't what its name says, it prints a line for each,
-/// `gone <sha256>` or `changed <sha256>`, then exits [`UNADMITTED`].
+/// A script that, for each blob of the stored manifest of `tree` that the store lacks, joins its
+/// pieces, checks its digest, and moves it into the store.
+///
+/// It ends with [`UNADMITTED`], after printing `changed <digest>` for a blob that doesn't match
+/// its digest and `gone <digest>` for one whose pieces are not all there, which
+/// [`unadmitted`] words.
 // A blob is checked as `incoming/<sha256>`, a name that no receive writes: its one piece renamed
 // to it, or its pieces joined into it. GNU tar replaces a piece by removing it and writing a new
 // file under its name, so a piece checked under its own name could, by its move into the store,
@@ -541,9 +520,7 @@ rm "$refused"
     )
 }
 
-/// Why the start refused the blobs that `printed`, what [`admit`] printed as it exited
-/// [`UNADMITTED`], names, of `hashed`: the first that changed, by where this machine holds it,
-/// else how many of the task's files are gone, and whether Pumpkin's bundle is.
+/// What to tell the operator of what [`admit`]'s script printed, `printed`, ending with what to do.
 pub(crate) fn unadmitted(hashed: &Hashed, printed: &[u8]) -> String {
     let printed = String::from_utf8_lossy(printed);
     let mut changed = Vec::new();
@@ -590,21 +567,16 @@ pub(crate) fn unadmitted(hashed: &Hashed, printed: &[u8]) -> String {
     )
 }
 
-/// A blob that the controller's store lacks, as its answer to [`query`] names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A blob that the store lacks, with the indices of its pieces that it holds.
 pub(crate) struct Missing {
     pub(crate) digest: Sha256Digest,
     pub(crate) size_bytes: u64,
-    /// The indices of its pieces that the controller already holds whole.
     pub(crate) held: BTreeSet<u64>,
 }
 
-/// The blobs that `answer`, the controller's to [`query`], says its store lacks.
-///
-/// # Errors
-///
-/// Fails, saying the line, if a line is none that [`query`] prints, or `answer` doesn't end with
-/// `end`, as one cut off doesn't.
+/// Reads what [`query`]'s script printed. It fails if the answer is cut off, before its `end`, or
+/// is anything else.
 pub(crate) fn missing(answer: &[u8]) -> Result<Vec<Missing>, String> {
     let answer = String::from_utf8_lossy(answer);
     let mut lines = answer.lines();
@@ -638,7 +610,6 @@ pub(crate) fn missing(answer: &[u8]) -> Result<Vec<Missing>, String> {
     Ok(missing)
 }
 
-/// The [`Missing`] that `line`, of the controller's answer, names.
 fn lacked(line: &str) -> Option<Missing> {
     let mut fields = line.split(' ');
     let (Some("missing"), Some(hex), Some(size), held, None) = (
@@ -659,8 +630,8 @@ fn lacked(line: &str) -> Option<Missing> {
     })
 }
 
-/// A piece of a blob, its bytes from `index` times [`PIECE_BYTES`] on.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Bytes `index * PIECE_BYTES` and on, `size_bytes` of them, of the blob with `digest`.
 pub(crate) struct Piece {
     pub(crate) digest: Sha256Digest,
     pub(crate) index: u64,
@@ -668,7 +639,7 @@ pub(crate) struct Piece {
 }
 
 impl Piece {
-    /// Its name in `incoming/`, `<sha256>.<index>`, the index in [`INDEX_DIGITS`] digits.
+    /// The name that the piece has in [`INCOMING`].
     pub(crate) fn name(&self) -> String {
         format!("{}.{:0INDEX_DIGITS$}", self.digest.hex(), self.index)
     }
@@ -678,7 +649,7 @@ impl Piece {
     }
 }
 
-/// The pieces of `missing` to send, in order: each blob's, but those the controller holds.
+/// The pieces of each blob in `missing` that the store doesn't hold. A blob of no bytes has one.
 pub(crate) fn pieces(missing: &[Missing]) -> Vec<Piece> {
     let mut pieces = Vec::new();
     for Missing {
@@ -687,7 +658,6 @@ pub(crate) fn pieces(missing: &[Missing]) -> Vec<Piece> {
         held,
     } in missing
     {
-        // An empty blob is one piece of no bytes.
         let count = size_bytes.div_ceil(PIECE_BYTES).max(1);
         for index in (0..count).filter(|index| !held.contains(index)) {
             let size_bytes = (size_bytes - index * PIECE_BYTES).min(PIECE_BYTES);
@@ -701,17 +671,15 @@ pub(crate) fn pieces(missing: &[Missing]) -> Vec<Piece> {
     pieces
 }
 
-/// The most streams that a send's pieces go over at once, each a [`receive`] over a connection of
+/// The most streams that carry a send's pieces at once, each a [`receive`] over a connection of
 /// its own.
-// Each SSM session is bounded on its own, so sessions at once add up. The workspace's
-// connections are 16 masters, and a stream over a master that another stream holds shares its
-// session, so more streams would gain nothing.
+// Each SSM session is bounded on its own, so sessions at once add up. The workspace's connections
+// are as many masters as `controller` asserts this is within, and a stream over a master that
+// another stream holds shares its session, so more streams would gain nothing.
 pub(crate) const STREAMS: usize = 16;
 
-/// `pieces`, dealt to as many streams as [`STREAMS`] but one per [`PIECE_BYTES`] they hold, at
-/// least one, and none for no pieces: the largest first, each to the stream with the fewest bytes
-/// so far, the first of those; so no stream holds a piece's bytes more than another, and the same
-/// pieces in any order are dealt the same.
+/// Deals `pieces` out to streams of about the same bytes: one for each `PIECE_BYTES` of them,
+/// but at most `STREAMS`, and none for no pieces.
 pub(crate) fn deal(mut pieces: Vec<Piece>) -> Vec<Vec<Piece>> {
     let size_bytes: u64 = pieces.iter().map(|piece| piece.size_bytes).sum();
     // The master of each stream past the first opens in about a second, while the streams before
@@ -733,15 +701,12 @@ pub(crate) fn deal(mut pieces: Vec<Piece>) -> Vec<Vec<Piece>> {
     streams.into_iter().map(|(_, dealt)| dealt).collect()
 }
 
-/// Writes `pieces`, each read from where `sources`, which hold each one's blob, say it is, to
-/// `out` as a POSIX `ustar` stream that [`receive`] extracts, a member each, named as
-/// [`Piece::name`] names it, 0444; and gives `sent` each count of a piece's bytes it has written.
+/// Writes `pieces` to `out` as a tar archive, each a file named by [`Piece::name`], and calls
+/// `sent` with the bytes of each chunk as it is written.
 ///
-/// # Errors
-///
-/// Fails if writing to `out` fails; else gives, naming it, a source that can't be read, or is
-/// gone or holds fewer bytes than its piece, as one that changed while it was sent. The stream
-/// then ends after the last whole piece, if the source was found so before its piece began.
+/// The inner error says that a piece's source changed, or can't be read, while it was sent, and
+/// the archive ends after the last whole piece if the source was found so before its piece began;
+/// the outer error is of writing `out`.
 pub(crate) fn stream(
     pieces: &[Piece],
     sources: &BTreeMap<Sha256Digest, Source>,
@@ -788,14 +753,10 @@ pub(crate) fn stream(
     Ok(Ok(()))
 }
 
-/// What a blob is read from.
 trait ReadSeek: Read + Seek {}
 
 impl<T: Read + Seek> ReadSeek for T {}
 
-/// Copies `piece`'s bytes from `blob` to `out`, until `blob` ends, giving `sent` each count of
-/// them it has written; gives how many there were, or why `blob` can't be read. Fails if writing
-/// to `out` fails.
 fn part(
     mut blob: impl Read + Seek,
     piece: &Piece,
@@ -822,17 +783,19 @@ fn part(
     }
 }
 
-/// A `tar` block, of which a member's header is one, and its bytes a whole number.
 pub(crate) const BLOCK: usize = 512;
 
-/// The zeros that fill a member of `size_bytes` to a whole block.
 fn padding(size_bytes: u64) -> usize {
     let size = usize::try_from(size_bytes % BLOCK as u64).unwrap_or(0);
     (BLOCK - size) % BLOCK
 }
 
-/// The POSIX `ustar` header of a regular file named `name`, of at most 100 bytes, with mode
-/// `mode`, owned by user and group 0, holding `size_bytes`, at the epoch.
+/// The ustar header of a file `name` of `mode` and `size_bytes`, owned by user and group 0, last
+/// changed at time 0.
+///
+/// # Panics
+///
+/// If `name` is over 100 bytes, which a ustar header holds at most.
 pub(crate) fn header(name: &str, mode: u32, size_bytes: u64) -> [u8; BLOCK] {
     assert!(name.len() <= 100, "a ustar name holds 100 bytes at most");
     let mut header = [0; BLOCK];

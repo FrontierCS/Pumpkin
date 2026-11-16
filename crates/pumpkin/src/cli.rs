@@ -1,9 +1,11 @@
-//! `pumpkin`'s command line, parsed once into what it asks for ([`Command`]) by clap: each
-//! command is a struct whose fields are its operands and flags, which clap's parser, usage lines,
-//! help and errors all read. `-h` or `--help` before `--` asks for the help of the command the
-//! line names, which `pumpkin help` also prints, as it does the topics, such as [`CONFIG`]; `-V`
-//! or `--version` before the command, for the build ([`runtime::BUILD`]). The commands that are
-//! rarely needed ([`RARE`]) are listed apart, and the controller's own side is listed nowhere.
+//! `pumpkin`'s command line: [`parse`] reads it with clap into a [`Command`], each command a
+//! struct of its operands and flags.
+//!
+//! The help texts here are the home of what each command and option means. `-h` or `--help`
+//! before `--` prints the help of the command that the line names, as `pumpkin help` does, which
+//! also prints the topics, such as [`CONFIG`]. The commands that [`RARE`] names are hidden from
+//! clap's list and listed apart; the controller's own side is listed nowhere.
+//! What a command does is left to its own module.
 
 use std::ffi::OsString;
 use std::iter;
@@ -138,8 +140,7 @@ output, `pumpkin view` on a client, which shows the controller's runs; and
     },
 }
 
-/// The commands that are rarely needed, which `pumpkin --help` lists after the others. Each is
-/// hidden from clap's list of commands, as the controller's side is from every list.
+// Hidden from clap's list of commands, so `command` lists them apart.
 const RARE: [&str; 2] = ["build", "reap"];
 
 /// The actions of `pumpkin controller`.
@@ -241,7 +242,8 @@ Default: none"
     pub(crate) controller_addresses: Vec<Ipv4Addr>,
 }
 
-/// What a command line asks for.
+/// What a command line asks for. `Job` and the variants after it are the controller's own side,
+/// `pumpkin controller <action>`; `Print` holds help or the version, for the standard output.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
@@ -253,33 +255,24 @@ pub(crate) enum Command {
     Build(Build),
     Lock(Lock),
     View(View),
-    /// `pumpkin controller job`, a job on the controller.
     Job(Job),
-    /// `pumpkin controller boot`, the controller's boot.
     Boot,
-    /// `pumpkin controller follow`, a client's follow of a run.
     Follow(RunTag),
-    /// `pumpkin controller cancel`, a client's cancel of a run.
     CancelFor(Cancel),
-    /// `pumpkin controller view`, a client's view of the runs.
     ViewFor,
-    /// `pumpkin controller publish`, a publish of the runs by hand.
     Publish(Publish),
-    /// Help, or the version, for the standard output.
     Print(String),
 }
 
-/// The name of the flag of the commands that evaluate a task, `--arg` ([`TaskArgs`]).
 const ARG: &str = "arg";
 
-/// The help of `--arg` of `check`, which the other commands that take it point to.
 const CHECK_ARG: &str = "\
 The value of the arg that an arg() call declares as <name>, read as the
 type that it declares. Each arg is given at most once, and one with no
 default must be, for each task.";
 
-/// The `--arg`s of a command that evaluates a task, each `--arg <name>=<value>`, read as
-/// [`lang::Args::parse`] reads them.
+/// The `--arg` flag of the commands that evaluate a task, each value read as
+/// [`lang::Args::parse`] reads it.
 pub(crate) struct TaskArgs(pub(crate) lang::Args);
 
 impl Args for TaskArgs {
@@ -303,7 +296,7 @@ impl FromArgMatches for TaskArgs {
     fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
         let given = matches.get_many::<String>(ARG).into_iter().flatten();
         let args = lang::Args::parse(given.map(String::as_str)).map_err(|problems| {
-            // The first, as clap says the first problem of a line alone.
+            // clap says the first problem of a line alone.
             let Some(first) = problems.into_iter().next() else {
                 unreachable!(
                     "`lang::Args::parse` failed with no problem, though it fails with each"
@@ -320,8 +313,8 @@ impl FromArgMatches for TaskArgs {
     }
 }
 
-/// A value of `pumpkin`'s, a path or a name, that must be UTF-8; if it isn't, the problem says
-/// so, then `why`, such as `, as every id is: name an id`.
+/// Parses a UTF-8 value, and refuses another with `it isn't UTF-8` followed by `why`, which
+/// starts with the punctuation that joins the two.
 fn utf8(why: &'static str) -> impl TypedValueParser<Value = String> {
     OsStringValueParser::new().try_map(move |value| {
         value
@@ -330,18 +323,14 @@ fn utf8(why: &'static str) -> impl TypedValueParser<Value = String> {
     })
 }
 
-/// Why a path that `run` is given must be UTF-8, and what to do.
 const RECORDED: &str = ", as a run's record keeps each path that `run` is given: name one that is";
 
-/// Why a path that another command is given must be UTF-8, and what to do.
 const NAMED_NEXT: &str = ", as the commands that `pumpkin` says to run next name it: name one \
                           that is";
 
-/// Why the `--runs` of a command that reads runs must be UTF-8, and what to do.
 const RUNS_NAMED_NEXT: &str = ", as the commands that `pumpkin` says to run next name it: name \
                                a directory with a UTF-8 path";
 
-/// A task's entry, as `pumpkin check` takes it ([`Entry::parse`]).
 fn entry() -> impl TypedValueParser<Value = Entry> {
     utf8(NAMED_NEXT).try_map(Entry::parse)
 }
@@ -380,8 +369,7 @@ outcome.json instead of its id."
 }
 
 impl Run {
-    /// The path flags it was given, each named as on the command line, with its value, in the
-    /// order its usage lists them.
+    /// The path flags that were given, each as `(flag, value)`, in the order of the usage.
     pub(crate) fn given(&self) -> impl Iterator<Item = (&'static str, &str)> {
         let Self {
             entry: _,
@@ -500,8 +488,8 @@ Default: runs/ in the .pumpkin directory that this pumpkin is in")]
     pub(crate) modal_config: Option<PathBuf>,
 }
 
-/// The help of `--modal-config` of `cancel` and `reap`, which the controller target alone gives
-/// them: a job's Modal configuration file goes with the job, and the client sends it again.
+// Hidden: only the controller target gives `--modal-config`, as a job's Modal configuration
+// file goes with the job, and the client sends it again.
 const MODAL_CONFIG_HELP: &str = "\
 Modal's configuration file, read for each provider of kind modal in place of
 the one that the configuration of the run names.";
@@ -577,29 +565,23 @@ pub(crate) struct Job {
     pub(crate) command: JobCommand,
 }
 
-/// The command that a job runs, as `pumpkin` takes it on its own.
 pub(crate) enum JobCommand {
     Run(Run),
     Build(Build),
 }
 
-/// A run, as a command's `<run>` names it.
 #[derive(Clone)]
+/// A run named by its record's path, which has a `/`, or by its id or a prefix of it.
 pub(crate) enum RunName {
-    /// By its record's path, which has a `/`.
     Record(String),
-    /// By its id, or a prefix of its id or of its random digits, among the runs in `--runs`.
     Prefix(String),
 }
 
-/// The digest that `hex`, a `--tree`, names.
 fn tree(hex: &str) -> Result<Sha256Digest, &'static str> {
     crate::manifest::digest(hex)
         .ok_or("it isn't 64 lowercase hexadecimal digits: give the SHA-256 of the tree's manifest")
 }
 
-/// The run that a `<run>` names, which is UTF-8, as every id is, and as the commands that
-/// `pumpkin` says to run next name a record.
 fn run_name() -> impl TypedValueParser<Value = RunName> {
     OsStringValueParser::new().try_map(|run| {
         if run.as_bytes().contains(&b'/') {
@@ -973,7 +955,6 @@ Exit status:
   1  An error, which a `pumpkin:` line on the standard error says.
   2  A usage error.";
 
-/// `pumpkin help config`, the machine's configuration.
 const CONFIG: &str = "\
 pumpkin.toml, the machine's configuration, which every `pumpkin run` and
 `pumpkin build` reads: the file that --config names,
@@ -1171,15 +1152,16 @@ the module's settings give, and `dials_from`, which each run sets:
   classes       As modal's.
 ";
 
-/// A usage error, as clap words it, and the command that prints the help of the command it was
-/// found in.
+/// A command line that clap refuses.
 pub(crate) struct Refusal {
     pub(crate) error: clap::Error,
+    /// The command line that prints the help of the command that was refused.
     pub(crate) help: String,
 }
 
-/// What `args`, a command line without its program's name, asks for. Fails with the first usage
-/// problem of `args`, unless they ask for help or the version.
+/// Reads `args`, which leave out the program's name, into the command that they ask for.
+/// `-h` or `--help` before `--`, and `-V` or `--version` before the command, are answered as
+/// [`Command::Print`], not refused.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
@@ -1190,8 +1172,6 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
         .position(|arg| !arg.as_bytes().starts_with(b"-"));
     let named = first.and_then(|at| cli.find_subcommand(&args[at]));
     let named = named.map(|command| command.get_name().to_owned());
-    // The controller's action, which the word after `controller` names, as `help` lists none of
-    // the controller's.
     let action = (named.as_deref() == Some("controller"))
         .then(|| first.and_then(|at| args.get(at + 1)))
         .flatten()
@@ -1233,8 +1213,6 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     command_of(&mut cli, parsed).map_err(refusal)
 }
 
-/// The command that `parsed`, a line of `cli`, asks for. Fails with the usage problem of a job's
-/// command or of a help's topic.
 fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::Error> {
     Ok(match parsed {
         Parsed::Run(run) => Command::Run(run),
@@ -1282,9 +1260,8 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
     })
 }
 
-/// The command of a job, `command`, as `pumpkin` takes it on its own, if it is `run` or `build`.
-/// Fails with the usage problem of `command`, or that it is neither.
 fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCommand, clap::Error> {
+    // The job's command is a whole command line of its own, so it is parsed as one.
     match parse(command).map_err(|refusal| refusal.error)? {
         Command::Run(run) => Ok(JobCommand::Run(run)),
         Command::Build(build) => Ok(JobCommand::Build(build)),
@@ -1315,7 +1292,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
     }
 }
 
-/// `pumpkin help <topic>`: a command's help, a topic, or `pumpkin --help` without one.
 fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap::Error> {
     let Some(topic) = topic else {
         return Ok(Command::Print(help(cli, None, None)));
@@ -1341,17 +1317,14 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
     })
 }
 
-/// Whether a help lists `command`: all but the controller's side.
 fn listed(command: &clap::Command) -> bool {
     !command.is_hide_set() || RARE.contains(&command.get_name())
 }
 
-/// `pumpkin`, with `-h` and `--help` listed last in each command's help, and after its options
-/// the commands that are rarely needed ([`RARE`]) and the topics.
 fn command() -> clap::Command {
-    // No command has a help flag of clap's, so a usage error ends without clap's pointer to
-    // it, and `pumpkin help <command>` is said instead; `parse` answers `-h` and `--help`, and
-    // `-V` and `--version`.
+    // No command has a help flag of clap's, so a usage error ends without clap's pointer to it,
+    // and `pumpkin help <command>` is said instead; `parse` answers `-h`, `--help`, `-V` and
+    // `--version`.
     let help = Arg::new("help").short('h').long("help").global(true);
     let help = help.action(ArgAction::SetTrue).help("Print this help.");
     let version = Arg::new("version").short('V').long("version");
@@ -1391,8 +1364,6 @@ does, and `pumpkin help <topic>` a topic.",
     ))
 }
 
-/// The help of the command of `cli` that `name` names, or of its action `action`, or of `pumpkin`
-/// if it names none.
 fn help(cli: &mut clap::Command, name: Option<&str>, action: Option<&str>) -> String {
     cli.build();
     let help = match name.and_then(|name| cli.find_subcommand_mut(name)) {

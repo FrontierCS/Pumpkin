@@ -1,17 +1,14 @@
-//! A run's or a build's send of its job to the controller.
+//! Sending a run's or a build's job to the controller: the task's files, which go by content to
+//! the controller's store, and the command that starts the job from them.
 //!
-//! A run or a build sends the files of its task's repository that the task reaches, and the
-//! bundle of the Pumpkin it pins, by content, to the controller's store, which keeps each for
-//! every later send, so that only what the store lacks goes, over several of the connections at
-//! once ([`crate::manifest`]); then the job's start sends the upstreams of this machine's
-//! configuration, their keys, its Modal provider and Modal's configuration file into its job's
-//! directory in tmpfs, by `tar` on the connection's standard input, never in an argument nor in a
-//! file of this machine's, takes what arrived into the store, and starts the job, `pumpkin
-//! controller job`, which makes its tree of links into the store, in a unit of the user's
-//! systemd, which outlives every connection.
+//! The controller says which blobs of the task's manifest its store lacks, and only those are
+//! sent, in streams over connections of their own. A connection that ends, or a stream that
+//! stalls, costs only the pieces not yet stored: the send asks again what the controller lacks.
 //!
-//! How a tree's files are read, dealt into streams and taken in there is [`crate::manifest`]'s;
-//! following the job once it has started is the commands' ([`super::commands`]).
+//! The job's start then sends this machine's upstreams, their keys and its Modal settings into
+//! the job's directory in tmpfs, as a `tar` on the connection's standard input, never in an
+//! argument or in a file of this machine's, takes in what arrived, and starts the job in a unit of
+//! the user's systemd, which outlives every connection.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,43 +31,40 @@ use crate::job::{SENT_CONFIG, SENT_MODAL, STARTED, STORE, TREES};
 use crate::manifest::{self, INCOMING};
 use crate::{config, next, say, workspace};
 
-/// How often a send says how much it has sent, so a send that ends sooner says nothing more.
-// Often enough that a person sees a send move; seldom enough that a log of a send of minutes
-// keeps a few lines of it. BuildKit's plain progress likewise says a step's count again only once
-// it has moved 5%, or 5 s have passed:
+// How often a send says how much it has sent: often enough that a person sees a send move, and
+// seldom enough that a log of a send of minutes keeps a few lines of it. BuildKit's plain progress
+// likewise says a step's count again only once it has moved 5%, or 5 s have passed:
 // https://github.com/moby/buildkit/blob/1d510a3097d9fbd85a42d162d42c3a79eda1f795/util/progress/progressui/printer.go#L93-L101
 const PROGRESS: Duration = Duration::from_secs(15);
 
-/// The SSM parameter that holds the settings of the controller of `name`, as the module names
-/// it.
+/// The name of the SSM parameter that holds the settings of the jobs of controller `name`.
 fn parameter(name: &Name) -> String {
     format!("/pumpkin-{name}/settings")
 }
 
-/// A task's repository, as this machine sends it to the controller.
+/// A task's git repository, as this machine sends it to the controller.
 pub(super) struct Tree {
     /// Of the files git lists there, tracked, or untracked but not ignored, those it sends, and
-    /// the git bundle of the Pumpkin that its `.pumpkinversion` names, which `./pumpkin` keeps
-    /// once it has built it, from which the controller builds the same Pumpkin.
+    /// the git bundle of the Pumpkin that its `.pumpkinversion` names, which `./pumpkin` keeps once
+    /// it has built it, from which the controller builds the same Pumpkin.
     hashed: manifest::Hashed,
     /// The entry's path below the repository's top.
     pub(super) entry: String,
-    /// The repository's name, the top's own as [`plain`] gives it, which its trees on the
+    /// The repository's name, the top's own as `plain` gives it, which its trees on the
     /// controller are below.
     repo: String,
-    /// The commit of Pumpkin that its `.pumpkinversion` names.
     commit: String,
 }
 
-/// The repository of the task whose entry is `entry`, given `args`, as the controller is sent it:
-/// of the files that git lists there, those that checking the task reaches
-/// ([`crate::star::reached`]), all that its build reads, with `./pumpkin` and `.pumpkinversion`.
+/// Hashes what a run of `entry` needs of its git repository: the tracked and unignored files
+/// that the task reaches, and what the controller builds Pumpkin with (`pumpkin`,
+/// `.pumpkinversion` and the bundle of the commit that names).
 ///
 /// # Errors
 ///
-/// Fails if the entry is in no git repository, or the repository has no
-/// `./pumpkin`, the consumer entry, which the job builds Pumpkin with, or a file to send can't be
-/// sent ([`manifest::hash`]); or, saying them, if the task has problems.
+/// Fails if the entry isn't in a git repository, the repository has no `pumpkin` or
+/// `.pumpkinversion` that names a commit with a bundle built here, or the task's root is above
+/// the repository.
 pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
     let path = fs::canonicalize(entry.path()).context(entry.path())?;
     let dir = path.parent().unwrap_or(Path::new("/"));
@@ -125,8 +119,8 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
     })
 }
 
-/// `name` with each character but an ASCII letter or digit, `.`, `_` and `-` as `_`, as a name of a
-/// file or directory.
+/// `name` with each character that isn't ASCII alphanumeric or one of `._-` made `_`, to be a
+/// directory's name.
 fn plain(name: &str) -> String {
     let kept = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     name.chars()
@@ -134,9 +128,9 @@ fn plain(name: &str) -> String {
         .collect()
 }
 
-/// Of `listed`, the files that git lists in `top`, each ended by a NUL, those below it that
-/// checking the task whose entry is `entry`, given `args`, reaches, as files or as directories
-/// that hold them, with `./pumpkin` and `.pumpkinversion`, which the job runs.
+/// Of `listed`, the files that git lists in `top`, each ended by a NUL, those that checking the
+/// task whose entry is `entry`, given `args`, reaches, as files or as directories that hold them,
+/// with `pumpkin` and `.pumpkinversion`, which the job runs.
 fn needed(
     entry: &crate::star::Entry,
     args: &lang::Args,
@@ -188,8 +182,8 @@ fn needed(
     Ok(files)
 }
 
-/// The commit that the `.pumpkinversion` in `top` names, after its tag, and the bundle of it that
-/// `./pumpkin` keeps beside its build, `.pumpkin/<commit>/pumpkin.bundle`.
+/// The commit that `.pumpkinversion` names, and the path of the bundle of it that this machine
+/// built.
 fn pumpkin_version(top: &Path) -> Result<(String, PathBuf), String> {
     let path = top.join(".pumpkinversion");
     let text = fs::read_to_string(&path).context(path.display())?;
@@ -213,9 +207,10 @@ fn pumpkin_version(top: &Path) -> Result<(String, PathBuf), String> {
     Ok((commit.to_owned(), bundle))
 }
 
-/// Sends `tree` to `reached` as job `id`'s, which runs `words`, `run` or `build` with their
-/// arguments, in its directory below `kind`, with what `client` sends with each job, then starts
-/// the job in a unit of its own, once the controller has taken in what it lacked of the tree.
+/// Sends the task's `tree` and the client's configuration, keys and Modal configuration to the
+/// controller, and starts the job `id` of `kind` there, which runs `pumpkin` with `words`.
+/// The keys go on the connection's standard input, to the job's directory in tmpfs, and are not
+/// stored.
 pub(super) fn send(
     reached: &Reached,
     client: &config::Client,
@@ -255,9 +250,8 @@ pub(super) fn send(
         .map_err(|error| reached.lost(master, error))
 }
 
-/// A `tar` archive, in POSIX's ustar format, of `files`, each a name and what the file holds,
-/// each file 0600: what [`send`] sends a job, made in memory, so that what it holds of keys is
-/// never written on this machine but in the files that hold them.
+/// A `tar` archive of `files`, each a name and what the file holds, each mode 0600: made in memory,
+/// so that what it holds of keys is never written on this machine but in the files that hold them.
 fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut archive = Vec::new();
     for (name, holds) in files {
@@ -272,11 +266,10 @@ fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     archive
 }
 
-/// What a command on `controller` runs to start job `id`, below `kind`, which runs `words` in
-/// its tree, of `tree`'s manifest, building the Pumpkin it pins from its bundle, with what the job
-/// is sent on its standard input, as `tar`: once it has taken in what the store lacked
-/// ([`manifest::admit`]), it links into the tree what the job's unit runs ([`STARTED`]), and the
-/// bundle into the controller's one workspace, as `<commit>.bundle`, in place of any there.
+/// The script that the controller runs to start the job: it unpacks the archive on its standard
+/// input, admits the tree's blobs into the store, links the tree from them, with the bundle as
+/// `<commit>.bundle` in the controller's one workspace, and starts the job's unit. It exits
+/// [`manifest::UNADMITTED`] if a blob isn't whole.
 fn starting(
     controller: &config::Controller,
     id: &str,
@@ -306,8 +299,8 @@ fn starting(
             manifest::Kind::Bundle => {
                 let bundle = format!("\"$HOME\"/{}/{path}.bundle", workspace::DIR);
                 // The store's, in place of any other, as of one cut short by an earlier send;
-                // linked aside and moved over it, as another job's start may link it at once,
-                // and a job that reads it keeps what it opened.
+                // linked aside and moved over it, as another job's start may link it at once, and
+                // a job that reads it keeps what it opened.
                 format!(
                     "if ! [ {bundle} -ef {blob} ]; then\n  ln --force {blob} {bundle}.$$\n  \
                      mv --force {bundle}.$$ {bundle}\nfi\n"
@@ -358,11 +351,8 @@ trap - EXIT
     )
 }
 
-/// Sends `reached` what its store lacks of `tree`, saying what that is, or that it lacks
-/// nothing: if it lacks anything, with the lock on sending it
-/// ([`Shared::upload`](super::Shared::upload)), it asks again, and sends what it still lacks, over
-/// several connections at once ([`sent`]); and once more, if a connection that went over ends, as
-/// [`Reached::pause`] allows, as what has arrived stays there.
+/// Sends the blobs of the tree that the controller lacks, saying what that is, until it lacks none.
+/// Sends of one workspace take turns, so that none sends what another is sending.
 fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
     let manifest::Hashed { manifest, sources } = &tree.hashed;
     if manifest::pieces(&lacked(reached, manifest)?).is_empty() {
@@ -410,18 +400,19 @@ fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
     }
 }
 
-/// How a stream of [`sent`] ended: over shared master `master`, its `ssh`'s exit status, whether
-/// that says its connection ended, and what [`manifest::stream`] gave.
+/// How one stream of a send ended.
 struct Streamed {
     master: usize,
     status: ExitStatus,
+    /// Whether the stream's connection ended under it, not the command on the controller.
     cut: bool,
+    /// What writing the stream came to: `Err` if a write failed, and `Ok(Err)` if a source changed
+    /// since it was hashed.
     written: io::Result<Result<(), String>>,
 }
 
 impl Streamed {
-    /// Whether the stream, whose connection didn't end, sent all its pieces to `reached`, else
-    /// why not.
+    /// Whether the stream, whose connection didn't end, sent all its pieces, else why not.
     fn ended(self, reached: &Reached) -> Result<(), String> {
         let Self {
             master,
@@ -452,11 +443,9 @@ impl Streamed {
     }
 }
 
-/// Sends `streams`, each a list of pieces read from where `sources` say, to `reached`, each a
-/// [`manifest::receive`] of its own, at once, over a session of a master that no other of them
-/// holds, as long as one can be had, else of one they hold ([`Reached::slot_apart`]): each starts
-/// as its master opens. Says, each [`PROGRESS`] once all have started until the last has ended,
-/// how much they have sent. Gives how each ended, once all have.
+/// Sends each of `streams` at once, each a `manifest::receive` of its own over a session of a
+/// connection that no other of them holds, as long as one can be had, and each as its connection
+/// opens, while it says how far the send is. Returns how each stream ended, once all have.
 // Many connections at once, each with a list of its own, as Bazel's uploads go over up to
 // `--remote_max_connections` and Nix's downloads over up to `http-connections`:
 // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/com/google/devtools/build/lib/remote/options/RemoteOptions.java#L65-L80
@@ -469,8 +458,8 @@ fn sent(
     let began = Instant::now();
     let size_bytes = streams.iter().flatten().map(|piece| piece.size_bytes).sum();
     // Many streams write how many bytes they have sent, and this thread alone reads them; not
-    // bounded, so that no stream waits while this thread opens masters, as the counts are bounded
-    // by the reads of the pieces.
+    // bounded, so that no stream waits while this thread opens connections, as the reads of the
+    // pieces bound the counts.
     let (counting, counts) = mpsc::channel();
     thread::scope(|scope| {
         let (mut held, mut apart) = (BTreeSet::new(), true);
@@ -535,8 +524,6 @@ fn sent(
     })
 }
 
-/// Says, each [`PROGRESS`] since `began` until every sender of `counts` has gone, how many of
-/// `size_bytes` they have sent to controller `name`, as the counts of bytes they send add up.
 fn said_progress(name: &Name, counts: &mpsc::Receiver<u64>, began: Instant, size_bytes: u64) {
     let (mut sent_bytes, mut next) = (0, began + PROGRESS);
     loop {
@@ -553,8 +540,7 @@ fn said_progress(name: &Name, counts: &mpsc::Receiver<u64>, began: Instant, size
     }
 }
 
-/// What the store of `reached` lacks of the blobs that `manifest` names, as it answers
-/// [`manifest::query`], asked again if the connection that went over ends.
+/// The blobs of `manifest` that the controller's store lacks.
 fn lacked(
     reached: &Reached,
     manifest: &manifest::Manifest,
@@ -573,9 +559,8 @@ fn lacked(
     manifest::missing(&answer)
 }
 
-/// Runs `session` with this machine's standard output and error, and its standard input written
-/// by `write`, until it ends, or `write` fails as [`Pipe`] does once the session stalls, which
-/// kills it; gives its exit status, and what `write` gave.
+/// Runs `session` with a standard input that `write` fills, and returns how it ended with what
+/// `write` returned. A stalled write stops the `ssh`.
 fn streamed<T>(
     session: &mut Session,
     write: impl FnOnce(&mut Pipe) -> io::Result<T>,
@@ -596,8 +581,8 @@ fn streamed<T>(
     Ok((status, written))
 }
 
-/// A command's standard input, which fails, as [`io::ErrorKind::TimedOut`], once it has taken no
-/// byte for [`STALL_TIMEOUT`].
+/// The standard input of an `ssh`, written only when it takes bytes: a write that finds no room
+/// for `STALL_TIMEOUT` fails as `TimedOut`.
 struct Pipe(ChildStdin);
 
 impl io::Write for Pipe {
@@ -628,16 +613,13 @@ impl io::Write for Pipe {
     }
 }
 
-/// What controller `name` lacks of `manifest`'s blobs, for a person to read, as `streams` of
-/// their pieces are to be sent: how many of the task's files, whether Pumpkin's bundle, and over
-/// how many connections, if more than one; or that it holds them all.
 fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Piece>]) -> String {
     let pieces = || streams.iter().flatten();
     let lacked: BTreeSet<&Sha256Digest> = pieces().map(|piece| &piece.digest).collect();
     let (bundles, files): (Vec<&manifest::Entry>, Vec<&manifest::Entry>) = (manifest.entries())
         .iter()
         .partition(|entry| entry.kind == manifest::Kind::Bundle);
-    // A task's files are never one, as `./pumpkin` and `.pumpkinversion` go with its own.
+    // A task's files are never none, as `pumpkin` and `.pumpkinversion` go with its own.
     let files_count = files.len();
     if lacked.is_empty() {
         return format!("controller `{name}` holds all {files_count} of the task's files");
@@ -667,9 +649,6 @@ fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Pi
     )
 }
 
-/// What a send to controller `name` says of the pieces it sends, `size_bytes` in all, once it has
-/// sent `sent_bytes` of them after `elapsed`: how much, and at what rate so far, for a person to
-/// read.
 // A count of what is done against the whole, as Modal says of the files of a mount it uploads:
 // https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/mount.py#L597
 fn progress(name: &Name, sent_bytes: u64, size_bytes: u64, elapsed: Duration) -> String {
@@ -682,7 +661,6 @@ fn progress(name: &Name, sent_bytes: u64, size_bytes: u64, elapsed: Duration) ->
     )
 }
 
-/// `bytes` for a glance, to a tenth of the largest unit of 1024 that it reaches, as `3.4 MiB`.
 fn size(bytes: u64) -> String {
     let units = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
     let Some((unit, name)) = units.into_iter().find(|(unit, _)| bytes >= *unit) else {

@@ -1,28 +1,19 @@
-//! A caller's trace: its model requests as steps of its conversations, read in one pass over its
-//! exchanges and held, extended as the log grows.
+//! A run's model requests read as conversations.
 //!
-//! A request sends its conversation again, as a list of items, each of which the record keeps
-//! once, by its digest. A request whose list extends another's, item for item the same
-//! ([`read::unmarked`]), is that one's child, so the requests of a caller make a forest: each
-//! tree is a thread, named by its first root's request. Of the earlier requests that sent the
-//! longest such list, the parent is the last whose answer the request continues
-//! ([`Trace::continues`]), else the last. A request that sends a list an earlier one sent is a
-//! retry of it if that one failed, and a repeat of it if it was answered.
-//! The forest is that of the requests in their order, whatever the order of their answers. A step
-//! shows what its request added past its parent's list, less what only sends back its parent's
-//! answer, and its answer, as `route::read` reads any API's; a turn starts at a step that adds
-//! a user's item. A tool call of an answer is paired with each of its outputs, in later steps of
-//! the thread, by the call's id, and names the first.
+//! A request's body, as the record keeps it, is a list of items. A request whose list extends an
+//! earlier request's, the items that its answer gave included, continues it: a [`Trace`] derives
+//! from that each request's parent, its thread (the root request that its ancestors lead to) and
+//! its turn (the request at which a user's item began). The derivation reads each request once, as
+//! it arrives, and again from the start if a request with a lower number arrives later. A tool
+//! call of an answer is paired by its id with its first output, in a later request of the thread.
 //!
-//! The pass reads each request's kept parts without the items they name, each item once, and each
-//! answer once it has ended; a step in flight shows its answer so far, read again at each
-//! extension. A request whose files can't be read is a step with what the log says of it and a
-//! note. Which parts a record keeps apart, its log says in a request's answer, so a step in flight
-//! is in no thread until it is answered.
+//! A request in flight shows the answer so far, read again at each extension, and is in no thread
+//! until it is answered, as the log names which parts the record keeps apart in the answer. A
+//! request whose files can't be read is a step with what the log says of it, and a note.
 //!
-//! Which request asks for what, and the answer it gets, is [`ask`]'s; the JSON forms of the
-//! answers, [`json`](mod@json)'s; a trace's statistics, [`stats`]'s; the diff of two of its
-//! requests, [`diff`]'s; and the ops the run brokered for its caller, [`ops`]'s.
+//! [`Exchanges`] holds what a run's log says of each request, for every caller; a `Trace` is one
+//! caller's. `ask` says what a request of the page asks for, `json` and `stats` answer it, `diff`
+//! compares two requests, and `ops` holds what the log says of the ops a run brokered.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,34 +36,33 @@ pub(super) use ask::{Answer, Asked, Side, asked};
 pub(super) use json::searchable;
 pub(super) use ops::Ops;
 
-/// The most traces that the view holds, those read last, besides those of live runs whose folds
-/// it holds: a page shows one, and a person opens a few side by side.
+/// How many traces `View::trace` keeps of runs that it no longer holds live; the one read longest
+/// ago goes first. A page shows one, and a person opens a few side by side.
 pub(super) const TRACE_PASSES: usize = 3;
 
-/// The most steps up a thread that an output's call is looked for in, past its own step's parent:
-/// a harness sends a call's output in the request after the call's answer.
+/// How many ancestors up a request's chain `pair` looks for the call that an output answers, past
+/// its own parent: a harness sends a call's output in the request after the call's answer.
 const CALL_LOOKUP_STEPS: usize = 64;
 
-/// The model exchanges that a run's log names, by request, as its lines are taken.
+/// What a run's log says of its model requests so far, for every caller.
 #[derive(Default)]
 pub(super) struct Exchanges {
     by_request: BTreeMap<u64, Said>,
-    /// The request that each of the log's model lines names, in the log's order.
+    /// The request of each start or answer taken, in log order, which a trace reads from where it
+    /// left off.
     lines: Vec<u64>,
 }
 
-/// A model request, as the log says of it so far.
 struct Said {
     caller: String,
-    /// The byte of its `model_request_started`, and when it was observed, if logged.
+    /// The byte of the start's log line, and the time it says, in nanoseconds.
     started: Option<(u64, Option<u64>)>,
-    /// The byte of its `model_answered`, when it was observed, and the event's JSON, held as text
-    /// as a parsed value would hold ten times the memory.
+    /// The same for the answer, with the answer's event as JSON text, which holds far less memory
+    /// than a parsed value.
     answered: Option<(u64, Option<u64>, Box<str>)>,
 }
 
 impl Said {
-    /// Its `model_answered`'s event; `null` while in flight.
     fn event(&self) -> Value {
         let text = self.answered.as_ref().map(|(_, _, text)| &**text);
         text.and_then(|text| serde_json::from_str(text).ok())
@@ -81,7 +71,8 @@ impl Said {
 }
 
 impl Exchanges {
-    /// Takes `record`, the line of the log at byte `byte`.
+    /// Adds the request that `record`, the log line that starts at `byte`, starts or answers; any
+    /// other record is ignored.
     pub(super) fn take(&mut self, byte: u64, record: &Value) {
         let event = &record["event"];
         let answered = match event["kind"].as_str() {
@@ -110,11 +101,10 @@ impl Exchanges {
     }
 }
 
-/// The API of the request whose `model_answered` is `event`, if the log names it.
 fn api_of(event: &Value) -> Option<Api> {
     match &event["api"] {
-        // A build before the log named a request's API served the Responses API and Chat
-        // Completions alone, whose conversations are their `input` and `messages`.
+        // A log that names no API is of a build that served only the Responses and Chat
+        // Completions APIs, whose conversations are their `input` and `messages`.
         Value::Null => match event["kept"]["request"]["items"]["field"].as_str() {
             Some("input") => Some(Api::Responses),
             Some("messages") => Some(Api::Chat),
@@ -124,53 +114,50 @@ fn api_of(event: &Value) -> Option<Api> {
     }
 }
 
-/// A decimal string of nanoseconds, as the log writes a time.
 fn nanos(value: &Value) -> Option<u64> {
     value.as_str()?.parse().ok()
 }
 
-/// A part of a request: an item of its conversation, or a field of its body, read once by its
-/// digest or, as the record keeps it as sent, by its JSON.
+/// A field or conversation item that some request kept, read once however many requests hold it.
 struct Part {
+    /// The record's digest of the kept item, or `None` for a part that the record holds in line.
     digest: Option<String>,
-    /// Of a conversation's item, the first part that sends the same item ([`read::unmarked`]); of
-    /// a field, itself.
+    /// The first part that equals this one less what marks an item for one request alone.
     same: u32,
-    /// The names of its tools, if it is a body's `tools`.
     tools: Option<Vec<String>>,
-    /// Its entries, or why its item can't be read.
     entries: Result<Vec<Item>, String>,
 }
 
-/// A step of a trace: a request, and what is known of it.
+/// One request of a trace. Indexes are into the trace's `steps`, parts and tool lists.
 struct Step {
     request: u64,
-    /// Whether it was answered, and its request read, if it can be.
+    /// Whether its answer has been taken and its request read.
     placed: bool,
-    /// How the record kept its request, if it was read, which places it in the forest.
     form: Option<Form>,
     api: Option<Api>,
-    /// Its conversation, each item as the index of its part.
+    /// The parts of its conversation, in order.
     list: Vec<u32>,
-    /// The fields of its body, each as the index of its part.
+    /// The parts of its other fields, by name.
     fields: BTreeMap<String, u32>,
-    /// The part of its list of tools, if it sent one.
     tools_part: Option<u32>,
+    /// The earlier request that this continues.
     parent: Option<usize>,
+    /// The request at the root of the chain of parents.
     thread: Option<u64>,
-    /// The step that sent the same list last before it, by their requests.
+    /// The earlier request with the same conversation, of which this is a retry or a repeat.
     same_as: Option<usize>,
-    /// The byte of the log's last line whose answer changed it once it was placed: of an earlier
-    /// request, where it is in the forest; of a later one, the output that a call of its answer
-    /// names.
+    /// The byte of the log's last line that changed it once it was placed: of an earlier request,
+    /// where it is in the forest; of a later one, the output that a call of its answer names.
     changed: Option<u64>,
-    /// The request whose step began its turn.
+    /// The request at which the user's item that this answers began.
     turn: Option<u64>,
-    /// The entries it added, by address and part: of its fields, then of its items.
+    /// The entries this request adds to its parent's: the address of each, its part and its place
+    /// in the part.
     added: Vec<(Address, u32, usize)>,
-    /// Its answer's items, as far as read.
+    /// The items that its response gave, as far as read.
     answer: Vec<Item>,
     stop: Option<String>,
+    /// Whether the answer was read whole.
     whole: bool,
     tools: Option<usize>,
     notes: Vec<String>,
@@ -179,13 +166,13 @@ struct Step {
 /// How the record kept a request's body.
 #[derive(Clone, Copy)]
 enum Form {
-    /// Whole, so that its conversation is compared with no other.
+    /// As one body: its conversation is compared with no other.
     Whole,
-    /// With its conversation's items apart.
+    /// Its items apart, each by its digest.
     Apart,
 }
 
-/// Where a step is in the forest, and what it pairs, as a placement out of order may change it.
+/// What is derived of a step, which a derivation made again compares to see what it moved.
 #[derive(PartialEq, Eq)]
 struct Derived {
     thread: Option<u64>,
@@ -196,10 +183,13 @@ struct Derived {
     pairs: Vec<(String, String)>,
 }
 
-/// Where an entry is: `<request>/in/<item>/<part>`, the part of the item at that index of the
-/// request's conversation, `<request>/head/<field>/<part>`, of a field its API reads as an item,
-/// such as the Responses API's `instructions`, or `<request>/out/<part>`, of its answer; the same
-/// in every reply, as a request's list and answer never change once read.
+/// Where an entry of a request is: in a field of its head that its API reads as an item, such as
+/// the Responses API's `instructions` (the field and the place in it), in an item of its
+/// conversation (the item and the place in it), or in its answer (the place).
+///
+/// Its text is `<request>/head/<field>/<part>`, `<request>/in/<item>/<part>` or
+/// `<request>/out/<part>`, the same in every reply, as a request's list and answer never change
+/// once read.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum Address {
     Head(String, usize),
@@ -208,7 +198,7 @@ pub(super) enum Address {
 }
 
 impl Address {
-    /// The request and address that `text` names, as [`Address::of`] writes them.
+    /// The request and the place that `text` names, or `None` if it is no address.
     fn parse(text: &str) -> Option<(u64, Self)> {
         let number = |text: &str| text.parse::<usize>().ok();
         let address = match text.split('/').collect::<Vec<_>>()[..] {
@@ -231,40 +221,42 @@ impl Address {
     }
 }
 
-/// A list of tools that a request declares, by its part.
 struct Tools {
     digest: Option<String>,
     names: Vec<String>,
 }
 
-/// A caller's trace, as one pass over its exchanges made it, as far as the log was taken.
+/// What the view has read of one caller's model requests in one run, made from the log's
+/// [`Exchanges`] and the record, and extended as the log grows.
 pub(super) struct Trace {
     run: String,
     caller: String,
+    /// The log epoch and the fold's number that this was read from; a trace of another is made
+    /// again.
     log_epoch: u64,
-    /// Which of the view's folds of the run it was read from ([`super::Held::made`]).
     made: u64,
-    /// How many of the log's model lines the pass took ([`Exchanges::lines`]).
+    /// How many of `Exchanges::lines` it has read.
     taken: usize,
     steps: Vec<Step>,
-    /// Each step's index, by its request.
+    /// Each request's step.
     at: BTreeMap<u64, usize>,
     parts: Vec<Part>,
-    /// Each part's index, by its field, if it is one, and its digest or JSON.
+    /// Each part by its field and its text, so that it is read once.
     keys: BTreeMap<(Option<String>, String), u32>,
-    /// The forest's nodes: each holds the steps whose list ends there, by the order placed.
+    /// A tree of conversations: each node lists the steps whose conversation ends there, and an
+    /// edge, from a node and a part's `same`, leads to the node of the conversation one item
+    /// longer.
     nodes: Vec<Vec<usize>>,
-    /// Each node's child by the item that leads to it, as its first part ([`Part::same`]).
     edges: BTreeMap<(usize, u32), usize>,
-    /// Each conversation's item's first part, by the SHA-256 of its unmarked JSON.
+    /// Each part's `same`, by the digest of its unmarked form.
     unmarked: BTreeMap<[u8; 32], u32>,
     tools: Vec<Tools>,
     tools_of: BTreeMap<u32, usize>,
-    /// Each call's output and each output's call, by their addresses.
+    /// The address of each call and of the output that answers it, each by the other.
     pairs: BTreeMap<String, String>,
-    /// The API of the caller's answered requests, if they agree.
+    /// The API all the requests read so far use, or `None` if they differ.
     api: Option<Api>,
-    /// The last request placed in the forest, which places a later one after it.
+    /// The highest request derived, so that a lower one arriving later is seen.
     derived: Option<u64>,
 }
 
@@ -291,8 +283,8 @@ impl Trace {
         }
     }
 
-    /// Takes what `exchanges`, of `record`, gained since the pass last took them, and reads again
-    /// the answer so far of each step in flight.
+    /// Reads the requests of this trace's caller that `exchanges` has taken since the last call,
+    /// from `record`.
     fn extend(&mut self, record: &Record, exchanges: &Exchanges) {
         let mut touched = Vec::new();
         for &request in &exchanges.lines[self.taken..] {
@@ -323,8 +315,8 @@ impl Trace {
                 self.read_so_far(index, record);
             }
         }
-        // In the order of their requests, so that a pass makes the same forest however much of
-        // the log it takes at a time.
+        // In the order of their requests, so that a pass makes the same forest however much of the
+        // log it takes at a time.
         placed.sort_by_key(|&index| self.steps[index].request);
         let first = placed.first().map(|&index| self.steps[index].request);
         if first.is_some_and(|first| self.derived.is_some_and(|last| first < last)) {
@@ -343,8 +335,6 @@ impl Trace {
         }
     }
 
-    /// Reads the answer so far of step `index`, in flight, by the API its caller's answers have;
-    /// nothing while no answer of the caller says which.
     fn read_so_far(&mut self, index: usize, record: &Record) {
         let Some(api) = self.api else {
             return;
@@ -357,8 +347,6 @@ impl Trace {
         }
     }
 
-    /// Reads step `index` once the log says it was answered; whether this call read its request,
-    /// which is then to be placed in the forest.
     fn update(&mut self, index: usize, record: &Record, exchanges: &Exchanges) -> bool {
         let request = self.steps[index].request;
         let Some(said) = exchanges.by_request.get(&request) else {
@@ -411,7 +399,6 @@ impl Trace {
         }
     }
 
-    /// Reads the parts of step `index`'s request, which `kept` holds, of `api`.
     fn read(&mut self, index: usize, api: Api, kept: KeptRequest, record: &Record) {
         let KeptRequest {
             conversation,
@@ -443,9 +430,6 @@ impl Trace {
         }
     }
 
-    /// Places step `index`, whose request was read, in the forest, after every step placed
-    /// before it, and reads what it added; a step above whose call it pairs first is changed at
-    /// `byte`, if given.
     fn derive(&mut self, index: usize, byte: Option<u64>) {
         let request = self.steps[index].request;
         self.derived = self.derived.max(Some(request));
@@ -459,7 +443,6 @@ impl Trace {
             Some(Form::Apart) => {}
         }
         let list = std::mem::take(&mut self.steps[index].list);
-        // The deepest node above the list's own that holds a step holds its parent.
         let (mut node, mut above) = (0, None);
         for (depth, &part) in list.iter().enumerate() {
             if !self.nodes[node].is_empty() {
@@ -472,6 +455,7 @@ impl Trace {
                 nodes.len() - 1
             });
         }
+        // The deepest node above the list's own that holds a step holds its parent.
         let parent = above.and_then(|(above, depth)| {
             let held = &self.nodes[above];
             let continued = held.iter().rev().copied();
@@ -494,7 +478,8 @@ impl Trace {
 
     /// Whether `part`, the first item that a request sent past step `other`'s list, continues
     /// `other`'s answer: each of its entries sends back an entry of it, or is the output of one of
-    /// its calls. Each, as samples of one list may answer with the same text and other calls.
+    /// its calls: every entry, not any, as samples of one list may answer with the same text and
+    /// other calls.
     fn continues(&self, part: u32, other: usize) -> bool {
         let Ok(entries) = &self.parts[part as usize].entries else {
             return false;
@@ -513,9 +498,6 @@ impl Trace {
             })
     }
 
-    /// Places every step read again, in the order of their requests, once one was read after a
-    /// later one was placed; each step whose place or pairs that changes is changed at `byte`,
-    /// the line that `since` sends it again from.
     fn derive_again(&mut self, byte: Option<u64>) {
         let before = self.all_derived();
         self.nodes = vec![Vec::new()];
@@ -529,10 +511,10 @@ impl Trace {
         let placed: Vec<usize> = (self.at.values().copied())
             .filter(|&index| self.steps[index].form.is_some())
             .collect();
-        // Only what differs from the forest before is changed, below.
         for index in placed {
             self.derive(index, None);
         }
+        // Only what differs from the forest before is changed, below.
         let after = self.all_derived();
         let mut left = BTreeSet::new();
         for ((step, before), after) in self.steps.iter_mut().zip(before).zip(after) {
@@ -551,7 +533,6 @@ impl Trace {
         }
     }
 
-    /// Where each step is in the forest, and what it pairs, by its index.
     fn all_derived(&self) -> Vec<Derived> {
         let mut pairs: BTreeMap<u64, Vec<(String, String)>> = BTreeMap::new();
         for (at, other) in &self.pairs {
@@ -581,9 +562,6 @@ impl Trace {
             .collect()
     }
 
-    /// Reads the entries that step `index` added past the first `from` items of its list, and
-    /// the fields that differ from its parent's, less those that send back its parent's answer;
-    /// pairs each output with its call, as [`Self::pair`] does at `byte`, and finds its turn.
     fn add(&mut self, index: usize, from: usize, byte: Option<u64>) {
         let step = &self.steps[index];
         let parent = step.parent.map(|parent| &self.steps[parent]);
@@ -631,9 +609,6 @@ impl Trace {
         (step.added, step.turn) = (added, turn);
     }
 
-    /// Pairs each output among `added`, the entries step `index` added, with its call, in the
-    /// answer of a step above it; a call is paired with its first output, and its step is then
-    /// changed at `byte`, if given.
     fn pair(&mut self, index: usize, added: &[(Address, u32, usize)], byte: Option<u64>) {
         let step = &self.steps[index];
         let mut pairs = Vec::new();
@@ -676,7 +651,6 @@ impl Trace {
         }
     }
 
-    /// The index of `part`, of `field` if it is one, read once, as `api` writes it.
     fn part(&mut self, api: Api, field: Option<&str>, part: KeptPart, record: &Record) -> u32 {
         let key = match &part {
             KeptPart::Kept(digest) => digest.to_string(),
@@ -730,7 +704,6 @@ impl Trace {
         index
     }
 
-    /// The index of the list of tools that `part` is.
     fn tools(&mut self, part: u32) -> usize {
         if let Some(&index) = self.tools_of.get(&part) {
             return index;
@@ -746,9 +719,9 @@ impl Trace {
     }
 }
 
-/// Whether `entry`, which a request sent, sends back `answer`, an entry of its parent's answer:
-/// the same text of the same kind, or the same call, by its id. A request's reasoning is matched
-/// by its text, as a client may send none of it back.
+/// Whether `entry`, which a request sent, sends back `answer`, an entry of its parent's answer: the
+/// same text of the same kind, or the same call, by its id. A request's reasoning is matched by
+/// its text, as a client may send none of it back.
 fn echoed(entry: &Item, answer: &Item) -> bool {
     match (entry, answer) {
         (Item::Assistant { text }, Item::Assistant { text: answered })

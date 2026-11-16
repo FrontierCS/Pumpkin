@@ -1,10 +1,9 @@
-//! `pumpkin fmt`, which formats the workflow language's `.star` files, and the lints that `check`
-//! runs on each file that an evaluation reads, both by the formatter beside `pumpkin`, which
-//! `cargo xtask install` puts there.
+//! The formatter of `.star` files, `buildifier` beside `pumpkin`: `pumpkin fmt` formats files with
+//! it, and `pumpkin check` lints a task's files with it.
 //!
 //! The formatter is buildifier, Bazel's formatter of Starlark, and this module alone knows it:
 //! each file's text goes to it on its standard input, and what it gives back is read here, so
-//! that none of its flags or forms is Pumpkin's interface, and another formatter could take its
+//! that none of its flags or forms is `pumpkin`'s interface, and another formatter could take its
 //! place.
 
 use std::io::Write as _;
@@ -20,17 +19,13 @@ use crate::{absolute_utf8, cli, next, say};
 
 const FORMATTER: &str = "buildifier";
 
-/// What every run of the formatter is given: no configuration file, so that every `.star` file is
-/// written alike, wherever it is; and each text read as a generic Starlark file, not one of
-/// Bazel's, whatever its name.
+// No configuration file, so that every `.star` file is written alike, wherever it is; and each
+// text is read as a generic Starlark file, not one of Bazel's, whatever its name.
 const ALWAYS: [&str; 2] = ["--config=off", "--type=default"];
 
-/// What `check` says of each lint of the formatter's default set that a `.star` file `pumpkin`
-/// evaluates can have, by the formatter's name for it, which the source line, shown below it,
-/// marks. Most find a mistake that evaluating the file doesn't, as it may lie on a path that the
-/// args given don't run; the rest hold every file to one convention, of docstrings and names.
-/// The set's other lints are of Bazel's own files, or of what the language refuses before any
-/// lint, such as `print`, `/` or `+=`.
+/// The lints that a file can raise, by the formatter's name for each, with the message that
+/// says what is wrong and what to do. The formatter's other lints are of Bazel's own files, or
+/// of what the language refuses before any lint.
 const LINTS: [(&str, &str); 19] = [
     (
         "load",
@@ -124,12 +119,11 @@ struct Report {
 
 #[derive(Deserialize)]
 struct Linted {
-    /// Whether it reads the file as Starlark.
+    /// Whether the formatter reads the file as Starlark.
     valid: bool,
     warnings: Vec<Warning>,
 }
 
-/// What a lint finds, by the formatter's name for the lint, from its start to its end.
 #[derive(Deserialize)]
 struct Warning {
     category: String,
@@ -137,8 +131,6 @@ struct Warning {
     end: Position,
 }
 
-/// A place in a text: its line, and its column, in characters, each counted from 1; a column one
-/// past a line's last character is the line's end.
 #[derive(Deserialize)]
 struct Position {
     line: usize,
@@ -146,7 +138,9 @@ struct Position {
 }
 
 impl Position {
-    /// The place's byte offset in `text`, if `text` has such a place.
+    /// The byte offset in `text` of this position, whose line and column count from 1, a column in
+    /// characters; a column one past a line's last character is the line's end. None if `text` has
+    /// no such place.
     fn offset(&self, text: &str) -> Option<usize> {
         let start = match self.line.checked_sub(1)? {
             0 => 0,
@@ -159,12 +153,10 @@ impl Position {
     }
 }
 
-/// The formatter beside the `pumpkin` executable that runs, by its path.
 pub(crate) struct Formatter(PathBuf);
 
 impl Formatter {
-    /// The formatter beside this `pumpkin`, as `cargo xtask install` installs it. Fails if there
-    /// is none.
+    /// The formatter installed beside this `pumpkin`.
     pub(crate) fn beside() -> Result<Self, String> {
         let pumpkin = crate::workspace::exe("expected the formatter beside it")?;
         let formatter = pumpkin.with_file_name(FORMATTER);
@@ -178,16 +170,16 @@ impl Formatter {
         Ok(Self(formatter))
     }
 
-    /// `text` formatted; or, if it isn't valid Starlark, where it isn't, as a line and a column,
-    /// if the formatter says.
+    /// `text` formatted; or, if the formatter reads it as no Starlark, the line and column where
+    /// it says so, if it says. The outer error is a failure of the formatter.
     fn format(&self, text: &str) -> Result<Result<String, Option<(usize, usize)>>, String> {
         let output = self.run(&["--mode=fix"], text)?;
         match output.status.code() {
             Some(0) => String::from_utf8(output.stdout)
                 .map(Ok)
                 .map_err(|_| "the formatter wrote a text that isn't UTF-8".to_owned()),
-            // Its first line is `<stdin>:<line>:<column>: <message>`.
             Some(1) => {
+                // Its first line is `<stdin>:<line>:<column>: <message>`.
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let place = stderr.strip_prefix("<stdin>:").and_then(|rest| {
                     let mut numbers = rest.splitn(3, ':').map(str::parse::<usize>);
@@ -199,9 +191,8 @@ impl Formatter {
         }
     }
 
-    /// What the formatter's default lints find in `text`, a file's that an evaluation read as
-    /// Starlark, each a finding in Pumpkin's words. Fails if the formatter doesn't report on
-    /// `text` as it is to, as when it doesn't read it as Starlark, or reports a lint that
+    /// The lints that `text` raises, in the order of the text. It fails if the formatter doesn't
+    /// report on `text` as it is to: it doesn't read it as Starlark, or reports a lint that
     /// [`LINTS`] lacks or a place that `text` lacks.
     pub(crate) fn lint(&self, text: &str) -> Result<Vec<Finding>, String> {
         let args = ["--mode=check", "--lint=warn", "--format=json"];
@@ -248,9 +239,8 @@ impl Formatter {
         Ok(findings)
     }
 
-    /// What the formatter gives, run with `args` and [`ALWAYS`], `text` on its standard input,
-    /// and no variable of this process's environment, which could steer it.
     fn run(&self, args: &[&str], text: &str) -> Result<Output, String> {
+        // No variable of this process's environment, which could steer the formatter.
         let mut command = stdx::process::command(&self.0, Environment::Only(&[]));
         command.args(ALWAYS).args(args);
         let spawned = (command.stdin(Stdio::piped()))
@@ -259,8 +249,8 @@ impl Formatter {
             .spawn();
         let mut child =
             spawned.map_err(|error| format!("{} can't be run: {error}", self.0.display()))?;
-        // It reads all of its input before it writes, so writing all of it first never waits
-        // on a pipe that is full.
+        // The formatter reads all of its input before it writes, so writing all of it first never
+        // waits on a pipe that is full.
         let written = child
             .stdin
             .take()
@@ -268,7 +258,7 @@ impl Formatter {
         let output = child.wait_with_output();
         let output =
             output.map_err(|error| format!("waiting for the formatter failed: {error}"))?;
-        // A formatter that ended before it read all of its input has said why, as its status.
+        // A formatter that failed may have stopped reading first: its failure is the one to say.
         match written {
             Some(Err(error)) if output.status.success() => {
                 Err(format!("writing to the formatter failed: {error}"))
@@ -277,7 +267,6 @@ impl Formatter {
         }
     }
 
-    /// Why the formatter, which gave `output`, failed.
     fn failed(&self, output: &Output) -> String {
         let stderr = String::from_utf8_lossy(&output.stderr);
         format!(
@@ -289,8 +278,6 @@ impl Formatter {
     }
 }
 
-/// Formats the `.star` files that `flags` name, as `pumpkin fmt --help` says, or with `check`
-/// says each that isn't formatted; returns 0 if each is.
 pub(crate) fn fmt(flags: cli::Fmt) -> Result<ExitCode, String> {
     let cli::Fmt { paths, check } = flags;
     let formatter = Formatter::beside()?;
@@ -339,9 +326,7 @@ pub(crate) fn fmt(flags: cli::Fmt) -> Result<ExitCode, String> {
     ))
 }
 
-/// Whether the `.star` file `file` was formatted; if it wasn't, and not `check`, it is now. Fails
-/// with what is wrong with the file, at its path, as when it can't be read or written, or isn't
-/// valid Starlark; or with the formatter's failure.
+/// Whether `file` was already formatted; if not, rewrites it, unless `check`.
 fn formatted(formatter: &Formatter, file: &Path, check: bool) -> Result<bool, String> {
     let shown = file.display();
     let text =
@@ -371,9 +356,6 @@ fn formatted(formatter: &Formatter, file: &Path, check: bool) -> Result<bool, St
     Ok(false)
 }
 
-/// Adds to `files` the `.star` file `path`, or each one below the directory `path`, in the order
-/// of their names, but those whose name, or that of a directory on the way to them, starts with
-/// `.`, or that a symbolic link on the way leads to. Fails if `path` is neither.
 fn star_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let shown = path.display();
     let metadata = fs::metadata(path).map_err(|error| match error.kind() {
@@ -394,22 +376,22 @@ fn star_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Adds to `files` each `.star` file below the directory `dir`, as [`star_files`] says.
 fn below(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let read = |error| format!("{} can't be read: {error}", dir.display());
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir).map_err(read)? {
         let entry = entry.map_err(read)?;
+        // The kind of the entry itself: a symbolic link is neither of these.
         let kind = entry.file_type().map_err(read)?;
         entries.push((entry.file_name(), kind));
     }
+    // So that the files, and their problems, come in an order of their own, not the directory's.
     entries.sort_by(|(one, _), (other, _)| one.cmp(other));
     for (name, kind) in entries {
         if name.as_encoded_bytes().starts_with(b".") {
             continue;
         }
         let path = dir.join(name);
-        // The kind of the entry itself: a symbolic link is neither of these.
         if kind.is_dir() {
             below(&path, files)?;
         } else if kind.is_file() && is_star(&path) {
@@ -419,7 +401,6 @@ fn below(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `path`'s last component names a `.star` file.
 fn is_star(path: &Path) -> bool {
     path.extension() == Some("star".as_ref())
 }
