@@ -13,6 +13,9 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   break it
 - WRITE a why as a `//` at the line it explains: the failure it prevents, where a number comes
   from, the alternative turned down
+- KEEP a measurement's result out of a comment and a commit message: where a why rests on a
+  quantity, name it at the precision the reasoning needs; what was measured, with its result,
+  goes in the pull request's description or an issue
 - CITE what shaped a design: name the project, paper or document, and link it (code by a
   permalink at a full commit SHA)
 - WRITE a module doc for the module's model and what it leaves to others, never a tour of its
