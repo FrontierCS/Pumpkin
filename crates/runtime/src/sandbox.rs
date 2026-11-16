@@ -396,7 +396,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         // end, as the run is abandoned then.
         let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
         let role = which.role(self.workflow());
-        let model = self.workflow().sandbox(role).model.is_some();
+        let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
         let hosting = self.providers.get(&placement.provider);
         let create = Create {

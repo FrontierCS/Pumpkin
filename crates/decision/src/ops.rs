@@ -256,7 +256,7 @@ impl Core<'_> {
 
     fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
-        // Parsing gives judge and submit grants to the agent alone (`Parser::roles`).
+        // A judge's runtime holds lease grants alone (`ir::JudgeRuntime`).
         let deadline = match working {
             Working::Agent { deadline, .. } => Some(deadline),
             Working::Job { .. } => None,

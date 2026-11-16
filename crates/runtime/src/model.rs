@@ -21,7 +21,7 @@ use std::time::Duration;
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
-use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
+use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
@@ -55,11 +55,14 @@ pub(super) fn routes(
     workflow: &Workflow,
     servings: &ByRole<Vec<Serving>>,
 ) -> Result<ByRole<Vec<Serving>>, String> {
-    workflow.by_role(|(role, sandbox)| route(sandbox, servings.get(role)))
+    workflow.by_role(|(role, sandbox)| route((sandbox, workflow.model(role)), servings.get(role)))
 }
 
-fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String> {
-    let Some(route) = &sandbox.model else {
+fn route(
+    (sandbox, model): (&Sandbox, Option<&ModelRoute>),
+    servings: &[Serving],
+) -> Result<Vec<Serving>, String> {
+    let Some(route) = model else {
         return Ok(Vec::new());
     };
     let role = &sandbox.name;
@@ -75,7 +78,7 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
         let Some(serving) = serving else {
             return Err(format!(
                 "`{role}` has a model route, but no upstream serves its `{api}` entry: give one, \
-                 or remove the role's `egress.model` to run without one"
+                 or remove the `egress.model` of `{role}`'s runtime to run without one"
             ));
         };
         let taken = models.as_slice().iter().map(|model| {

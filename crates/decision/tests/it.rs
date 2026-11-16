@@ -564,7 +564,7 @@ fn whole_run() {
 fn quotas() {
     check(
         |ir| {
-            let train = &mut ir["roles"][0]["grants"][0]["judge"];
+            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"];
             train["cumulative_seconds"] = json!(10);
             train["call_timeout_seconds"] = json!(6);
         },
@@ -631,7 +631,7 @@ fn quotas() {
 #[test]
 fn one_call_at_a_time() {
     check(
-        |ir| ir["roles"][0]["grants"][0]["judge"]["calls"] = json!(2),
+        |ir| ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["calls"] = json!(2),
         r#"
         0 agent_started
         1000 judge train 10
@@ -1517,7 +1517,7 @@ fn leasing(ir: &mut Value) {
         "name": "gpu", "role": "gpu_runner", "instances": 2, "instance_seconds": 900,
         "cumulative_seconds": 1200, "commands": 3, "transfer_bytes": 4096,
     } });
-    ir["roles"][0]["grants"]
+    ir["roles"][0]["runtime"]["agent"]["grants"]
         .as_array_mut()
         .unwrap()
         .insert(1, grant);
@@ -1899,7 +1899,7 @@ fn lease_shares() {
     check(
         |ir| {
             leasing(ir);
-            ir["roles"][0]["grants"][1]["lease"]["instances"] = json!(3);
+            ir["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["instances"] = json!(3);
         },
         r"
         0 agent_started
@@ -1951,11 +1951,11 @@ fn lease_grants_apart() {
             let mut runner = ir["roles"][3].clone();
             runner["name"] = json!("cpu_runner");
             ir["roles"].as_array_mut().unwrap().push(runner);
-            let mut cpu = ir["roles"][0]["grants"][1].clone();
+            let mut cpu = ir["roles"][0]["runtime"]["agent"]["grants"][1].clone();
             cpu["lease"]["name"] = json!("cpu");
             cpu["lease"]["role"] = json!("cpu_runner");
             cpu["lease"]["instances"] = json!(1);
-            ir["roles"][0]["grants"]
+            ir["roles"][0]["runtime"]["agent"]["grants"]
                 .as_array_mut()
                 .unwrap()
                 .insert(2, cpu);
@@ -2301,21 +2301,21 @@ fn lease_slots() {
 /// 50 s.
 fn judges_leasing(ir: &mut Value) {
     leasing(ir);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(50);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(50);
     let boxes = [("train_box", 1, "4", 100), ("final_box", 2, "5", 30)];
     for (name, judge, image, seconds) in boxes {
         let mut runner = ir["roles"][3].clone();
         runner["name"] = json!(name);
         runner["image"] = json!(format!("sha256:{}", image.repeat(64)));
         ir["roles"].as_array_mut().unwrap().push(runner);
-        let mut grant = json!({ "lease": {
+        let mut grant = json!({
             "name": "box", "role": name, "instances": 1, "instance_seconds": seconds,
             "transfer_bytes": 4096,
-        } });
+        });
         if judge == 1 {
-            grant["lease"]["commands"] = json!(2);
+            grant["commands"] = json!(2);
         }
-        ir["roles"][judge]["grants"] = json!([grant]);
+        ir["roles"][judge]["runtime"]["judge"]["lease_grants"] = json!([grant]);
     }
 }
 
@@ -2323,7 +2323,10 @@ fn judges_leasing(ir: &mut Value) {
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn call_model_routes() {
     check(
-        |ir| ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(10),
+        |ir| {
+            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"];
+            train["call_timeout_seconds"] = json!(10);
+        },
         r#"
         0 agent_started
         1000 judge train 10

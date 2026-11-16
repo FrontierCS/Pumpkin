@@ -523,7 +523,7 @@ workflow(
 )
 "#,
         &expect![[r#"
-            bad/status/task.star:5:30: `status` is no field of an element of `roles`: expected one of `name`, `image`, `user`, `needs`, `runtime`, `egress`, `grants`
+            bad/status/task.star:5:30: `status` is no field of an element of `roles`: expected one of `name`, `image`, `user`, `needs`, `runtime`
                 5 |     roles = [AGENT, JUDGE | {"status": "ready"}],
                   |                              ^^^^^^^^
                 the IR's /roles/1"#]],
@@ -3626,32 +3626,6 @@ fn plans() {
               "name": "neutral/images",
               "roles": [
                 {
-                  "egress": {
-                    "model": [
-                      {
-                        "api": "responses",
-                        "models": [
-                          "model-large"
-                        ]
-                      }
-                    ]
-                  },
-                  "grants": [
-                    {
-                      "judge": {
-                        "call_timeout_seconds": 600,
-                        "calls": 10,
-                        "name": "train",
-                        "role": "train_judge",
-                        "slot": "payload"
-                      }
-                    },
-                    {
-                      "submit": {
-                        "name": "final"
-                      }
-                    }
-                  ],
                   "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb6",
                   "name": "agent",
                   "needs": {
@@ -3667,7 +3641,33 @@ fn plans() {
                         "cwd": "/workspace"
                       },
                       "deadline_seconds": 7200,
+                      "egress": {
+                        "model": [
+                          {
+                            "api": "responses",
+                            "models": [
+                              "model-large"
+                            ]
+                          }
+                        ]
+                      },
                       "finalize_grace_seconds": 0,
+                      "grants": [
+                        {
+                          "judge": {
+                            "call_timeout_seconds": 600,
+                            "calls": 10,
+                            "name": "train",
+                            "role": "train_judge",
+                            "slot": "payload"
+                          }
+                        },
+                        {
+                          "submit": {
+                            "name": "final"
+                          }
+                        }
+                      ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
                     }
                   },
@@ -4886,13 +4886,6 @@ NAME = "one"
               "name": "neutral/library",
               "roles": [
                 {
-                  "grants": [
-                    {
-                      "submit": {
-                        "name": "final"
-                      }
-                    }
-                  ],
                   "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
                   "name": "agent",
                   "needs": {
@@ -4909,6 +4902,13 @@ NAME = "one"
                       },
                       "deadline_seconds": 3600,
                       "finalize_grace_seconds": 0,
+                      "grants": [
+                        {
+                          "submit": {
+                            "name": "final"
+                          }
+                        }
+                      ],
                       "stdin": "Solve the task in /task/README.md.\n"
                     }
                   },

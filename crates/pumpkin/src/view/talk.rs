@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use runtime::{Place, RouteEntry};
+use schema::ir::{self, Name};
 use serde_json::{Value, json};
 
 /// The model upstream, which every role with a route reaches: an end of edges, but no role.
@@ -58,29 +59,39 @@ impl Talk {
     /// The talk of a run before its log, with the roles of its `ir`, as placed in `places` and
     /// routed by `routes`, which is `None` where the run's routes are unknown.
     pub(super) fn new(
-        ir: &Value,
+        ir: &ir::Workflow,
         places: &BTreeMap<String, Place>,
         routes: Option<&BTreeMap<String, Vec<RouteEntry>>>,
     ) -> Self {
-        let roles = ir["roles"].as_array().map_or(&[][..], Vec::as_slice);
-        let score = ir["score"]["role"].as_str().unwrap_or_default();
+        let roles = ir.roles.as_slice();
+        let score = ir.score.role.as_str();
         let mut granted = BTreeMap::new();
         for role in roles {
-            for grant in role["grants"].as_array().into_iter().flatten() {
-                for kind in ["judge", "lease"] {
-                    if let (Some(holder), Some(name), Some(target)) = (
-                        role["name"].as_str(),
-                        grant[kind]["name"].as_str(),
-                        grant[kind]["role"].as_str(),
-                    ) {
-                        granted.insert((holder.to_owned(), name.to_owned()), target.to_owned());
-                    }
-                }
+            // Each grant that names a role: a judge grant its judge, a lease grant its runner.
+            let named: Vec<(&Name, &Name)> = match &role.runtime {
+                ir::Runtime::Agent(agent) => (agent.grants.iter())
+                    .filter_map(|grant| match grant {
+                        ir::Grant::Judge(judge) => Some((&judge.name, &judge.role)),
+                        ir::Grant::Lease(lease) => Some((&lease.name, &lease.role)),
+                        ir::Grant::Submit(_) => None,
+                    })
+                    .collect(),
+                ir::Runtime::Judge(judge) => (judge.lease_grants.iter())
+                    .map(|lease| (&lease.name, &lease.role))
+                    .collect(),
+                ir::Runtime::Runner(_) => Vec::new(),
+            };
+            for (name, target) in named {
+                let key = (role.name.to_string(), name.to_string());
+                granted.insert(key, target.to_string());
             }
         }
-        let routes = |role: &Value| {
-            let name = role["name"].as_str().unwrap_or_default();
-            routes.map(|routes| routes.get(name).map_or(&[][..], Vec::as_slice))
+        let routes = |role: &ir::Role| {
+            routes.map(|routes| {
+                routes
+                    .get(role.name.as_str())
+                    .map_or(&[][..], Vec::as_slice)
+            })
         };
         Self {
             roles: (roles.iter())
@@ -93,10 +104,9 @@ impl Talk {
             failed: BTreeMap::new(),
             reading: Reading {
                 agent: (roles.iter())
-                    .find(|role| role["runtime"]["agent"].is_object())
-                    .and_then(|role| role["name"].as_str())
-                    .unwrap_or_default()
-                    .to_owned(),
+                    .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)))
+                    .map(|role| role.name.to_string())
+                    .unwrap_or_default(),
                 score: score.to_owned(),
                 granted,
                 jobs: BTreeMap::new(),
@@ -305,14 +315,17 @@ impl Talk {
 }
 
 fn role_json(
-    role: &Value,
+    role: &ir::Role,
     score: &str,
     places: &BTreeMap<String, Place>,
     routes: Option<&[RouteEntry]>,
 ) -> Value {
-    let name = role["name"].as_str().unwrap_or_default();
-    let runtime = role["runtime"].as_object();
-    let kind = runtime.and_then(|runtime| runtime.keys().next().cloned());
+    let name = role.name.as_str();
+    let (kind, has_route) = match &role.runtime {
+        ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
+        ir::Runtime::Judge(judge) => ("judge", judge.egress.model.is_some()),
+        ir::Runtime::Runner(_) => ("runner", false),
+    };
     let place = (places.get(name)).map(|Place { provider, class }| format!("{provider}/{class}"));
     let routes = routes.map_or(json!("unknown"), |entries| {
         let entries = entries.iter().map(|entry| {
@@ -329,7 +342,7 @@ fn role_json(
         "name": name,
         "kind": kind,
         "score": name == score,
-        "routed": !role["egress"]["model"].is_null(),
+        "routed": has_route,
         "place": place,
         "routes": routes,
     })

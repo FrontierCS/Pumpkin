@@ -1727,8 +1727,8 @@ fn send_by_content() {
           stand-in/run.sh: 444, 1 link
           stand-in/task.star: 444, 1 link
           stand-in/with space.txt: 444, 1 link
-          a manifest: a tree of no files
           a manifest: the task's tree
+          a manifest: a tree of no files
           incoming/: none
         the job's tree:
           .pumpkin: a symbolic link to <scratch>/home/.pumpkin
@@ -2063,7 +2063,7 @@ fn send_refusals() {
     // A budget whose model the client's configuration gives no price.
     let mut budgeted = workflow(&image('0'), &["true"]);
     let route = json!([{ "api": "responses", "models": ["model-a"], "budget": { "microusd": 1 } }]);
-    budgeted["roles"][0]["egress"] = json!({ "model": route });
+    budgeted["roles"][0]["runtime"]["agent"]["egress"] = json!({ "model": route });
     scratch.write_task_in("repo", "stand-in", &budgeted);
     let (_, refused) = start(&scratch, &client);
     lines.extend([refused, calls(&scratch)]);
@@ -2534,7 +2534,8 @@ fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
         &format!("{record}/record.json"),
         &json!({ "record_version": "pumpkin.record/v0", "args": args }),
     );
-    let ir = json!({ "name": "stand-in", "roles": [] });
+    let mut ir: serde_json::Value = serde_json::from_str(test_support::WORKFLOW).unwrap();
+    ir["name"] = json!("stand-in");
     scratch.write(&format!("{record}/ir.json"), &ir);
     scratch.write(&format!("{record}/driver.pid"), "4242\n");
     grow(scratch, id, lines_count, "");
@@ -2731,7 +2732,7 @@ fn ls_by_offsets() {
         &shown,
         &expect![[r#"
             first, with no copies:
-            ls: exit status: 0, 4 rows, 44156 bytes
+            ls: exit status: 0, 4 rows, 48764 bytes
               <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
@@ -2746,7 +2747,7 @@ fn ls_by_offsets() {
               <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             run 1's log replaced by a shorter one, run 2's copy cut inside a line:
-            ls: exit status: 0, 4 rows, 7299 bytes
+            ls: exit status: 0, 4 rows, 8835 bytes
               <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
@@ -2802,14 +2803,14 @@ fn ls_before_a_line() {
         &[(id.as_str(), "<run>")],
         &expect![[r#"
             no line yet, listed three times:
-            ls: exit status: 0, 2 rows, 4668 bytes
+            ls: exit status: 0, 2 rows, 6204 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 4668 bytes
+            ls: exit status: 0, 2 rows, 6204 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 4668 bytes
+            ls: exit status: 0, 2 rows, 6204 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
             its line finished, twice:
-            ls: exit status: 0, 2 rows, 5692 bytes
+            ls: exit status: 0, 2 rows, 7228 bytes
               <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             ls: exit status: 0, 2 rows, 1085 bytes
               <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json"#]],

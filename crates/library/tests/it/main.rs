@@ -139,9 +139,7 @@ workflow(
             "image": agent["image"],
             "user": {"uid": 1000, "gid": 1000},
             "needs": {"cpu_millis": 1000, "memory_bytes": GiB},
-            "runtime": agent["runtime"],
-            "egress": agent["egress"],
-            "grants": [{"submit": {"name": "final"}}],
+            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"submit": {"name": "final"}}]}},
         },
         {
             "name": "judge",
@@ -273,9 +271,9 @@ fn shown(number: usize, declared: &Declared<'_, Built>) -> String {
     shown
 }
 
-/// `runtime` but its standard input and its times, a line for each part, each word of the command
-/// that is empty or holds a space quoted; each file by its mode, path and digest, followed by
-/// what `excerpt` shows of its content.
+/// `runtime` but its standard input, its times, its route and its grants, a line for each part,
+/// each word of the command that is empty or holds a space quoted; each file by its mode, path and
+/// digest, followed by what `excerpt` shows of its content.
 fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String {
     let AgentRuntime {
         command,
@@ -284,6 +282,8 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
         stdin: _,
         deadline_seconds: _,
         finalize_grace_seconds: _,
+        egress: _,
+        grants: _,
     } = runtime;
     let quoted = |word: String| {
         if word.is_empty() || word.contains(char::is_whitespace) {
@@ -316,9 +316,16 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
     shown
 }
 
+fn model_route(agent: &ir::Role) -> &ir::ModelRoute {
+    let ir::Runtime::Agent(runtime) = &agent.runtime else {
+        panic!("the first role is the agent");
+    };
+    runtime.egress.model.as_ref().unwrap()
+}
+
 /// The line of `agent`'s model route: each entry's API and models.
 fn route(agent: &ir::Role) -> String {
-    let route = agent.egress.model.as_ref().unwrap();
+    let route = model_route(agent);
     let route: Vec<String> = (route.as_slice().iter())
         .map(|entry| {
             let models: Vec<ModelName> = entry.models.clone().into();
@@ -333,7 +340,7 @@ fn route(agent: &ir::Role) -> String {
 /// it; and the number of the image `agent` runs on.
 fn layer(agent: &ir::Role, images: &[String]) -> String {
     let mut shown = String::new();
-    for entry in agent.egress.model.as_ref().unwrap().as_slice() {
+    for entry in model_route(agent).as_slice() {
         let names = |names: &[ir::HeaderName]| {
             if names.is_empty() {
                 return "none".to_owned();

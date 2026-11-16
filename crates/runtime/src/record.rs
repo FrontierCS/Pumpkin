@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use decision::PayloadRef;
 use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
 use route::Serving;
-use schema::ir::{Api, GpuModel, ModelName, Name, Sha256Digest};
+use schema::ir::{self, Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
@@ -442,27 +442,23 @@ impl Record {
 
     /// The name of the workflow, or `None` if `ir.json` isn't written.
     pub fn task(&self) -> Result<Option<String>, String> {
-        let Some(ir) = self.ir()? else {
+        let path = self.dir.join("ir.json");
+        let Some(bytes) = read_optional(&path)? else {
             return Ok(None);
         };
+        let ir: Value = serde_json::from_slice(&bytes).context(path.display())?;
         match ir["name"].as_str() {
             Some(name) => Ok(Some(name.to_owned())),
             None => Err(format!(
                 "{} holds no name: expected a workflow's IR",
-                self.dir.join("ir.json").display()
+                path.display()
             )),
         }
     }
 
     /// The workflow's IR, or `None` if `ir.json` isn't written.
-    pub fn ir(&self) -> Result<Option<Value>, String> {
-        let path = self.dir.join("ir.json");
-        let Some(bytes) = read_optional(&path)? else {
-            return Ok(None);
-        };
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .context(path.display())
+    pub fn ir(&self) -> Result<Option<ir::Workflow>, String> {
+        log::ir_in(&self.dir)
     }
 
     /// Where each role is placed, by the role's name, or `None` if `provider.json` isn't written.

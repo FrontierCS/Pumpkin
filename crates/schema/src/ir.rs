@@ -1,8 +1,8 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
 //! A workflow is data: [`Role`]s (one agent, its judges, with their [`Slot`]s, and the runners
-//! they lease), the [`Grant`]s each role holds, and the [`Score`], which judges what the agent
-//! submits.
+//! they lease), the [`Grant`]s the agent holds and the lease grants its judges hold, and the
+//! [`Score`], which judges what the agent submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -70,15 +70,6 @@ pub struct Role {
     /// ([`Workflow::place`](crate::workflow::Workflow::place)).
     pub needs: Needs,
     pub runtime: Runtime,
-    /// The role's routes out; absent, the role has none. A runner has none; the agent's model
-    /// route is open while it works, a judge's while its command runs, in each of its calls.
-    #[serde(default, skip_serializing_if = "Egress::is_empty")]
-    pub egress: Egress,
-    /// The ops the role may use while it works; absent, none. The agent holds judge calls,
-    /// leases, and exactly one submit grant; a judge may hold leases, which each of its calls
-    /// uses afresh, while its command runs; a runner holds none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<Grant>,
 }
 
 /// A numeric user and group, neither of them root.
@@ -190,6 +181,13 @@ pub struct AgentRuntime {
     /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
     /// comes first. 0 ends the work phase at the final submission.
     pub finalize_grace_seconds: u64,
+    /// The agent's routes out, open while it works; absent, it has none.
+    #[serde(default, skip_serializing_if = "Egress::is_empty")]
+    pub egress: Egress,
+    /// The ops the agent may use while it works: judge calls, leases and submit grants, of which
+    /// [`Workflow::parse`](crate::workflow::Workflow::parse) takes exactly one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
 }
 
 /// A directory to make in the agent's sandbox.
@@ -218,6 +216,13 @@ pub struct JudgeRuntime {
     pub slots: Vec<Slot>,
     /// What each call writes as its result.
     pub result: ResultSpec,
+    /// The judge's routes out, open while its command runs, in each of its calls; absent, it has
+    /// none.
+    #[serde(default, skip_serializing_if = "Egress::is_empty")]
+    pub egress: Egress,
+    /// The leases the judge may make while its command runs ([`LeaseGrant`]); absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lease_grants: Vec<LeaseGrant>,
 }
 
 /// How a runner runs each command its lease's holder sends, as the role's user: as a
@@ -443,7 +448,7 @@ impl fmt::Display for Api {
     }
 }
 
-/// Permission for the role that holds it to use an op while it works.
+/// Permission for the agent to use an op while it works.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
@@ -453,7 +458,7 @@ pub enum Grant {
 }
 
 impl Grant {
-    /// The name its holder uses the grant by. Unique among the role's grants.
+    /// The name the agent uses the grant by. Unique among its grants.
     pub fn name(&self) -> &Name {
         match self {
             Self::Judge(JudgeGrant { name, .. })

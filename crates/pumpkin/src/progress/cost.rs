@@ -9,9 +9,7 @@
 use std::collections::BTreeMap;
 
 use runtime::{Cost, ModelUse, Priced, Progress, TokenPrices, TokensCost};
-use schema::ir::{ApiRoute, ModelBudget, ModelName, Models};
-use serde::Deserialize;
-use serde_json::Value;
+use schema::ir::{self, ApiRoute, ModelBudget, ModelName, Models};
 
 /// The cost column of a run that cost `usd`, in dollars, and more if the cost is `partial`
 /// ([`Cost::partial`]), as `$1.20+`.
@@ -138,25 +136,29 @@ pub(super) fn more(unpriced: Option<&str>, unreported: u64) -> String {
 /// many places as the budget states: `budget train_judge (m-task): $20.04 of $20.00, exhausted`.
 /// The spend is `at least` that if a response left its tokens unreported or its tokens can't be
 /// costed; the budget is `exhausted` once the spend reaches it ([`ModelBudget`]).
-pub(super) fn budgets(progress: &Progress, ir: &Value) -> Vec<String> {
+pub(super) fn budgets(progress: &Progress, ir: &ir::Workflow) -> Vec<String> {
     let prices = &progress.token_prices;
-    // Read loosely, as a record that another build made may hold an IR that this one doesn't
-    // parse: an entry that can't be read then shows no budget, and the rest of the summary stays.
-    let roles = ir["roles"].as_array().into_iter().flatten();
-    let entries = roles.flat_map(|role| {
-        let entries = role["egress"]["model"].as_array().into_iter().flatten();
-        entries.filter_map(move |entry| Some((role, ApiRoute::deserialize(entry).ok()?)))
+    let entries = ir.roles.iter().flat_map(|role| {
+        let (agent, egress) = match &role.runtime {
+            ir::Runtime::Agent(agent) => (true, Some(&agent.egress)),
+            ir::Runtime::Judge(judge) => (false, Some(&judge.egress)),
+            ir::Runtime::Runner(_) => (false, None),
+        };
+        let route = egress.and_then(|egress| egress.model.as_ref());
+        let entries = route.map_or(&[][..], ir::ModelRoute::as_slice);
+        entries
+            .iter()
+            .map(move |entry| (agent, role.name.as_str(), entry))
     });
-    let lines = entries.filter_map(|(role, entry)| {
-        let name = role["name"].as_str()?;
+    let lines = entries.filter_map(|(agent, name, entry)| {
         let budget = entry.budget.as_ref()?;
-        let spent = if role["runtime"]["agent"].is_null() {
+        let spent = if agent {
+            Spent::of(progress.agent.model.as_ref()?, entry, prices)
+        } else {
             let own = (progress.calls.iter()).filter(|call| call.role.as_deref() == Some(name));
             own.fold(Spent::default(), |spent, call| {
-                spent.plus(Spent::of(&call.model, &entry, prices))
+                spent.plus(Spent::of(&call.model, entry, prices))
             })
-        } else {
-            Spent::of(progress.agent.model.as_ref()?, &entry, prices)
         };
         Some(spent.line(name, &entry.models, budget))
     });

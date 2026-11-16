@@ -12,13 +12,13 @@ use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 impl Workflow {
     /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
     /// [at](super::ParseError::at) its place. The rules: one agent and one submit grant; names
-    /// unique among roles, among a role's slots and among its grants; a judge holds lease grants
-    /// alone, a runner no grant and no model route; the agent's `dirs` and `files` give each path
-    /// once, none below a file; a slot's `max_bytes` and a lease grant's `transfer_bytes` are
-    /// within the protocol's limits; each grant names a role of its kind that no other grant of its
-    /// kind names, a judge grant a slot it has; an agent's runner has an image no judge has; every
-    /// runner is leased; the score's judge is named by no judge grant. A rule about parts that
-    /// fail to resolve goes unchecked, so fixing these errors may reveal others.
+    /// unique among roles, among a role's slots and among its grants; the agent's `dirs` and
+    /// `files` give each path once, none below a file; a slot's `max_bytes` and a lease grant's
+    /// `transfer_bytes` are within the protocol's limits; each grant names a role of its kind that
+    /// no other grant of its kind names, a judge grant a slot it has; an agent's runner has an
+    /// image no judge has; every runner is leased; the score's judge is named by no judge grant. A
+    /// rule about parts that fail to resolve goes unchecked, so fixing these errors may reveal
+    /// others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -32,7 +32,13 @@ struct Parser<'ir> {
     agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
     judges: BTreeMap<RoleId, Judge>,
     runners: BTreeMap<RoleId, Runner>,
-    holders: Vec<(JsonPointer, RoleId, &'ir [ir::Grant])>,
+    holders: Vec<Holder<'ir>>,
+}
+
+/// A role that holds lease grants, with each of them and its place.
+struct Holder<'ir> {
+    role: RoleId,
+    grants: Vec<(JsonPointer, &'ir ir::LeaseGrant)>,
 }
 
 type Grants = (
@@ -52,8 +58,22 @@ impl<'ir> Parser<'ir> {
         // With no agent, it holds no grants, so the score is checked against none.
         let (agent, grants) = match self.first_agent() {
             Ok((at, agent, grants)) => {
+                let list = at.token("grants");
+                let names = grants.iter().map(ir::Grant::name);
+                (self.errors).unique(names, |index| place(&list, index, &grants[index]));
+                let leases = grants
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, grant)| match grant {
+                        ir::Grant::Lease(lease) => Some((list.token(index).token("lease"), lease)),
+                        ir::Grant::Judge(_) | ir::Grant::Submit(_) => None,
+                    });
                 // The agent's lease grants come first, as [`Workflow::lease_grants`] says.
-                (self.holders).insert(0, (at.clone(), agent.role, grants));
+                let holder = Holder {
+                    role: agent.role,
+                    grants: leases.collect(),
+                };
+                self.holders.insert(0, holder);
                 (Ok((agent, self.grants(&at, grants))), grants)
             }
             Err(reported) => (Err(reported), &[][..]),
@@ -96,8 +116,6 @@ impl<'ir> Parser<'ir> {
                 user,
                 needs,
                 runtime,
-                egress: ir::Egress { model },
-                grants,
             } = role;
             self.roles.push(Sandbox {
                 name: name.clone(),
@@ -105,45 +123,12 @@ impl<'ir> Parser<'ir> {
                 user: *user,
                 needs: needs.clone(),
                 at: at.clone(),
-                model: model.clone(),
             });
+            let runtime_at = at.token("runtime");
             match runtime {
-                ir::Runtime::Agent(agent) => self.agent(at, id, agent, grants),
-                ir::Runtime::Judge(judge) => {
-                    let list = at.token("grants");
-                    let held = grants.iter().enumerate();
-                    for (index, grant) in
-                        held.filter(|(_, grant)| !matches!(grant, ir::Grant::Lease(_)))
-                    {
-                        self.errors.report(
-                            place(&list, index, grant),
-                            format!(
-                                "`{name}` is a judge, and judges hold only lease grants: remove it"
-                            ),
-                        );
-                    }
-                    if !grants.is_empty() {
-                        self.holders.push((at.clone(), id, grants));
-                    }
-                    self.judge(&at, id, judge);
-                }
+                ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
+                ir::Runtime::Judge(judge) => self.judge(&runtime_at.token("judge"), id, judge),
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
-                    if model.is_some() {
-                        self.errors.report(
-                            at.token("egress").token("model"),
-                            format!(
-                                "`{name}` is a runner, and runners have no model route: remove it"
-                            ),
-                        );
-                    }
-                    if !grants.is_empty() {
-                        self.errors.report(
-                            at.token("grants"),
-                            format!(
-                                "`{name}` is a runner, and runners hold no grants: remove them"
-                            ),
-                        );
-                    }
                     let runner = Runner {
                         cwd: cwd.clone(),
                         env: env.clone(),
@@ -156,13 +141,7 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    fn agent(
-        &mut self,
-        at: JsonPointer,
-        role: RoleId,
-        agent: &ir::AgentRuntime,
-        grants: &'ir [ir::Grant],
-    ) {
+    fn agent(&mut self, at: JsonPointer, role: RoleId, agent: &'ir ir::AgentRuntime) {
         let ir::AgentRuntime {
             command,
             dirs,
@@ -170,8 +149,11 @@ impl<'ir> Parser<'ir> {
             stdin,
             deadline_seconds,
             finalize_grace_seconds,
+            egress,
+            grants,
         } = agent;
-        self.agent_paths(&at.token("runtime").token("agent"), dirs, files);
+        self.agent_paths(&at, dirs, files);
+        let model = egress.model.clone();
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
         let agent = Agent {
@@ -182,6 +164,7 @@ impl<'ir> Parser<'ir> {
             stdin: stdin.clone(),
             deadline: Duration::from_secs(deadline_seconds.get()),
             finalize_grace: Duration::from_secs(*finalize_grace_seconds),
+            model,
         };
         self.agents.push((at, agent, grants));
     }
@@ -221,24 +204,37 @@ impl<'ir> Parser<'ir> {
             ));
         };
         let name = |agent: &Agent| &self.roles[agent.role.0].name;
-        for (at, other, _) in agents {
+        for (_, other, _) in agents {
             let message = format!(
                 "`{}` is a second agent, after `{}`: a workflow has exactly one",
                 name(&other),
                 name(&first.1)
             );
-            self.errors.report(at.token("runtime"), message);
+            let at = self.roles[other.role.0].at.token("runtime");
+            self.errors.report(at, message);
         }
         Ok(first)
     }
 
-    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &ir::JudgeRuntime) {
+    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &'ir ir::JudgeRuntime) {
         let ir::JudgeRuntime {
             command,
             slots,
             result,
+            egress,
+            lease_grants,
         } = judge;
-        let list = at.token("runtime").token("judge").token("slots");
+        let model = egress.model.clone();
+        let list = at.token("lease_grants");
+        let names = lease_grants.iter().map(|grant| &grant.name);
+        self.errors.unique(names, |index| list.token(index));
+        let grants = lease_grants.iter().enumerate();
+        let grants = grants.map(|(index, grant)| (list.token(index), grant));
+        self.holders.push(Holder {
+            role,
+            grants: grants.collect(),
+        });
+        let list = at.token("slots");
         let names = slots.iter().map(|slot| &slot.name);
         self.errors.unique(names, |index| list.token(index));
         for (index, slot) in slots.iter().enumerate() {
@@ -267,6 +263,7 @@ impl<'ir> Parser<'ir> {
             command: command.clone(),
             slots,
             result: result.clone(),
+            model,
         };
         self.judges.insert(role, judge);
     }
@@ -295,18 +292,11 @@ impl<'ir> Parser<'ir> {
         let holders = std::mem::take(&mut self.holders);
         let mut parsed = Vec::new();
         let mut earlier: Vec<(RoleId, &ir::LeaseGrant)> = Vec::new();
-        for (at, holder, grants) in &holders {
-            let list = at.token("grants");
-            let names = grants.iter().map(ir::Grant::name);
-            (self.errors).unique(names, |index| place(&list, index, &grants[index]));
-            for (index, grant) in grants.iter().enumerate() {
-                let ir::Grant::Lease(grant) = grant else {
-                    continue;
-                };
-                let at = list.token(index).token("lease");
-                let leased = self.lease_grant(&at, (*holder, grant), &earlier, agent);
+        for Holder { role, grants } in &holders {
+            for (at, grant) in grants {
+                let leased = self.lease_grant(at, (*role, grant), &earlier, agent);
                 parsed.push(leased);
-                earlier.push((*holder, grant));
+                earlier.push((*role, grant));
             }
         }
         self.unleased(&earlier);

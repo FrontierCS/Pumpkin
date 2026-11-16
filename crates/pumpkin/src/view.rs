@@ -235,7 +235,7 @@ impl Held {
             };
             let routes = self.record.routes()?;
             self.talk = Some(Talk::new(&ir, &places, routes.as_ref()));
-            self.task = ir["name"].as_str().map(str::to_owned);
+            self.task = Some(ir.name.to_string());
         }
         let Self {
             fold,

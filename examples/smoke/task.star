@@ -41,8 +41,8 @@ workflow(
                 "command": {"argv": ["python3", "-u", "/opt/smoke/agent.py"] + (["hold"] if HOLD else []), "cwd": "/workspace"},
                 "deadline_seconds": DEADLINE,
                 "finalize_grace_seconds": 0,
+                "grants": [CPU_LEASE] + ([GPU_LEASE] if GPU_MODEL else []) + [{"submit": {"name": "final"}}],
             }},
-            "grants": [CPU_LEASE] + ([GPU_LEASE] if GPU_MODEL else []) + [{"submit": {"name": "final"}}],
         },
         {
             "name": "cpu_runner",

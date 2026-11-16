@@ -66,6 +66,17 @@ impl Workflow {
         &self.roles[role.0]
     }
 
+    /// The model route of `role`, the agent's or a judge's, with the budgets of its entries, if it
+    /// has one.
+    pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
+        if role == self.agent.role {
+            return self.agent.model.as_ref();
+        }
+        self.judges
+            .get(&role)
+            .and_then(|judge| judge.model.as_ref())
+    }
+
     /// Each role, by its id, and its sandbox, in the IR's order.
     pub fn roles(&self) -> impl Iterator<Item = (RoleId, &Sandbox)> {
         (self.roles.iter().enumerate()).map(|(index, sandbox)| (RoleId(index), sandbox))
@@ -328,8 +339,6 @@ pub struct Sandbox {
     pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
-    /// The role's model route, with the budgets of its entries, if it has one; a runner has none.
-    pub model: Option<ModelRoute>,
 }
 
 /// The agent role; see [`ir::AgentRuntime`](crate::ir::AgentRuntime), whose rules its `dirs`
@@ -347,6 +356,8 @@ pub struct Agent {
     /// See
     /// [`ir::AgentRuntime::finalize_grace_seconds`](crate::ir::AgentRuntime::finalize_grace_seconds).
     pub finalize_grace: Duration,
+    /// The agent's model route, with the budgets of its entries, if it has one.
+    pub model: Option<ModelRoute>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +368,8 @@ pub struct Judge {
     pub slots: Vec<Slot>,
     /// See [`ir::JudgeRuntime::result`](crate::ir::JudgeRuntime::result).
     pub result: ResultSpec,
+    /// The judge's model route, with the budgets of its entries, if it has one.
+    pub model: Option<ModelRoute>,
 }
 
 /// A judge's slot; see [`ir::Slot`](crate::ir::Slot).

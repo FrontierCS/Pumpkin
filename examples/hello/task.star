@@ -18,8 +18,8 @@ workflow(
                 },
                 "deadline_seconds": 300,
                 "finalize_grace_seconds": 30,
+                "grants": [{"submit": {"name": "final"}}],
             }},
-            "grants": [{"submit": {"name": "final"}}],
         },
         {
             "name": "judge",

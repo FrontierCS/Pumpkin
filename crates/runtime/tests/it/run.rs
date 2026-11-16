@@ -253,7 +253,7 @@ fn build() {
 fn prepare() {
     let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     let mut no_route = ir.clone();
-    no_route["roles"][0]
+    no_route["roles"][0]["runtime"]["agent"]
         .as_object_mut()
         .unwrap()
         .remove("egress");
@@ -280,7 +280,7 @@ fn prepare() {
             20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
-            refused: `agent` has a model route, but no upstream serves its `responses` entry: give one, or remove the role's `egress.model` to run without one; runs directory made: false
+            refused: `agent` has a model route, but no upstream serves its `responses` entry: give one, or remove the `egress.model` of `agent`'s runtime to run without one; runs directory made: false
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
             driver.pid is locked: true
@@ -496,21 +496,16 @@ fn rebuilds_requests_kept_before_whole_fields() {
 
 // Each command is busy until its lease's charge ends, so that busy is never more than charged.
 #[test]
-#[expect(clippy::too_many_lines, reason = "one line for each record of its log")]
 fn reads_unended_commands() {
     let dir = TempDir::new().unwrap();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
-    let ir = serde_json::json!({ "roles": [{
-        "name": "solver",
-        "runtime": { "agent": {} },
-        "grants": [
-            { "lease": { "name": "stopped", "role": "stopped" } },
-            { "lease": { "name": "expired", "role": "expired" } },
-        ],
-    }] });
+    let ir = solver(serde_json::json!([
+        { "lease": lease("stopped") },
+        { "lease": lease("expired") },
+    ]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
     let provided = serde_json::json!({ "roles": {
@@ -619,6 +614,21 @@ fn reads_other_builds_lines() {
 
 // Each span runs between the core's times, its `observed_ns`, but where a record has none, as
 // lease 1's delete, its `at_ns`.
+/// [`WORKFLOW`] with its agent named `solver`, holding `grants`.
+fn solver(grants: Value) -> Value {
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    ir["roles"][0]["name"] = serde_json::json!("solver");
+    ir["roles"][0]["runtime"]["agent"]["grants"] = grants;
+    ir
+}
+
+/// A lease grant `name` of the runner of that name.
+fn lease(name: &str) -> Value {
+    serde_json::json!({
+        "name": name, "role": name, "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
+    })
+}
+
 #[test]
 fn reads_core_times() {
     let dir = TempDir::new().unwrap();
@@ -626,14 +636,10 @@ fn reads_core_times() {
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
-    let ir = serde_json::json!({ "roles": [{
-        "name": "solver",
-        "runtime": { "agent": {} },
-        "grants": [
-            { "judge": { "name": "train", "role": "trainer" } },
-            { "lease": { "name": "runner", "role": "runner" } },
-        ],
-    }] });
+    let train = serde_json::json!({
+        "name": "train", "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
+    });
+    let ir = solver(serde_json::json!([{ "judge": train }, { "lease": lease("runner") }]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
     let provided = serde_json::json!({ "roles": {

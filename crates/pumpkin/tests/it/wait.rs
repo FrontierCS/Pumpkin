@@ -636,7 +636,8 @@ fn summarizes() {
     );
     // With a model budget for the agent, spent.
     let mut budgeted = lease_task();
-    budgeted["roles"][0]["egress"]["model"][0]["budget"] = json!({ "microusd": 500_000 });
+    budgeted["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] =
+        json!({ "microusd": 500_000 });
     scratch.write(&format!("runs/{whole}/ir.json"), &budgeted);
     // And one that ended at its deadline with nothing submitted, unpriced, whose route refused a
     // request of its agent's, and whose upstream answered others with a 200 whose stream states
@@ -757,7 +758,7 @@ fn summarizes() {
         write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
     }
     let mut budgeted = lease_task();
-    budgeted["roles"][0]["egress"]["model"] = json!([
+    budgeted["roles"][0]["runtime"]["agent"]["egress"]["model"] = json!([
         { "api": "responses", "models": ["model-a"], "budget": { "microusd": 1_000_000 } },
         { "api": "responses", "models": ["model-b"] },
         { "api": "chat", "models": ["model-a"] },

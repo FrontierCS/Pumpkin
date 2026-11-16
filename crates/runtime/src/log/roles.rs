@@ -1,15 +1,16 @@
 //! What a record's IR and `provider.json` say of a run's roles.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
-use schema::ir::Gpu;
+use schema::ir::{self, Gpu, Name};
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::Place;
 use super::progress::{Sandbox, places};
-use crate::TokenPrices;
+use crate::{TokenPrices, record};
 
 /// What the IR and `provider.json` say of a run's roles: what the log's lines refer to by name.
 #[derive(Default)]
@@ -27,33 +28,19 @@ pub(super) struct Roles {
 }
 
 impl Roles {
-    pub(super) fn of(ir: &Value, provided: &Value) -> Self {
-        let roles = ir["roles"].as_array().into_iter().flatten();
-        let gpus = roles.clone().filter_map(|role| {
-            let gpu = Gpu::deserialize(&role["needs"]["gpu"]).ok()?;
-            Some((role["name"].as_str()?.to_owned(), gpu))
+    pub(super) fn of(ir: Option<&ir::Workflow>, provided: &Value) -> Self {
+        let roles = ir.map_or(&[][..], |ir| ir.roles.as_slice());
+        let gpus = (roles.iter())
+            .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
+        let agent = roles.iter().find_map(|role| match &role.runtime {
+            ir::Runtime::Agent(agent) => Some((&role.name, agent)),
+            ir::Runtime::Judge(_) | ir::Runtime::Runner(_) => None,
         });
-        let agent = (roles.clone()).find(|role| !role["runtime"]["agent"].is_null());
-        let agent = agent.unwrap_or(&Value::Null);
-        let agent_role = agent["name"].as_str().unwrap_or_default();
-        let held = roles.map(|role| (role["name"].as_str().unwrap_or_default(), &role["grants"]));
-        let grants = held.flat_map(|(holder, grants)| {
-            let grants = grants.as_array().into_iter().flatten();
-            grants.filter_map(move |grant| {
-                // `{"judge": g}`, `{"lease": g}` or `{"submit": g}`.
-                let (_, grant) = grant.as_object()?.iter().next()?;
-                let role = grant["role"].as_str().map(str::to_owned);
-                let granted = Grant {
-                    role,
-                    ready_for: grant["instance_seconds"].as_u64().map(Duration::from_secs),
-                };
-                Some((
-                    (holder.to_owned(), grant["name"].as_str()?.to_owned()),
-                    granted,
-                ))
-            })
+        let grants = roles.iter().flat_map(|role| {
+            held(&role.runtime)
+                .map(|(name, grant)| ((role.name.to_string(), name.to_string()), grant))
         });
-        let score = ir["score"]["role"].as_str();
+        let score = ir.map(|ir| ir.score.role.to_string());
         let (mut startups, mut prices) = (BTreeMap::new(), BTreeMap::new());
         let providers = provided["providers"].as_object().into_iter().flatten();
         for (provider, ready) in providers {
@@ -80,14 +67,13 @@ impl Roles {
             Some((model.clone(), prices))
         });
         Self {
-            agent_role: agent_role.to_owned(),
-            routed: !agent["egress"]["model"].is_null(),
+            agent_role: agent.map(|(name, _)| name.to_string()).unwrap_or_default(),
+            routed: agent.is_some_and(|(_, agent)| agent.egress.model.is_some()),
             grants: grants.collect(),
-            score_role: score.map(str::to_owned),
+            score_role: score,
             places: places(provided),
             gpus: gpus.collect(),
-            deadline: (agent["runtime"]["agent"]["deadline_seconds"].as_u64())
-                .map(Duration::from_secs),
+            deadline: agent.map(|(_, agent)| Duration::from_secs(agent.deadline_seconds.get())),
             startups,
             prices,
             token_prices: token_prices.collect(),
@@ -110,4 +96,53 @@ impl Roles {
 pub(super) struct Grant {
     pub(super) role: Option<String>,
     pub(super) ready_for: Option<Duration>,
+}
+
+/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's lease grants.
+fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
+    let lease = |grant: &ir::LeaseGrant| Grant {
+        role: Some(grant.role.to_string()),
+        ready_for: Some(Duration::from_secs(grant.instance_seconds.get())),
+    };
+    let (agent, judge) = match runtime {
+        ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
+        ir::Runtime::Judge(judge) => (&[][..], judge.lease_grants.as_slice()),
+        ir::Runtime::Runner(_) => (&[][..], &[][..]),
+    };
+    let agent = agent.iter().map(move |grant| match grant {
+        ir::Grant::Judge(judge) => {
+            let role = Some(judge.role.to_string());
+            (
+                &judge.name,
+                Grant {
+                    role,
+                    ready_for: None,
+                },
+            )
+        }
+        ir::Grant::Lease(grant) => (&grant.name, lease(grant)),
+        ir::Grant::Submit(submit) => (
+            &submit.name,
+            Grant {
+                role: None,
+                ready_for: None,
+            },
+        ),
+    });
+    agent.chain(judge.iter().map(move |grant| (&grant.name, lease(grant))))
+}
+
+/// The IR in record `dir`'s `ir.json`, or `None` if it isn't written.
+pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, String> {
+    let path = dir.join("ir.json");
+    let Some(bytes) = record::read_optional(&path)? else {
+        return Ok(None);
+    };
+    let ir = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "{} holds an IR that this build doesn't read: {error}",
+            path.display()
+        )
+    })?;
+    Ok(Some(ir))
 }
