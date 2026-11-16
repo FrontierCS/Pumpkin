@@ -283,13 +283,76 @@ pub struct Slot {
 #[serde(deny_unknown_fields)]
 pub struct Egress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<ModelRoute>,
+    pub model: Option<Model>,
 }
 
 impl Egress {
     pub fn is_empty(&self) -> bool {
         let Self { model } = self;
         model.is_none()
+    }
+}
+
+/// A role's model route, and the budget that bounds what the role spends through it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Model {
+    pub route: ModelRoute,
+    /// None for a route whose spend is unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ModelBudget>,
+}
+
+/// The most that a role's model requests may cost, over all its sandboxes and every model of its
+/// route, at the prices that the run's configuration gives each model's tokens.
+///
+/// A run starts only if every kind of token of each model of the route has a price. What is
+/// counted is the tokens that each response reported, priced once it has ended; one that reported
+/// none, or more input read from and written to the cache than input, adds nothing. Once the
+/// count reaches the budget, the route refuses each later request of the role with a 400 that
+/// says that the role's model budget is exhausted. Requests in flight then are answered all the
+/// same, so the spend may pass the budget by what they cost.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudget {
+    pub microusd: NonZeroU64,
+}
+
+impl ModelBudget {
+    /// Whether a spend of `usd`, in US dollars, has reached the budget.
+    pub fn spent_by(&self, usd: f64) -> bool {
+        // Reached at the budget itself, as `LiteLLM`'s proxy refuses a key once
+        // `spend >= max_budget`:
+        // https://github.com/BerriAI/litellm/blob/df78b16941697991a736fc224182fa17270420ed/litellm/proxy/auth/auth_checks.py#L6766-L6787
+        usd >= self.usd()
+    }
+
+    /// `usd`, a sum in US dollars, to the cent at least and to as many more places as the budget
+    /// states: `$20.04` beside a budget of `$20.00`.
+    pub fn dollars(&self, usd: f64) -> String {
+        let mut millionths = self.microusd.get() % 1_000_000;
+        let mut places = 6;
+        while places > 2 && millionths.is_multiple_of(10) {
+            millionths /= 10;
+            places -= 1;
+        }
+        format!("${usd:.places$}")
+    }
+
+    fn usd(&self) -> f64 {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "exact below 2^53 millionths of a dollar, past any budget's need"
+        )]
+        let microusd = self.microusd.get() as f64;
+        microusd / 1e6
+    }
+}
+
+/// In US dollars, as [`ModelBudget::dollars`] gives them: `$20.00`, `$0.0005`.
+impl fmt::Display for ModelBudget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.dollars(self.usd()))
     }
 }
 

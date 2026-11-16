@@ -430,14 +430,22 @@ fn comments_only(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The root of `entry`'s task and each path below it that checking it with `args` reaches, which
-/// is all that building it reads. The outcome is as `checked`'s.
-pub(crate) fn reached(
-    entry: &Entry,
-    args: &Args,
-) -> Result<Result<(PathBuf, BTreeSet<String>), Problems>, String> {
-    checked(entry, args, |Task { root, .. }| {
-        Ok(Ok((root.dir.clone(), root.reached.clone())))
+/// A checked task's root, each path below it that checking it reached, which is all that
+/// building it reads, and its workflow.
+pub(crate) struct Reach {
+    pub(crate) root: PathBuf,
+    pub(crate) paths: BTreeSet<String>,
+    pub(crate) workflow: Workflow,
+}
+
+/// What checking `entry`'s task with `args` reaches. The outcome is as `checked`'s.
+pub(crate) fn reached(entry: &Entry, args: &Args) -> Result<Result<Reach, Problems>, String> {
+    checked(entry, args, |Task { root, workflow, .. }| {
+        Ok(Ok(Reach {
+            root: root.dir.clone(),
+            paths: root.reached.clone(),
+            workflow,
+        }))
     })
 }
 

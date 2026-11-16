@@ -318,7 +318,7 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
 
 /// The line of `agent`'s model route: each entry's API and models.
 fn route(agent: &ir::Role) -> String {
-    let route = agent.egress.model.as_ref().unwrap();
+    let route = &agent.egress.model.as_ref().unwrap().route;
     let route: Vec<String> = (route.as_slice().iter())
         .map(|entry| {
             let models: Vec<ModelName> = entry.models.clone().into();
@@ -333,7 +333,7 @@ fn route(agent: &ir::Role) -> String {
 /// it; and the number of the image `agent` runs on.
 fn layer(agent: &ir::Role, images: &[String]) -> String {
     let mut shown = String::new();
-    for entry in agent.egress.model.as_ref().unwrap().as_slice() {
+    for entry in agent.egress.model.as_ref().unwrap().route.as_slice() {
         let names = |names: &[ir::HeaderName]| {
             if names.is_empty() {
                 return "none".to_owned();

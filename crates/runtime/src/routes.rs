@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use decision::{Caller, Core, Outcome};
 use gateway::IncomingModelRequest;
+use route::Admission;
 use schema::ir::{Api, Name};
 use schema::workflow::RoleId;
 
+use crate::budget::Budget;
 use crate::host::deadline;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
@@ -41,7 +43,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let note = format!("model request {number} wasn't answered: the run has ended");
             return self.log.note(&note);
         };
-        let allowed = core.model_requests_allowed(caller, at);
+        let role = self.role(caller);
+        let admission = if core.model_requests_allowed(caller, at) {
+            self.budgets
+                .get(&role)
+                .map_or(Admission::Open, Budget::admission)
+        } else {
+            Admission::Ended
+        };
         // A response still open at its deadline ends the caller's session, which its collect
         // needs, so it is due by then; the core's stop of its requests ends it before that
         // (`end_routes`).
@@ -81,7 +90,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 served.serve(
                     (number, &exchange),
                     incoming,
-                    allowed,
+                    admission,
                     by,
                     forwarding,
                     answered,
@@ -99,6 +108,22 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 );
                 self.log.note(&note)
             }
+        }
+    }
+
+    pub(crate) fn count(&mut self, entry: &Entry) {
+        if let Entry::ModelAnswered((caller, _), answered) = entry {
+            let role = self.role(*caller);
+            if let Some(budget) = self.budgets.get_mut(&role) {
+                budget.add(&answered.answer);
+            }
+        }
+    }
+
+    fn role(&mut self, caller: Caller) -> RoleId {
+        match caller {
+            Caller::Agent => self.workflow().agent().role,
+            Caller::Job(job) => self.call(job).judge,
         }
     }
 

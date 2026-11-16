@@ -105,7 +105,7 @@ impl<'ir> Parser<'ir> {
                 user: *user,
                 needs: needs.clone(),
                 at: at.clone(),
-                model_route: model.clone(),
+                model: model.clone(),
             });
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(at, id, agent, grants),

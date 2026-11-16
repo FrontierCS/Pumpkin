@@ -55,7 +55,7 @@ def images_task(*, agent):
                     "deadline_seconds": DEADLINE,
                     "finalize_grace_seconds": 0 if STRICT else 60,
                 }},
-                "egress": {"model": [{"api": "responses", "models": [MODEL]}]},
+                "egress": {"model": {"route": [{"api": "responses", "models": [MODEL]}]}},
                 "grants": [
                     {"judge": {
                         "name": "train",

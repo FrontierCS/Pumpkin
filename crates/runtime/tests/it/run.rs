@@ -20,7 +20,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use expect_test::{Expect, expect};
 use provider::{Provider, Ready};
 use route::{Headers, Key, Serving, UpstreamUrl};
-use runtime::{Record, Recorded, Run, System, new_id};
+use runtime::{ModelRoutes, Record, Recorded, Run, System, new_id};
 use schema::ir::{self, Api, ModelName, Name};
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use serde_json::Value;
@@ -84,13 +84,15 @@ fn check(
         let sim = Sim::new();
         let prepared = new_id(now).and_then(|id| {
             let placed = placed(&ir, sim.ready())?;
-            let servings = agent_servings(placed.workflow(), &runs.dir, url, served);
+            let servings = &agent_servings(placed.workflow(), &runs.dir, url, served);
             let on = providers_of(&placed, |_| &sim);
             let recorded = Recorded {
                 args: &args,
                 prices: &unpriced,
             };
-            Run::prepare(&System, placed, on, &dir, id, &servings, recorded)
+            let budgets = runtime::budgets(placed.workflow(), &unpriced)?;
+            let models = ModelRoutes { servings, budgets };
+            Run::prepare(&System, placed, on, &dir, id, models, recorded)
         });
         let record = fs::read_dir(&dir)
             .ok()

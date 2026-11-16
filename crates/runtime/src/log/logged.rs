@@ -313,6 +313,25 @@ pub(super) struct Usage {
     pub(super) reasoning_tokens: Option<u64>,
 }
 
+impl From<&Usage> for route::Usage {
+    fn from(usage: &Usage) -> Self {
+        let Usage {
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        } = *usage;
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Action {

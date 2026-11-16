@@ -9,8 +9,8 @@ use schema::sandbox::RESULT_MAX_DEPTH;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, invocation, judged, judged_log, lease_places, logged,
-    ran, report, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, invocation, judged, judged_log, lease_places,
+    lease_task, logged, ran, report, write_record, write_run,
 };
 
 #[test]
@@ -634,6 +634,10 @@ fn summarizes() {
         &format!("runs/{whole}/jobs/2/log/command.stderr"),
         "Traceback\n",
     );
+    // With a model budget for the agent, spent.
+    let mut budgeted = lease_task();
+    budgeted["roles"][0]["egress"]["model"]["budget"] = json!({ "microusd": 500_000 });
+    scratch.write(&format!("runs/{whole}/ir.json"), &budgeted);
     // And one that ended at its deadline with nothing submitted, unpriced, whose route refused a
     // request of its agent's, and whose upstream answered others with a 200 whose stream states
     // a rate limit, one giving no code; its requests left behind more header names than the
@@ -693,7 +697,8 @@ fn summarizes() {
         Some(unjudged),
         &unpriced,
     );
-    // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
+    // And the first priced otherwise: its tokens alone, under a budget for the agent that it
+    // hasn't spent, its sandboxes alone, and nothing.
     let others = [
         ("20261110-120000-0000000c", Prices::Tokens),
         ("20261110-120000-0000000d", Prices::Sandboxes),
@@ -711,6 +716,9 @@ fn summarizes() {
             &places,
         );
     }
+    let mut budgeted = lease_task();
+    budgeted["roles"][0]["egress"]["model"]["budget"] = json!({ "microusd": 1_000_000 });
+    scratch.write(&format!("runs/{}/ir.json", others[0].0), &budgeted);
     // What it said, as these runs' times are their records'.
     let wait = |id: &str| {
         let mut wait = scratch.pumpkin(&["wait", "--runs", "runs", id]);
@@ -721,14 +729,16 @@ fn summarizes() {
         format!("{invoked}\nexit status: {status:?}\n{}", said.trim_end())
     };
     let mut steps: Vec<Step> = [whole, late].map(|id| Step::Ran(wait(id))).into();
-    // Of those, the command and the lines that say a cost.
+    // Of those, the command and the lines that say a cost or a budget.
     for (id, _) in others {
         let said = wait(id);
         let mut lines = said.lines();
-        let costs = lines
-            .next()
-            .into_iter()
-            .chain(lines.filter(|line| line.contains("model:") || line.contains("cost:")));
+        let shown = |line: &&str| {
+            ["model:", "budget ", "cost:"]
+                .iter()
+                .any(|word| line.contains(word))
+        };
+        let costs = lines.next().into_iter().chain(lines.filter(shown));
         steps.push(Step::Ran(costs.collect::<Vec<&str>>().join("\n")));
     }
     check(
@@ -752,6 +762,7 @@ fn summarizes() {
                 16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              budget solver: at least $0.66 of $0.50, exhausted
               sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
               cost: $1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
             pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
@@ -767,6 +778,7 @@ fn summarizes() {
             $ pumpkin wait --runs runs 20261110-120000-0000000c
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              budget solver: at least $0.66 of $1.00
               cost: $0.66 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens
             $ pumpkin wait --runs runs 20261110-120000-0000000d
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price

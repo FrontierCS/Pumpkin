@@ -537,7 +537,9 @@ A run's bounds are the workflow's: the agent's deadline and finalize grace, each
 calls and judge seconds, each lease grant's instances, seconds, commands and transfer bytes, each
 slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
 refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's hard
-end, by which the core abandons the run if nothing has ended it.
+end, by which the core abandons the run if nothing has ended it. A role's model budget is the one
+bound the core doesn't meter: the runtime meters it, from its route's answers, at the machine's
+prices.
 
 Every sandbox ends by its run's hard end even if its driver dies: the EC2 provider schedules each
 instance's termination then, and `ec2-boot` kills its container; Modal ends each sandbox then; a

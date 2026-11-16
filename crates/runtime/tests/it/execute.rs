@@ -24,7 +24,7 @@ use provider::{
     RunTag, SandboxId, SandboxdRef, Sweep,
 };
 use route::Serving;
-use runtime::{Ending, Host, Record, Recorded, Run, System, TokenPrices, new_id};
+use runtime::{Ending, Host, ModelRoutes, Record, Recorded, Run, System, TokenPrices, new_id};
 use schema::ir::{self, Image, ModelName};
 use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByRole, Placed, Workflow};
@@ -320,9 +320,8 @@ fn executed_ir<H: Shown>(
     let interrupting = interrupting(providers, at, &record);
     let on = providers_of(&placed, |name| named(&interrupting, name));
     let prices = prices();
-    let recorded = kept(&prices);
-    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, &servings, recorded);
-    let run = run.unwrap();
+    let (models, recorded) = kept(&placed, &servings, &prices);
+    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, models, recorded).unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
@@ -386,8 +385,16 @@ fn prices() -> BTreeMap<ModelName, TokenPrices> {
     BTreeMap::from([(small, serde_json::from_value(prices).unwrap())])
 }
 
-fn kept(prices: &BTreeMap<ModelName, TokenPrices>) -> Recorded<'_> {
-    Recorded { args: &[], prices }
+fn kept<'p>(
+    placed: &Placed,
+    servings: &'p ByRole<Vec<Serving>>,
+    prices: &'p BTreeMap<ModelName, TokenPrices>,
+) -> (ModelRoutes<'p>, Recorded<'p>) {
+    let budgets = runtime::budgets(placed.workflow(), prices).unwrap();
+    (
+        ModelRoutes { servings, budgets },
+        Recorded { args: &[], prices },
+    )
 }
 
 fn held(
@@ -798,9 +805,9 @@ impl StandIn {
     fn servings(stand_in: Option<&Self>, workflow: &Workflow, dir: &Path) -> ByRole<Vec<Serving>> {
         let servings = workflow.by_role(|(_, sandbox)| {
             let entries = sandbox
-                .model_route
+                .model
                 .iter()
-                .flat_map(ir::ModelRoute::as_slice);
+                .flat_map(|model| model.route.as_slice());
             let served = entries.map(|entry| stand_in.unwrap().serving(dir, entry));
             Ok::<_, Infallible>(served.collect())
         });
@@ -870,18 +877,8 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     connection.write_all(streams.as_bytes()).unwrap();
     let text = String::from_utf8(body).unwrap();
     let echo = format!("data: {line} {key:?} {text}\n\n");
-    if said == Some("usage") {
-        let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}"#;
-        write_chunk(
-            &mut connection,
-            "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n\
-             data: {\"type\":\"response.output_text.delta\",\"delta\":\"6\"}\n\n",
-        );
-        write_chunk(
-            &mut connection,
-            &format!("event: response.completed\ndata: {completed}\n\n"),
-        );
-        write_chunk(&mut connection, "");
+    if let Some(said @ ("usage" | "cut")) = said {
+        completed(&mut connection, said == "usage");
         return (received, None);
     }
     // As a provider answered a rate limit, with a 200.
@@ -903,6 +900,22 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     // What the client sends is read until it hangs up, as its end shows that it has.
     let _ = io::copy(&mut connection, &mut io::sink());
     (received, Some(unix_ns()))
+}
+
+fn completed(connection: &mut TcpStream, ended: bool) {
+    let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}"#;
+    write_chunk(
+        connection,
+        "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n\
+         data: {\"type\":\"response.output_text.delta\",\"delta\":\"6\"}\n\n",
+    );
+    write_chunk(
+        connection,
+        &format!("event: response.completed\ndata: {completed}\n\n"),
+    );
+    if ended {
+        write_chunk(connection, "");
+    }
 }
 
 trait Shown: Host {
@@ -1176,7 +1189,7 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
 
 fn routed(mut ir: Value) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-large"] }]);
-    ir["roles"][0]["egress"] = json!({ "model": route });
+    ir["roles"][0]["egress"] = json!({ "model": { "route": route } });
     ir
 }
 
@@ -2668,7 +2681,7 @@ fn model_requests_kept_whole() {
     ];
     let mut ir = routed(ops_workflow(&argv, 30));
     let chat = json!({ "api": "chat", "models": ["m-large"] });
-    ir["roles"][0]["egress"]["model"]
+    ir["roles"][0]["egress"]["model"]["route"]
         .as_array_mut()
         .unwrap()
         .push(chat);
@@ -3073,7 +3086,7 @@ fn model_grace_cut() {
 
 fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-small"] }]);
-    ir["roles"][judge]["egress"] = json!({ "model": route });
+    ir["roles"][judge]["egress"] = json!({ "model": { "route": route } });
     let argv: Vec<&str> = iter::once("ops").chain(steps.iter().copied()).collect();
     ir["roles"][judge]["runtime"]["judge"]["command"]["argv"] = json!(argv);
     ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
@@ -3253,6 +3266,96 @@ fn judge_key_refused() {
     .assert_eq(&shown);
 }
 
+// A priced response costs $0.0000894, so the agent's first passes its budget of $0.00005, and
+// the train judge's fourth, over its two calls and with a stream cut short, passes $0.0003.
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
+fn budgets_spent() {
+    let argv = [
+        "ops",
+        "model m-small usage",
+        "model m-small usage",
+        "judge train 3",
+        "await 0 completed",
+        "judge train 3",
+        "await 1 completed",
+    ];
+    let steps = [
+        "model m-small 5",
+        "result",
+        "model m-small cut",
+        "model m-small usage",
+        "model m-small 5",
+    ];
+    let mut ir = judge_routed(ops_workflow(&argv, 30), 1, &steps);
+    ir["roles"][1]["egress"]["model"]["budget"] = json!({ "microusd": 300 });
+    let route = json!([{ "api": "responses", "models": ["m-small"] }]);
+    ir["roles"][0]["egress"] = json!({ "model": { "route": route, "budget": { "microusd": 50 } } });
+    let shown = executed(
+        &System,
+        "budgets-spent",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &[Also::Usage],
+    );
+    expect![[r#"
+        finished without a result
+        payloads hold: ["xxx"]
+        provider.json routes: {"agent":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}],"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":4,"tokens":{"cached":16,"input":24,"output":10,"reasoning":6,"responses":2}},{"grant":"train","job":1,"model_requests":4,"tokens":{"cached":16,"input":24,"output":10,"reasoning":6,"responses":2}}],"model_requests":10,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":40,"input":60,"output":25,"reasoning":15,"responses":5},"unreported_responses":5,"usd":"<usd>"}
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent","kind":"model_request_started","request":0},"observed_ns":"<ns>","seq":2}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"adf416133003fe506e3c6c79d89b48d93a2fab8fa6183b4146e91bfcb0cdf293","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-small","request":0,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the role's model budget, $0.00005 at the configured prices, is exhausted: make no more model requests","status":400},"api":"responses","caller":"agent","kept":{"request":{"body_bytes":166,"body_sha256":"5c198bde2343baefbe04b5fe987e83f6c26d5f53dfa79a138124030085fa9b83","bytes":166},"response":{"bytes":181}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"judge","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":2},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"body_sha256":"0687d2985455096f15d6a4404ef14584b391c7b3d31d6355df3fbfda36a3a57a","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":1}},"kind":"model_answered","model":"m-small","request":2,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":3},"observed_ns":"<ns>","seq":9}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":171,"body_sha256":"c038d8c8ced74099f33f300abdb4f2be4ac15b5575f81b89ed1ab5d833607b01","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-small","request":3,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":10}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":4},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"adf416133003fe506e3c6c79d89b48d93a2fab8fa6183b4146e91bfcb0cdf293","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-small","request":4,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-0","kind":"model_request_started","request":5},"observed_ns":"<ns>","seq":13}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"body_sha256":"0687d2985455096f15d6a4404ef14584b391c7b3d31d6355df3fbfda36a3a57a","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":1}},"kind":"model_answered","model":"m-small","request":5,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":14}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"values":[{"name":"score","value":5}]}},"observed_ns":"<ns>","seq":17}
+        {"actions":[{"kind":"reply","reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3},"timeout_ns":"20000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:cd2eb0837c9b4c962c22d2ff8b5441b7b45805887f051d39bf133b583baf6860","size":3}}},"observed_ns":"<ns>","seq":18}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":19}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-1","kind":"model_request_started","request":6},"observed_ns":"<ns>","seq":20}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-1","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"body_sha256":"0687d2985455096f15d6a4404ef14584b391c7b3d31d6355df3fbfda36a3a57a","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":1}},"kind":"model_answered","model":"m-small","request":6,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":21}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-1","kind":"model_request_started","request":7},"observed_ns":"<ns>","seq":22}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"job-1","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":171,"body_sha256":"c038d8c8ced74099f33f300abdb4f2be4ac15b5575f81b89ed1ab5d833607b01","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-small","request":7,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":23}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"job-1","kind":"model_request_started","request":8},"observed_ns":"<ns>","seq":24}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-1","first_byte_ns":"<ns>","first_token_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"adf416133003fe506e3c6c79d89b48d93a2fab8fa6183b4146e91bfcb0cdf293","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":330}},"kind":"model_answered","model":"m-small","request":8,"upstream":"stand-in","upstream_status":200,"usage":{"cached_tokens":8,"input_tokens":12,"output_tokens":5,"reasoning_tokens":3}},"observed_ns":"<ns>","seq":25}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"barred","message":"the role's model budget, $0.0003 at the configured prices, is exhausted: make no more model requests","status":400},"api":"responses","caller":"job-1","kept":{"request":{"body_bytes":162,"body_sha256":"fbad949ecafca6d36e3c4e8eb7a799e56b2d6e36bc2cdab84f9326a5cdf05b4f","bytes":162},"response":{"bytes":180}},"kind":"model_answered","request":9,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":26}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":27}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":28}
+        {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":5},"values":[{"name":"score","value":5}]}},"observed_ns":"<ns>","seq":29}
+        {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":30}
+        {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 649 bytes","seq":31}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":32}
+        its last record came before the agent's teardown was to end
+        the agent's standard output:
+        model request 0: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 1: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the role's model budget, $0.00005 at the configured prices, is exhausted: make no more model requests","param":null,"type":"invalid_request_error"}}
+        job 0's standard output:
+        model request 0: 200 [("content-type", "text/plain")] 5
+        model request 1: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 2: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 3: 200 [("content-type", "text/plain")] 5
+        job 1's standard output:
+        model request 0: 200 [("content-type", "text/plain")] 5
+        model request 1: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 2: 200 [("content-type", "text/event-stream")] data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.output_text.delta","delta":"6"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n
+        model request 3: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the role's model budget, $0.0003 at the configured prices, is exhausted: make no more model requests","param":null,"type":"invalid_request_error"}}
+        the model endpoint at each create: [true, true, true]"#]].assert_eq(&shown);
+}
+
 fn unix_ns() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_nanos()).unwrap()
@@ -3273,7 +3376,7 @@ fn holds_until_its_end() {
     let prepare = |name: &str| {
         let placed = placed(&ir, sim.ready()).unwrap();
         let dir = runs.dir.join(name);
-        let Ok(unrouted) = placed
+        let Ok(servings) = placed
             .workflow()
             .by_role(|_| Ok::<_, Infallible>(Vec::new()));
         let on = providers_of(&placed, |_| &sim);
@@ -3282,7 +3385,12 @@ fn holds_until_its_end() {
             prices: &unpriced,
         };
         let id = new_id(SystemTime::now()).unwrap();
-        Run::prepare(&System, placed, on, &dir, id, &unrouted, recorded)
+        let budgets = runtime::budgets(placed.workflow(), &unpriced).unwrap();
+        let models = ModelRoutes {
+            servings: &servings,
+            budgets,
+        };
+        Run::prepare(&System, placed, on, &dir, id, models, recorded)
     };
     let prepared = |run: &Result<Run<'_, System>, String>| match run {
         Ok(_) => "prepared".to_owned(),

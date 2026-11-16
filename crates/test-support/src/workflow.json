@@ -33,7 +33,7 @@
         }
       },
       "egress": {
-        "model": [{ "api": "responses", "models": ["gpt-6-astra"] }]
+        "model": { "route": [{ "api": "responses", "models": ["gpt-6-astra"] }] }
       },
       "grants": [
         {
