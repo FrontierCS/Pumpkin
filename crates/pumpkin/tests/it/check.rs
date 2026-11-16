@@ -893,6 +893,46 @@ fn library_lints() {
     );
 }
 
+/// The `--arg`s that [`examples`] checks an example with, by the name of its directory below
+/// `examples/`; it checks one not named here with none.
+const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
+    ("codex", &["--arg", "model=model-a"]),
+    // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
+    ("smoke", &["--arg", "gpu_model=gpu-a"]),
+];
+
+#[test]
+fn examples() {
+    let scratch = Scratch::new("check-examples");
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut names: Vec<String> = (fs::read_dir(&examples).unwrap())
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().unwrap().is_dir())
+        .map(|entry| entry.file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let steps = names.iter().map(|name| {
+        let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
+        let mut command = scratch.pumpkin(&["check", &format!("{name}/task.star")]);
+        command.args(args.map_or(&[][..], |(_, args)| args));
+        command.current_dir(&examples);
+        Step::from(command)
+    });
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin check codex/task.star --arg model=model-a
+            exit status: Some(0)
+            $ pumpkin check hello/task.star
+            exit status: Some(0)
+            $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
+            exit status: Some(0)"#]],
+    );
+}
+
 /// Writes each file below `dir` into `scratch`, at its path below `dir` after `below`, with each
 /// `@pumpkin//` label in quotes a `//` one.
 fn copy(dir: &Path, below: &str, scratch: &Scratch) {
