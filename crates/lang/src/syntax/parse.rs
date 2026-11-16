@@ -15,7 +15,7 @@ use super::{
     Step, Target, Type,
 };
 use crate::problem::{Fault, refusal};
-use crate::value::{FileId, Span};
+use crate::value::{FileId, Hosted, Span};
 use crate::{Label, MAX_NESTING};
 
 /// The module that `text` is, or the fault at its first refused token.
@@ -287,6 +287,11 @@ impl Parser<'_> {
             "int" => Type::Int,
             "float" => Type::Float,
             "str" => Type::Str,
+            // The host's, named as Buck2 names its context's type, `ctx: AnalysisContext`:
+            // https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_build_api/src/interpreter/rule_defs/context.rs#L396-L398
+            "Target" => Type::Hosted(Hosted::Target),
+            "Run" => Type::Hosted(Hosted::Run),
+            "Payload" => Type::Hosted(Hosted::Payload),
             "list" => {
                 let takes = "its elements' type: write `list[str]`";
                 let element = self.type_arguments(&name, takes, Self::type_expr)?;
@@ -304,8 +309,8 @@ impl Parser<'_> {
             }
             text => {
                 let message = format!(
-                    "`{text}` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]` \
-                     or `dict[…, …]`"
+                    "`{text}` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, \
+                     `dict[…, …]`, `Target`, `Run` or `Payload`"
                 );
                 return Err(Fault::new(name.span, message));
             }
@@ -324,7 +329,8 @@ impl Parser<'_> {
             Type::Int => Ok(KeyType::Int),
             Type::Float => Ok(KeyType::Float),
             Type::Str => Ok(KeyType::Str),
-            other @ (Type::None | Type::Bool | Type::List(_) | Type::Dict(..)) => {
+            other
+            @ (Type::None | Type::Bool | Type::List(_) | Type::Dict(..) | Type::Hosted(_)) => {
                 let message = format!(
                     "a dict's keys can't be {}: key a dict with strings or numbers, as `str`, \
                      `int` or `float`",

@@ -86,7 +86,7 @@ impl Pumpkin {
             Self::Workflow => workflow(call, site, planned),
             Self::Arg => arg(call, planned),
             Self::Image => image(call, site, planned),
-            Self::PackageName => package_name(call, site, planned),
+            Self::PackageName => package_name(call, site),
         }
     }
 }
@@ -95,17 +95,20 @@ impl Pumpkin {
 pub(crate) struct Site<'e> {
     /// The file whose statements are running.
     pub(crate) module: &'e Label,
-    pub(crate) entry: bool,
+    /// The entry's directory below the root, while the statements running are a workflow's
+    /// entry's; else `None`.
+    pub(crate) package: Option<&'e str>,
     /// The functions running, outermost first, each with its call.
     pub(crate) calls: &'e [(Rc<Def>, Span)],
 }
 
-impl Site<'_> {
-    // A file may not depend on what loads it (spec.md, "Module execution"), so what a task
+impl<'e> Site<'e> {
+    // The entry's directory, `package`, refused unless the entry's own statements are running. A
+    // file may not depend on what loads it (spec.md, "Module execution"), so what a task
     // declares, the entry file's own statements declare, and loading a file declares nothing.
-    fn in_entry(&self, function: Pumpkin, at: Span) -> Result<(), Fault> {
-        if self.entry {
-            return Ok(());
+    fn in_entry(&self, function: Pumpkin, at: Span) -> Result<&'e str, Fault> {
+        if let Some(package) = self.package {
+            return Ok(package);
         }
         let (function, module) = (function.name(), self.module);
         let message = format!(
@@ -304,7 +307,8 @@ impl Type {
             | Kind::Function(_)
             | Kind::Builtin(Builtin::Pumpkin(_))
             | Kind::Image(_)
-            | Kind::Module(_) => None,
+            | Kind::Module(_)
+            | Kind::Hosted(_) => None,
         };
         kind.ok_or_else(|| {
             let message = format!(
@@ -390,25 +394,22 @@ fn image(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<
         optional: [context, mount, target, args, contexts],
     } = PARAMS.bind(Pumpkin::Image, call)?;
     let at = call.at;
-    site.in_entry(Pumpkin::Image, at)?;
+    let package = site.in_entry(Pumpkin::Image, at)?;
     let file = string("`image`'s `recipe`", recipe.span, &recipe)?;
     let file = in_context(file, recipe.span)?;
     let (context, context_at) = match context {
         Some(context) => {
             let text = string("`image`'s `context`", context.span, &context)?;
-            (
-                directory(&planned.package, text, context.span)?,
-                context.span,
-            )
+            (directory(package, text, context.span)?, context.span)
         }
-        None if planned.package.is_empty() => {
+        None if package.is_empty() => {
             let message = "the context defaults to the entry file's directory, the root, which \
                            can't be a context: give `context` a directory below it";
             return Err(Fault::new(at, message));
         }
-        None => (directory(&planned.package, ".", at)?, at),
+        None => (directory(package, ".", at)?, at),
     };
-    let mounts = mounts(&planned.package, mount.as_ref())?;
+    let mounts = mounts(package, mount.as_ref())?;
     let target = stage(target)?;
     let args = build_args(args.as_ref())?;
     let contexts = named(contexts.as_ref())?;
@@ -635,20 +636,16 @@ fn fits(repository: String, at: Span) -> Result<String, Fault> {
 
 // `package_name()`: the entry file's directory below the root, such as `tasks/bench`, or the empty
 // string for an entry at the root.
-fn package_name(
-    call: &Call<'_>,
-    site: &Site<'_>,
-    planned: &mut Planned<'_>,
-) -> Result<Value, Fault> {
+fn package_name(call: &Call<'_>, site: &Site<'_>) -> Result<Value, Fault> {
     const PARAMS: Params<0, 0, 0> = Params {
         positional: [],
         required: [],
         optional: [],
     };
     PARAMS.bind(Pumpkin::PackageName, call)?;
-    site.in_entry(Pumpkin::PackageName, call.at)?;
+    let package = site.in_entry(Pumpkin::PackageName, call.at)?;
     Ok(Value {
-        kind: Kind::Str(Text::new(&planned.package, call.at, call.budget)?),
+        kind: Kind::Str(Text::new(package, call.at, call.budget)?),
         span: call.at,
     })
 }

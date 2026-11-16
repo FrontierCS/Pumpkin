@@ -10,6 +10,7 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+mod body;
 mod conformance;
 mod fixtures;
 
@@ -3234,6 +3235,21 @@ images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
     reason = "most of it is the cases and their snapshots"
 )]
 fn annotations() {
+    // A workflow's evaluation makes no handle, and no name gives one.
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "f")
+f(Target)
+#- //lib.star
+def f(target: Target):
+    pass
+"#,
+        &expect![[r#"
+            text.star:2:3: `Target` is not defined: bind it in this file, or load it
+                2 | f(Target)
+                  |   ^^^^^^"#]],
+    );
     check(
         r#"
 #- //text.star
@@ -3442,7 +3458,7 @@ load("//lib.star", "X")
 def f(x: Strng):
     pass"#,
         &expect![[r#"
-            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]` or `dict[…, …]`
+            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, `dict[…, …]`, `Target`, `Run` or `Payload`
                 1 | def f(x: Strng):
                   |          ^^^^^"#]],
     );

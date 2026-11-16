@@ -16,7 +16,8 @@
 //!
 //! It adds the annotations that the crate's doc names: each parameter with a type after `:` or
 //! without, as is a `def`'s return after `->`, a type being `None`, `bool`, `int`, `float`,
-//! `str`, `list[T]` or `dict[K, V]`, whose `K` is `int`, `float` or `str`.
+//! `str`, `list[T]` or `dict[K, V]`, whose `K` is `int`, `float` or `str`, or the host's
+//! `Target`, `Run` or `Payload`.
 //!
 //! Each place where the subset is narrower than the specification is refused at its token, and
 //! the rule of the refusal is written where it is checked: the lexical ones in `lex`, the
@@ -39,7 +40,7 @@ pub(crate) use parse::parse;
 pub(crate) use resolve::resolve;
 
 use crate::Label;
-use crate::value::{Key, Kind, Number, Span, Value};
+use crate::value::{Hosted, Key, Kind, Number, Span, Value};
 
 /// A file's statements: its loads, and the others, each in the order written.
 pub(crate) struct Module {
@@ -134,6 +135,7 @@ pub(crate) struct Param {
 }
 
 /// A type that an annotation names.
+#[derive(PartialEq)]
 pub(crate) enum Type {
     None,
     Bool,
@@ -142,10 +144,11 @@ pub(crate) enum Type {
     Str,
     List(Box<Self>),
     Dict(KeyType, Box<Self>),
+    Hosted(Hosted),
 }
 
 /// The type of a dict's keys, which can only be what a key can be: a number or a string.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) enum KeyType {
     Int,
     Float,
@@ -193,6 +196,7 @@ impl Type {
             | (Self::Int, Kind::Int(_))
             | (Self::Float, Kind::Float(_))
             | (Self::Str, Kind::Str(_)) => None,
+            (Self::Hosted(hosted), Kind::Hosted(made)) => (made != hosted).then_some(Misfit::Whole),
             (Self::List(element), Kind::List(elements)) => {
                 (elements.iter()).find_map(|value| element.held(value, Part::Element))
             }
@@ -214,7 +218,8 @@ impl Type {
                 | Self::Float
                 | Self::Str
                 | Self::List(_)
-                | Self::Dict(..),
+                | Self::Dict(..)
+                | Self::Hosted(_),
                 _,
             ) => Some(Misfit::Whole),
         }
@@ -250,6 +255,7 @@ impl Type {
             Self::Dict(key, value) => {
                 format!("a dict of {} to {}", key.as_type().plural(), value.plural())
             }
+            Self::Hosted(hosted) => String::from(hosted.describe()),
         }
     }
 
@@ -265,6 +271,9 @@ impl Type {
             Self::Dict(key, value) => {
                 format!("dicts of {} to {}", key.as_type().plural(), value.plural())
             }
+            Self::Hosted(Hosted::Target) => String::from("`Target`s"),
+            Self::Hosted(Hosted::Run) => String::from("`Run`s"),
+            Self::Hosted(Hosted::Payload) => String::from("payloads"),
         }
     }
 }

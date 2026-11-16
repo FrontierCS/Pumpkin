@@ -65,6 +65,22 @@ impl<'a> Call<'a> {
         })
     }
 
+    /// The call of `positional` and `keyword` arguments alone.
+    pub(crate) fn of(
+        at: Span,
+        positional: Vec<(Span, Value)>,
+        keyword: Vec<(&'a Name, Value)>,
+        budget: &'a Budget,
+    ) -> Self {
+        Self {
+            at,
+            positional,
+            keyword,
+            kwargs: None,
+            budget,
+        }
+    }
+
     /// Each keyword argument: those written by name, then those that `**` passes.
     pub(crate) fn keywords(&self) -> impl Iterator<Item = Keyword<'_>> {
         let written = self.keyword.iter().map(|(name, value)| Keyword {
