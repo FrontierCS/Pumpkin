@@ -2060,19 +2060,31 @@ fn send_refusals() {
         lines.extend([refused, calls(&scratch)]);
         fs::remove_file(path).unwrap();
     }
+    // A budget whose model the client's configuration gives no price.
+    let mut budgeted = workflow(&image('0'), &["true"]);
+    let route = json!([{ "api": "responses", "models": ["model-a"] }]);
+    budgeted["roles"][0]["egress"] =
+        json!({ "model": { "route": route, "budget": { "microusd": 1 } } });
+    scratch.write_task_in("repo", "stand-in", &budgeted);
+    let (_, refused) = start(&scratch, &client);
+    lines.extend([refused, calls(&scratch)]);
     check(
         &scratch,
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(1)
-        pumpkin: `stand-in/a\nb` can't be sent to the controller, whose tree names each file by a line: rename it with no newline or tab, and no empty, `.` or `..` component
-        the calls: none
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(1)
-        pumpkin: `stand-in/�` isn't UTF-8, so it can't be sent to the controller, whose tree names each file by a line of text: rename it
-        the calls: none"#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(1)
+            pumpkin: `stand-in/a\nb` can't be sent to the controller, whose tree names each file by a line: rename it with no newline or tab, and no empty, `.` or `..` component
+            the calls: none
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(1)
+            pumpkin: `stand-in/�` isn't UTF-8, so it can't be sent to the controller, whose tree names each file by a line of text: rename it
+            the calls: none
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(1)
+            pumpkin: <scratch>/client/.config/pumpkin/pumpkin.toml: `agent` has a model budget, but `model-a` has no price for `input`, `cached`, `cache_write` or `output` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
+            the calls: none"#]],
     );
 }
 

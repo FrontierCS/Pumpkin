@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 use gateway::{IncomingModelRequest, ModelRequest};
-use schema::ir::{Api, ModelName};
+use schema::ir::{Api, ModelBudget, ModelName};
 use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
@@ -424,6 +424,15 @@ impl Refusal {
         let message = "the model provider refused the route's key, with a 401, which ends the \
                        model route: make no more model requests";
         refusal(Status::BadRequest, message.to_owned())
+    }
+
+    pub(crate) fn spent(budget: &ModelBudget) -> Self {
+        // A 400, as for the route's end, which a harness takes as final.
+        let message = format!(
+            "the role's model budget, {budget} at the configured prices, is exhausted: make no \
+             more model requests"
+        );
+        refusal(Status::BadRequest, message)
     }
 
     pub(crate) fn forbidden() -> Self {

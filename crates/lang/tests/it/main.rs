@@ -3611,14 +3611,16 @@ fn plans() {
               "roles": [
                 {
                   "egress": {
-                    "model": [
-                      {
-                        "api": "responses",
-                        "models": [
-                          "model-large"
-                        ]
-                      }
-                    ]
+                    "model": {
+                      "route": [
+                        {
+                          "api": "responses",
+                          "models": [
+                            "model-large"
+                          ]
+                        }
+                      ]
+                    }
                   },
                   "grants": [
                     {
@@ -3884,11 +3886,11 @@ fn builtins() {
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
-        r#"fail("{} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1))"#,
+        r#"fail("{} {} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1, 20 * USD))"#,
         &expect![[r#"
-            text.star:1:1: fail: http://127.0.0.1:11235 6
-                1 | fail("{} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:1:1: fail: http://127.0.0.1:11235 6 20000000
+                1 | fail("{} {} {}".format(MODEL_URL, MAX_MODEL_REQUESTS - 1, 20 * USD))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         r#"

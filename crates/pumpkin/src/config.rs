@@ -15,7 +15,7 @@ use gateway::GatewayAddress;
 use route::{Headers, Key, Serving, UpstreamUrl};
 use runtime::TokenPrices;
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use stdx::Context;
 
 pub(crate) struct Config {
@@ -30,10 +30,9 @@ pub(crate) struct Config {
 /// `[controller.modal]` that each job is sent.
 pub(crate) struct Client {
     pub(crate) controller: Controller,
-    /// The `[upstreams]` tables as the file holds them.
-    upstreams: toml::Table,
-    /// The file's directory, which each `key_file` is below unless absolute.
-    dir: PathBuf,
+    pub(crate) upstreams: Upstreams,
+    /// The file that it was read from.
+    pub(crate) path: PathBuf,
 }
 
 enum Target {
@@ -103,11 +102,11 @@ pub(crate) struct Gateway {
 
 pub(crate) struct Providers<T>(BTreeMap<Name, T>);
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct Upstreams(BTreeMap<Name, Upstream>);
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Upstream {
     #[serde(deserialize_with = "base")]
@@ -118,11 +117,12 @@ struct Upstream {
     models: Vec<Model>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Model {
     name: ModelName,
     upstream_name: ModelName,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usd_per_mtok: Option<TokenPrices>,
 }
 
@@ -360,6 +360,9 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
     // configuration and its keys move together, and no variable of the environment changes which
     // file a key is in. A file that was read has a parent: `""` for a bare file name.
     let dir = path.parent().unwrap_or(Path::new(""));
+    for upstream in upstreams.0.values_mut() {
+        upstream.key_file = dir.join(&upstream.key_file);
+    }
     if let Some(mut controller) = controller {
         let beside: Vec<&str> = [
             ("`[docker]`", docker.is_some()),
@@ -382,19 +385,11 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         if let Some(modal) = &mut controller.modal {
             modal.config = modal.config.take().map(|config| dir.join(config));
         }
-        let mut raw: toml::Table = toml::from_str(text).context(path.display())?;
-        let upstreams = match raw.remove("upstreams") {
-            Some(toml::Value::Table(upstreams)) => upstreams,
-            _ => toml::Table::new(),
-        };
         return Ok(Target::Controller(Client {
             controller,
             upstreams,
-            dir: dir.to_owned(),
+            path: path.to_owned(),
         }));
-    }
-    for upstream in upstreams.0.values_mut() {
-        upstream.key_file = dir.join(&upstream.key_file);
     }
     let missing = |table: &str| {
         format!(
@@ -421,18 +416,14 @@ impl Client {
     pub(crate) fn sent(&self) -> Result<(String, Vec<(String, PathBuf)>), String> {
         let mut upstreams = self.upstreams.clone();
         let mut keys = Vec::new();
-        for (name, upstream) in &mut upstreams {
-            let key = upstream
-                .get("key_file")
-                .and_then(toml::Value::as_str)
-                .map(|key| self.dir.join(key));
-            if let (Some(table), Some(key)) = (upstream.as_table_mut(), key) {
-                let file = format!("{name}.key");
-                table.insert("key_file".to_owned(), file.clone().into());
-                keys.push((file, key));
-            }
+        for (name, upstream) in &mut upstreams.0 {
+            let file = format!("{name}.key");
+            let source = std::mem::replace(&mut upstream.key_file, PathBuf::from(&file));
+            keys.push((file, source));
         }
-        let mut sent = toml::Table::from_iter([("upstreams".to_owned(), upstreams.into())]);
+        let upstreams = toml::Value::try_from(upstreams)
+            .map_err(|error| format!("writing what the job is sent: {error}"))?;
+        let mut sent = toml::Table::from_iter([("upstreams".to_owned(), upstreams)]);
         if let Some(ClientModal {
             config: _,
             profile,

@@ -14,7 +14,7 @@ use engine::Engine;
 use gateway::{Dialer, GrantListener};
 use modal::Modal;
 use provider::{Meeting, Provider, RunTag};
-use runtime::{Record, Recorded, Run, System, TokenPrices};
+use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
 use rustix::process::Signal;
 use schema::ir::{ModelName, Name};
 use schema::sandbox::HELLO_TIMEOUT;
@@ -164,6 +164,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         providers,
         gateway,
         servings,
+        budgets,
         prices,
     } = prepared.map_err(|error| refused(error, again.as_deref()))?;
     let (placed, placed_on) = place(
@@ -185,7 +186,11 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         args: &words,
         prices: &prices,
     };
-    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, &servings, kept)?;
+    let models = ModelRoutes {
+        servings: &servings,
+        budgets,
+    };
+    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, models, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     begun(&id, &dir, &names, reader);
     driver::locked(&id)?;
@@ -256,6 +261,7 @@ struct Prepared<'e> {
     providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
     servings: ByRole<Vec<route::Serving>>,
+    budgets: Budgets,
     prices: BTreeMap<ModelName, TokenPrices>,
 }
 
@@ -274,11 +280,12 @@ fn prepared<'e>(
     } = config::read(config)?;
     let servings = task
         .workflow()
-        .by_role(|(_, sandbox)| match &sandbox.model_route {
-            Some(route) => upstreams.serving(route).context(config.display()),
+        .by_role(|(_, sandbox)| match &sandbox.model {
+            Some(model) => upstreams.serving(&model.route).context(config.display()),
             None => Ok(Vec::new()),
         })?;
     let prices = upstreams.prices();
+    let budgets = runtime::budgets(task.workflow(), &prices).context(config.display())?;
     let engine = &*engine.insert(crate::engine(context, reader)?);
     // Each provider is connected before any image is built, so that an engine that can't run
     // sandboxes is refused first.
@@ -289,6 +296,7 @@ fn prepared<'e>(
         providers,
         gateway,
         servings,
+        budgets,
         prices,
     }))
 }

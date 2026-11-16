@@ -21,6 +21,7 @@ use provider::RunTag;
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use schema::ir::Sha256Digest;
+use schema::workflow::Workflow;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
@@ -54,6 +55,8 @@ pub(super) struct Tree {
     /// controller are below.
     repo: String,
     commit: String,
+    /// The task's workflow, as checking it gave it, which isn't sent.
+    pub(super) workflow: Workflow,
 }
 
 /// Hashes what a run of `entry` needs of its git repository: the tracked and unignored files
@@ -96,7 +99,11 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
             "--exclude-standard",
         ],
     )?;
-    let files = needed(entry, args, &top, &files)?;
+    let reach = match crate::star::reached(entry, args)? {
+        Ok(reach) => reach,
+        Err(problems) => return Err(crate::task_problems(entry, &problems)),
+    };
+    let files = needed(entry, &reach.root, &reach.paths, &top, &files)?;
     let hashed = manifest::hash(&top, &files, &commit, &bundle)?;
     let below = path.strip_prefix(&top).ok().and_then(Path::to_str);
     let Some(below) = below else {
@@ -116,6 +123,7 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
         entry: below.to_owned(),
         repo,
         commit,
+        workflow: reach.workflow,
     })
 }
 
@@ -129,18 +137,15 @@ fn plain(name: &str) -> String {
 }
 
 /// Of `listed`, the files that git lists in `top`, each ended by a NUL, those that checking the
-/// task whose entry is `entry`, given `args`, reaches, as files or as directories that hold them,
-/// with `pumpkin` and `.pumpkinversion`, which the job runs.
+/// task whose entry is `entry` reaches, `reached` below its `root`, as files or as directories
+/// that hold them, with `pumpkin` and `.pumpkinversion`, which the job runs.
 fn needed(
     entry: &crate::star::Entry,
-    args: &lang::Args,
+    root: &Path,
+    reached: &BTreeSet<String>,
     top: &Path,
     listed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let (root, reached) = match crate::star::reached(entry, args)? {
-        Ok(reached) => reached,
-        Err(problems) => return Err(crate::task_problems(entry, &problems)),
-    };
     // At or below the top, unless the marker is above the repository that holds the entry.
     let prefix = root.strip_prefix(top).map_err(|_| {
         format!(

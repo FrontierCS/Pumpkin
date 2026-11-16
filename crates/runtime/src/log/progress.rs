@@ -133,14 +133,15 @@ pub struct Sandbox {
     pub deleted: Option<bool>,
 }
 
-/// The agent: its sandbox, and its command's end.
+/// The agent: its sandbox, its command's end, and its model requests.
 #[derive(Clone, Debug, Default)]
 pub struct AgentSpan {
     pub sandbox: Sandbox,
-    /// Whether its role has a model route.
-    pub routed: bool,
     /// When, and how, its command ended.
     pub end: Option<(Duration, AgentEnd)>,
+    /// Its own model requests, which the run's (`Progress::model`) count too; `None` if its role
+    /// has no model route.
+    pub model: Option<ModelUse>,
 }
 
 /// How the agent's command ended.
@@ -402,7 +403,7 @@ pub(super) fn readout(
         gpus: agent.sandbox.gpus.take(),
         ..roles.sandbox(Some(&roles.agent_role), Duration::ZERO)
     };
-    agent.routed = roles.routed;
+    agent.model = agent.model.or(roles.routed.then(ModelUse::default));
     let mut progress = Progress {
         started,
         hard_end,
@@ -730,14 +731,20 @@ impl Reading {
                     upstream_status: *upstream_status,
                     answer,
                     failed: failed.as_ref(),
-                    usage: usage.as_ref(),
+                    usage: usage.as_ref().map(route::Usage::from),
                 };
                 self.model.take(at, &answered);
-                // A judge call's own, which the run's count too.
-                if let Some(logged::Caller::Job(job)) = caller
-                    && let Some(call) = self.call(*job)
-                {
-                    call.model.take(at, &answered);
+                // The caller's own, which the run's count too.
+                match caller {
+                    Some(logged::Caller::Agent) => {
+                        self.agent.model.get_or_insert_default().take(at, &answered);
+                    }
+                    Some(logged::Caller::Job(job)) => {
+                        if let Some(call) = self.call(*job) {
+                            call.model.take(at, &answered);
+                        }
+                    }
+                    None => {}
                 }
             }
             logged::Event::SandboxGpus { sandbox, gpus } => {
@@ -902,7 +909,7 @@ struct Answered<'e> {
     upstream_status: Option<u16>,
     answer: &'e logged::Answer,
     failed: Option<&'e logged::Failed>,
-    usage: Option<&'e logged::Usage>,
+    usage: Option<route::Usage>,
 }
 
 impl ModelUse {
@@ -972,7 +979,7 @@ impl ModelUse {
 }
 
 impl Tokens {
-    fn add(&mut self, usage: &logged::Usage) {
+    pub(crate) fn add(&mut self, usage: &route::Usage) {
         self.reported += 1;
         self.input += usage.input_tokens;
         self.output += usage.output_tokens;

@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
-use route::{Answer, Apart, Headers, Keep, Route, Serving, Upstream};
-use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
+use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
+use schema::ir::{Api, ApiRoute, Model, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
@@ -59,7 +59,7 @@ pub(super) fn routes(
 }
 
 fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String> {
-    let Some(route) = &sandbox.model_route else {
+    let Some(Model { route, budget: _ }) = &sandbox.model else {
         return Ok(Vec::new());
     };
     let role = &sandbox.name;
@@ -125,7 +125,7 @@ impl Served {
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
         incoming: IncomingModelRequest,
-        allowed: bool,
+        admission: Admission<'_>,
         by: Deadline,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Option<&(Name, Api)>, Answer),
@@ -139,7 +139,7 @@ impl Served {
         };
         let entries = &self.entries;
         route::serve(
-            entries, incoming, allowed, by, exchange, forwarding, answered,
+            entries, incoming, admission, by, exchange, forwarding, answered,
         );
     }
 

@@ -6,14 +6,15 @@ use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, slice, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
-use route::{Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
-use schema::ir::Api;
+use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
+use schema::ir::{Api, ModelBudget};
 use stdx::Deadline;
 use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
@@ -151,8 +152,8 @@ struct Case {
     /// How the stand-in answers; `None` if it never receives the request.
     answer: Option<Answer>,
     /// Whether a second request, which the stand-in never receives, is served with the same
-    /// upstream: `Some(allowed)`.
-    then: Option<bool>,
+    /// upstream: `Some(admission)`.
+    then: Option<Admission<'static>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -172,6 +173,13 @@ enum Answer {
     /// It tells the test that it holds the request, then holds it without an answer until the
     /// route's end hangs up on it.
     Holds,
+}
+
+fn spent() -> Admission<'static> {
+    const BUDGET: ModelBudget = ModelBudget {
+        microusd: NonZeroU64::new(1_500_000).unwrap(),
+    };
+    Admission::Spent { budget: &BUDGET }
 }
 
 fn case(name: &'static str, answer: Answer) -> Case {
@@ -308,18 +316,18 @@ fn serve_case(
     let incoming = next_model_request(arrivals);
     let first = if case.answer == Some(Answer::Holds) {
         thread::scope(|scope| {
-            let served = scope.spawn(move || serve_one(entry, incoming, true, by));
+            let served = scope.spawn(move || serve_one(entry, incoming, Admission::Open, by));
             held.recv_timeout(HUNG).unwrap();
             entry.1.shutdown();
             served.join().unwrap()
         })
     } else {
-        serve_one(entry, incoming, true, by)
+        serve_one(entry, incoming, Admission::Open, by)
     };
     let mut served = vec![first];
-    if let Some(allowed) = case.then {
+    if let Some(admission) = case.then {
         let incoming = next_model_request(arrivals);
-        served.push(serve_one(entry, incoming, allowed, by));
+        served.push(serve_one(entry, incoming, admission, by));
     }
     served
 }
@@ -327,7 +335,7 @@ fn serve_case(
 fn serve_one(
     entry: &(Route, Upstream),
     incoming: IncomingModelRequest,
-    allowed: bool,
+    admission: Admission<'_>,
     by: Deadline,
 ) -> (Option<Told>, String) {
     let kept = Kept::default();
@@ -336,7 +344,7 @@ fn serve_one(
     route::serve(
         slice::from_ref(entry),
         incoming,
-        allowed,
+        admission,
         by,
         &kept,
         || {},
@@ -528,12 +536,16 @@ fn forward() {
             case("a stream", Answer::Streams(PARTS)),
             case("the provider's refusal", Answer::Refuses),
             Case {
-                then: Some(true),
+                then: Some(Admission::Open),
                 ..case("the key refused", Answer::RefusesKey(401))
             },
             Case {
-                then: Some(false),
+                then: Some(Admission::Ended),
                 ..case("the work phase ended", Answer::Refuses)
+            },
+            Case {
+                then: Some(spent()),
+                ..case("the role's budget spent", Answer::Refuses)
             },
             case("a request forbidden", Answer::RefusesKey(403)),
             case("a redirect", Answer::Redirects),
@@ -629,6 +641,7 @@ fn forward() {
             the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; key refused: false
             the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 35 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 191 bytes; key refused: true
             the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false
+            the role's budget spent: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the role's model budget, $1.50 at the configured prices, is exhausted: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the role's model budget, $1.50 at the configured prices, is exhausted: make no more model requests" }); kept: request 552 bytes, response 178 bytes; key refused: false
             a request forbidden: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); kept: request 552 bytes, response 35 bytes; key refused: false
             a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { model: ModelName("m-large"), status: 307, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 0 bytes; key refused: false
             a coded body: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); kept: request 552 bytes, response 20 bytes; key refused: false
@@ -639,9 +652,9 @@ fn forward() {
             a port beyond 65535: the upstream's URL names a port that is not a number up to 65535: name one, or none for the scheme's default
             another scheme: the upstream's URL is not an http URL: name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
             not a URL: the upstream's URL is not a URL (invalid uri character): name an https URL without a user, or an http URL to a loopback IP address such as 127.0.0.1
-            no key file: the key file <dir>/key-14 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
-            an empty key file: the key file <dir>/key-15 holds no API key: write the key alone, on one line
-            a key with a space: the key file <dir>/key-16 holds no API key: write the key alone, on one line
+            no key file: the key file <dir>/key-15 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
+            an empty key file: the key file <dir>/key-16 holds no API key: write the key alone, on one line
+            a key with a space: the key file <dir>/key-17 holds no API key: write the key alone, on one line
             a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("x-request-id", "req_1")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 1, cached_tokens: Some(16), cache_write_tokens: None, reasoning_tokens: Some(0) }), failed: None }); kept: request 355 bytes, response 319 bytes, its output begun by byte 103; key refused: false
             a rate limit with a 200: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.failed\ndata: {"type":"response.failed","sequence_number":0,"response":{"id":"resp_1","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"output":[],"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null,"sequence_number":1}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); kept: request 552 bytes, response 367 bytes; key refused: false
             a failure after output: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed"},"usage":{"input_tokens":12,"output_tokens":1}}}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 1, cached_tokens: None, cache_write_tokens: None, reasoning_tokens: None }), failed: Some(Failure { code: Some("server_error") }) }); kept: request 552 bytes, response 347 bytes, its output begun by byte 152; key refused: false
@@ -682,7 +695,7 @@ fn sandbox_hangs_up_mid_stream() {
 fn shutdown() {
     check(
         &[Case {
-            then: Some(true),
+            then: Some(Admission::Open),
             ..case("a request in flight", Answer::Holds)
         }],
         &expect![[

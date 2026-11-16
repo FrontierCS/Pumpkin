@@ -72,7 +72,57 @@ impl TryFrom<Stated> for TokenPrices {
     }
 }
 
+/// Prices of every kind of token, as [`TokenPrices`] holds them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AllPrices {
+    input: f64,
+    cached: f64,
+    cache_write: f64,
+    output: f64,
+}
+
+impl AllPrices {
+    /// As [`TokenPrices::usd`].
+    pub(crate) fn usd(self, tokens: &Tokens) -> Option<f64> {
+        let Self {
+            input,
+            cached,
+            cache_write,
+            output,
+        } = self;
+        let prices = TokenPrices {
+            input,
+            cached: Some(cached),
+            cache_write: Some(cache_write),
+            output,
+        };
+        prices.usd(tokens)
+    }
+}
+
 impl TokenPrices {
+    /// These prices, if they price every kind of token; else the kinds they give no price, by
+    /// their names in the configuration, as a list for a message (`` `cached` or `cache_write` ``).
+    pub(crate) fn all(&self) -> Result<AllPrices, &'static str> {
+        let Self {
+            input,
+            cached,
+            cache_write,
+            output,
+        } = *self;
+        match (cached, cache_write) {
+            (Some(cached), Some(cache_write)) => Ok(AllPrices {
+                input,
+                cached,
+                cache_write,
+                output,
+            }),
+            (None, Some(_)) => Err("`cached`"),
+            (Some(_), None) => Err("`cache_write`"),
+            (None, None) => Err("`cached` or `cache_write`"),
+        }
+    }
+
     /// What `tokens`, a model's, cost in US dollars at these prices; `None` if a kind that they
     /// count tokens of has no price, or they count more input read from and written to the
     /// cache than input. A count that no response gave is 0.

@@ -513,7 +513,9 @@ fn lease_task() -> Value {
             {
                 "name": "solver",
                 "runtime": { "agent": { "deadline_seconds": 1800 } },
-                "egress": { "model": {} },
+                "egress": { "model": {
+                    "route": [{ "api": "responses", "models": ["model-a", "model-b"] }],
+                } },
                 "grants": [
                     { "judge": { "name": "train", "role": "trainer" } },
                     lease("gpu", 60),

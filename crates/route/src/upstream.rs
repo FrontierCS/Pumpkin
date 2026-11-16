@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fmt, fs};
 
-use gateway::{IncomingModelRequest, ModelResponse};
-use schema::ir::{Api, ModelName, Name};
+use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
+use schema::ir::{Api, ModelBudget, ModelName, Name};
 use schema::sandbox::frame;
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
@@ -365,20 +365,29 @@ impl Upstream {
         }
     }
 
-    fn serve(
-        &self,
-        route: &Route,
-        client: Client<'_>,
-        allowed: bool,
-        forwarding: impl FnOnce(),
-        answered: impl FnOnce(Answer),
-    ) {
-        let taken = if !allowed || self.was_shut_down() {
+    fn close<'r>(&self, route: &'r Route, request: &ModelRequest) -> Result<Closed<'r>, Refusal> {
+        if self.was_shut_down() {
             Err(Refusal::ended())
         } else if self.key_was_refused() {
             Err(Refusal::key_refused())
         } else {
-            route.close(&client.request.request)
+            route.close(request)
+        }
+    }
+
+    fn serve(
+        &self,
+        route: &Route,
+        client: Client<'_>,
+        admission: Admission<'_>,
+        forwarding: impl FnOnce(),
+        answered: impl FnOnce(Answer),
+    ) {
+        let taken = match admission {
+            Admission::Ended => Err(Refusal::ended()),
+            Admission::Open => self.close(route, &client.request.request),
+            Admission::Spent { .. } if self.was_shut_down() => Err(Refusal::ended()),
+            Admission::Spent { budget } => Err(Refusal::spent(budget)),
         };
         let _ = match taken {
             Ok(closed) => self.forward(&closed, client, forwarding, answered),
@@ -417,21 +426,33 @@ impl Upstream {
     }
 }
 
+/// Whether the caller still takes a role's model requests.
+#[derive(Clone, Copy, Debug)]
+pub enum Admission<'b> {
+    Open,
+    /// The caller has stopped taking them: the route's end.
+    Ended,
+    /// The role's `budget` is spent ([`ModelBudget`]).
+    Spent {
+        budget: &'b ModelBudget,
+    },
+}
+
 /// Answers `request` for the sandbox that made it, by `by`, through the entry of `entries`, each
 /// a route's entry for one API and its upstream, whose endpoint it names.
 ///
 /// One that names none is refused with a 404 that names each. The entry's upstream refuses it
-/// unless `allowed`, or once it has shut down ([`Upstream::shutdown`]) or its key was refused,
-/// and else forwards it closed, giving up at `by` too, calling `forwarding` just before it sends
-/// it. It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`])
-/// and through which entry's index, once `keep` has the whole answer and before the answer's end
-/// is written.
+/// unless `admission` is open, or once it has shut down ([`Upstream::shutdown`]) or its key was
+/// refused, and else forwards it closed, giving up at `by` too, calling `forwarding` just before
+/// it sends it. It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered
+/// ([`Answer`]) and through which entry's index, once `keep` has the whole answer and before the
+/// answer's end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
 // too long for a frame, or as the sandbox's session ends, which the run log shows.
 pub fn serve(
     entries: &[(Route, Upstream)],
     request: IncomingModelRequest,
-    allowed: bool,
+    admission: Admission<'_>,
     by: Deadline,
     keep: &dyn Keep,
     forwarding: impl FnOnce(),
@@ -458,7 +479,7 @@ pub fn serve(
     };
     let (route, upstream) = &entries[index];
     let answered = |answer| answered(Some(index), answer);
-    upstream.serve(route, client, allowed, forwarding, answered);
+    upstream.serve(route, client, admission, forwarding, answered);
 }
 
 pub(crate) struct Client<'k> {

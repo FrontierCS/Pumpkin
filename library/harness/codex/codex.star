@@ -238,10 +238,10 @@ def codex(
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
         }},
-        "egress": {"model": [{
+        "egress": {"model": {"route": [{
             "api": "responses",
             "models": [model],
             "request_headers": _REQUEST_HEADERS,
             "response_headers": _RESPONSE_HEADERS,
-        }]},
+        }]}},
     }

@@ -28,6 +28,7 @@ use serde_json::json;
 use stdx::{Context, Deadline};
 
 mod agent;
+mod budget;
 mod child;
 mod host;
 mod interruption;
@@ -43,6 +44,8 @@ mod sandbox;
 mod start;
 
 use agent::Agent;
+use budget::Budget;
+pub use budget::{Budgets, budgets};
 use child::{Message, Report};
 use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
@@ -76,6 +79,13 @@ pub struct Recorded<'a> {
     pub prices: &'a BTreeMap<ModelName, TokenPrices>,
 }
 
+/// The upstreams that serve each role's model route, and the budgets that bound what the roles
+/// spend through them ([`budgets`]).
+pub struct ModelRoutes<'s> {
+    pub servings: &'s ByRole<Vec<Serving>>,
+    pub budgets: Budgets,
+}
+
 /// A run whose providers have reserved room for it and whose record exists, ready to
 /// [`execute`](Run::execute).
 pub struct Run<'r, H> {
@@ -83,6 +93,7 @@ pub struct Run<'r, H> {
     placed: Placed,
     providers: ByProvider<&'r dyn Provider>,
     routes: ByRole<Vec<Serving>>,
+    budgets: Budgets,
     prices: &'r BTreeMap<ModelName, TokenPrices>,
     id: RunTag,
     dir: PathBuf,
@@ -92,8 +103,7 @@ pub struct Run<'r, H> {
 
 impl<'r, H: Host> Run<'r, H> {
     /// Reserves room on each provider, then begins the record under `runs`, so that a run that
-    /// doesn't fit leaves no record. `servings` are the upstreams that serve each role's model
-    /// route.
+    /// doesn't fit leaves no record.
     ///
     /// # Errors
     ///
@@ -105,10 +115,11 @@ impl<'r, H: Host> Run<'r, H> {
         providers: ByProvider<&'r dyn Provider>,
         runs: &Path,
         id: RunTag,
-        servings: &ByRole<Vec<Serving>>,
+        models: ModelRoutes<'_>,
         recorded: Recorded<'r>,
     ) -> Result<Self, String> {
         let Recorded { args, prices } = recorded;
+        let ModelRoutes { servings, budgets } = models;
         let routes = model::routes(placed.workflow(), servings)?;
         let reserved = placed.by_provider(|name| {
             let phases = sandbox::phases(&placed, name);
@@ -122,6 +133,7 @@ impl<'r, H: Host> Run<'r, H> {
             placed,
             providers,
             routes,
+            budgets,
             prices,
             id,
             dir,
@@ -219,6 +231,7 @@ impl<'r, H: Host> Run<'r, H> {
             placed: &self.placed,
             routes: &self.routes,
             served: BTreeMap::new(),
+            budgets: self.budgets.unspent(),
             dir: &self.dir,
             sandboxes: &sandboxes,
             clock,
@@ -302,6 +315,7 @@ struct Runtime<'r, H: Host> {
     routes: &'r ByRole<Vec<Serving>>,
     // The model routes of the callers whose roles have one.
     served: BTreeMap<Caller, Arc<Served>>,
+    budgets: BTreeMap<RoleId, Budget<'r>>,
     dir: &'r Path,
     sandboxes: &'r Sandboxes<'r, H>,
     clock: H::Clock,
@@ -490,7 +504,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let (at, arrival) = match input {
             Input::Agent(at, arrival) => (at, arrival),
             Input::Child(report) => return self.report(scope, core, report),
-            Input::Logged(entry) => return self.log.entry(entry).map(|()| None),
+            Input::Logged(entry) => {
+                self.count(&entry);
+                return self.log.entry(entry).map(|()| None);
+            }
         };
         // Ops are taken as usual even once the agent's session has closed: the core has ended the
         // work phase, or the run, by then, so it refuses each, and the run log notes that the

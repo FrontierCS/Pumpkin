@@ -479,7 +479,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
     let statuses = answered(model).filter(|_| model.not_2xx > 0);
     let not_good: Vec<String> = failed_upstream(model).into_iter().chain(statuses).collect();
     let not_good = not_good.join("; ");
-    let doing = match (agent.routed, model.last_good) {
+    let doing = match (agent.model.is_some(), model.last_good) {
         (false, _) => format!("the agent on {on}"),
         (true, Some(last)) if not_good.is_empty() => format!(
             "{requests}, the last answered {} ago",
@@ -752,9 +752,20 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         let _ = writeln!(summary, "  {:>7} {line}", clock(asked));
     }
     // A run whose roles have no route made no model request.
-    if progress.agent.routed || progress.model.requests > 0 {
+    if progress.agent.model.is_some() || progress.model.requests > 0 {
         let model = model(&progress.model, prices);
         let _ = writeln!(summary, "  model: {model}");
+    }
+    match record.ir() {
+        Ok(ir) => {
+            for line in ir.iter().flat_map(|ir| cost::budgets(progress, ir)) {
+                let _ = writeln!(summary, "  {line}");
+            }
+        }
+        Err(error) => {
+            let error = crate::escaped(&error);
+            let _ = writeln!(summary, "  its budgets can't be read: {error}");
+        }
     }
     let _ = writeln!(summary, "  sandboxes: {}", sandboxes(progress));
     if let Some(cost) = &cost {

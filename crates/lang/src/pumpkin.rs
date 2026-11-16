@@ -1,8 +1,10 @@
 //! Pumpkin's predeclared names: the functions that make an evaluation's workflow and images and
 //! read its `--arg`s ([`Args`](crate::Args)); the units `KiB`, `MiB` and `GiB`, the ints 2^10,
-//! 2^20 and 2^30; and two values of the contract between a sandbox and what runs in it, which
-//! `schema::sandbox` holds: `MODEL_URL`, the string of the model endpoint's URL, its
-//! `model_url()`, and `MAX_MODEL_REQUESTS`, the int of its `MAX_MODEL_REQUESTS_IN_FLIGHT`.
+//! 2^20 and 2^30, and `USD`, the int 10^6, a US dollar in the millionths that a model budget
+//! counts (`schema::ir::ModelBudget`); and two values of the contract between a sandbox and what
+//! runs in it, which `schema::sandbox` holds: `MODEL_URL`, the string of the model endpoint's
+//! URL, its `model_url()`, and `MAX_MODEL_REQUESTS`, the int of its
+//! `MAX_MODEL_REQUESTS_IN_FLIGHT`.
 //!
 //! Each function takes its arguments as a `def` of its signature would. All but `arg()` refuse a
 //! call made while a file other than the entry loads ([`Site::in_entry`]). Each records what it
@@ -41,6 +43,7 @@ pub(crate) fn predeclared(name: &str) -> Option<Kind> {
         "KiB" => Kind::Int(1 << 10),
         "MiB" => Kind::Int(1 << 20),
         "GiB" => Kind::Int(1 << 30),
+        "USD" => Kind::Int(1_000_000),
         "MODEL_URL" => Kind::Str(Text::literal(&Rc::from(model_url()))),
         "MAX_MODEL_REQUESTS" => Kind::Int(MAX_MODEL_REQUESTS),
         _ => {

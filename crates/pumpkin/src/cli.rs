@@ -727,12 +727,12 @@ phase. Once the run has ended, it says its summary: when it started, how long it
 ran, the agent's start and end, each judge call with how long it took and how it
 ended, each lease with how long its runner lived and was charged for, and how
 much of that a command or transfer ran, its commands and how it ended, the
-model requests of an agent with a model route and the tokens reported, and the
-sandboxes, by provider and class, with how long they lasted and how many were
-deleted; then how it ended, and where its record
-is, then the command that runs it again, as `pumpkin run --help` says, and of a
-lost run, the commands that remove what it left; any other exit but 0 ends with
-a `pumpkin:` line that says why.
+model requests of an agent with a model route and the tokens reported, what
+each role with a model budget spent of it, and the sandboxes, by provider and
+class, with how long they lasted and how many were deleted; then how it ended,
+and where its record is, then the command that runs it again, as
+`pumpkin run --help` says, and of a lost run, the commands that remove what it
+left; any other exit but 0 ends with a `pumpkin:` line that says why.
 If the final judge returned no result, its standard error is shown first, or,
 if it is long, named.
 

@@ -738,8 +738,9 @@ fn parsed() {
     assert_eq!(name(workflow.agent().role), "agent");
     assert_eq!(workflow.submit_grant().name.as_str(), "submit");
     assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
-    let route = workflow.sandbox(workflow.agent().role).model_route.as_ref();
-    let apis: Vec<ir::Api> = route.unwrap().as_slice().iter().map(|e| e.api).collect();
+    let model = workflow.sandbox(workflow.agent().role).model.as_ref();
+    let route = &model.unwrap().route;
+    let apis: Vec<ir::Api> = route.as_slice().iter().map(|e| e.api).collect();
     assert_eq!(apis, [ir::Api::Responses], "the agent's route");
     let ir::Runtime::Judge(judge) = &ir.roles[2].runtime else {
         panic!("the final judge's runtime is a judge's");
@@ -768,7 +769,8 @@ fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let result = "/roles/1/runtime/judge/result";
-    let entry = &fixture()["roles"][0]["egress"]["model"][0];
+    let route = "/roles/0/egress/model/route";
+    let entry = &fixture()["roles"][0]["egress"]["model"]["route"][0];
     // A `Value` holds a key once, so the IR repeats a name as text.
     let shows = r#""metrics": "/metrics" }"#;
     let repeated = WORKFLOW.replacen(shows, r#""metrics": "/metrics", "score": "/x" }"#, 1);
@@ -793,13 +795,13 @@ fn checked_values() {
                 &format!("{command}/env"),
                 json!(["MODE=train", "MODE=eval"]),
             ),
-            fixture_with(&format!("{agent}/egress/model/0/models"), json!([])),
+            fixture_with(&format!("{route}/0/models"), json!([])),
             fixture_with(
-                &format!("{agent}/egress/model/0/models"),
+                &format!("{route}/0/models"),
                 json!(["gpt-6-astra", "gpt-6-astra"]),
             ),
-            fixture_with(&format!("{agent}/egress/model"), json!([])),
-            fixture_with(&format!("{agent}/egress/model"), json!([entry, entry])),
+            fixture_with(route, json!([])),
+            fixture_with(route, json!([entry, entry])),
             fixture_with(&format!("{result}/shows"), json!({ "Score": "/raw_score" })),
             fixture_with(&format!("{result}/shows"), json!({ "score": "raw_score" })),
             fixture_with(
@@ -853,7 +855,7 @@ fn checked_values() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn header_names() {
-    let entry = "/roles/0/egress/model/0";
+    let entry = "/roles/0/egress/model/route/0";
     let listed =
         |list: &str, names: &[&str]| fixture_with(&format!("{entry}/{list}"), json!(names));
     let refused = [
