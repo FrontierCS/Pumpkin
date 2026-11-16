@@ -4,11 +4,12 @@
 //! reason that says what to do instead, if it fails any of these:
 //!
 //! - The agent's ops are taken only during the work phase, and not once a finalize is accepted;
-//!   a call's, only while its judge's command runs.
-//! - An op names a grant its caller's role holds: a judge call one of the agent's judge grants, a
+//!   a call's, only while its body drives its target.
+//! - An op names a grant its caller's role holds: a call one of the agent's job functions, a
 //!   session's function one of its role's sessions, and a submission the agent's submit grant.
-//! - Its payload isn't empty, and fits its slot's `max_bytes`, the score's for a submission.
-//! - A judge grant has calls left, none of its calls queued or running, and judge time left. A
+//! - Its payload isn't empty, and fits its function's `payload_max_bytes`, the score slot's
+//!   `max_bytes` for a submission.
+//! - A job function has calls left, none of its calls queued or running, and call time left. A
 //!   refused call is not charged.
 //! - A session has fewer leases open than its `instances`, and time left, for its caller, and a
 //!   lease asks to last at most its `instance_seconds`; a lease runs a command or a transfer once
@@ -18,7 +19,7 @@
 //!   of that session.
 //!
 //! A refused op changes nothing. An op that passes changes the core's state and calls for
-//! [`Action`]s, which follow its reply: a judge call becomes a job, a lease, a command or a
+//! [`Action`]s, which follow its reply: a call becomes a job, a lease, a command or a
 //! transfer is started and metered by the `leases` module. Each reply gives the time left: the
 //! agent's until its deadline, a call's until its timeout.
 
@@ -31,11 +32,11 @@ use core::time::Duration;
 
 use schema::ir::{Argv, Name};
 use schema::sandbox::op::{
-    self, CommandStatus, Grant, JobState, JudgeReply, Last, LeaseRemaining, LeaseReply, LeaseState,
-    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, Remaining, SessionOp, StatusReply,
-    SubmitReply, SubmitState, TransferEnd, TransferStatus,
+    self, CommandStatus, Grant, JobState, Last, LeaseRemaining, LeaseReply, LeaseState,
+    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, SubmitReply,
+    SubmitState, TransferEnd, TransferStatus,
 };
-use schema::workflow::{JudgeCall, JudgeGrant, JudgeGrantId, RoleId, Session, SessionId};
+use schema::workflow::{JobFunctionId, JobOf, RoleId, Session, SessionId};
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
@@ -79,9 +80,8 @@ impl Working {
     }
 }
 
-/// A grant of the caller's; a judge or submit grant carries the work phase's deadline.
-enum Held {
-    Judge(JudgeGrantId, Duration),
+pub(super) enum Held {
+    Job(JobFunctionId, Duration),
     Session(SessionId),
     Submit(Duration),
 }
@@ -102,7 +102,7 @@ impl Core<'_> {
         actions.append(&mut then);
     }
 
-    /// `caller`, if it works: the agent in the work phase, a call while its command runs. Else
+    /// `caller`, if it works: the agent in the work phase, a call while it runs. Else
     /// why the run takes no more ops of `caller`'s.
     pub(super) fn working(&self, caller: Caller) -> Result<Working, String> {
         let work_end = match (&self.phase, caller) {
@@ -117,14 +117,19 @@ impl Core<'_> {
                         state: State::Running { started },
                     }) => Ok(Working::Job {
                         job,
-                        role: self.workflow.call_slot(*call).judge().role(),
+                        role: match *call {
+                            JobOf::Function(function) => {
+                                self.workflow.job_function(function).target.role()
+                            }
+                            JobOf::Score => self.workflow.score().slot.judge().role(),
+                        },
                         end: started.saturating_add(*timeout),
                     }),
                     Some(Job {
                         state: State::Queued | State::Ending { .. } | State::Ended { .. },
                         ..
                     })
-                    | None => Err("the call's command has ended: make no more ops".to_owned()),
+                    | None => Err("the call has ended: make no more ops".to_owned()),
                 };
             }
             (Phase::Work { deadline, .. }, Caller::Agent) => {
@@ -161,12 +166,7 @@ impl Core<'_> {
         match request {
             Request::Ops => Ok(OpReply::Ops(self.ops(working))),
             Request::Status { job } => self.own_job(caller, job).map(OpReply::Status),
-            Request::Judge { grant, payload } => match self.held(working, &grant)? {
-                Held::Judge(id, deadline) => {
-                    self.judge(id, payload, deadline, then).map(OpReply::Judge)
-                }
-                other => Err(other.misnamed(&grant, "a judge grant")),
-            },
+            Request::Call { function, payload } => self.call(working, &function, payload, then),
             Request::Submit {
                 grant,
                 finalize,
@@ -192,7 +192,7 @@ impl Core<'_> {
     ) -> Result<OpReply, String> {
         let id = match self.held(working, grant)? {
             Held::Session(id) => id,
-            held @ (Held::Judge(..) | Held::Submit(_)) => {
+            held @ (Held::Job(..) | Held::Submit(_)) => {
                 return Err(held.misnamed(grant, "a session"));
             }
         };
@@ -260,22 +260,22 @@ impl Core<'_> {
     }
 
     fn own_job(&self, caller: Caller, number: u64) -> Result<StatusReply, String> {
-        // The agent asks only about its calls to judge grants: the final score's job, and any job
+        // The agent asks only about its calls to job functions: the final score's job, and any job
         // it didn't make, are refused as absent.
         let job = JobId(number);
         let found = self
             .jobs
             .get(job)
             .and_then(|found| match (caller, found.call) {
-                (Caller::Agent, JudgeCall::Grant(grant)) => Some((found, grant)),
-                (Caller::Agent, JudgeCall::Score) | (Caller::Job(_), _) => None,
+                (Caller::Agent, JobOf::Function(id)) => Some((found, id)),
+                (Caller::Agent, JobOf::Score) | (Caller::Job(_), _) => None,
             });
-        let Some((found, grant)) = found else {
+        let Some((found, function)) = found else {
             return Err(format!(
                 "you have no job {number}: ask about a job that one of your calls returned"
             ));
         };
-        Ok(self.status(job, found, grant))
+        Ok(self.status(job, found, function))
     }
 
     /// The time from now until `end`, as a reply gives the time left: in whole seconds rounded
@@ -284,83 +284,25 @@ impl Core<'_> {
         end.saturating_sub(self.now).as_secs()
     }
 
-    fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
+    pub(super) fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
-        // A judge's runtime holds lease grants alone (`ir::JudgeRuntime`).
+        // A job's role, a judge or a target, holds sessions alone (`ir::JudgeRuntime`,
+        // `ir::TargetRuntime`).
         let deadline = match working {
             Working::Agent { deadline, .. } => Some(deadline),
             Working::Job { .. } => None,
         };
-        let judge = deadline.and_then(|deadline| {
-            (self.workflow.judge_grants())
-                .find(|(_, grant)| grant.name == *name)
-                .map(|(id, _)| Held::Judge(id, deadline))
+        let job = deadline.and_then(|deadline| {
+            (self.workflow.job_functions())
+                .find(|(_, function)| function.name == *name)
+                .map(|(id, _)| Held::Job(id, deadline))
         });
         let lease = (self.workflow.sessions())
             .find(|(_, grant)| grant.holder.role(self.workflow) == role && grant.name == *name)
             .map(|(id, _)| Held::Session(id));
         let submit = deadline.filter(|_| self.workflow.submit_grant().name == *name);
-        let held = judge.or(lease).or(submit.map(Held::Submit));
+        let held = (job.or(lease)).or(submit.map(Held::Submit));
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
-    }
-
-    fn judge(
-        &mut self,
-        id: JudgeGrantId,
-        payload: PayloadRef,
-        deadline: Duration,
-        then: &mut Vec<Action>,
-    ) -> Result<JudgeReply, String> {
-        let grant = self.workflow.judge_grant(id);
-        let name = &grant.name;
-        fits(name, &payload, self.workflow.slot(grant.slot).max_bytes())?;
-        let usage = self.jobs.usage(id);
-        if let Some(calls) = grant.calls
-            && usage.calls >= calls.get()
-        {
-            return Err(format!(
-                "`{name}` has no calls left of the {calls} it allows: make no more calls to it"
-            ));
-        }
-        // A call has ended only once every lease it held has.
-        let holding = self
-            .jobs
-            .of(id)
-            .any(|job| self.leases.holds(Caller::Job(job)));
-        if usage.busy || holding {
-            return Err(format!(
-                "`{name}` runs one call at a time, and already has one queued or running: call \
-                 again once it has finished; this call is not charged"
-            ));
-        }
-        if let Some(total) = grant.cumulative()
-            && usage.used >= total
-        {
-            return Err(format!(
-                "`{name}` has no judge time left of the {} s it allows: make no more calls to it",
-                total.as_secs()
-            ));
-        }
-        // The work phase's end stops every call (`end_work`), so a call is given at most the time
-        // the work phase has left when it is accepted; after a wait in the queue, its timeout can
-        // reach past the deadline, where that stop ends it all the same. Each term is positive: the
-        // work phase ends at the deadline, and every limit is left above zero.
-        let work_left = deadline.saturating_sub(self.now);
-        let judge_left =
-            (grant.cumulative()).map_or(Duration::MAX, |total| total.saturating_sub(usage.used));
-        let timeout = grant.call_timeout().min(judge_left).min(work_left);
-        let job = self.jobs.add(JudgeCall::Grant(id), timeout);
-        then.push(Action::StartJudge {
-            job,
-            call: JudgeCall::Grant(id),
-            payload,
-            timeout,
-        });
-        let remaining = self.remaining(id);
-        Ok(JudgeReply {
-            job: job.0,
-            remaining,
-        })
     }
 
     /// Opens a lease of session `id` for `caller`, whose work ends at `end`, by which the lease's
@@ -581,10 +523,17 @@ impl Core<'_> {
     fn ops(&self, working: Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
         let agent = matches!(working, Working::Agent { .. });
-        // A call holds no judge or submit grant.
-        let judges = (self.workflow.judge_grants())
-            .filter(|_| agent)
-            .map(|(_, grant)| Grant::Judge(self.judge_grant(grant)));
+        // A call holds no job function or submit grant.
+        let jobs = (self.workflow.job_functions()).filter(|_| agent);
+        let jobs = jobs.map(|(_, function)| {
+            Grant::Job(op::JobFunction {
+                name: function.name.clone(),
+                payload_max_bytes: function.payload_max_bytes(),
+                calls: function.calls,
+                cumulative_seconds: function.cumulative_seconds,
+                call_timeout_seconds: function.call_timeout_seconds,
+            })
+        });
         let leases = (self.workflow.sessions())
             .filter(|(_, grant)| grant.holder.role(self.workflow) == role);
         let leases = leases.map(|(id, grant)| {
@@ -617,28 +566,11 @@ impl Core<'_> {
         OpsReply {
             remaining_seconds: self.seconds_left(end),
             resources: (self.workflow.sandbox(role).needs).resources(),
-            grants: judges.chain(leases).chain(submit).collect(),
+            grants: (jobs.chain(leases)).chain(submit).collect(),
         }
     }
 
-    fn judge_grant(&self, grant: &JudgeGrant) -> op::JudgeGrant {
-        let JudgeGrant {
-            name,
-            slot,
-            calls,
-            cumulative_seconds,
-            call_timeout_seconds,
-        } = grant;
-        op::JudgeGrant {
-            name: name.clone(),
-            max_bytes: self.workflow.slot(*slot).max_bytes(),
-            calls: *calls,
-            cumulative_seconds: *cumulative_seconds,
-            call_timeout_seconds: *call_timeout_seconds,
-        }
-    }
-
-    fn status(&self, id: JobId, job: &Job, grant: JudgeGrantId) -> StatusReply {
+    fn status(&self, id: JobId, job: &Job, function: JobFunctionId) -> StatusReply {
         let state = match &job.state {
             State::Queued => JobState::Queued,
             State::Running { .. } | State::Ending { .. } => JobState::Running,
@@ -658,7 +590,7 @@ impl Core<'_> {
         StatusReply {
             job: id.0,
             state,
-            remaining: self.remaining(grant),
+            remaining: self.remaining(function),
         }
     }
 
@@ -745,20 +677,12 @@ impl Core<'_> {
                 .map(|commands| commands.get().saturating_sub(usage.commands)),
         }
     }
-
-    fn remaining(&self, id: JudgeGrantId) -> Remaining {
-        let (grant, usage) = (self.workflow.judge_grant(id), self.jobs.usage(id));
-        Remaining {
-            calls: (grant.calls).map(|calls| calls.get().saturating_sub(usage.calls)),
-            seconds: (grant.cumulative()).map(|total| total.saturating_sub(usage.used).as_secs()),
-        }
-    }
 }
 
 impl Held {
-    fn misnamed(&self, name: &Name, kind: &str) -> String {
+    pub(super) fn misnamed(&self, name: &Name, kind: &str) -> String {
         let (is, instead) = match self {
-            Self::Judge(..) => ("a judge grant", "judge with it".to_owned()),
+            Self::Job(..) => ("a job function", "call it".to_owned()),
             Self::Session(_) => (
                 "a session",
                 format!("call its functions, as `{name}.open`,"),
@@ -799,7 +723,7 @@ fn rerun((session, lease): (&Name, u64), timeout: Option<NonZeroU64>, argv: &Arg
 }
 
 // Refuses a payload that is empty, or over `max_bytes`.
-fn fits(name: &Name, payload: &PayloadRef, max_bytes: NonZeroU64) -> Result<(), String> {
+pub(crate) fn fits(name: &Name, payload: &PayloadRef, max_bytes: NonZeroU64) -> Result<(), String> {
     if payload.size == 0 {
         Err(format!(
             "the payload is empty: send `{name}` at least one byte"

@@ -116,7 +116,7 @@ impl Case for Placing {
     }
 }
 
-/// The train judge, needing what the case gives, placed on [`offered`] beside roles that fit
+/// The trainer, needing what the case gives, placed on [`offered`] beside roles that fit
 /// its smallest class: where it is placed, or why it can't be.
 struct Needing(Value);
 
@@ -341,12 +341,12 @@ fn placement() {
             small(json!({ "gpu": h100(2) })),
         ],
         &expect![[r#"
-            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: offer a class that meets its needs, or change its needs
-            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
-            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `train_judge` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs"#]],
+            {"cpu_millis":128000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 128000; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 128000; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 128000: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"memory_bytes":549755813888}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` offers 68719476736 bytes of memory, fewer than its 549755813888; `aws`'s `ice_lake` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 549755813888; `aws`'s `judge_60` offers 137438953472 bytes of memory, fewer than its 549755813888; `aws`'s `judge_memory` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100` offers 68719476736 bytes of memory, fewer than its 549755813888; `gpus`'s `h100_4` offers 274877906944 bytes of memory, fewer than its 549755813888: offer a class that meets its needs, or change its needs
+            {"cpu_features":["amx_tile","avx512f"],"cpu_millis":2000,"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `ice_lake` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `aws`'s `judge_60` lacks the CPU flags `amx_tile`, which it needs; `aws`'s `judge_memory` lacks the CPU flags `amx_tile`, `avx512f`, which it needs; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":8000,"cpu_model":"Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_60` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `aws`'s `judge_memory` states no CPU model, and it needs `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"cpu_model":"AMD EPYC 7R13 Processor","memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `ice_lake` states the CPU model `Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz`, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_60` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `aws`'s `judge_memory` states no CPU model, and it needs `AMD EPYC 7R13 Processor`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs none; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs none: offer a class that meets its needs, or change its needs
+            {"cpu_millis":2000,"gpu":{"count":2,"model":"NVIDIA H100 80GB HBM3"},"memory_bytes":2147483648}: /roles/1/needs: `trainer` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_60` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 2 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs"#]],
     );
     let mut unplaced = fixture();
     unplaced["roles"][0]["needs"]["gpu"] = h100(8);
@@ -354,7 +354,7 @@ fn placement() {
     check(
         [Placing(fixture()), Placing(unplaced)],
         &expect![[r#"
-            agent, on `aws` in `agent`, whose starts take at most 30s; train_judge, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
+            agent, on `aws` in `agent`, whose starts take at most 30s; trainer, on `aws` in `judge`, whose starts take at most 60s; final_judge, on `aws` in `judge`, whose starts take at most 60s; providers `aws`
             /roles/0/needs: `agent` fits no class of sandbox, as `aws`'s `agent` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 8000; `aws`'s `judge` offers 17179869184 bytes of memory, fewer than its 34359738368; `aws`'s `judge_60` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `aws`'s `judge_memory` has no GPU, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100` has GPUs, 1 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`; `gpus`'s `h100_4` has GPUs, 4 × `NVIDIA H100 80GB HBM3`, and it needs 8 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
             /roles/2/needs: `final_judge` fits no class of sandbox, as `aws`'s `agent` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `ice_lake` offers 4000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge` offers 8000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_60` offers 64000 thousandths of a CPU, fewer than its 64001; `aws`'s `judge_memory` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100` offers 8000 thousandths of a CPU, fewer than its 64001; `gpus`'s `h100_4` offers 32000 thousandths of a CPU, fewer than its 64001: offer a class that meets its needs, or change its needs"#]],
     );
@@ -453,9 +453,9 @@ fn op_replies() {
     check(
         [
             Reply(
-                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
+                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
             ),
-            Reply(r#"{"kind":"judge","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
+            Reply(r#"{"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
             Reply(
                 r#"{"kind":"status","job":1,"state":"queued","remaining":{"calls":99,"seconds":null}}"#,
             ),
@@ -469,10 +469,10 @@ fn op_replies() {
                 r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"remaining":{"calls":98,"seconds":11990}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
+                r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"invalid_result","message":"result.json nests arrays and objects more than 120 deep: nest them at most that deep"},"remaining":{"calls":96,"seconds":0}}"#,
+                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":96,"seconds":0}}"#,
             ),
             Reply(r#"{"kind":"submit","state":"stored","remaining_seconds":120}"#),
             Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
@@ -508,18 +508,18 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"completed","remaining":{"calls":null,"seconds":null}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":1,"state":"errored","returned":{},"failure":{"code":"judge_error","message":"the judge failed"},"remaining":{"calls":null,"seconds":null}}"#,
+                r#"{"kind":"status","job":1,"state":"errored","returned":{},"failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":null,"seconds":null}}"#,
             ),
         ],
         &expect![[r#"
-            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Judge(JudgeGrant { name: Name("train"), max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
-            Judge(JudgeReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
+            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Job(JobFunction { name: Name("train"), payload_max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
+            Call(Job(JobReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } }))
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
             Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
             Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
-            Status(StatusReply { job: 3, state: Errored { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
-            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: InvalidResult, message: "result.json nests arrays and objects more than 120 deep: nest them at most that deep" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
+            Status(StatusReply { job: 3, state: Errored { failure: Failure { code: CallTimeout, message: "the call ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
+            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: CallError, message: "the call's body failed: the run's record says why" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
             Submit(SubmitReply { state: Stored, remaining_seconds: 120 })
             Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
             Refused { message: "`train` has no calls left: it allows 100" }
@@ -768,7 +768,7 @@ fn parsed() {
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
-    let result = "/roles/1/runtime/judge/result";
+    let result = "/roles/2/runtime/judge/result";
     let route = "/roles/0/runtime/agent/egress/model";
     let entry = &fixture()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
     // A `Value` holds a key once, so the IR repeats a name as text.
@@ -844,7 +844,7 @@ fn checked_values() {
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
-            `score` is shown more than once: show each name once at line 72 column 84"#]],
+            `score` is shown more than once: show each name once at line 88 column 84"#]],
     );
     assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }
@@ -1035,8 +1035,8 @@ fn agent_files() {
 #[test]
 fn broken_references() {
     let mut ir = fixture();
-    let train_judge = ir["roles"][1].clone();
-    ir["roles"].as_array_mut().unwrap().push(train_judge);
+    let trainer = ir["roles"][1].clone();
+    ir["roles"].as_array_mut().unwrap().push(trainer);
     let payload = ir["roles"][2]["runtime"]["judge"]["slots"][0].clone();
     ir["roles"][2]["runtime"]["judge"]["slots"]
         .as_array_mut()
@@ -1045,18 +1045,22 @@ fn broken_references() {
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let train = grants[0].clone();
     grants.as_array_mut().unwrap().push(train);
-    grants[0]["judge"]["role"] = json!("ghost");
-    grants[2]["judge"]["slot"] = json!("submission");
+    grants[0]["job"]["target"] = json!("ghost");
     ir["score"]["role"] = json!("agent");
+    let mut unscored = fixture();
+    let mut judge = unscored["roles"][2].clone();
+    judge["name"] = json!("spare");
+    unscored["roles"].as_array_mut().unwrap().push(judge);
     check(
-        [ir],
+        [ir, unscored],
         &expect![[r#"
-            /roles/3/name: `train_judge` also names /roles/1: give each a unique name
+            /roles/3/name: `trainer` also names /roles/1: give each a unique name
             /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
             /roles/0/runtime/agent/grants/2/name: `train` also names /roles/0/runtime/agent/grants/0: give each a unique name
-            /roles/0/runtime/agent/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
-            /roles/0/runtime/agent/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
-            /score/role: `agent` is an agent: name a judge"#]],
+            /roles/0/runtime/agent/grants/0/job/target: no role is named `ghost`: name one listed in `roles`
+            /roles/3: `trainer` is a target that no job function names: name it from one
+            /score/role: `agent` is an agent: name a judge
+            /roles/3: `spare` is a judge that the score doesn't name: name it as the score's role"#]],
     );
 }
 
@@ -1077,8 +1081,8 @@ fn grant_forms() {
             }),
         ],
         &expect![[r#"
-            `submit` follows `judge`, the function's kind: give a grant its `name` and one function
-            unknown variant `lease`, expected one of `judge`, `session`, `submit`
+            `submit` follows `job`, the function's kind: give a grant its `name` and one function
+            unknown variant `lease`, expected one of `job`, `session`, `submit`
             the grant gives no function: give one, under its kind's key
             missing field `name`"#]],
     );
@@ -1107,7 +1111,7 @@ fn leasing() -> Value {
 #[test]
 fn broken_leases() {
     let mut judged = leasing();
-    judged["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("train_judge");
+    judged["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("final_judge");
     let mut twice = leasing();
     let mut again = twice["roles"][0]["runtime"]["agent"]["grants"][1].clone();
     again["name"] = json!("again");
@@ -1149,17 +1153,106 @@ fn broken_leases() {
         ],
         &expect![[r#"
             parsed
-            /roles/0/runtime/agent/grants/1/session/runner: `train_judge` is a judge: name a runner
+            /roles/0/runtime/agent/grants/1/session/runner: `final_judge` is a judge: name a runner
             /roles/3: `gpu` is a runner that no session names: name it from one
             /roles/0/runtime/agent/grants/3/session/runner: `gpu` is named by `agent`'s session `gpu` and `agent`'s `again`: name each runner from one session
             /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs judge `train_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs judge `final_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge or target has
             /roles/0/runtime/agent/grants/1/session/runner: no role is named `ghost`: name one listed in `roles`
             /roles/3: `gpu` is a runner that no session names: name it from one
             /score/role: `gpu` is a runner: name a judge
             /roles/0/runtime/agent/grants/1/session/runner: `agent` is an agent: name a runner
             /roles/3: `gpu` is a runner that no session names: name it from one
             /roles/0/runtime/agent/grants/1/session/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
+            parsed"#]],
+    );
+}
+
+/// [`leasing`]'s workflow, with a target, `verifier`, of an image of its own, of the agent's job
+/// function `check`.
+fn calling() -> Value {
+    let mut ir = leasing();
+    let mut verifier = ir["roles"][3].clone();
+    verifier["name"] = json!("verifier");
+    verifier["image"] = json!(format!("sha256:{}", "5".repeat(64)));
+    verifier["runtime"] = json!({ "target": { "cwd": "/work" } });
+    ir["roles"].as_array_mut().unwrap().push(verifier);
+    let function = json!({ "name": "check", "job": {
+        "target": "verifier", "body": { "file": "//lib/verify.star", "def": "check" },
+        "keywords": { "metrics": ["passed"] }, "payload_max_bytes": 1024, "calls": 3,
+        "call_timeout_seconds": 60,
+    } });
+    ir["roles"][0]["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .push(function);
+    ir
+}
+
+/// [`calling`]'s workflow, whose target holds the agent's model route and a session, `box`, of a
+/// runner of an image of its own.
+fn target_holding() -> Value {
+    let mut ir = calling();
+    let mut boxed = ir["roles"][3].clone();
+    boxed["name"] = json!("box");
+    boxed["image"] = json!(format!("sha256:{}", "6".repeat(64)));
+    ir["roles"].as_array_mut().unwrap().push(boxed);
+    let mut session = ir["roles"][0]["runtime"]["agent"]["grants"][1].clone();
+    session["name"] = json!("box");
+    session["session"]["runner"] = json!("box");
+    ir["roles"][4]["runtime"]["target"]["sessions"] = json!([session]);
+    ir["roles"][4]["runtime"]["target"]["egress"] =
+        ir["roles"][0]["runtime"]["agent"]["egress"].clone();
+    ir
+}
+
+#[test]
+fn job_functions() {
+    let with = |change: fn(&mut Value)| {
+        let mut ir = calling();
+        change(&mut ir["roles"][0]["runtime"]["agent"]["grants"][3]);
+        ir
+    };
+    let mut leased = calling();
+    leased["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("verifier");
+    let mut same_image = calling();
+    same_image["roles"][4]["image"] = same_image["roles"][3]["image"].clone();
+    let mut twice = calling();
+    let mut again = twice["roles"][0]["runtime"]["agent"]["grants"][3].clone();
+    again["name"] = json!("again");
+    twice["roles"][0]["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .push(again);
+    let mut uncalled = calling();
+    let grants = &mut uncalled["roles"][0]["runtime"]["agent"]["grants"];
+    grants.as_array_mut().unwrap().remove(3);
+    check(
+        [
+            calling(),
+            with(|grant| grant["job"]["target"] = json!("final_judge")),
+            with(|grant| grant["job"]["target"] = json!("gpu")),
+            with(|grant| grant["job"]["payload_max_bytes"] = json!(MAX_OP_PAYLOAD_BYTES + 1)),
+            with(|grant| grant["job"]["body"]["file"] = json!("lib/verify.star")),
+            leased,
+            same_image,
+            twice,
+            uncalled,
+            target_holding(),
+        ],
+        &expect![[r#"
+            parsed
+            /roles/0/runtime/agent/grants/3/job/target: `final_judge` is a judge: name a target as a job's target
+            /roles/4: `verifier` is a target that no job function names: name it from one
+            /roles/0/runtime/agent/grants/3/job/target: `gpu` is a runner: name a target as a job's target
+            /roles/4: `verifier` is a target that no job function names: name it from one
+            /roles/0/runtime/agent/grants/3/job/payload_max_bytes: `check`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+            `lib/verify.star` is no label: start it with `//`, the root
+            /roles/0/runtime/agent/grants/1/session/runner: `verifier` is a target: name a runner
+            /roles/3: `gpu` is a runner that no session names: name it from one
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `verifier`'s image, sha256:3333333333333333333333333333333333333333333333333333333333333333: give the runner an image no judge or target has
+            /roles/0/runtime/agent/grants/4/job/target: `verifier` is the target of job functions `check` and `again`: name each target from one function
+            /roles/4: `verifier` is a target that no job function names: name it from one
             parsed"#]],
     );
 }
@@ -1189,7 +1282,7 @@ fn judge_leases() {
     let mut twice = judge_leasing();
     let grants = &mut twice["roles"][2]["runtime"]["judge"]["sessions"];
     let mut again = grants[0].clone();
-    again["session"]["runner"] = json!("train_judge");
+    again["session"]["runner"] = json!("trainer");
     grants.as_array_mut().unwrap().insert(0, again);
     check(
         [judge_leasing(), same_image, both, twice],
@@ -1199,7 +1292,7 @@ fn judge_leases() {
             /roles/2/runtime/judge/sessions/0/session/runner: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
             /roles/4: `checker` is a runner that no session names: name it from one
             /roles/2/runtime/judge/sessions/1/name: `box` also names /roles/2/runtime/judge/sessions/0: give each a unique name
-            /roles/2/runtime/judge/sessions/0/session/runner: `train_judge` is a judge: name a runner"#]],
+            /roles/2/runtime/judge/sessions/0/session/runner: `trainer` is a target: name a runner"#]],
     );
 }
 
@@ -1216,8 +1309,7 @@ fn broken_roles() {
     let mut retrain = grants[0].clone();
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
-    grants[0]["judge"]["slot"] = json!("submission");
-    ir["score"]["role"] = json!("train_judge");
+    ir["score"]["role"] = json!("trainer");
     let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
     let mut unsubmitted = fixture();
@@ -1231,7 +1323,7 @@ fn broken_roles() {
         .unwrap()
         .remove("grants");
     let mut untimed = fixture();
-    untimed["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]
+    untimed["roles"][0]["runtime"]["agent"]["grants"][0]["job"]
         .as_object_mut()
         .unwrap()
         .remove("call_timeout_seconds");
@@ -1239,13 +1331,13 @@ fn broken_roles() {
         [ir, none, unsubmitted, ungranted, untimed],
         &expect![[r#"
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
-            /roles/0/runtime/agent/grants/0/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
-            /roles/0/runtime/agent/grants/3/judge/role: `train_judge` is named by judge grants `train` and `retrain`: name each judge from one grant
+            /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
             /roles/0/runtime/agent/grants/2/submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
-            /score/role: `train_judge` is also the role of judge grant `train`: name a judge no grant names
+            /score/role: `trainer` is a target: name a judge
             /roles: no role is an agent: a workflow has exactly one
             /roles/0/runtime/agent/grants: no submit grant: give the agent exactly one
             /roles/0/runtime/agent: no submit grant: give the agent exactly one
+            /roles/1: `trainer` is a target that no job function names: name it from one
             missing field `call_timeout_seconds`"#]],
     );
 }

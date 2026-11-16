@@ -291,9 +291,9 @@ fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         let mut lane_json = json!({
             "lane": lane,
             "caller": format!("job-{}", call.job),
-            "kind": "judge",
+            "kind": if call.function.is_some() { "target" } else { "judge" },
             "role": call.role,
-            "grant": call.grant,
+            "grant": call.function,
             "sandbox": sandbox(&call.sandbox),
             "said": progress::called(call, dir),
             "model": model_json(&call.model),

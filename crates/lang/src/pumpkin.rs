@@ -26,7 +26,7 @@ use crate::syntax::{Def, is_name};
 use crate::value::{
     Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Span, Text, Value, escape, quote,
 };
-use crate::{Label, Root, is_component};
+use crate::{Label, Root};
 
 // `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
 #[expect(
@@ -560,7 +560,7 @@ fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
         (_, None) if package.is_empty() => String::from(text),
         (_, None) => format!("{package}/{text}"),
     };
-    Label::below(Root::Task, below).ok_or_else(|| {
+    Label::parse(&format!("//{below}")).map_err(|_| {
         let message = format!(
             "`{}` names no directory below the root: write `.` for the entry file's directory, a \
              path below it, or `//` and a path below the root, each in `/`-separated components \
@@ -574,7 +574,8 @@ fn directory(package: &str, text: &str, at: Span) -> Result<Label, Fault> {
 // A path below the context, as a recipe's or a mount's.
 fn in_context(text: &str, at: Span) -> Result<RelativePath, Fault> {
     let path = RelativePath::try_from(String::from(text)).ok();
-    let path = path.filter(|path| path.as_str().split('/').all(is_component));
+    // A label's components, as a path in the context is named as a file is.
+    let path = path.filter(|path| Label::is_path(path.as_str()));
     path.ok_or_else(|| {
         let message = format!(
             "`{}` names no path in the context: write `/`-separated components of ASCII letters, \

@@ -67,23 +67,27 @@ impl Talk {
         let score = ir.score.role.as_str();
         let mut granted = BTreeMap::new();
         for role in roles {
-            // Each grant that names a role: a judge grant its judge, a session its runner.
-            let named: Vec<(&Name, &Name)> = match &role.runtime {
+            // Each grant that names a role: a job function its target, a session its runner; and
+            // how the page names a call of it.
+            let named: Vec<(&Name, &Name, &'static str)> = match &role.runtime {
                 ir::Runtime::Agent(agent) => (agent.grants.iter())
                     .filter_map(|grant| match &grant.function {
-                        ir::Function::Judge(judge) => Some((&grant.name, &judge.role)),
-                        ir::Function::Session(session) => Some((&grant.name, &session.runner)),
+                        ir::Function::Job(job) => Some((&grant.name, &job.target, "job call")),
+                        ir::Function::Session(session) => {
+                            Some((&grant.name, &session.runner, "lease"))
+                        }
                         ir::Function::Submit(_) => None,
                     })
                     .collect(),
-                ir::Runtime::Judge(judge) => (judge.sessions.iter())
-                    .map(|named| (&named.name, &named.session.runner))
+                ir::Runtime::Judge(ir::JudgeRuntime { sessions, .. })
+                | ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (sessions.iter())
+                    .map(|named| (&named.name, &named.session.runner, "lease"))
                     .collect(),
                 ir::Runtime::Runner(_) => Vec::new(),
             };
-            for (name, target) in named {
+            for (name, target, call) in named {
                 let key = (role.name.to_string(), name.to_string());
-                granted.insert(key, target.to_string());
+                granted.insert(key, (target.to_string(), call));
             }
         }
         let routes = |role: &ir::Role| {
@@ -142,7 +146,8 @@ impl Talk {
 struct Reading {
     agent: String,
     score: String,
-    granted: BTreeMap<(String, String), String>,
+    /// Each grant's role, by its holder and name, and how the page names a call of it.
+    granted: BTreeMap<(String, String), (String, &'static str)>,
     jobs: BTreeMap<u64, String>,
     holders: BTreeMap<u64, String>,
     directions: BTreeMap<(u64, u64), String>,
@@ -152,18 +157,18 @@ impl Talk {
     fn action(&mut self, at: f64, action: &Value, request: &Value) {
         let lease = action["lease"].as_u64();
         match (action["kind"].as_str().unwrap_or_default(), lease) {
-            ("start_judge", _) => {
+            ("start_judge" | "start_call", _) => {
                 let Some(job) = action["job"].as_u64() else {
                     return;
                 };
-                let (role, kind) = match action["grant"].as_str() {
-                    None => (Some(self.reading.score.clone()), "submission"),
+                let called = match action["grant"].as_str() {
+                    None => Some((self.reading.score.clone(), "submission")),
                     Some(grant) => {
                         let grant = (self.reading.agent.clone(), grant.to_owned());
-                        (self.reading.granted.get(&grant).cloned(), "judge call")
+                        self.reading.granted.get(&grant).cloned()
                     }
                 };
-                let Some(role) = role else { return };
+                let Some((role, kind)) = called else { return };
                 let size = action["payload"]["size"].as_u64();
                 self.edge(&self.reading.agent.clone(), &role, kind)
                     .add(size, None);
@@ -175,7 +180,7 @@ impl Talk {
                     .and_then(|holder| self.role(holder));
                 let grant = action["grant"].as_str().unwrap_or_default().to_owned();
                 let Some(holder) = holder else { return };
-                let Some(runner) = self.reading.granted.get(&(holder.clone(), grant)).cloned()
+                let Some((runner, _)) = self.reading.granted.get(&(holder.clone(), grant)).cloned()
                 else {
                     return;
                 };
@@ -324,6 +329,7 @@ fn role_json(
     let (kind, has_route) = match &role.runtime {
         ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
         ir::Runtime::Judge(judge) => ("judge", judge.egress.model.is_some()),
+        ir::Runtime::Target(target) => ("target", target.egress.model.is_some()),
         ir::Runtime::Runner(_) => ("runner", false),
     };
     let place = (places.get(name)).map(|Place { provider, class }| format!("{provider}/{class}"));

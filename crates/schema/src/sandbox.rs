@@ -140,8 +140,8 @@ pub fn slot_dir(slot: &Name) -> RelativePath {
     in_dir().join(&RelativePath::from(slot))
 }
 
-/// `in/<slot>/raw`, where a judge call's payload is, in the slot the call names, before the
-/// judge's command starts.
+/// `in/<slot>/raw`, where the score's payload is, in the score's slot, before the judge's command
+/// starts.
 pub fn slot_payload(slot: &Name) -> RelativePath {
     slot_dir(slot).join(&const { RelativePath::from_static("raw") })
 }
@@ -163,7 +163,8 @@ pub fn result_file() -> RelativePath {
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
 /// How deep a judge's result ([`result_file()`]) may nest arrays and objects, the document
-/// included: a deeper one is no result.
+/// included, and a job function's body its return, the returned dict included: a deeper one is
+/// no result.
 // A run's record nests what a result returns inside objects of its own, a log line's `result` and
 // `returned` among them, and serde_json reads at most 127 nested arrays and objects: this bound
 // leaves 7 of them for what holds a result, so that every line of a run's log reads back.
@@ -580,8 +581,9 @@ pub enum ToSandbox {
     /// more, so that what is collected afterwards can't change. A platform's own first process,
     /// such as Modal's `dumb-init`, runs on. `sandboxd` replies once they are gone.
     Freeze { stream: u32 },
-    /// Sends the tree in `dir`: its entries, then an `End`.
-    Collect { stream: u32, dir: AbsolutePath },
+    /// Sends the tree at `path`, a directory's entries, then an `End`. A regular file at `path`
+    /// is sent as the tree of that one file, by its name.
+    Collect { stream: u32, path: AbsolutePath },
     /// The answer to op `op`, which ends it.
     OpReply { op: u32, reply: OpReply },
     /// The status and headers of the response to model request `request`, sent once the request is

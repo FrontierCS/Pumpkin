@@ -34,7 +34,7 @@ impl Roles {
             .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
         let agent = roles.iter().find_map(|role| match &role.runtime {
             ir::Runtime::Agent(agent) => Some((&role.name, agent)),
-            ir::Runtime::Judge(_) | ir::Runtime::Runner(_) => None,
+            ir::Runtime::Judge(_) | ir::Runtime::Target(_) | ir::Runtime::Runner(_) => None,
         });
         let grants = roles.iter().flat_map(|role| {
             held(&role.runtime)
@@ -98,21 +98,23 @@ pub(super) struct Grant {
     pub(super) ready_for: Option<Duration>,
 }
 
-/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's sessions.
+/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's or a target's
+/// sessions.
 fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
     let session = |session: &ir::Session| Grant {
         role: Some(session.runner.to_string()),
         ready_for: Some(Duration::from_secs(session.instance_seconds.get())),
     };
-    let (agent, judge) = match runtime {
+    let (agent, sessions) = match runtime {
         ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
-        ir::Runtime::Judge(judge) => (&[][..], judge.sessions.as_slice()),
+        ir::Runtime::Judge(ir::JudgeRuntime { sessions, .. })
+        | ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (&[][..], sessions.as_slice()),
         ir::Runtime::Runner(_) => (&[][..], &[][..]),
     };
     let agent = agent.iter().map(move |grant| {
         let held = match &grant.function {
-            ir::Function::Judge(judge) => Grant {
-                role: Some(judge.role.to_string()),
+            ir::Function::Job(job) => Grant {
+                role: Some(job.target.to_string()),
                 ready_for: None,
             },
             ir::Function::Session(held) => session(held),
@@ -124,7 +126,7 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
         (&grant.name, held)
     });
     agent.chain(
-        judge
+        sessions
             .iter()
             .map(move |named| (&named.name, session(&named.session))),
     )

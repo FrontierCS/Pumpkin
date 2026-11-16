@@ -1,5 +1,7 @@
-"""A neutral workflow written as literals: an agent, a judge it calls while it works, and the
-judge that scores what it submits."""
+"""A neutral workflow written as literals: an agent, two job functions it calls while it works,
+whose bodies verify on targets, and the judge that scores what it submits."""
+
+load("//lib/verify.star", "verify")
 
 # The agent's user and group, unpacked from one tuple, on two lines joined.
 UID, GID = 1000, \
@@ -41,33 +43,34 @@ joined\n',
                 "finalize_grace_seconds": 60,
                 "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
                 "grants": [
-                    {"name": "train", "judge": {
-                        "role": "train_judge",
-                        "slot": "payload",
+                    {"name": "train", "job": {
+                        "target": "trainer",
+                        "body": verify,
+                        # A list joined to another.
+                        "keywords": {"metrics": ["score"] + ["metrics", "failure"]},
+                        # A hex int's digits may start with `0`, as a decimal int's can't.
+                        "payload_max_bytes": 0x010 * KiB,
                         "calls": 100,
                         "cumulative_seconds": None,
                         "call_timeout_seconds": 10 * 60,
+                    }},
+                    {"name": "verify", "job": {
+                        "target": "verifier",
+                        "body": verify,
+                        "keywords": {"metrics": ["passed"]},
+                        "payload_max_bytes": 16 * KiB,
+                        "call_timeout_seconds": 60,
                     }},
                     {"name": "final", "submit": {}},
                 ],
             }},
         },
         {
-            "name": "train_judge",
+            "name": "trainer",
             "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
-            "runtime": {"judge": {
-                "command": {
-                    "argv": ("/opt/judge/run",),
-                    "cwd": "/pumpkin/home",
-                    "env": ["MODE=train", r"PATTERN=\d+\.json"],
-                },
-                # A hex int's digits may start with `0`, as a decimal int's can't.
-                "slots": [{"name": "payload", "max_bytes": 0x010 * KiB}],
-                # A list joined to another.
-                "result": {"shows": {"score": "/score"}, "returns": ["/score"] + ["/metrics", "/failure"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=train", r"PATTERN=\d+\.json"]}},
         },
         {
             "name": "final_judge",
@@ -79,6 +82,13 @@ joined\n',
                 "slots": [{"name": "payload", "max_bytes": 0o20 * KiB}],
                 "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
             }},
+        },
+        {
+            "name": "verifier",
+            "image": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "user": {"uid": 65532, "gid": 65532},
+            "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
     score = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120},

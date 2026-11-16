@@ -6,7 +6,7 @@
 //! | Command | Call | Reply |
 //! | --- | --- | --- |
 //! | `sandboxctl ops` | [`OpCall::Ops`] | [`OpsReply`] |
-//! | `sandboxctl judge <grant> <file>` | [`OpCall::Judge`] | [`JudgeReply`] |
+//! | `sandboxctl call <function> <file>` | [`OpCall::Call`] | [`CallReply`] |
 //! | `sandboxctl submit <grant> <file> [--finalize]` | [`OpCall::Submit`] | [`SubmitReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
@@ -19,10 +19,9 @@
 //! A payload is read from its file when its caller's turn comes, so leave the file be until the
 //! call returns.
 //!
-//! A reply is an object whose `kind` is `ops`, `judge`, `submit`, `status`, `lease`, `lease_status`
-//! or `refused`, which may answer any op ([`OpReply::Refused`]). Its fields are its type's, under
-//! the same names; a limit or a quota that doesn't exist is `null`. A status has `returned` once
-//! its job has given a result, and `failure` only if it gave none.
+//! A reply is an object whose `kind` is its [`OpReply`]'s variant, `refused` answering any op. Its
+//! fields are its type's, under the same names; a limit or a quota that doesn't exist is `null`. A
+//! status has `returned` once its job has given a result, and `failure` only if it gave none.
 
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -76,12 +75,13 @@ pub fn output_tail(output: &[u8]) -> String {
 pub enum OpCall {
     /// Asks for the caller's limits: the time left to work, its resources and the grants it holds.
     Ops,
-    /// Calls the judge grant named `grant` with the op's payload, which a new job judges.
-    Judge { grant: Name },
+    /// Calls the function of the grant named `grant` that the caller's role holds, with the op's
+    /// payload.
+    Call { grant: Name },
     /// Submits the op's payload to the submit grant named `grant`. `finalize` marks it as the final
     /// submission.
     Submit { grant: Name, finalize: bool },
-    /// Asks how job `job`, which an earlier judge call started, is doing.
+    /// Asks how job `job`, which an earlier call of a job function started, is doing.
     Status { job: u64 },
     /// Calls `op`, one of the functions of the session named `grant` that the caller's role holds.
     Session { grant: Name, op: SessionOp },
@@ -128,11 +128,11 @@ pub enum SessionOp {
 }
 
 impl OpCall {
-    /// Whether the call takes a payload ([`FromSandbox::Op`](super::FromSandbox::Op)): a judge call
-    /// or a submission does, and no other call.
+    /// Whether the call takes a payload ([`FromSandbox::Op`](super::FromSandbox::Op)): a function's
+    /// call or a submission does, and no other call.
     pub fn takes_payload(&self) -> bool {
         match self {
-            Self::Judge { .. } | Self::Submit { .. } => true,
+            Self::Call { .. } | Self::Submit { .. } => true,
             Self::Ops | Self::Status { .. } | Self::Session { .. } => false,
         }
     }
@@ -143,7 +143,7 @@ impl OpCall {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OpReply {
     Ops(OpsReply),
-    Judge(JudgeReply),
+    Call(CallReply),
     Submit(SubmitReply),
     Status(StatusReply),
     Lease(LeaseReply),
@@ -167,23 +167,31 @@ pub struct OpsReply {
     pub grants: Vec<Grant>,
 }
 
+/// The reply to [`OpCall::Call`], by the kind of the function called.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CallReply {
+    /// A job function's: the job that runs the call, which `status` follows, and what the
+    /// function has left of its quotas.
+    Job(JobReply),
+}
+
 /// A grant that a caller holds, and its limits. Its `kind` says which call takes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Grant {
-    Judge(JudgeGrant),
+    Job(JobFunction),
     Session(SessionGrant),
     Submit(SubmitGrant),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// A grant that [`OpCall::Judge`] calls; see [`ir::JudgeGrant`](crate::ir::JudgeGrant) for its
-/// limits.
-pub struct JudgeGrant {
+/// A job function, which [`OpCall::Call`] calls; see [`ir::JobFunction`](crate::ir::JobFunction)
+/// for its limits.
+pub struct JobFunction {
     pub name: Name,
-    /// The most bytes a payload may hold: its judge slot's.
-    pub max_bytes: NonZeroU64,
+    pub payload_max_bytes: NonZeroU64,
     pub calls: Option<NonZeroU64>,
     pub cumulative_seconds: Option<NonZeroU64>,
     pub call_timeout_seconds: NonZeroU64,
@@ -215,20 +223,21 @@ pub struct SubmitGrant {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// The reply to [`OpCall::Judge`]: the job that judges the payload, queued, and what the grant has
-/// left now that the call counts against it.
-pub struct JudgeReply {
+/// A job function's reply to [`OpCall::Call`]: the job that runs the call, queued, and what the
+/// function has left now that the call counts against it.
+pub struct JobReply {
     pub job: u64,
     pub remaining: Remaining,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// What a judge grant has left of its quotas.
+/// What a job function has left of its quotas.
 pub struct Remaining {
-    /// The calls left, or `None` if the grant doesn't limit them.
+    /// The calls left, or `None` if the function doesn't limit them.
     pub calls: Option<u64>,
-    /// The judge time left, in whole seconds rounded down, or `None` if the grant doesn't limit it.
+    /// The call time left, in whole seconds rounded down, or `None` if the function doesn't limit
+    /// it.
     pub seconds: Option<u64>,
 }
 
@@ -254,7 +263,7 @@ pub enum SubmitState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "StatusJson", into = "StatusJson")]
-/// The reply to [`OpCall::Status`]: how a job is doing, and what its grant has left.
+/// The reply to [`OpCall::Status`]: how a job is doing, and what its function has left.
 pub struct StatusReply {
     pub job: u64,
     pub state: JobState,
@@ -265,21 +274,19 @@ pub struct StatusReply {
 /// Where a job is, with what came of it once it has ended. Its JSON form is the status's `state`,
 /// with `returned`, or `failure`, beside it.
 pub enum JobState {
-    /// Accepted; its judge hasn't started.
+    /// Accepted; its body hasn't started.
     Queued,
-    /// Its judge is running, or has ended and is being cleaned up.
+    /// Its body is running, or has ended and its target is being cleaned up.
     Running,
-    /// The judge gave a result.
+    /// The body returned.
     Completed { returned: Returned },
-    /// The judge gave no result.
+    /// The body didn't return.
     Errored { failure: Failure },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-/// The fields of a judge's result that its caller sees, by name: those the judge declares
-/// ([`ResultSpec::returns`](crate::ir::ResultSpec::returns)) and the result holds, each with the
-/// result's value.
+/// What a job's body returned, by name, each with its value.
 pub struct Returned(Map<String, Value>);
 
 impl FromIterator<(String, Value)> for Returned {
@@ -300,12 +307,10 @@ pub struct Failure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureCode {
-    /// The judge ran past its timeout.
-    JudgeTimeout,
-    /// The judge failed before giving a result.
-    JudgeError,
-    /// The judge wrote no valid result.
-    InvalidResult,
+    /// The call's body ran past its timeout.
+    CallTimeout,
+    /// The call's body failed before it returned.
+    CallError,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

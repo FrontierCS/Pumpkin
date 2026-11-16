@@ -320,6 +320,15 @@ impl AbsolutePath {
         Self(Cow::Owned(format!("{parent}/{}", path.0)))
     }
 
+    /// The directory that holds this path, and the path's last component; none for `/`.
+    pub fn split_last(&self) -> Option<(Self, RelativePath)> {
+        let (parent, last) = self.0.rsplit_once('/')?;
+        let last = RelativePath(Cow::Owned(last.to_owned()));
+        // Normalized, so a last component follows the parent's, or `/` alone.
+        let parent = if parent.is_empty() { "/" } else { parent };
+        (!last.0.is_empty()).then(|| (Self(Cow::Owned(parent.to_owned())), last))
+    }
+
     /// Whether `path` is this path or below it.
     pub(crate) fn holds(&self, path: &str) -> bool {
         let below = path.strip_prefix(self.0.trim_end_matches('/'));

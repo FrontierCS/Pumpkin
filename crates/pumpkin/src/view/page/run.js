@@ -75,10 +75,10 @@ import { RowList } from "./rows.js";
  * @property {{ input: number | null, output: number | null, cached: number | null }} tokens
  * @property {string[]} dropped_headers the request headers the route left behind, the first by name
  * @property {boolean} more_dropped_headers whether it left more than `dropped_headers`
- * @typedef {object} Lane a sandbox's lane: the agent's, a judge call's (`job <n>`) or a lease's
+ * @typedef {object} Lane a sandbox's lane: the agent's, a call's (`job <n>`) or a lease's
  * @property {string} lane
  * @property {string} [caller] the caller that the lane's trace is of, `agent` or `job-<n>`; none for a lease
- * @property {"agent" | "judge" | "runner"} kind
+ * @property {"agent" | "judge" | "target" | "runner"} kind
  * @property {string | null} [role]
  * @property {string | null} [grant]
  * @property {string} [holder]
@@ -593,10 +593,10 @@ function drawAgain(node, data) {
   );
 }
 
-// A link to the trace of each caller with model answers: the agent, each judge call.
+// A link to the trace of each caller with model answers: the agent, each call.
 /** @param {HTMLElement} node @param {Run} data */
 function drawTraces(node, data) {
-  const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "judge") && lane.answers && lane.answers.count > 0);
+  const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "judge" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
   fill(
     node,
     callers.length ? h("span", { class: "name" }, "Traces") : null,
@@ -697,7 +697,7 @@ function drawLanes(node, data, view, picked, change, inspect) {
 }
 
 // Who talks to whom: the agent, with the model upstream under it, in the left column and the
-// judges then the runners in the right one; a line for each pair that the log shows talking, one
+// targets and the judge, then the runners in the right one; a line for each pair that the log shows talking, one
 // within a column bowed out past its side so that it passes no box, and below, what went between
 // them. What a selection lights is lit, the rest dim; a role picked lights the lines it has.
 /** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {(name: string) => void} pick */
@@ -705,7 +705,7 @@ function drawTalk(node, data, lit, picked, pick) {
   if (!data.talk) return fill(node, h("p", { class: "empty" }, "The record has no roles yet."));
   const { roles, edges } = data.talk;
   /** @type {Record<string, number>} */
-  const order = { agent: 0, judge: 1, runner: 2 };
+  const order = { agent: 0, target: 1, judge: 1, runner: 2 };
   const shown = roles.map((role) => ({ ...role, column: role.kind === "agent" ? 0 : 1 }));
   if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === "model")) {
     shown.push({ name: "model", kind: "model", place: "The route's upstream", routed: false, score: false, routes: [], column: 0 });

@@ -21,6 +21,7 @@ use schema::sandbox::HELLO_TIMEOUT;
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
 
+use crate::bodies::{Bodies, Sources};
 use crate::driver::{ARGV0, Driver, Handoff};
 use crate::ending::{closing, end, follow, followed, following};
 use crate::sandboxd::Sandboxd;
@@ -161,6 +162,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
         workflow,
+        sources,
         providers,
         gateway,
         servings,
@@ -185,6 +187,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let kept = Recorded {
         args: &words,
         prices: &prices,
+        sources: sources.texts(),
     };
     let models = ModelRoutes {
         servings: &servings,
@@ -199,7 +202,8 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // client says from its copy instead.
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
     let dialer = Dialer::new(tls::Client::web_pki());
-    let executed = run.execute(sandboxd.path(), private.as_ref(), &dialer, || {
+    let bodies = Bodies::new(&sources, &args);
+    let executed = run.execute(sandboxd.path(), private.as_ref(), &dialer, &bodies, || {
         driver::announce(&dir)
     });
     if let Err(stopped) = executed {
@@ -258,6 +262,7 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), Str
 
 struct Prepared<'e> {
     workflow: Workflow,
+    sources: Sources,
     providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
     servings: ByRole<Vec<route::Serving>>,
@@ -291,14 +296,17 @@ fn prepared<'e>(
     // sandboxes is refused first.
     let providers =
         providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
-    Ok(task.build(engine, &mut ()).map(|(workflow, _)| Prepared {
-        workflow,
-        providers,
-        gateway,
-        servings,
-        budgets,
-        prices,
-    }))
+    Ok(task
+        .build(engine, &mut ())
+        .map(|(workflow, _, sources)| Prepared {
+            workflow,
+            sources,
+            providers,
+            gateway,
+            servings,
+            budgets,
+            prices,
+        }))
 }
 
 enum Connected<'e> {

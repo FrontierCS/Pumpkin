@@ -216,14 +216,13 @@ fn judge_stderr() {
         "verdict": { "kind": "no_result", "failure": { "kind": "error", "reason": "r" } },
         "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
     });
-    // The final judge's job follows the agent's train job, whose standard error isn't shown.
+    // The final judge's job follows the agent's call of `train`, whose standard error isn't shown.
     let shown = "20261108-120000-0000000a";
     write_record(&scratch, shown, true, Some(no_result.clone()));
-    let start = |job: u64, grant: Value| {
-        let start = json!({ "kind": "start_judge", "job": job, "grant": grant, "timeout_ns": "0" });
-        json!({ "seq": job, "at_ns": "0", "actions": [start] })
-    };
-    let log = [start(0, json!("train")), start(1, Value::Null)];
+    let start = |job: u64, start: Value| json!({ "seq": job, "at_ns": "0", "actions": [start] });
+    let call = json!({ "kind": "start_call", "job": 0, "grant": "train", "timeout_ns": "0" });
+    let judge = |job: u64| json!({ "kind": "start_judge", "job": job, "timeout_ns": "0" });
+    let log = [start(0, call), start(1, judge(1))];
     let lines: Vec<String> = log.iter().map(|line| format!("{line}\n")).collect();
     scratch.write(&format!("runs/{shown}/log.jsonl"), &lines.concat());
     scratch.write(
@@ -234,7 +233,7 @@ fn judge_stderr() {
     let path = scratch.0.join(format!("runs/{shown}/jobs/1/log"));
     fs::create_dir_all(&path).unwrap();
     fs::write(path.join("command.stderr"), stderr).unwrap();
-    let final_job = start(0, Value::Null);
+    let final_job = start(0, judge(0));
     let large = "20261108-120000-0000000b";
     write_record(&scratch, large, true, Some(no_result.clone()));
     scratch.write(
@@ -295,7 +294,7 @@ fn judge_stderr() {
             printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000e --runs runs
             exit status: Some(3)
-            pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000e/log.jsonl names no final judge: expected a `start_judge` without a grant
+            pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000e/log.jsonl names no final judge: expected a `start_judge`
             pumpkin: run 20261108-120000-0000000e finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000e
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
@@ -617,8 +616,8 @@ fn states() {
 )]
 fn summarizes() {
     let scratch = Scratch::new("summarizes");
-    // A run that went the whole way, priced but for its box's class, whose stopped judge call
-    // left its standard error.
+    // A run that went the whole way, priced but for its box's class, whose stopped train call
+    // left its standard error, and evidence in its target's `out`.
     let whole = "20261110-100000-0000000a";
     let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
     let priced = lease_places(Prices::Both);
@@ -633,6 +632,10 @@ fn summarizes() {
     scratch.write(
         &format!("runs/{whole}/jobs/2/log/command.stderr"),
         "Traceback\n",
+    );
+    scratch.write(
+        &format!("runs/{whole}/jobs/2/out/evidence/loss.txt"),
+        "0.5\n",
     );
     // With a model budget for the agent, spent.
     let mut budgeted = lease_task();
@@ -721,7 +724,7 @@ fn summarizes() {
         });
         [started, answered]
     };
-    // Before the first judge call, as the agent's.
+    // Before the first train call, as the agent's.
     let at = (logs[0].iter())
         .position(|line| line["event"]["kind"] == "op_arrived")
         .unwrap();
@@ -796,13 +799,13 @@ fn summarizes() {
             exit status: Some(0)
             pumpkin: run 20261110-100000-0000000a started 30s after it was asked for, and ran 18m20s:
                  0:00 agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40
-                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53
+                 0:40 train job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53
                  0:50   box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; closed as its call ended
                  2:00 gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
                  2:00 cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended
-                 3:20 train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
-                 5:00 train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); its standard error jobs/2/log/command.stderr
-                 6:40 train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)
+                 3:20 train job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
+                 5:00 train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); its standard error jobs/2/log/command.stderr, its evidence jobs/2/out/evidence
+                 6:40 train job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)
                  8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
                 16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
@@ -878,37 +881,37 @@ fn follows_milestones() {
         false,
         &[],
         &expect![[r#"
-        $ pumpkin wait 20261110-100000-0000000a --runs runs
-        pumpkin: run 20261110-100000-0000000a: 1 part of its log can't be read by this pumpkin, the first at line 57, its action 1: missing field `lease`
-        pumpkin:    0:05 the agent started on aws/judge
-        pumpkin:    0:40 train judge job 0 asked on modal/a100_80
-        pumpkin:    0:46 train judge job 0 started with unknown GPUs
-        pumpkin:    0:50 box lease 0 of job 0 asked on aws/box
-        pumpkin:    0:55 box lease 0 of job 0 ready
-        pumpkin:    1:40 train judge job 0 ended: score=49.53
-        pumpkin:    1:42 box lease 0 of job 0 ended: closed as its call ended
-        pumpkin:    2:00 gpu lease 1 asked on modal/a100_80
-        pumpkin:    2:00 cpu lease 2 asked on aws/judge
-        pumpkin:    2:06 gpu lease 1 ready with NVIDIA A100-SXM4-80GB
-        pumpkin:    2:25 gpu lease 1 ended: closed by its holder
-        pumpkin:    2:30 cpu lease 2 ready
-        pumpkin:    3:20 train judge job 1 asked on modal/a100_80
-        pumpkin:    4:20 train judge job 1 ended: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
-        pumpkin:    5:00 train judge job 2 asked on modal/a100_80
-        pumpkin:    5:10 train judge job 2 started with NVIDIA A100-SXM4-80GB
-        pumpkin:    5:30 train judge job 2 ended: failed: the call was stopped
-        pumpkin:    6:40 train judge job 3 asked on modal/a100_80
-        pumpkin:    6:45 train judge job 3 started with unknown GPUs
-        pumpkin:    6:55 train judge job 3 ended: a result
-        pumpkin:    8:20 gpu lease 3 asked on modal/a100_80
-        pumpkin:    8:25 gpu lease 3 ready with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)
-        pumpkin:    9:30 gpu lease 3 ended: expired
-        pumpkin:   16:40 the work phase ended
-        pumpkin:   16:45 cpu lease 2 ended: closed as the work phase ended
-        pumpkin:   16:46 final judge job 4 asked on modal/a100_80
-        pumpkin:   16:50 final judge job 4 started with NVIDIA A100-SXM4-80GB
-        pumpkin:   18:20 final judge job 4 ended: score=49.36 metrics={"solved":3}
-          1 part of its log can't be read by this pumpkin, the first at line 57, its action 1: missing field `lease`"#]],
+            $ pumpkin wait 20261110-100000-0000000a --runs runs
+            pumpkin: run 20261110-100000-0000000a: 1 part of its log can't be read by this pumpkin, the first at line 60, its action 1: missing field `lease`
+            pumpkin:    0:05 the agent started on aws/judge
+            pumpkin:    0:40 train job 0 asked on modal/a100_80
+            pumpkin:    0:46 train job 0 started with unknown GPUs
+            pumpkin:    0:50 box lease 0 of job 0 asked on aws/box
+            pumpkin:    0:55 box lease 0 of job 0 ready
+            pumpkin:    1:40 train job 0 ended: score=49.53
+            pumpkin:    1:42 box lease 0 of job 0 ended: closed as its call ended
+            pumpkin:    2:00 gpu lease 1 asked on modal/a100_80
+            pumpkin:    2:00 cpu lease 2 asked on aws/judge
+            pumpkin:    2:06 gpu lease 1 ready with NVIDIA A100-SXM4-80GB
+            pumpkin:    2:25 gpu lease 1 ended: closed by its holder
+            pumpkin:    2:30 cpu lease 2 ready
+            pumpkin:    3:20 train job 1 asked on modal/a100_80
+            pumpkin:    4:20 train job 1 ended: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
+            pumpkin:    5:00 train job 2 asked on modal/a100_80
+            pumpkin:    5:10 train job 2 started with NVIDIA A100-SXM4-80GB
+            pumpkin:    5:30 train job 2 ended: failed: the call was stopped
+            pumpkin:    6:40 train job 3 asked on modal/a100_80
+            pumpkin:    6:45 train job 3 started with unknown GPUs
+            pumpkin:    6:55 train job 3 ended: a result
+            pumpkin:    8:20 gpu lease 3 asked on modal/a100_80
+            pumpkin:    8:25 gpu lease 3 ready with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)
+            pumpkin:    9:30 gpu lease 3 ended: expired
+            pumpkin:   16:40 the work phase ended
+            pumpkin:   16:45 cpu lease 2 ended: closed as the work phase ended
+            pumpkin:   16:46 final judge job 4 asked on modal/a100_80
+            pumpkin:   16:50 final judge job 4 started with NVIDIA A100-SXM4-80GB
+            pumpkin:   18:20 final judge job 4 ended: score=49.36 metrics={"solved":3}
+              1 part of its log can't be read by this pumpkin, the first at line 60, its action 1: missing field `lease`"#]],
     );
 }
 
@@ -969,19 +972,20 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
     let whole = (1..depth).fold(json!({ "raw_score": 6 }), |inner, _| json!({ "d": inner }));
     let returned = json!({ "raw_score": 6, "whole": whole });
     let shows_none = json!({ "returned": returned });
-    let collected = json!({ "kind": "judge_collected", "job": 0, "result": shows_none });
+    let collected = json!({ "kind": "judge_collected", "job": 1, "result": shows_none });
     let finish = json!([{ "kind": "finish" }]);
     let final_judge = json!([{
-        "kind": "start_judge", "job": 0, "grant": null, "timeout_ns": "60000000000",
+        "kind": "start_judge", "job": 1, "timeout_ns": "60000000000",
     }]);
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
-    let log = [
-        logged(0, json!({ "kind": "agent_started" }), json!([])),
+    let mut log = vec![logged(0, json!({ "kind": "agent_started" }), json!([]))];
+    log.extend(deep_call(depth));
+    log.extend([
         logged(1, exit, json!([{ "kind": "tear_down_agent" }])),
         logged(1, json!({ "kind": "tick" }), final_judge),
-        logged(1, json!({ "kind": "judge_started", "job": 0 }), json!([])),
+        logged(1, json!({ "kind": "judge_started", "job": 1 }), json!([])),
         logged(2, collected, finish),
-    ];
+    ]);
     let mut outcome = judged(6.0, returned);
     outcome["verdict"]["result"] = shows_none;
     let outcome = Some(outcome);
@@ -1025,15 +1029,34 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
             exit status: Some(0)
             pumpkin: run 20261113-123335-0000000a started 0s after it was asked for, and ran 2s:
                  0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
-                 0:01 final judge job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: a result
+                 0:00 train job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: deep=[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+                 0:01 final judge job 1 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: a result
               model: 0 requests
-              sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 1 on modal/a100_80, 1s in all, 1 created, all deleted
+              sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 2 on modal/a100_80, 2s in all, 2 created, all deleted
             pumpkin: run 20261113-123335-0000000a finished with a result, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }
 
-// A run that a signal stopped as its judge call's lease ran: its log ends with the stop, then
+/// The log of call 0 of `train`, from 0:00 to 0:01, whose body's return, its dict included, nests
+/// `depth` deep.
+fn deep_call(depth: usize) -> [Value; 3] {
+    let deep = (2..depth).fold(json!([]), |inner, _| json!([inner]));
+    let call = json!({ "kind": "op_arrived", "request": { "kind": "call", "grant": "train" } });
+    let start = json!([{
+        "kind": "start_call", "job": 0, "grant": "train", "timeout_ns": "60000000000",
+    }]);
+    let returned = json!({
+        "kind": "call_returned", "job": 0, "returned": [{ "name": "deep", "value": deep }],
+    });
+    [
+        logged(0, call, start),
+        logged(0, json!({ "kind": "call_started", "job": 0 }), json!([])),
+        logged(1, returned, json!([])),
+    ]
+}
+
+// A run that a signal stopped as its train call's lease ran: its log ends with the stop, then
 // the delete of each sandbox the core never ended, which the summary says.
 #[test]
 fn summarizes_an_interrupted_run() {
@@ -1073,7 +1096,7 @@ fn summarizes_an_interrupted_run() {
             exit status: Some(1)
             pumpkin: run 20261113-123335-5ea1ea5f started 0s after it was asked for, and ran 1m20s:
                  0:00 agent on aws/judge, started at 0:05
-                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
+                 0:40 train job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
                  0:50   box lease 0 of job 0 on aws/box, 21s: charged 16s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; deleted as the run stopped
               model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.66 at the models' prices, but for 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
               sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.01 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.02 at $2.5 an hour, 1 created, all deleted

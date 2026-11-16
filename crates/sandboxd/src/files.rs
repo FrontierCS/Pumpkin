@@ -130,7 +130,11 @@ fn protocol_error(stream: u32, what: &str) -> io::Error {
 
 pub(crate) fn collect(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()> {
     let mut entries = Vec::new();
-    if let Err(message) = list(dir, None, &mut entries) {
+    let listed = match fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_file() => one_file(dir, &metadata).map(|one| entries.push(one)),
+        _ => list(dir, None, &mut entries),
+    };
+    if let Err(message) = listed {
         return sender.reply(stream, Err(message));
     }
     let mut buffer = vec![0; MAX_BODY_BYTES];
@@ -147,6 +151,23 @@ pub(crate) fn collect(sender: &Sender, stream: u32, dir: &Path) -> io::Result<()
         }
     }
     sender.send(&FromSandbox::End { stream }, &[])
+}
+
+/// The regular file at `path`, as the one entry of a tree, by its name.
+fn one_file(path: &Path, metadata: &fs::Metadata) -> Result<(PathBuf, Entry), String> {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let Some(name) = name else {
+        return Err(format!(
+            "{} has no UTF-8 name: collect only UTF-8 names",
+            path.display()
+        ));
+    };
+    let entry = Entry::File {
+        path: RelativePath::try_from(name.to_owned())?,
+        size: metadata.len(),
+        mode: tree_mode(metadata.permissions().mode()),
+    };
+    Ok((path.to_owned(), entry))
 }
 
 /// Lists the entries below `root`, or below `root/dir`, depth first and sorted by name, each

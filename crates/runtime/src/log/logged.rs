@@ -130,11 +130,26 @@ pub(super) enum Event {
         job: u64,
         reason: String,
     },
+    CallStarted {
+        job: u64,
+    },
+    CallTimedOut {
+        job: u64,
+    },
+    CallReturned {
+        job: u64,
+        returned: Vec<Shown>,
+    },
+    CallFailed {
+        job: u64,
+        reason: String,
+    },
     LeaseReady {
         lease: u64,
     },
     CommandEnded {
-        lease: u64,
+        #[serde(flatten)]
+        of: CommandOf,
         end: CommandEnd,
     },
     TransferEnded {
@@ -192,6 +207,10 @@ impl Event {
             | Self::JudgeTimedOut { .. }
             | Self::JudgeCollected { .. }
             | Self::JudgeFailed { .. }
+            | Self::CallStarted { .. }
+            | Self::CallTimedOut { .. }
+            | Self::CallReturned { .. }
+            | Self::CallFailed { .. }
             | Self::LeaseReady { .. }
             | Self::CommandEnded { .. }
             | Self::TransferEnded { .. }
@@ -206,13 +225,17 @@ impl Event {
         }
     }
 
-    pub(super) fn judge_job(&self) -> Option<u64> {
+    pub(super) fn job(&self) -> Option<u64> {
         match self {
             Self::JudgeStarted { job }
             | Self::JudgeExited { job }
             | Self::JudgeTimedOut { job }
             | Self::JudgeCollected { job, .. }
-            | Self::JudgeFailed { job, .. } => Some(*job),
+            | Self::JudgeFailed { job, .. }
+            | Self::CallStarted { job }
+            | Self::CallTimedOut { job }
+            | Self::CallReturned { job, .. }
+            | Self::CallFailed { job, .. } => Some(*job),
             Self::RunStarted { .. }
             | Self::AgentStarted
             | Self::AgentExited { .. }
@@ -232,6 +255,19 @@ impl Event {
             | Self::Unknown => None,
         }
     }
+}
+
+/// Whose command a `command_ended` ended: a lease's, or a job function's call's.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum CommandOf {
+    Lease {
+        lease: u64,
+    },
+    Job {
+        #[expect(dead_code, reason = "a call's commands show in no line of their own")]
+        job: u64,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,7 +377,12 @@ pub(super) enum Action {
     Reply,
     StartJudge {
         job: u64,
-        grant: Option<String>,
+        #[serde(deserialize_with = "nanos")]
+        timeout_ns: Duration,
+    },
+    StartCall {
+        job: u64,
+        grant: String,
         #[serde(deserialize_with = "nanos")]
         timeout_ns: Duration,
     },
@@ -372,12 +413,10 @@ pub(super) enum Action {
 impl Action {
     pub(super) fn score_job(&self) -> Option<u64> {
         match self {
-            Self::StartJudge {
-                job, grant: None, ..
-            } => Some(*job),
-            Self::StartJudge { grant: Some(_), .. }
-            | Self::StartAgent
+            Self::StartJudge { job, .. } => Some(*job),
+            Self::StartAgent
             | Self::Reply
+            | Self::StartCall { .. }
             | Self::StopJudge { .. }
             | Self::StartLease { .. }
             | Self::RunCommand { .. }

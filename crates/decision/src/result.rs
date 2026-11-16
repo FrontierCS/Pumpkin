@@ -8,8 +8,8 @@ use schema::sandbox::RESULT_MAX_DEPTH;
 use schema::sandbox::op::{JobState, Returned};
 use serde_json::Value;
 
-/// A judge call's result, parsed from its `result.json` per its judge's [`ResultSpec`]: the
-/// values its run shows, and the fields its caller's reply returns.
+/// A call's result, parsed from a judge's `result.json` per its [`ResultSpec`], or a body's
+/// return: the values its run shows, and the fields its caller's reply returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JudgeResult {
     values: Vec<(Name, Value)>,
@@ -43,6 +43,28 @@ impl JudgeResult {
                 Some((key.to_owned(), pointer.resolve(&document)?.clone()))
             })
             .collect();
+        Ok(Self { values, returned })
+    }
+
+    /// A body's return: each name with its value, in the body's order, both as the values the
+    /// run shows and as the fields its caller's reply returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails, with the reason, if the return, its dict included, nests deeper than
+    /// [`RESULT_MAX_DEPTH`].
+    pub fn returned_by(values: Vec<(Name, Value)>) -> Result<Self, String> {
+        let deepest = values.iter().map(|(_, value)| depth(value)).max();
+        if 1 + deepest.unwrap_or(0) > RESULT_MAX_DEPTH {
+            return Err(format!(
+                "the body's return nests lists, tuples and dicts more than {RESULT_MAX_DEPTH} \
+                 deep, its dict included: nest them at most that deep"
+            ));
+        }
+        let fields = values
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.clone()));
+        let returned = fields.collect();
         Ok(Self { values, returned })
     }
 

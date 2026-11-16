@@ -24,9 +24,9 @@ pub mod suite;
 
 /// A complete workflow, in the IR's JSON.
 ///
-/// Its roles are an agent with a model route, a train judge it may call, and a final judge that
-/// scores its submission, in that order. Their images' digests, commands, files, standard input
-/// and environment are placeholders.
+/// Its roles are an agent with a model route, the target of its job function `train`, and a final
+/// judge that scores its submission, in that order. Their images' digests, commands, files,
+/// standard input and environment are placeholders, and so is the body's file.
 pub const WORKFLOW: &str = include_str!("workflow.json");
 
 /// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
@@ -136,7 +136,7 @@ pub fn sandboxd() -> PathBuf {
 }
 
 /// The standard output that `record`, a run's record, holds of the agent's command and of each
-/// judge call's, in the order of the jobs' numbers, each after a line that says whose it is.
+/// call's, in the order of the jobs' numbers, each after a line that says whose it is.
 ///
 /// # Panics
 ///
@@ -153,8 +153,7 @@ pub fn standard_outputs(record: &Path) -> Vec<String> {
     lines
 }
 
-/// What `record`, a run's record, keeps of each sandbox, the agent's, each judge call's, each
-/// lease's.
+/// What `record`, a run's record, keeps of each sandbox, the agent's, each call's, each lease's.
 ///
 /// Its `sandbox.json`, on one line, after whose it is.
 ///

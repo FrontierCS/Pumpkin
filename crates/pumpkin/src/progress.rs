@@ -22,7 +22,7 @@ mod child;
 pub(crate) mod cost;
 mod model;
 
-use child::{STOPPED, command, exited, judge, lease_end, lease_name};
+use child::{STOPPED, call_name, command, exited, lease_end, lease_name};
 pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
@@ -171,7 +171,7 @@ impl State {
 
 /// The lines of `ls` of `listing`, its runs by id, so oldest first, and so the live ones, which
 /// started last, nearest the line of totals that follows them, each live run with a line for
-/// each of its judge calls and leases that hasn't ended. The totals line ends with the command
+/// each of its calls and leases that hasn't ended. The totals line ends with the command
 /// that lists the runs left out, unless there are none; `runs` is their runs directory, as
 /// commands name it.
 pub(crate) fn lines(listing: &Listing, now: UnixTime, runs: Option<&str>) -> String {
@@ -438,7 +438,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
     } = progress;
     // Once the work phase has ended, the core ends the run by its hard end.
     if let Some(work_end) = *work_end {
-        if let Some(call) = calls.iter().find(|call| call.grant.is_none()) {
+        if let Some(call) = calls.iter().find(|call| call.function.is_none()) {
             return Phase {
                 name: "final judge".to_owned(),
                 since: call.sandbox.asked,
@@ -514,14 +514,16 @@ fn in_flight(model: &runtime::ModelUse, at: Duration) -> String {
 }
 
 fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
-    let calls = progress.calls.iter().filter(|call| call.grant.is_some());
+    let calls = progress
+        .calls
+        .iter()
+        .filter_map(|call| Some((call, call.function.as_ref()?)));
     let calls = calls
-        .filter(|call| call.sandbox.gone.is_none())
-        .map(|call| {
+        .filter(|(call, _)| call.sandbox.gone.is_none())
+        .map(|(call, function)| {
             let asked = call.sandbox.asked;
             let bound = call_bound(call);
-            let grant = call.grant.as_deref().unwrap_or_default();
-            let mut doing = format!("{grant} judge on {}", placed(&call.sandbox));
+            let mut doing = format!("{function} call on {}", placed(&call.sandbox));
             if call.sandbox.started.is_none() {
                 doing.push_str(", starting");
             }
@@ -580,8 +582,8 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
     children.into_iter().map(|(_, child)| child).collect()
 }
 
-/// By when, since the run started, judge call `call` ends at the latest: its command's timeout
-/// after its sandbox started, or, before that, after its class's startup, if the record says.
+/// By when, since the run started, call `call` ends at the latest: its timeout after its sandbox
+/// started, or, before that, after its class's startup, if the record says.
 fn call_bound(call: &CallSpan) -> Option<Duration> {
     let Sandbox {
         asked,
@@ -594,7 +596,7 @@ fn call_bound(call: &CallSpan) -> Option<Duration> {
 }
 
 /// When the sandbox of `lease`, of the run whose log says `progress`, comes among the run's: under
-/// the judge call that holds it, if one does, by when the core began each.
+/// the call that holds it, if one does, by when the core began each.
 pub(crate) fn sorted(progress: &Progress, lease: &LeaseSpan) -> (Duration, Duration) {
     let asked = lease.sandbox.asked;
     let call = (progress.calls.iter()).find(|call| Some(call.job) == lease.holder);
@@ -671,7 +673,7 @@ pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
     shown.collect::<Vec<_>>().join(" ")
 }
 
-/// What a judge call's result shows, or `a result` if it shows nothing.
+/// What a call's result shows, or `a result` if it shows nothing.
 fn result(values: &[(Name, Value)]) -> String {
     if values.is_empty() {
         "a result".to_owned()
@@ -871,9 +873,12 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     }
     for call in &progress.calls {
         let on = place(call.sandbox.place.as_ref());
-        milestones.push((call.sandbox.asked, format!("{} asked on {on}", judge(call))));
+        milestones.push((
+            call.sandbox.asked,
+            format!("{} asked on {on}", call_name(call)),
+        ));
         if let Some(started) = call.sandbox.started {
-            let started_line = format!("{} started{}", judge(call), gpus(&call.sandbox));
+            let started_line = format!("{} started{}", call_name(call), gpus(&call.sandbox));
             milestones.push((started, started_line));
         }
         if let Some(at) = call.sandbox.gone {
@@ -883,7 +888,7 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
                 Some(CallEnd::Failed(reason)) => format!("failed: {}", crate::escaped(reason)),
                 None => STOPPED.to_owned(),
             };
-            milestones.push((at, format!("{} ended: {ended}", judge(call))));
+            milestones.push((at, format!("{} ended: {ended}", call_name(call))));
         }
     }
     // By time, stably, so that a call asked and ended at once keeps its order.

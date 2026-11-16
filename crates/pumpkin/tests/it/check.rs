@@ -14,8 +14,8 @@ use test_support::BUSYBOX;
 use super::{Scratch, Step, check, ran};
 
 /// A neutral library, which writes a task's workflow from the task's own values: Codex works
-/// as the agent, on the image that the package's agent recipe builds, and two judges, on the
-/// image of its judge recipe, judge the agent's train calls and its final submission.
+/// as the agent, on the image that the package's agent recipe builds, and a trainer and a judge,
+/// on the image of its judge recipe, judge the agent's train calls and its final submission.
 const LIBRARY: &str = r##""""A neutral library: `bench_task` writes the workflow of the task in the entry's package,
 `tasks/<id>`, from its own values."""
 
@@ -55,7 +55,7 @@ def _judge(name, mode, *, recipe, needs, max_bytes, metrics):
             "command": {
                 "argv": ["/opt/judge/run"],
                 "cwd": "/pumpkin/home",
-                "env": ["JUDGE_MODE=" + mode, "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"],
+                "env": _env(mode),
             },
             "slots": [{"name": "payload", "max_bytes": max_bytes}],
             "result": {
@@ -86,9 +86,9 @@ def bench_task(
       train_seconds: how many seconds the train calls may take in all.
       final_timeout: how long the final judge may take.
       submission_bytes: the most that a submission may hold.
-      judge: each judge's needs.
-      metrics: the task's own metrics, which each judge returns.
-      judge_recipe: the recipe of the judges' image, built in the package's directory with
+      judge: the trainer's and the final judge's needs.
+      metrics: the task's own metrics, which each judgement returns.
+      judge_recipe: the recipe of the judge's image, built in the package's directory with
         `//shared` mounted in it.
 
     Returns:
@@ -97,15 +97,15 @@ def bench_task(
     task = package_name().split("/")[-1]
     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
     judges = [
+        _trainer("train", recipe = judge_recipe, needs = judge),
         _judge(
-            name,
-            mode,
+            "final_judge",
+            "final",
             recipe = judge_recipe,
             needs = judge,
             max_bytes = submission_bytes,
             metrics = metrics,
-        )
-        for name, mode in [("train_judge", "train"), ("final_judge", "final")]
+        ),
     ]
     codex_agent = codex(
         agent_image,
@@ -127,9 +127,11 @@ def bench_task(
                 "needs": agent,
                 "runtime": {"agent": codex_agent["runtime"]["agent"] | {
                     "grants": [
-                        {"name": "train", "judge": {
-                            "role": "train_judge",
-                            "slot": "payload",
+                        {"name": "train", "job": {
+                            "target": "trainer",
+                            "body": train,
+                            "keywords": {"metrics": metrics + JUDGE_METRICS},
+                            "payload_max_bytes": submission_bytes,
                             "calls": train_calls,
                             "cumulative_seconds": train_seconds,
                             "call_timeout_seconds": TRAIN_TIMEOUT,
@@ -141,6 +143,39 @@ def bench_task(
         ] + judges,
         score = {"role": "final_judge", "slot": "payload", "timeout_seconds": final_timeout},
     )
+
+def _env(mode):
+    """The environment of a judge that judges in `mode`."""
+    return ["JUDGE_MODE=" + mode, "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"]
+
+def _trainer(mode, *, recipe, needs):
+    """The target that each train call starts, which judges in `mode`.
+
+    It runs on the image that `recipe` builds.
+    """
+    return {
+        "name": "trainer",
+        "image": image(recipe, mount = SHARED),
+        "user": {"uid": 65532, "gid": 65532},
+        "needs": needs,
+        "runtime": {"target": {"cwd": "/pumpkin/home", "env": _env(mode)}},
+    }
+
+def train(target: Target, payload: Payload, *, metrics: list[str]):
+    """Judges the payload in train mode, in a fresh sandbox of the trainer.
+
+    Args:
+      target: the trainer's sandbox.
+      payload: the tar to judge.
+      metrics: the judge's metrics to return.
+
+    Returns:
+      The judge's score and the metrics that `metrics` names.
+    """
+    target.put("/pumpkin/in/payload/raw", payload)
+    target.run(["/opt/judge/run"])
+    found = json.decode(target.get("/pumpkin/out/result.json"))
+    return {"score": found["score"]} | {name: found["metrics"][name] for name in metrics}
 "##;
 
 /// A task's entry file, which the library writes the workflow of, with `cpu_millis` for its
@@ -183,7 +218,7 @@ pub(super) fn write_repository(scratch: &Scratch, dir: &str) {
     write("tasks/bench/judge/run", "#!/bin/sh\n");
 }
 
-/// Writes into `scratch` the repository of [`write_repository`], with its library's judges'
+/// Writes into `scratch` the repository of [`write_repository`], with its trainer's and judge's
 /// images two stages of one recipe, `train` and `eval`, and its agent's image built on the
 /// tools' image, from a recipe whose `FROM` is the arg `base`, and which keeps the arg `note` as
 /// a label, with the toolchain's `/usr/local/go` copied in, a stage `go` of its recipe, which a
@@ -398,10 +433,10 @@ fn tasks() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:33:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
             tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
                 6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
@@ -415,10 +450,10 @@ fn tasks() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:33:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: tasks/broken/judge/Dockerfile:1: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
             tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
                 6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
@@ -429,10 +464,10 @@ fn tasks() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/other/task.star:5:1
-            lib/bench.star:33:18: `tasks/other/judge/Dockerfile` doesn't exist: name a regular file below the root that does
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: `tasks/other/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/other/task.star:5:1
             pumpkin: tasks/other/task.star: the task has 2 problems
             pumpkin: nowhere/task.star: the entry's directory nowhere can't be found (No such file or directory (os error 2)): name the entry by a path that exists
@@ -540,29 +575,29 @@ def _helper():
             tasks/bench/task.star:3:41: this name is loaded, but never used: drop it from the `load`
                 3 | load("//lib/bench.star", "bench_task", "sometimes")
                   |                                         ^^^^^^^^^
-            lib/bench.star:127:1: this function returns a value on some paths, but not on others: return one on every path, or on none
-                127 | def sometimes(x):
+            lib/bench.star:162:1: this function returns a value on some paths, but not on others: return one on every path, or on none
+                162 | def sometimes(x):
                     | ^^^^^^^^^^^^^^^^^
-            lib/bench.star:133:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
-                133 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:168:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
+                168 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:133:5: this docstring doesn't say what the function returns: say it under `Returns:`
-                133 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:168:5: this docstring doesn't say what the function returns: say it under `Returns:`
+                168 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:134:5: this is bound, but never used: use it, or drop it
-                134 |     unused = calls
+            lib/bench.star:169:5: this is bound, but never used: use it, or drop it
+                169 |     unused = calls
                     |     ^^^^^^
-            lib/bench.star:135:5: this expression's value is never used: use it, or drop the statement
-                135 |     calls == 100
+            lib/bench.star:170:5: this expression's value is never used: use it, or drop the statement
+                170 |     calls == 100
                     |     ^^^^^^^^^^^^
-            lib/bench.star:138:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
-                138 |     return bound
+            lib/bench.star:173:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
+                173 |     return bound
                     |            ^^^^^
-            lib/bench.star:139:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
-                139 |     fail("never")
+            lib/bench.star:174:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
+                174 |     fail("never")
                     |     ^^^^^^^^^^^^^
-            lib/bench.star:141:1: this is bound, but never used: use it, or drop it
-                141 | def _helper():
+            lib/bench.star:176:1: this is bound, but never used: use it, or drop it
+                176 | def _helper():
                     | ^^^^^^^^^^^^^^
             pumpkin: tasks/bench/task.star: the task has 9 problems
             pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/bench/task.star"#]],
@@ -735,19 +770,19 @@ fn roots() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/linked/task.star:5:1
-            lib/bench.star:33:18: `tasks/linked/judge/Dockerfile` is a symbolic link, which could lead out of the root: put what it links to there instead
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: `tasks/linked/judge/Dockerfile` is a symbolic link, which could lead out of the root: put what it links to there instead
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/linked/task.star:5:1
             pumpkin: repo/tasks/linked/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/linked/task.star
             $ pumpkin check repo/tasks/mounted/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:33:18: shared/judge.Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: shared/judge.Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
             pumpkin: repo/tasks/mounted/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/repo/tasks/mounted/task.star
@@ -757,10 +792,10 @@ fn roots() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
-            lib/bench.star:33:18: `shared` is a symbolic link, which could lead out of the root: put what it links to there instead
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: `shared` is a symbolic link, which could lead out of the root: put what it links to there instead
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/mounted/task.star:5:1
             pumpkin: unshared/tasks/mounted/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/unshared/tasks/mounted/task.star
@@ -790,10 +825,10 @@ fn roots() {
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/newer/task.star
             $ pumpkin check nested/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:33:18: sub/Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: sub/Dockerfile:1: `busybox` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: nested/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/nested/tasks/bench/task.star
@@ -946,4 +981,90 @@ fn copy(dir: &Path, below: &str, scratch: &Scratch) {
         let text = fs::read_to_string(entry.path()).unwrap();
         scratch.write(&path, &text.replace("\"@pumpkin//", "\"//"));
     }
+}
+
+/// `lib/verify.star`, which defines a job function's body that a check accepts.
+const VERIFY: &str = r#""""The body of the agent's check calls."""
+
+def verify(target: Target, payload: Payload, *, metric: str = "score"):
+    """Puts the payload in the target, runs the judge on it, and returns its metric.
+
+    Args:
+      target: the call's target.
+      payload: the agent's submission.
+      metric: the metric of the judge's result that the call returns.
+
+    Returns:
+      The metric, by its name.
+    """
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/judge/run"])
+    return {metric: json.decode(target.get("/pumpkin/out/result.json"))[metric]}
+"#;
+
+#[test]
+fn bodies() {
+    let scratch = Scratch::new("check-bodies");
+    // A task below `dir` whose library gives the agent a job function, `check`, whose body is
+    // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image.
+    let write = |dir: &str, verify: &str, body: &str| {
+        write_repository(&scratch, dir);
+        let target = r#"{
+            "name": "checker",
+            "image": image(judge_recipe, mount = SHARED),
+            "user": {"uid": 65532, "gid": 65532},
+            "needs": judge,
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
+        }"#;
+        let function = format!(
+            r#"{{"name": "check", "job": {{
+                        "target": "checker",
+                        "body": {body},
+                        "payload_max_bytes": submission_bytes,
+                        "call_timeout_seconds": TRAIN_TIMEOUT,
+                    }}}},
+                    {{"name": "final", "submit": {{}}}},"#
+        );
+        let library = LIBRARY
+            .replace(
+                "load(\"@pumpkin//harness/codex/codex.star\", \"codex\")\n",
+                "load(\"@pumpkin//harness/codex/codex.star\", \"codex\")\n\
+                 load(\"//lib/verify.star\", \"verify\")\n",
+            )
+            .replace(r#"{"name": "final", "submit": {}},"#, &function)
+            .replace("] + judges,", &format!("] + judges + [{target}],"));
+        scratch.write(&format!("{dir}lib/bench.star"), &library);
+        scratch.write(&format!("{dir}lib/verify.star"), verify);
+    };
+    write("", VERIFY, "verify");
+    write("one/", "def verify(target):\n    pass\n", "verify");
+    write("int/", VERIFY, "3");
+    let pumpkin = |dir: &str| {
+        let entry = format!("{dir}tasks/bench/task.star");
+        Step::from(scratch.pumpkin(&["check", &entry, "--arg=model=m"]))
+    };
+    check(
+        &scratch,
+        [pumpkin(""), pumpkin("one/"), pumpkin("int/")],
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin check tasks/bench/task.star --arg=model=m
+            exit status: Some(0)
+            $ pumpkin check one/tasks/bench/task.star --arg=model=m
+            exit status: Some(1)
+            lib/verify.star:1:5: `verify` takes 1 positional parameter, and a job's body takes its `Target` and the payload first: write `def verify(target: Target, payload: Payload, …)`
+                1 | def verify(target):
+                  |     ^^^^^^
+            pumpkin: one/tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/one/tasks/bench/task.star
+            $ pumpkin check int/tasks/bench/task.star --arg=model=m
+            exit status: Some(1)
+            lib/bench.star:124:33: `body` can't be an int: expected a dict
+                124 |                         "body": 3,
+                    |                                 ^
+                the IR's /roles/0/runtime/agent/grants/1/job/body
+            pumpkin: int/tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/int/tasks/bench/task.star"#]],
+    );
 }

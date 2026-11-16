@@ -573,7 +573,11 @@ workflow(
                 4 | SLOT = {"name": "payload", "max_bytes": 65 * MiB}
                   |                                         ^^^^^^^^
                 the IR's /roles/1/runtime/judge/slots/0/max_bytes
-                the IR's /roles/2/runtime/judge/slots/0/max_bytes"#]],
+                the IR's /roles/2/runtime/judge/slots/0/max_bytes
+            bad/slot/task.star:13:9: `train_judge` is a judge that the score doesn't name: name it as the score's role
+                13 |         JUDGE | {"name": "train_judge", "runtime": RUNTIME},
+                   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                the IR's /roles/1"#]],
     );
     check(
         r#"
@@ -604,12 +608,13 @@ judged_task(
 )
 "#,
         &expect![[r#"
-            lib/judged.star:27:35: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
-                27 |                 "env": [key + "=" + value for key, value in env.items()] + [
-                   |                                   ^
-                the left operand, `"SEED="`, is made at lib/judged.star:27:25
+            lib/judged.star:13:23: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
+                13 |     return [key + "=" + value for key, value in env.items()] + [
+                   |                       ^
+                the left operand, `"SEED="`, is made at lib/judged.star:13:13
                 the right operand, `7`, is made at bad/operand/task.star:7:20
-                in `_judge()`, called at lib/judged.star:87:13
+                in `_env()`, called at lib/judged.star:25:63
+                in `_trainer()`, called at lib/judged.star:110:13
                 in `judged_task()`, called at bad/operand/task.star:3:1"#]],
     );
     check(
@@ -3654,11 +3659,15 @@ fn plans() {
                       "finalize_grace_seconds": 0,
                       "grants": [
                         {
-                          "judge": {
+                          "job": {
+                            "body": {
+                              "def": "train",
+                              "file": "//lib/images.star"
+                            },
                             "call_timeout_seconds": 600,
                             "calls": 10,
-                            "role": "train_judge",
-                            "slot": "payload"
+                            "payload_max_bytes": 65536,
+                            "target": "trainer"
                           },
                           "name": "train"
                         },
@@ -3677,33 +3686,14 @@ fn plans() {
                 },
                 {
                   "image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3",
-                  "name": "train_judge",
+                  "name": "trainer",
                   "needs": {
                     "cpu_millis": 1000,
                     "memory_bytes": 536870912
                   },
                   "runtime": {
-                    "judge": {
-                      "command": {
-                        "argv": [
-                          "/opt/judge/run"
-                        ],
-                        "cwd": "/pumpkin/home"
-                      },
-                      "result": {
-                        "returns": [
-                          "/score"
-                        ],
-                        "shows": {
-                          "score": "/score"
-                        }
-                      },
-                      "slots": [
-                        {
-                          "max_bytes": 65536,
-                          "name": "payload"
-                        }
-                      ]
+                    "target": {
+                      "cwd": "/pumpkin/home"
                     }
                   },
                   "user": {
@@ -3823,41 +3813,41 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:36:13: the stand-in check refuses `tools/Dockerfile`
-                36 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:54:13: the stand-in check refuses `tools/Dockerfile`
+                54 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:37:17: the stand-in check refuses `toolchain/Dockerfile`
-                37 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:55:17: the stand-in check refuses `toolchain/Dockerfile`
+                55 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:39:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
-                39 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:57:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
+                57 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:39:19: the stand-in check refuses the mount at `shared`
-                39 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:57:19: the stand-in check refuses the mount at `shared`
+                57 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:22:18: the stand-in check refuses `judge/Dockerfile`
-                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:29:18: the stand-in check refuses `judge/Dockerfile`
+                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:42:15
+                in `_role()`, called at lib/images.star:61:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:22:18: the stand-in check refuses the mount at `shared`
-                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:29:18: the stand-in check refuses the mount at `shared`
+                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:42:15
+                in `_role()`, called at lib/images.star:61:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:22:18: the stand-in check refuses `judge/Dockerfile`
-                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:29:18: the stand-in check refuses `judge/Dockerfile`
+                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:42:47
+                in `_role()`, called at lib/images.star:62:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:22:18: the stand-in check refuses the mount at `shared`
-                22 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:29:18: the stand-in check refuses the mount at `shared`
+                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/images.star:42:47
+                in `_role()`, called at lib/images.star:62:9
                 in `images_task()`, called at bad/refused/task.star:5:1
             bad/refused/task.star:5:36: `cpu_millis` can't be `0`: expected a positive int
                 5 | images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
@@ -3874,12 +3864,12 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:36:13: building the image failed: the stand-in build fails `tools/Dockerfile`
-                36 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:54:13: building the image failed: the stand-in build fails `tools/Dockerfile`
+                54 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1
-            lib/images.star:37:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
-                37 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:55:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
+                55 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1"#]],
     );

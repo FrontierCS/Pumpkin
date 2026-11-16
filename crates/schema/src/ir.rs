@@ -19,10 +19,14 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 mod grant;
+mod job;
+mod label;
 mod session;
 pub(crate) mod values;
 
-pub use grant::{Function, Grant};
+pub use grant::{Body, Function, Grant};
+pub use job::JobFunction;
+pub use label::{Label, Root};
 pub use session::{NamedSession, Session};
 pub use values::{
     AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
@@ -142,6 +146,9 @@ pub enum Runtime {
     Agent(AgentRuntime),
     /// A judge, whose command runs once per call in a fresh instance.
     Judge(JudgeRuntime),
+    /// A target, which each call of the job function that names it starts afresh, and which runs
+    /// the commands the function's body sends ([`JobFunction`]).
+    Target(TargetRuntime),
     /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
     /// lease ([`Session`]).
     Runner(RunnerRuntime),
@@ -188,7 +195,7 @@ pub struct AgentRuntime {
     /// The agent's routes out, open while it works; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The functions the agent may call while it works: judge grants, sessions and submit grants,
+    /// The functions the agent may call while it works: job functions, sessions and submit grants,
     /// of which [`Workflow::parse`](crate::workflow::Workflow::parse) takes exactly one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<Grant>,
@@ -214,7 +221,7 @@ pub struct File {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeRuntime {
-    /// The command each judge call runs.
+    /// The command that the score's judge call runs.
     pub command: Command,
     /// Where inbound values land.
     pub slots: Vec<Slot>,
@@ -239,6 +246,25 @@ pub struct RunnerRuntime {
     /// Variables added to each command's environment, as [`Command::env`]'s are.
     #[serde(default, skip_serializing_if = "Env::is_empty")]
     pub env: Env,
+}
+
+/// How a target runs each command a job function's body sends, as the role's user: as a
+/// [`Command`] would with the body's argument vector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetRuntime {
+    /// The directory each command starts in.
+    pub cwd: AbsolutePath,
+    /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
+    /// The target's routes out, open while a call's body runs; absent, it has none.
+    #[serde(default, skip_serializing_if = "Egress::is_empty")]
+    pub egress: Egress,
+    /// The sessions the target may call while a call's body runs, which each call uses afresh;
+    /// absent, none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<NamedSession>,
 }
 
 /// What a judge call writes as its result: the JSON file at
@@ -452,30 +478,6 @@ impl fmt::Display for Api {
     }
 }
 
-/// Runs a payload in a fresh instance of a judge role and collects its result.
-///
-/// The grant runs one call at a time: a call made while one of its calls is queued or running
-/// is refused.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JudgeGrant {
-    /// The judge role, which no other judge grant names, so that the judge, like the grant,
-    /// runs one call at a time.
-    pub role: Name,
-    /// The judge's slot that receives the payload.
-    pub slot: Name,
-    /// The most calls the agent may make.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calls: Option<NonZeroU64>,
-    /// The most judge command time the agent's calls may use in all. A command's time counts
-    /// against it once the command has ended.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cumulative_seconds: Option<NonZeroU64>,
-    /// The timeout of each call, counted from the start of the judge command. A call also
-    /// ends with the grant's cumulative time, or with the work phase, if either comes first.
-    pub call_timeout_seconds: NonZeroU64,
-}
-
 /// Stores submissions, of which the [`Score`] judges the one selected. A submission may hold as
 /// many bytes as the [`Score`] slot takes, its [`max_bytes`](Slot::max_bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,8 +488,8 @@ pub struct SubmitGrant {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Score {
-    /// The judge role, which no [`JudgeGrant`] names, so that the agent never calls the judge
-    /// that scores it.
+    /// The judge role. No grant names a judge, so that the agent never calls the judge that scores
+    /// it.
     pub role: Name,
     /// The judge's slot that receives the submission.
     pub slot: Name,

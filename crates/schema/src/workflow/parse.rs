@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use super::errors::{Errors, Reported};
 use super::{
-    Agent, Holder, Judge, JudgeGrant, JudgeId, ParseErrors, RoleId, Runner, RunnerId, Sandbox,
-    Score, Session, Slot, SlotId, SubmitGrant, Workflow,
+    Agent, Holder, JobFunction, Judge, JudgeId, ParseErrors, RoleId, Runner, RunnerId, Sandbox,
+    Score, Session, Slot, SlotId, SubmitGrant, Target, TargetId, Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
@@ -15,10 +15,10 @@ impl Workflow {
     /// unique among roles, among a role's slots and among its grants; the agent's `dirs` and
     /// `files` give each path once, none below a file; a slot's `max_bytes` and a session's
     /// `transfer_bytes` are within the protocol's limits; each grant names a role of its kind that
-    /// no other grant of its kind names, a judge grant a slot it has; an agent's runner has an
-    /// image no judge has; every runner is leased; the score's judge is named by no judge grant. A
-    /// rule about parts that fail to resolve goes unchecked, so fixing these errors may reveal
-    /// others.
+    /// no other grant of its kind names; an agent's runner has an image no judge or target has;
+    /// every runner is leased, and every target called; the score names a judge's slot, and no
+    /// other judge is listed. A rule about parts that fail to resolve goes unchecked, so fixing
+    /// these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -31,8 +31,11 @@ struct Parser<'ir> {
     roles: Vec<Sandbox>,
     agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
     judges: BTreeMap<RoleId, Judge>,
+    targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     holders: Vec<Holding<'ir>>,
+    /// Each job function's target, with the function's name, in the IR's order.
+    called: Vec<(RoleId, &'ir Name)>,
 }
 
 /// A role that holds sessions, with each of them, its name and its place.
@@ -42,7 +45,7 @@ struct Holding<'ir> {
 }
 
 type Grants = (
-    Result<Vec<JudgeGrant>, Reported>,
+    Result<Vec<JobFunction>, Reported>,
     Result<SubmitGrant, Reported>,
 );
 
@@ -55,8 +58,7 @@ impl<'ir> Parser<'ir> {
             score,
         } = ir;
         self.roles(roles);
-        // With no agent, it holds no grants, so the score is checked against none.
-        let (agent, grants) = match self.first_agent() {
+        let agent = match self.first_agent() {
             Ok((at, agent, grants)) => {
                 let list = at.token("grants");
                 let names = grants.iter().map(|grant| &grant.name);
@@ -66,7 +68,7 @@ impl<'ir> Parser<'ir> {
                     ir::Function::Session(session) => {
                         Some((list.token(index).token("session"), &grant.name, session))
                     }
-                    ir::Function::Judge(_) | ir::Function::Submit(_) => None,
+                    ir::Function::Job(_) | ir::Function::Submit(_) => None,
                 });
                 // The agent's sessions come first, as [`Workflow::sessions`] says.
                 let holding = Holding {
@@ -74,30 +76,35 @@ impl<'ir> Parser<'ir> {
                     sessions: sessions.collect(),
                 };
                 self.holders.insert(0, holding);
-                (Ok((agent, self.grants(&at, grants))), grants)
+                let parsed = self.grants(&at, grants);
+                self.uncalled();
+                Ok((agent, parsed))
             }
-            Err(reported) => (Err(reported), &[][..]),
+            Err(reported) => Err(reported),
         };
         let sessions = self.sessions(agent.as_ref().ok().map(|(agent, _)| agent.role));
-        let score = self.score(score, grants);
+        let score = self.score(score);
         let Self {
             errors,
             roles,
-            judges,
+            targets,
             runners,
             ..
         } = self;
-        let parsed = agent.and_then(|(agent, (judge_grants, submit_grant))| {
-            Ok((agent, judge_grants?, sessions?, submit_grant?, score?))
+        let parsed = agent.and_then(|(agent, (job_functions, submit_grant))| {
+            let grants = (job_functions?, sessions?, submit_grant?);
+            Ok((agent, grants, score?))
         });
-        let (agent, judge_grants, sessions, submit_grant, score) = errors.finish(parsed)?;
+        let (agent, grants, (score, judge)) = errors.finish(parsed)?;
+        let (job_functions, sessions, submit_grant) = grants;
         Ok(Workflow {
             ir: ir.clone(),
             roles,
             agent,
-            judges,
+            judge,
+            targets,
             runners,
-            judge_grants,
+            job_functions,
             sessions,
             submit_grant,
             score,
@@ -128,6 +135,7 @@ impl<'ir> Parser<'ir> {
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
                 ir::Runtime::Judge(judge) => self.judge(&runtime_at.token("judge"), id, judge),
+                ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
                     let runner = Runner {
                         cwd: cwd.clone(),
@@ -216,15 +224,8 @@ impl<'ir> Parser<'ir> {
         Ok(first)
     }
 
-    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &'ir ir::JudgeRuntime) {
-        let ir::JudgeRuntime {
-            command,
-            slots,
-            result,
-            egress,
-            sessions,
-        } = judge;
-        let model = egress.model.clone();
+    /// Holds `sessions`, those of `role`'s kind at `at`, for [`Self::sessions`] to parse.
+    fn hold(&mut self, at: &JsonPointer, role: RoleId, sessions: &'ir [ir::NamedSession]) {
         let list = at.token("sessions");
         let names = sessions.iter().map(|named| &named.name);
         self.errors.unique(names, |index| list.token(index));
@@ -236,6 +237,34 @@ impl<'ir> Parser<'ir> {
             role,
             sessions: sessions.collect(),
         });
+    }
+
+    fn target(&mut self, at: &JsonPointer, role: RoleId, target: &'ir ir::TargetRuntime) {
+        let ir::TargetRuntime {
+            cwd,
+            env,
+            egress,
+            sessions,
+        } = target;
+        self.hold(at, role, sessions);
+        let target = Target {
+            cwd: cwd.clone(),
+            env: env.clone(),
+            model: egress.model.clone(),
+        };
+        self.targets.insert(role, target);
+    }
+
+    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &'ir ir::JudgeRuntime) {
+        let ir::JudgeRuntime {
+            command,
+            slots,
+            result,
+            egress,
+            sessions,
+        } = judge;
+        let model = egress.model.clone();
+        self.hold(at, role, sessions);
         let list = at.token("slots");
         let names = slots.iter().map(|slot| &slot.name);
         self.errors.unique(names, |index| list.token(index));
@@ -272,14 +301,13 @@ impl<'ir> Parser<'ir> {
 
     fn grants(&mut self, agent: &JsonPointer, grants: &'ir [ir::Grant]) -> Grants {
         let list = agent.token("grants");
-        let mut judge_grants = Vec::new();
+        let mut job_functions = Vec::new();
         let mut submit_grants = Vec::new();
         for (index, grant) in grants.iter().enumerate() {
             let at = place(&list, index, grant);
             match &grant.function {
-                ir::Function::Judge(judge) => {
-                    let earlier = &grants[..index];
-                    judge_grants.push(self.judge_grant(&at, &grant.name, judge, earlier));
+                ir::Function::Job(job) => {
+                    job_functions.push(self.job_function(&at, &grant.name, job));
                 }
                 ir::Function::Session(_) => {}
                 ir::Function::Submit(ir::SubmitGrant {}) => submit_grants.push((at, &grant.name)),
@@ -288,7 +316,65 @@ impl<'ir> Parser<'ir> {
         // An absent list has no place in the IR's JSON, so its absence is the agent's.
         let at = if grants.is_empty() { agent } else { &list };
         let submit_grant = self.submit_grant(at, &submit_grants);
-        (judge_grants.into_iter().collect(), submit_grant)
+        (job_functions.into_iter().collect(), submit_grant)
+    }
+
+    fn job_function(
+        &mut self,
+        at: &JsonPointer,
+        name: &'ir Name,
+        job: &'ir ir::JobFunction,
+    ) -> Result<JobFunction, Reported> {
+        let ir::JobFunction {
+            target,
+            body,
+            keywords,
+            payload_max_bytes,
+            calls,
+            cumulative_seconds,
+            call_timeout_seconds,
+        } = job;
+        // Every payload reaches its function through an op, which carries no more.
+        let bounded = if payload_max_bytes.get() > MAX_OP_PAYLOAD_BYTES {
+            Err(self.errors.report(
+                at.token("payload_max_bytes"),
+                format!(
+                    "`{name}`'s `payload_max_bytes` is {payload_max_bytes}, over the op payload \
+                     limit of {MAX_OP_PAYLOAD_BYTES}: give at most that"
+                ),
+            ))
+        } else {
+            Ok(())
+        };
+        let target_at = at.token("target");
+        let id = self.resolve(&target_at, target)?;
+        if !self.targets.contains_key(&id) {
+            let kind = self.kind(id);
+            let message = format!("`{target}` is {kind}: name a target as a job's target");
+            return Err(self.errors.report(target_at, message));
+        }
+        // So that a target, like a judge, runs one call at a time.
+        let shared = match self.called.iter().find(|(earlier, _)| *earlier == id) {
+            Some((_, first)) => Err(self.errors.report(
+                target_at,
+                format!(
+                    "`{target}` is the target of job functions `{first}` and `{name}`: name each \
+                     target from one function"
+                ),
+            )),
+            None => Ok(()),
+        };
+        self.called.push((id, name));
+        shared.and(bounded).map(|()| JobFunction {
+            name: name.clone(),
+            target: TargetId(id),
+            body: body.clone(),
+            keywords: keywords.clone(),
+            payload_max_bytes: *payload_max_bytes,
+            calls: *calls,
+            cumulative_seconds: *cumulative_seconds,
+            call_timeout_seconds: *call_timeout_seconds,
+        })
     }
 
     fn sessions(&mut self, agent: Option<RoleId>) -> Result<Vec<Session>, Reported> {
@@ -361,11 +447,13 @@ impl<'ir> Parser<'ir> {
         if agent == Some(holder) {
             self.agents_runner(&runner_at, id)?;
         }
-        // The agent and the judges alone hold grants that are parsed here (`Parser::roles`).
+        // The agent, the judges and the targets alone hold sessions (`Parser::roles`).
         let holder = if agent == Some(holder) {
             Holder::Agent
-        } else {
+        } else if self.judges.contains_key(&holder) {
             Holder::Judge(JudgeId(holder))
+        } else {
+            Holder::Target(TargetId(holder))
         };
         shared.and(bounded).map(|()| Session {
             name: name.clone(),
@@ -380,18 +468,26 @@ impl<'ir> Parser<'ir> {
     }
 
     fn agents_runner(&mut self, at: &JsonPointer, runner: RoleId) -> Result<(), Reported> {
-        // So that the agent never runs what a judge's image holds ([`ir::Session::runner`]).
+        // So that the agent never runs what a judge's or a target's image holds
+        // ([`ir::Session::runner`]).
         let (role, image) = (&self.roles[runner.0].name, &self.roles[runner.0].image);
-        let judge = (self.judges.keys()).find(|judge| self.roles[judge.0].image == *image);
+        let targets = self.targets.keys();
+        let judge =
+            (self.judges.keys().chain(targets)).find(|judge| self.roles[judge.0].image == *image);
         let Some(judge) = judge else {
             return Ok(());
+        };
+        let kind = if self.judges.contains_key(judge) {
+            "judge"
+        } else {
+            "target"
         };
         let judge = &self.roles[judge.0].name;
         Err(self.errors.report(
             at.clone(),
             format!(
-                "`{role}` runs judge `{judge}`'s image, {image}: give the runner an image no \
-                 judge has"
+                "`{role}` runs {kind} `{judge}`'s image, {image}: give the runner an image no \
+                 judge or target has"
             ),
         ))
     }
@@ -417,49 +513,41 @@ impl<'ir> Parser<'ir> {
         })
     }
 
+    // So that each target is reached, as each runner is (`Self::unleased`).
+    fn uncalled(&mut self) {
+        let targets: Vec<RoleId> = self.targets.keys().copied().collect();
+        for target in targets {
+            if !self.called.iter().any(|(called, _)| *called == target) {
+                let name = &self.roles[target.0].name;
+                let message =
+                    format!("`{name}` is a target that no job function names: name it from one");
+                (self.errors).report(JsonPointer::root().token("roles").token(target.0), message);
+            }
+        }
+    }
+
+    // A judge runs only as the score's, so another would never run.
+    fn unscored(&mut self, scorer: JudgeId) {
+        let judges: Vec<RoleId> = self.judges.keys().copied().collect();
+        for judge in judges.into_iter().filter(|&judge| judge != scorer.role()) {
+            let name = &self.roles[judge.0].name;
+            let message = format!(
+                "`{name}` is a judge that the score doesn't name: name it as the score's role"
+            );
+            (self.errors).report(JsonPointer::root().token("roles").token(judge.0), message);
+        }
+    }
+
     fn kind(&self, id: RoleId) -> &'static str {
         if self.judges.contains_key(&id) {
             "a judge"
+        } else if self.targets.contains_key(&id) {
+            "a target"
         } else if self.runners.contains_key(&id) {
             "a runner"
         } else {
             "an agent"
         }
-    }
-
-    fn judge_grant(
-        &mut self,
-        at: &JsonPointer,
-        name: &Name,
-        grant: &ir::JudgeGrant,
-        earlier: &[ir::Grant],
-    ) -> Result<JudgeGrant, Reported> {
-        let ir::JudgeGrant {
-            role,
-            slot,
-            calls,
-            cumulative_seconds,
-            call_timeout_seconds,
-        } = grant;
-        let shared = match self.judge_grant_naming(role, earlier) {
-            Some(first) => Err(self.errors.report(
-                at.token("role"),
-                format!(
-                    "`{role}` is named by judge grants `{first}` and `{name}`: name each judge \
-                     from one grant"
-                ),
-            )),
-            None => Ok(()),
-        };
-        // After the rule above, so that it is reported though the slot fails to resolve.
-        let slot = self.judge_slot(at, role, slot)?;
-        shared.map(|()| JudgeGrant {
-            name: name.clone(),
-            slot,
-            calls: *calls,
-            cumulative_seconds: *cumulative_seconds,
-            call_timeout_seconds: *call_timeout_seconds,
-        })
     }
 
     fn submit_grant(
@@ -484,41 +572,21 @@ impl<'ir> Parser<'ir> {
         parsed
     }
 
-    fn score(&mut self, score: &ir::Score, grants: &[ir::Grant]) -> Result<Score, Reported> {
+    /// The score, and its judge, the workflow's one.
+    fn score(&mut self, score: &ir::Score) -> Result<(Score, Judge), Reported> {
         let ir::Score {
             role,
             slot,
             timeout_seconds,
         } = score;
         let at = JsonPointer::root().token("score");
-        // So that the judge that scores the selection returns nothing to the agent.
-        let shared = match self.judge_grant_naming(role, grants) {
-            Some(grant) => Err(self.errors.report(
-                at.token("role"),
-                format!(
-                    "`{role}` is also the role of judge grant `{grant}`: name a judge no grant names"
-                ),
-            )),
-            None => Ok(()),
-        };
-        let slot = self.judge_slot(&at, role, slot)?;
-        shared.map(|()| Score {
+        let (slot, judge) = self.judge_slot(&at, role, slot)?;
+        self.unscored(slot.judge);
+        let score = Score {
             slot,
             timeout: Duration::from_secs(timeout_seconds.get()),
-        })
-    }
-
-    fn judge_grant_naming<'g>(&self, role: &Name, grants: &'g [ir::Grant]) -> Option<&'g Name> {
-        // The grants are compared by the role they name in the IR, so that a rule about the judges
-        // they name holds even where a grant's slot or the score's fails to resolve.
-        let id = self.role_ids.get(role.as_str())?;
-        if !self.judges.contains_key(id) {
-            return None;
-        }
-        grants.iter().find_map(|grant| match &grant.function {
-            ir::Function::Judge(judge) => (judge.role == *role).then_some(&grant.name),
-            ir::Function::Session(_) | ir::Function::Submit(_) => None,
-        })
+        };
+        Ok((score, judge))
     }
 
     fn judge_slot(
@@ -526,7 +594,7 @@ impl<'ir> Parser<'ir> {
         at: &JsonPointer,
         role: &Name,
         slot: &Name,
-    ) -> Result<SlotId, Reported> {
+    ) -> Result<(SlotId, Judge), Reported> {
         let role_at = at.token("role");
         let id = self.resolve(&role_at, role)?;
         let Some(judge) = self.judges.get(&id) else {
@@ -537,10 +605,13 @@ impl<'ir> Parser<'ir> {
         };
         let index = (judge.slots.iter()).position(|judge_slot| judge_slot.name == *slot);
         match index {
-            Some(index) => Ok(SlotId {
-                judge: JudgeId(id),
-                index,
-            }),
+            Some(index) => {
+                let slot = SlotId {
+                    judge: JudgeId(id),
+                    index,
+                };
+                Ok((slot, judge.clone()))
+            }
             None => Err(self.errors.report(
                 at.token("slot"),
                 format!("`{role}` has no slot named `{slot}`: name one of its slots"),
@@ -552,7 +623,7 @@ impl<'ir> Parser<'ir> {
 fn place(list: &JsonPointer, index: usize, grant: &ir::Grant) -> JsonPointer {
     // Below the function's kind, the key that holds the function (`ir::Grant`'s written form).
     let kind = match grant.function {
-        ir::Function::Judge(_) => "judge",
+        ir::Function::Job(_) => "job",
         ir::Function::Session(_) => "session",
         ir::Function::Submit(_) => "submit",
     };

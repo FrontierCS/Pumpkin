@@ -1,6 +1,6 @@
 """A neutral library: `images_task` writes the workflow of a task whose package's recipes build
 its images: the agent's, on the package's build tools with its toolchain copied in, with its
-harness added on it, and each judge's, a stage of one recipe."""
+harness added on it, and the trainer's and the judge's, each a stage of one recipe."""
 
 # The run's choices, each given as `--arg <name>=<value>`, or else its default.
 MODEL = arg("model", str, default = "model-small")
@@ -15,23 +15,41 @@ BASE_ARGS = {
     "BASE": "docker.io/example/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 }
 
-def _judge(name, stage):
-    """The judge role `name`, on the image of `stage` of the package's judge recipe."""
+# The judge's runtime: it scores the payload in its slot.
+JUDGE = {"judge": {
+    "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
+    "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
+    "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
+}}
+
+def _role(name, stage, runtime):
+    """The role `name`, on the image of `stage` of the package's judge recipe."""
     return {
         "name": name,
         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
         "user": {"uid": 65532, "gid": 65532},
         "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
-        "runtime": {"judge": {
-            "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
-            "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-            "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
-        }},
+        "runtime": runtime,
     }
+
+def train(target: Target, payload: Payload):
+    """Scores the payload by the judge's train stage, in a fresh sandbox of the trainer.
+
+    Args:
+      target: the trainer's sandbox.
+      payload: the payload to score.
+
+    Returns:
+      The judge's result.
+    """
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/judge/run"])
+    return json.decode(target.get("/pumpkin/out/result.json"))
 
 def images_task(*, agent):
     """The workflow of the task in the entry's package: a harness works as the agent, with
-    `agent`'s needs, on the image of the package's agent recipe, and two judges score it."""
+    `agent`'s needs, on the image of the package's agent recipe, which calls the trainer, and a
+    judge scores it."""
     task = package_name().split("/")[-1]
     tools = image("tools/Dockerfile", args = BASE_ARGS)
     toolchain = image("toolchain/Dockerfile", target = "Go")
@@ -39,7 +57,10 @@ def images_task(*, agent):
     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
     # Declared between the agent's image and the layer on it, so that the layer's base is not the
     # image built just before it.
-    judges = [_judge("train_judge", "train"), _judge("final_judge", "eval")]
+    stages = [
+        _role("trainer", "train", {"target": {"cwd": "/pumpkin/home"}}),
+        _role("final_judge", "eval", JUDGE),
+    ]
     harness = image("Dockerfile", context = "//harness", contexts = {"base": agent_image})
     workflow(
         name = "neutral/" + task.replace("_", "-"),
@@ -56,9 +77,10 @@ def images_task(*, agent):
                     "finalize_grace_seconds": 0 if STRICT else 60,
                     "egress": {"model": [{"api": "responses", "models": [MODEL]}]},
                     "grants": [
-                        {"name": "train", "judge": {
-                            "role": "train_judge",
-                            "slot": "payload",
+                        {"name": "train", "job": {
+                            "target": "trainer",
+                            "body": train,
+                            "payload_max_bytes": 64 * KiB,
                             "calls": 10,
                             "call_timeout_seconds": 600,
                         }},
@@ -66,6 +88,6 @@ def images_task(*, agent):
                     ],
                 }},
             },
-        ] + judges,
+        ] + stages,
         score = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120},
     )

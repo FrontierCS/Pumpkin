@@ -21,15 +21,15 @@ pub struct NamedSession {
 /// and `.close`.
 ///
 /// A lease runs one command at a time, until the holder closes it, its time runs out, or the
-/// holder's work ends: the work phase, for the agent; its command, for a judge's call. Its time
-/// runs from when its runner is ready until it ends. A judge's limits are each call's: a call
-/// starts with all of them.
+/// holder's work ends: the work phase, for the agent; its command, for a judge's call; its body,
+/// for a target's. Its time runs from when its runner is ready until it ends. A judge's or a
+/// target's limits are each call's: a call starts with all of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     /// The runner role, which no other session names. An agent's runner has an image that no
-    /// judge has: a judge's files are in its image alone, so a runner that a judge trusts with
-    /// them runs that image, and any other runner a judge leases may share the agent's runner's.
+    /// judge or target has: their files are in their images alone, so a runner that one trusts
+    /// with them runs that image, and any other runner it leases may share the agent's runner's.
     pub runner: Name,
     /// The most leases open at once, each until its runner is gone.
     pub instances: NonZeroU32,

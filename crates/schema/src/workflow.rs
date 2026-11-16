@@ -4,8 +4,8 @@
 //! A [`Placed`] workflow has each of its roles on a provider, in the smallest class of sandbox
 //! offered that fits it. A [`Workflow`] can only be made by [`Workflow::parse`], and a [`Placed`]
 //! by [`Workflow::place`], so code that acts on one need not check again what they established.
-//! Each kind of part has its own id type, so that, for example, the role a [`JudgeGrant`]
-//! judges with is known to be a [`Judge`]. Ids are only valid for the workflow that issued them.
+//! Each kind of part has its own id type, so that, for example, the role a [`JobFunction`]
+//! targets is known to be a [`Target`]. Ids are only valid for the workflow that issued them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroU64};
@@ -32,9 +32,11 @@ pub struct Workflow {
     /// Each role's sandbox, by its id.
     roles: Vec<Sandbox>,
     agent: Agent,
-    judges: BTreeMap<RoleId, Judge>,
+    /// The score's judge, the workflow's one.
+    judge: Judge,
+    targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
-    judge_grants: Vec<JudgeGrant>,
+    job_functions: Vec<JobFunction>,
     sessions: Vec<Session>,
     submit_grant: SubmitGrant,
     score: Score,
@@ -54,8 +56,13 @@ impl Workflow {
         &self.agent
     }
 
-    pub fn judge(&self, id: JudgeId) -> &Judge {
-        &self.judges[&id.0]
+    /// The workflow's one judge: the score's.
+    pub fn judge(&self) -> &Judge {
+        &self.judge
+    }
+
+    pub fn target(&self, id: TargetId) -> &Target {
+        &self.targets[&id.0]
     }
 
     pub fn runner(&self, id: RunnerId) -> &Runner {
@@ -66,15 +73,17 @@ impl Workflow {
         &self.roles[role.0]
     }
 
-    /// The model route of `role`, the agent's or a judge's, with the budgets of its entries, if it
-    /// has one.
+    /// The model route of `role`, the agent's, a judge's or a target's, with the budgets of its
+    /// entries, if it has one.
     pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
         if role == self.agent.role {
             return self.agent.model.as_ref();
         }
-        self.judges
-            .get(&role)
-            .and_then(|judge| judge.model.as_ref())
+        if role == self.score.slot.judge.role() {
+            return self.judge.model.as_ref();
+        }
+        let target = self.targets.get(&role).map(|target| &target.model);
+        target.and_then(Option::as_ref)
     }
 
     /// Each role, by its id, and its sandbox, in the IR's order.
@@ -92,22 +101,20 @@ impl Workflow {
     }
 
     pub fn slot(&self, id: SlotId) -> &Slot {
-        &self.judge(id.judge).slots[id.index]
+        &self.judge.slots[id.index]
     }
 
-    /// The agent's judge grants, in the IR's order.
-    pub fn judge_grants(&self) -> impl Iterator<Item = (JudgeGrantId, &JudgeGrant)> {
-        self.judge_grants
-            .iter()
-            .enumerate()
-            .map(|(index, grant)| (JudgeGrantId(index), grant))
+    /// The agent's job functions, in the IR's order.
+    pub fn job_functions(&self) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
+        let functions = self.job_functions.iter().enumerate();
+        functions.map(|(index, function)| (JobFunctionId(index), function))
     }
 
-    pub fn judge_grant(&self, id: JudgeGrantId) -> &JudgeGrant {
-        &self.judge_grants[id.0]
+    pub fn job_function(&self, id: JobFunctionId) -> &JobFunction {
+        &self.job_functions[id.0]
     }
 
-    /// Every role's sessions: the agent's, then each judge's, each in the IR's order.
+    /// Every role's sessions: the agent's, then each judge's and target's, each in the IR's order.
     pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> {
         (self.sessions.iter().enumerate()).map(|(index, grant)| (SessionId(index), grant))
     }
@@ -124,14 +131,6 @@ impl Workflow {
     /// How the selected submission is judged.
     pub fn score(&self) -> &Score {
         &self.score
-    }
-
-    /// The slot a judge call's payload lands in.
-    pub fn call_slot(&self, call: JudgeCall) -> SlotId {
-        match call {
-            JudgeCall::Grant(grant) => self.judge_grant(grant).slot,
-            JudgeCall::Score => self.score.slot,
-        }
     }
 }
 
@@ -284,6 +283,15 @@ impl JudgeId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TargetId(RoleId);
+
+impl TargetId {
+    pub fn role(self) -> RoleId {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunnerId(RoleId);
 
 impl RunnerId {
@@ -317,16 +325,15 @@ impl SlotId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JudgeGrantId(usize);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(usize);
 
-/// What a judge call is made under: one of the agent's judge grants, or the workflow's
-/// [`Score`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum JudgeCall {
-    Grant(JudgeGrantId),
+pub struct JobFunctionId(usize);
+
+/// What a job runs: a call of one of the agent's job functions, or the workflow's [`Score`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum JobOf {
+    Function(JobFunctionId),
     Score,
 }
 
@@ -392,40 +399,13 @@ impl Slot {
     }
 }
 
-/// A judge grant of the agent's.
+/// A target role; see [`ir::TargetRuntime`](crate::ir::TargetRuntime).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JudgeGrant {
-    pub name: Name,
-    /// The judge's slot that receives the payload.
-    pub slot: SlotId,
-    /// See [`ir::JudgeGrant::calls`](crate::ir::JudgeGrant::calls).
-    pub calls: Option<NonZeroU64>,
-    /// See [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds).
-    pub cumulative_seconds: Option<NonZeroU64>,
-    /// See
-    /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds).
-    pub call_timeout_seconds: NonZeroU64,
-}
-
-impl JudgeGrant {
-    /// The judge, which no other judge grant names; see
-    /// [`ir::JudgeGrant::role`](crate::ir::JudgeGrant::role).
-    pub fn judge(&self) -> JudgeId {
-        self.slot.judge
-    }
-
-    /// [`ir::JudgeGrant::cumulative_seconds`](crate::ir::JudgeGrant::cumulative_seconds), as a
-    /// [`Duration`].
-    pub fn cumulative(&self) -> Option<Duration> {
-        self.cumulative_seconds
-            .map(|seconds| Duration::from_secs(seconds.get()))
-    }
-
-    /// [`ir::JudgeGrant::call_timeout_seconds`](crate::ir::JudgeGrant::call_timeout_seconds), as
-    /// a [`Duration`].
-    pub fn call_timeout(&self) -> Duration {
-        Duration::from_secs(self.call_timeout_seconds.get())
-    }
+pub struct Target {
+    pub cwd: AbsolutePath,
+    pub env: Env,
+    /// The target's model route, with the budgets of its entries, if it has one.
+    pub model: Option<ModelRoute>,
 }
 
 /// A runner role; see [`ir::RunnerRuntime`](crate::ir::RunnerRuntime).
@@ -435,13 +415,52 @@ pub struct Runner {
     pub env: Env,
 }
 
+/// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobFunction {
+    pub name: Name,
+    /// The target that each call starts afresh, which no other job function names.
+    pub target: TargetId,
+    pub body: crate::ir::Body,
+    pub keywords: serde_json::Map<String, serde_json::Value>,
+    /// At most [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), as parsing checks.
+    pub(crate) payload_max_bytes: NonZeroU64,
+    pub calls: Option<NonZeroU64>,
+    pub cumulative_seconds: Option<NonZeroU64>,
+    pub call_timeout_seconds: NonZeroU64,
+}
+
+impl JobFunction {
+    /// [`ir::JobFunction::cumulative_seconds`](crate::ir::JobFunction::cumulative_seconds), as a
+    /// [`Duration`].
+    pub fn cumulative(&self) -> Option<Duration> {
+        self.cumulative_seconds
+            .map(|seconds| Duration::from_secs(seconds.get()))
+    }
+
+    /// [`ir::JobFunction::call_timeout_seconds`](crate::ir::JobFunction::call_timeout_seconds),
+    /// as a [`Duration`].
+    pub fn call_timeout(&self) -> Duration {
+        Duration::from_secs(self.call_timeout_seconds.get())
+    }
+
+    pub fn payload_max_bytes(&self) -> NonZeroU64 {
+        self.payload_max_bytes
+    }
+
+    /// The op payload limit of a session whose payloads the function takes.
+    pub fn payload_limit(&self) -> OpPayloadLimit {
+        OpPayloadLimit(self.payload_max_bytes.get())
+    }
+}
+
 /// A session; see [`ir::Session`](crate::ir::Session).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     pub name: Name,
     pub holder: Holder,
     /// The runner, which no other session names, and whose image, if the agent holds the
-    /// session, is no judge's ([`ir::Session::runner`](crate::ir::Session::runner)).
+    /// session, is no judge's or target's ([`ir::Session::runner`](crate::ir::Session::runner)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -450,11 +469,13 @@ pub struct Session {
     pub transfer_bytes: NonZeroU64,
 }
 
-/// The role that holds a [`Session`]: the agent, or a judge, each of whose calls uses it afresh.
+/// The role that holds a [`Session`]: the agent, or a judge or a target, each of whose calls uses
+/// it afresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
     Agent,
     Judge(JudgeId),
+    Target(TargetId),
 }
 
 impl Holder {
@@ -463,6 +484,7 @@ impl Holder {
         match self {
             Self::Agent => workflow.agent().role,
             Self::Judge(judge) => judge.role(),
+            Self::Target(target) => target.role(),
         }
     }
 }
@@ -487,8 +509,8 @@ pub struct SubmitGrant {
     pub name: Name,
 }
 
-/// The parsed [`ir::Score`](crate::ir::Score): the slot of a judge no judge grant names, whose
-/// `max_bytes` caps every submission.
+/// The parsed [`ir::Score`](crate::ir::Score): a judge's slot, whose `max_bytes` caps every
+/// submission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Score {
     pub slot: SlotId,

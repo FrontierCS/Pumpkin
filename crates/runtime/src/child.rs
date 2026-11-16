@@ -45,8 +45,6 @@ pub(super) struct Child<'r, H: Host, O: Send + 'static> {
 pub(super) struct Deadlines {
     /// Its sandbox's start: created, accepted and set up.
     pub(super) startup: Duration,
-    /// What it puts in its sandbox, and the start of each command.
-    pub(super) start: Duration,
     /// Its sandbox's freeze, and the collecting of what it holds.
     pub(super) collect: Duration,
 }
@@ -139,7 +137,11 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
     }
 
     pub(super) fn note(&self, note: String) {
-        let _ = (self.reports).send(Input::Logged(Entry::Note(note)));
+        self.log(Entry::Note(note));
+    }
+
+    pub(super) fn log(&self, entry: Entry) {
+        let _ = (self.reports).send(Input::Logged(entry));
     }
 
     pub(super) fn report(&self, report: Report) {

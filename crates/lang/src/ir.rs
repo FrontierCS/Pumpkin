@@ -5,8 +5,9 @@
 //! The kinds map one to one: a dict to a struct, or to an enum as its one key, the kind, and
 //! that key's value (`{"judge": {…}}`); a list or a tuple to a sequence; a string to a string,
 //! which the IR's types check; an int to an integer, which they range-check; a float to a float;
-//! a bool to a bool; `None` to an absent option; and an image to the string of its ID. A function
-//! is no data.
+//! a bool to a bool; `None` to an absent option; an image to the string of its ID; and a function
+//! that a `def` makes to a body, the dict of its file's label and its name. Any other function is
+//! no data.
 //! Messages say what `serde` names in the language's words: an int type, for one, by the ints it
 //! holds.
 //!
@@ -22,19 +23,26 @@ use core::fmt;
 
 use schema::ir::{self, JsonPointer};
 use schema::workflow::ParseError;
-use serde::de::value::StrDeserializer;
+use serde::de::value::{MapDeserializer, StrDeserializer};
 use serde::de::{
     self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor,
 };
 use serde::{Deserialize, forward_to_deserialize_any};
 
-use crate::problem::{Fault, list};
-use crate::value::{Entry, Key, Kind, Span, Value, escape, quote};
+use crate::problem::{Fault, Sources, list};
+use crate::value::{Entry, Function, Key, Kind, Span, Value, escape, quote};
+
+// A body's fields, as a function gives them.
+type BodyFields = core::array::IntoIter<(&'static str, String), 2>;
 
 /// The IR's workflow that `fields`, the dict of the keyword arguments of `workflow()`, gives. An
 /// image in it is the ID at its place in `images`. A fault is at the value that is wrong, and
 /// notes where in the IR it is.
-pub(crate) fn workflow(fields: &Value, images: &[ir::Image]) -> Result<ir::Workflow, Fault> {
+pub(crate) fn workflow(
+    fields: &Value,
+    images: &[ir::Image],
+    sources: &Sources,
+) -> Result<ir::Workflow, Fault> {
     // The fields of `ir::Workflow` that a workflow's writer gives.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -46,6 +54,7 @@ pub(crate) fn workflow(fields: &Value, images: &[ir::Image]) -> Result<ir::Workf
     let de = De {
         value: fields,
         images,
+        sources,
     };
     let Fields { name, roles, score } = Fields::deserialize(de).map_err(|error| {
         let Error {
@@ -306,16 +315,26 @@ fn words(expected: &dyn de::Expected) -> String {
     format!("an int from {least} to {most}")
 }
 
-/// A [`Value`] that `serde` reads as the IR's JSON would be read: an image is its ID, a string.
+/// A [`Value`] that `serde` reads as the IR's JSON would be read: an image is its ID, a string,
+/// and a function that a `def` makes is its body, `{"file": …, "def": …}`, its file's label in
+/// `sources`.
 #[derive(Clone, Copy)]
 struct De<'v> {
     value: &'v Value,
     images: &'v [ir::Image],
+    sources: &'v Sources,
 }
 
 impl<'v> De<'v> {
     fn of(self, value: &'v Value) -> Self {
         Self { value, ..self }
+    }
+
+    // The body that `function` is: its file's label and its name, as strings.
+    fn body<'de>(&self, function: &Function) -> MapDeserializer<'de, BodyFields, Error> {
+        let file = self.sources.label(function.module).to_string();
+        let def = function.def.name.text.clone();
+        MapDeserializer::new([("file", file), ("def", def)].into_iter())
     }
 
     fn mismatch(&self, expected: &str) -> Error {
@@ -348,9 +367,8 @@ impl<'de> de::Deserializer<'de> for De<'_> {
             Kind::Image(image) => visitor.visit_str(self.images[image.0].as_str()),
             Kind::List(items) | Kind::Tuple(items) => seq(self, items, visitor),
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(_) | Kind::Builtin(_) | Kind::Module(_) | Kind::Hosted(_) => {
-                Err(self.mismatch("data"))
-            }
+            Kind::Function(function) => visitor.visit_map(self.body(function)),
+            Kind::Builtin(_) | Kind::Module(_) | Kind::Hosted(_) => Err(self.mismatch("data")),
         }
     }
 
@@ -446,6 +464,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         match &self.value.kind {
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
+            Kind::Function(function) => visitor.visit_map(self.body(function)),
             _ => Err(self.mismatch("a dict")),
         }
     }

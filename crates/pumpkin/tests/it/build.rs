@@ -121,10 +121,10 @@ fn refusals() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:33:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
             tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
                 6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
@@ -370,9 +370,24 @@ fn builds_on_docker() {
                         "grants": [
                           {
                             "name": "train",
-                            "judge": {
-                              "role": "train_judge",
-                              "slot": "payload",
+                            "job": {
+                              "target": "trainer",
+                              "body": {
+                                "file": "//lib/bench.star",
+                                "def": "train"
+                              },
+                              "keywords": {
+                                "metrics": [
+                                  "instances",
+                                  "solved",
+                                  "submitted",
+                                  "invalid",
+                                  "duplicate",
+                                  "unbounded",
+                                  "rejected"
+                                ]
+                              },
+                              "payload_max_bytes": 4194304,
                               "calls": 100,
                               "cumulative_seconds": 12000,
                               "call_timeout_seconds": 600
@@ -387,7 +402,7 @@ fn builds_on_docker() {
                     }
                   },
                   {
-                    "name": "train_judge",
+                    "name": "trainer",
                     "image": "<pumpkin/tasks/bench/judge>",
                     "user": {
                       "uid": 65532,
@@ -401,39 +416,12 @@ fn builds_on_docker() {
                       ]
                     },
                     "runtime": {
-                      "judge": {
-                        "command": {
-                          "argv": [
-                            "/opt/judge/run"
-                          ],
-                          "env": [
-                            "JUDGE_MODE=train",
-                            "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
-                          ],
-                          "cwd": "/pumpkin/home"
-                        },
-                        "slots": [
-                          {
-                            "name": "payload",
-                            "max_bytes": 4194304
-                          }
-                        ],
-                        "result": {
-                          "shows": {
-                            "score": "/score"
-                          },
-                          "returns": [
-                            "/score",
-                            "/metrics/instances",
-                            "/metrics/solved",
-                            "/metrics/submitted",
-                            "/metrics/invalid",
-                            "/metrics/duplicate",
-                            "/metrics/unbounded",
-                            "/metrics/rejected",
-                            "/failure"
-                          ]
-                        }
+                      "target": {
+                        "cwd": "/pumpkin/home",
+                        "env": [
+                          "JUDGE_MODE=train",
+                          "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
+                        ]
                       }
                     }
                   },
@@ -511,10 +499,10 @@ fn builds_on_docker() {
                 80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/failing/task.star:5:1
-            lib/bench.star:33:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                33 |         "image": image(recipe, mount = SHARED),
-                   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_judge()`, called at lib/bench.star:82:9
+            lib/bench.star:140:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                140 |         "image": image(recipe, mount = SHARED),
+                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `_trainer()`, called at lib/bench.star:82:9
                 in `bench_task()`, called at tasks/failing/task.star:5:1
             pumpkin: tasks/failing/task.star: the task has 2 problems
             pumpkin: to build it again: pumpkin build --arg model=model-a --config <scratch>/pumpkin.toml <scratch>/tasks/failing/task.star
@@ -577,7 +565,7 @@ fn variants_on_docker() {
             pumpkin: building an image in pumpkin/tasks/bench/agent
             pumpkin: building an image in pumpkin-library/harness/codex/layer
             agent: image 1, note=one
-            train_judge: image 2, stage=train
+            trainer: image 2, stage=train
             final_judge: image 3, stage=eval
             $ pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml --arg note=two
             exit status: Some(0)
@@ -587,7 +575,7 @@ fn variants_on_docker() {
             pumpkin: building an image in pumpkin/tasks/bench/agent
             pumpkin: building an image in pumpkin-library/harness/codex/layer
             agent: image 4, note=two
-            train_judge: image 2, stage=train
+            trainer: image 2, stage=train
             final_judge: image 3, stage=eval
             $ pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml --arg base=busybox:1.37
             exit status: Some(1)

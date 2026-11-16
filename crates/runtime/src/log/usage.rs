@@ -260,7 +260,7 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
         .map(|call| {
             json!({
                 "job": call.job,
-                "grant": call.grant,
+                "grant": call.function,
                 "model_requests": call.model.requests,
                 "tokens": tokens_json(&call.model.tokens),
             })

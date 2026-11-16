@@ -19,6 +19,7 @@ use stdx::Context;
 
 use crate::print_line;
 
+mod call;
 mod session;
 
 /// What a caller is told when the connection to `sandboxd` closes without an answer, as
@@ -44,7 +45,7 @@ mod flags {
         src "./src/ctl.rs"
 
         /// Makes an op through the sandbox's sandboxd, and prints the reply as one line of
-        /// JSON, whose `kind` names it: `ops`, `judge`, `submit`, `status`, `lease`,
+        /// JSON, whose `kind` names it: `ops`, `call`, `submit`, `status`, `lease`,
         /// `lease_status` or `refused`. Exits with 0, with 2 for the status of a job that gave
         /// no result, and with 1 for a refused op.
         /// Reports any other error on standard error, with nothing printed, and exits with 1.
@@ -53,8 +54,9 @@ mod flags {
             /// the grants it holds.
             cmd ops {}
 
-            /// Calls one of a session's functions, `<session>.<op>`, each answered at once, which
-            /// lease the session's runners and drive them, one command or copy at a time: `open`
+            /// Calls a function that this sandbox's role holds: `<function> <file>`, with the
+            /// payload in <file>, or `<session>.<op>`, one of a session's ops, each answered at
+            /// once, which lease its runners and drive them, one command or copy at a time: `open`
             /// opens a lease, whose runner lasts as the session lets it; `run <lease> [--timeout
             /// <seconds>] -- <program> [<arg>...]` runs a command in its runner, until the timeout
             /// or the lease's end; `put <lease> <tree> <to>` copies the directory <tree> here to
@@ -62,12 +64,13 @@ mod flags {
             /// `status <lease>` shows the lease, how its last command or copy ended, and what is
             /// left; `close <lease>` ends it. A lease is named by the number `open` returned.
             cmd call {
-                /// The session's name, as `ops` lists it, a dot, and the op.
+                /// The function's name, as `ops` lists it, or a session's, a dot, and the op.
                 required function: OsString
-                /// The op's arguments. A copied tree's root becomes <to>, which must not exist
-                /// unless a put replaces it, a path in the runner given whole, from `/`; a copy
-                /// keeps the permission bits of each file and directory, and gives a directory's
-                /// owner all three; a copy counts as a command.
+                /// The file that holds the payload, or a symbolic link to it; for a session's op,
+                /// its arguments. A copied tree's root becomes <to>, which must not exist unless a
+                /// put replaces it, a path in the runner given whole, from `/`; a copy keeps the
+                /// permission bits of each file and directory, and gives a directory's owner all
+                /// three; a copy counts as a command.
                 repeated args: OsString
                 /// With `run`, the most seconds the command may run, at most what the lease has
                 /// left.
@@ -77,14 +80,6 @@ mod flags {
                 optional --seconds seconds: OsString
                 /// With `put`, removes whatever is at <to> in the runner first.
                 optional --replace
-            }
-
-            /// Calls a judge grant with the payload in a file, which a new job judges.
-            cmd judge {
-                /// The judge grant's name, as `ops` lists it.
-                required grant: OsString
-                /// The file that holds the payload, or a symbolic link to it.
-                required file: PathBuf
             }
 
             /// Submits the payload in a file to a submit grant.
@@ -97,9 +92,9 @@ mod flags {
                 optional --finalize
             }
 
-            /// Shows how a job that a judge call started is doing.
+            /// Shows how a job that a call of a job function started is doing.
             cmd status {
-                /// The job's number, as its judge call returned it.
+                /// The job's number, as its call returned it.
                 required job: OsString
             }
         }
@@ -116,7 +111,6 @@ mod flags {
     pub enum SandboxctlCmd {
         Ops(Ops),
         Call(Call),
-        Judge(Judge),
         Submit(Submit),
         Status(Status),
     }
@@ -132,12 +126,6 @@ mod flags {
         pub timeout: Option<OsString>,
         pub seconds: Option<OsString>,
         pub replace: bool,
-    }
-
-    #[derive(Debug)]
-    pub struct Judge {
-        pub grant: OsString,
-        pub file: PathBuf,
     }
 
     #[derive(Debug)]
@@ -209,7 +197,7 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
 fn exit_code(reply: &OpReply) -> u8 {
     match reply {
         OpReply::Ops(_)
-        | OpReply::Judge(_)
+        | OpReply::Call(_)
         | OpReply::Submit(_)
         | OpReply::Lease(_)
         | OpReply::LeaseStatus(_) => 0,
@@ -235,16 +223,12 @@ fn run(flags: flags::Sandboxctl) -> Result<OpReply, String> {
     }
 }
 
-/// Parses the arguments into the op's call and the request's body: for a judge call or a
+/// Parses the arguments into the op's call and the request's body: for a function's call or a
 /// submission, the payload file's absolute path ([`payload_path`]).
 fn parse(flags: flags::Sandboxctl) -> Result<(OpCall, Vec<u8>), String> {
     match flags.subcommand {
         flags::SandboxctlCmd::Ops(flags::Ops) => Ok((OpCall::Ops, Vec::new())),
-        flags::SandboxctlCmd::Call(call) => Ok((session::call(call)?, Vec::new())),
-        flags::SandboxctlCmd::Judge(flags::Judge { grant, file }) => {
-            let grant = parse_grant(&grant)?;
-            Ok((OpCall::Judge { grant }, payload_path(&file)?))
-        }
+        flags::SandboxctlCmd::Call(call) => call::call(call),
         flags::SandboxctlCmd::Submit(flags::Submit {
             grant,
             file,
@@ -259,7 +243,7 @@ fn parse(flags: flags::Sandboxctl) -> Result<(OpCall, Vec<u8>), String> {
                 .and_then(|job| job.parse().ok())
                 .ok_or_else(|| {
                     format!(
-                        "`{}` is not a job: name one by the number a judge call returned",
+                        "`{}` is not a job: name one by the number a call returned",
                         job.display()
                     )
                 })?;

@@ -7,36 +7,9 @@ use std::path::Component;
 use schema::ir::{AbsolutePath, Argv, Name};
 use schema::sandbox::op::{OpCall, SessionOp};
 
-use super::flags;
-
-/// The session's op that `call` makes: its function's name is the session's, a dot, and the op's.
-pub(super) fn call(call: flags::Call) -> Result<OpCall, String> {
-    let flags::Call {
-        function,
-        args,
-        timeout,
-        seconds,
-        replace,
-    } = call;
-    let function = function
-        .to_str()
-        .ok_or_else(|| format!("`{}` is not a session's op: use UTF-8", function.display()))?;
-    let named = function.split_once('.').ok_or_else(|| {
-        format!(
-            "`{function}` names no session's op: give the session's name, as `ops` lists it, a dot \
-             and the op, as `<session>.open`"
-        )
-    })?;
-    op(
-        named,
-        &args,
-        (timeout.as_deref(), seconds.as_deref(), replace),
-    )
-}
-
 /// The op of session `grant` that `op` names, with `args`, the op's arguments, and `timeout`,
 /// given for `run` alone, `seconds`, for `open` alone, and `replace`, for `put` alone.
-fn op(
+pub(super) fn op(
     (grant, op): (&str, &str),
     args: &[OsString],
     (timeout, seconds, replace): (Option<&OsStr>, Option<&OsStr>, bool),

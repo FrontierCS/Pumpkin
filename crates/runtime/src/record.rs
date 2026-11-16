@@ -15,8 +15,8 @@
 //! - `log.jsonl`, the run log (`log`); `payloads/<digest>`, the payload of each op the core
 //!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
 //! - `agent/`, `jobs/<n>/` and `leases/<n>/`, a sandbox each, with its `sandbox.json`: `provider`,
-//!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once a delete was tried;
-//!   and its `out/` and `log/` as far as collected, but a result over `RESULT_MAX_BYTES`.
+//!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once tried; its `out/`,
+//!   `log/` and a body's `got/` as far as collected, but a judge's result over `RESULT_MAX_BYTES`.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
 //!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
 //!   its log, which an older record lacks.

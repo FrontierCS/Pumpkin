@@ -1,7 +1,7 @@
-//! Judge calls, each a child of the run ([`child`](super::child)): a call puts its payload in its
-//! slot, runs the judge's command until it exits, its timeout passes or the core stops the call,
-//! relaying its session's ops and model requests to the loop meanwhile, and collects and parses
-//! the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
+//! The score's judge call, a child of the run ([`child`](super::child)): the call puts its payload
+//! in its slot, runs the judge's command until it exits, its timeout passes or the core stops the
+//! call, relaying its session's ops and model requests to the loop meanwhile, and collects and
+//! parses the judge's result under its [`ResultSpec`](schema::ir::ResultSpec).
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,11 +11,11 @@ use decision::{Event, JobId, JudgeResult};
 use gateway::{Arrival, IncomingOp, Put, Session};
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{
-    OpPayloadLimit, RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir,
-    pumpkin_dir, result_file, slot_dir, slot_payload,
+    ExitStatus, OpPayloadLimit, RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir,
+    out_dir, pumpkin_dir, result_file, slot_dir, slot_payload,
 };
 use schema::workflow::{Holder, Judge, SlotId};
-use stdx::Context;
+use stdx::{Context, Deadline};
 
 use super::child::{Child, Message, Report};
 use super::host::deadline;
@@ -23,21 +23,27 @@ use super::record::Stored;
 use super::sandbox::{collect, launch};
 use super::{Clock, Host, Inbox, request};
 
-/// A judge call, as its thread drives it, in its child of the run, whose orders are the core's
-/// replies to its ops.
+/// The score's judge call, as its thread drives it, in its child of the run, whose orders are the
+/// core's replies to its ops.
 pub(super) struct Call {
     pub(super) job: JobId,
     /// The slot the payload is put in, whose judge's sandbox and command the call runs, as the
     /// workflow of its child's sandboxes finds them.
     pub(super) slot: SlotId,
     pub(super) payload: Stored,
+    /// By when the payload is put and the judge's command started, as a time since the run
+    /// started.
+    pub(super) start: Duration,
     /// The longest the judge's command may run.
     pub(super) timeout: Duration,
 }
 
-enum Ended {
-    /// It exited, or ran until its timeout.
-    Ran,
+/// How waiting on a child's command ended.
+pub(super) enum Waited {
+    Exited(ExitStatus),
+    /// Its timeout passed first.
+    TimedOut,
+    /// The core stopped the child first.
     Stopped,
 }
 
@@ -61,21 +67,30 @@ fn judge<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>, session: &mut 
         Ok(timeout) => timeout,
         Err(reason) => return failed(reason),
     };
-    let ended = match wait(child, job, timeout, session) {
-        Ok(ended) => ended,
+    let ran = match Relay::default().wait(child, job, timeout, session) {
+        Ok(Waited::Exited(status)) => {
+            child.event(Event::JudgeExited { job, status });
+            true
+        }
+        Ok(Waited::TimedOut) => {
+            child.event(Event::JudgeTimedOut { job });
+            true
+        }
+        Ok(Waited::Stopped) => false,
         Err(reason) => return failed(format!("the judge's session ended: {reason}")),
     };
     let by = deadline(&child.clock, child.deadlines.collect);
     if let Err(error) = session.freeze(by) {
         return failed(format!("freezing the judge's sandbox failed: {error}"));
     }
-    let result = outputs(child, judge_of(child, call.slot), session);
+    let result = outputs(child, judge_of(child), session);
     if let Err(error) = collect(session, &log_dir(), &child.dir, by) {
         child.note(format!("job {}'s log is incomplete: {error}", job.0));
     }
-    match ended {
-        Ended::Ran => Event::JudgeCollected { job, result },
-        Ended::Stopped => failed("the call was stopped".to_owned()),
+    if ran {
+        Event::JudgeCollected { job, result }
+    } else {
+        failed("the call was stopped".to_owned())
     }
 }
 
@@ -94,10 +109,10 @@ fn start<H: Host>(
         Put::File(raw, file_mode(), &payload),
         Put::Dir(evidence, dir_mode()),
     ];
-    let by = deadline(&child.clock, child.deadlines.start);
+    let by = deadline(&child.clock, call.start);
     (session.put(&pumpkin_dir(), puts, by)).context("putting the payload failed")?;
     // The sandbox runs this one command, so its exit needs no `Process` to tell it apart.
-    let launched = launch(&judge_of(child, call.slot).command);
+    let launched = launch(&judge_of(child).command);
     (session.start(launched, by)).context("the judge's command didn't start")?;
     // The timeout runs from the start's reported time.
     let at = child.clock.now();
@@ -105,28 +120,80 @@ fn start<H: Host>(
     Ok(at.saturating_add(call.timeout))
 }
 
-/// Waits for the command of job `job` to exit, until `timeout`, a time since the run started, or
-/// for a stop, and reports its exit or its timeout; meanwhile relays each op its sandbox makes on
-/// `session` to the loop, and answers it with the reply the loop sends back, and each model
-/// request, which the loop answers. Fails with the reason the session ended, if it ended first.
-fn wait<H: Host>(
-    child: &mut Child<'_, H, OpReply>,
-    job: JobId,
-    timeout: Duration,
-    session: &mut Session,
-) -> Result<Ended, String> {
-    // The session hands out an op only once the one before it has been answered.
-    let mut asked: Option<IncomingOp> = None;
-    let by = deadline(&child.clock, timeout);
-    loop {
-        match child.inbox.wait(timeout) {
-            None => {
-                child.event(Event::JudgeTimedOut { job });
-                return Ok(Ended::Ran);
+/// What a job's thread relays between its sandbox's session and the loop: each op its sandbox
+/// makes, which the loop answers with the reply it sends back, and each model request, which the
+/// loop answers. The session hands out an op only once the one before it has been answered, so
+/// at most one is unanswered, which a later wait answers if the command that made it has exited.
+#[derive(Default)]
+pub(super) struct Relay {
+    asked: Option<IncomingOp>,
+}
+
+/// What came of a message into a job's inbox, if it ends a wait.
+enum Arrived {
+    Exited(ExitStatus),
+    Stopped,
+}
+
+impl Relay {
+    /// Waits for the command that job `job` runs to exit, until `timeout`, a time since the run
+    /// started, or for a stop, relaying meanwhile. Fails with the reason the session ended, if it
+    /// ended first.
+    pub(super) fn wait<H: Host>(
+        &mut self,
+        child: &mut Child<'_, H, OpReply>,
+        job: JobId,
+        timeout: Duration,
+        session: &mut Session,
+    ) -> Result<Waited, String> {
+        let by = deadline(&child.clock, timeout);
+        loop {
+            let Some(message) = child.inbox.wait(timeout) else {
+                return Ok(Waited::TimedOut);
+            };
+            match self.relay(child, job, (session, by), message)? {
+                None => {}
+                Some(Arrived::Exited(status)) => return Ok(Waited::Exited(status)),
+                Some(Arrived::Stopped) => return Ok(Waited::Stopped),
             }
-            Some(Message::Stop) => return Ok(Ended::Stopped),
-            Some(Message::Order(reply)) => {
-                let Some(op) = asked.take() else {
+        }
+    }
+
+    /// Relays what job `job`'s inbox holds, while none of its commands runs, without waiting for
+    /// more, and returns whether the core stopped the job. Fails with the reason the session
+    /// ended, if it has.
+    pub(super) fn idle<H: Host>(
+        &mut self,
+        child: &mut Child<'_, H, OpReply>,
+        job: JobId,
+        (session, by): (&mut Session, Deadline),
+    ) -> Result<bool, String> {
+        while let Some(message) = child.inbox.take() {
+            match self.relay(child, job, (&mut *session, by), message)? {
+                None => {}
+                Some(Arrived::Stopped) => return Ok(true),
+                Some(Arrived::Exited(_)) => unreachable!(
+                    "job {}'s sandbox reported a command's exit while none ran, though the job \
+                     starts one command at a time and waits for each to exit before it starts \
+                     the next",
+                    job.0
+                ),
+            }
+        }
+        Ok(false)
+    }
+
+    fn relay<H: Host>(
+        &mut self,
+        child: &mut Child<'_, H, OpReply>,
+        job: JobId,
+        (session, by): (&mut Session, Deadline),
+        message: Message<OpReply>,
+    ) -> Result<Option<Arrived>, String> {
+        match message {
+            Message::Stop => return Ok(Some(Arrived::Stopped)),
+            Message::Order(reply) => {
+                let Some(op) = self.asked.take() else {
                     unreachable!(
                         "job {}'s call was sent a reply to no op, though the loop replies only \
                          to the op the call relayed, once",
@@ -137,9 +204,9 @@ fn wait<H: Host>(
                     child.note(format!("job {}'s op's reply failed: {error}", job.0));
                 }
             }
-            Some(Message::Session(Arrival::Op(incoming))) => {
+            Message::Session(Arrival::Op(incoming)) => {
                 let (request, unanswered) = request(incoming);
-                asked = Some(unanswered.into_incoming());
+                self.asked = Some(unanswered.into_incoming());
                 let (at, trees) = (child.clock.now(), session.trees());
                 child.report(Report::Op {
                     at,
@@ -148,24 +215,24 @@ fn wait<H: Host>(
                     trees,
                 });
             }
-            Some(Message::Session(Arrival::Refused(refused))) => {
+            Message::Session(Arrival::Refused(refused)) => {
                 let message = refused.message();
                 if let Err(error) = session.refuse(refused, by) {
                     child.note(format!("job {}'s op's refusal failed: {error}", job.0));
                 }
                 child.note(format!("job {}'s op was refused: {message}", job.0));
             }
-            // The sandbox runs one command, so the exit is its.
-            Some(Message::Session(Arrival::Exited { process: _, status })) => {
-                child.event(Event::JudgeExited { job, status });
-                return Ok(Ended::Ran);
+            // The sandbox runs one command at a time, so the exit is its.
+            Message::Session(Arrival::Exited { process: _, status }) => {
+                return Ok(Some(Arrived::Exited(status)));
             }
-            Some(Message::Session(Arrival::Ended { reason })) => return Err(reason),
-            Some(Message::Session(Arrival::ModelRequest(incoming))) => {
+            Message::Session(Arrival::Ended { reason }) => return Err(reason),
+            Message::Session(Arrival::ModelRequest(incoming)) => {
                 let at = child.clock.now();
                 child.report(Report::Model { at, job, incoming });
             }
         }
+        Ok(None)
     }
 }
 
@@ -205,6 +272,6 @@ fn read_result(path: &Path) -> Result<Vec<u8>, String> {
     fs::read(path).context(path.display())
 }
 
-fn judge_of<'r, H: Host>(child: &Child<'r, H, OpReply>, slot: SlotId) -> &'r Judge {
-    child.sandboxes.workflow().judge(slot.judge())
+fn judge_of<'r, H: Host>(child: &Child<'r, H, OpReply>) -> &'r Judge {
+    child.sandboxes.workflow().judge()
 }

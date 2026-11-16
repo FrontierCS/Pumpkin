@@ -1,12 +1,12 @@
 //! How a grant is written: its name, and one key, its function's kind, that holds the function,
-//! as `{"name": "train", "judge": {…}}`.
+//! as `{"name": "train", "job": {…}}`.
 
 use std::fmt;
 
 use serde::de::{self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, VariantAccess};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{JudgeGrant, Name, Session, SubmitGrant};
+use super::{JobFunction, Label, Name, Session, SubmitGrant};
 
 /// A function that the role holding it calls by `name` while it works, or, for a session, the
 /// session's functions, each called by `name` and its own.
@@ -22,9 +22,17 @@ pub struct Grant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Function {
-    Judge(JudgeGrant),
+    Job(JobFunction),
     Session(Session),
     Submit(SubmitGrant),
+}
+
+/// A `def` of a file of the workflow's, which a host calls by its file and name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Body {
+    pub file: Label,
+    pub def: Name,
 }
 
 impl<'de> Deserialize<'de> for Grant {

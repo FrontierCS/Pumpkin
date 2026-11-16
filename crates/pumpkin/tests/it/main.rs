@@ -14,7 +14,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::fs::Permissions;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt as _;
@@ -101,8 +101,20 @@ impl Scratch {
             self.write(&at("runner/Dockerfile"), &recipe);
             images.push_str("RUNNER = image(\"runner/Dockerfile\")\n");
         }
+        let mut loads = String::new();
+        for (file, def) in bodies(ir) {
+            let path = Path::new(root).join(file.strip_prefix("//").unwrap());
+            self.write(path.to_str().unwrap(), &BODY.replace("DEF", &def));
+            writeln!(
+                loads,
+                "load({}, {})",
+                starlark(&json!(file)),
+                starlark(&json!(def))
+            )
+            .unwrap();
+        }
         let task = format!(
-            "{images}\nworkflow(\n    name = {},\n    roles = {},\n    score = {},\n)\n",
+            "{loads}{images}\nworkflow(\n    name = {},\n    roles = {},\n    score = {},\n)\n",
             starlark(&ir["name"]),
             starlark(&ir["roles"]),
             starlark(&ir["score"]),
@@ -145,6 +157,37 @@ impl Drop for Scratch {
     }
 }
 
+/// The file and the `def` of each job function's body that the agent of `ir` holds.
+fn bodies(ir: &Value) -> Vec<(String, String)> {
+    let grants = ir["roles"][0]["runtime"]["agent"]["grants"].as_array();
+    (grants.into_iter().flatten())
+        .filter_map(|grant| grant["job"]["body"].as_object())
+        .map(|body| {
+            let text = |key: &str| body[key].as_str().unwrap().to_owned();
+            (text("file"), text("def"))
+        })
+        .collect()
+}
+
+/// The body that [`Scratch::write_task`] writes for each `def` that a job function names, `DEF`
+/// in its text: it returns the payload's size in bytes, after 300 s for the payload `slow`.
+const BODY: &str = r#""""A job function's body, which the test writes."""
+
+def DEF(target: Target, payload: Payload):
+    """Counts the payload's bytes in the target.
+
+    Args:
+      target: the call's target, whose directory is `/workspace`.
+      payload: the payload to count.
+
+    Returns:
+      The payload's size, as `bytes`.
+    """
+    target.put("/workspace/payload", payload)
+    target.run(["sh", "-c", "if [ \"$(cat payload)\" = slow ]; then sleep 300; fi; printf '{\"bytes\": %s}' $(wc -c < payload) > result.json"])
+    return json.decode(target.get("/workspace/result.json"))
+"#;
+
 fn starlark(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
@@ -164,6 +207,9 @@ fn starlark(value: &Value) -> String {
                         "\"image\": RUNNER".to_owned()
                     }
                     ("image", Value::String(_)) => "\"image\": IMAGE".to_owned(),
+                    ("body", Value::Object(body)) => {
+                        format!("\"body\": {}", body["def"].as_str().unwrap())
+                    }
                     _ => format!(
                         "{}: {}",
                         serde_json::to_string(key).unwrap(),
@@ -502,7 +548,7 @@ fn masked(ran: &str, ids: &str) -> String {
     lines.collect::<Vec<String>>().join("\n")
 }
 
-/// A workflow whose agent holds leases and runs judges, matching `judged_log`.
+/// A workflow whose agent holds leases and a job function, matching `judged_log`.
 fn lease_task() -> Value {
     let gpu = json!({ "count": 1, "model": "NVIDIA A100-SXM4-80GB" });
     let lease = |name: &str, seconds: u64| {
@@ -547,15 +593,18 @@ fn lease_task() -> Value {
                 "finalize_grace_seconds": 0,
                 "egress": { "model": route },
                 "grants": [
-                    { "name": "train", "judge": {
-                        "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
+                    { "name": "train", "job": {
+                        "target": "trainer", "body": { "file": "//lib/train.star", "def": "train" },
+                        "payload_max_bytes": 4096, "call_timeout_seconds": 60,
                     } },
                     lease("gpu", 60),
                     lease("cpu", 1800),
                     { "name": "final", "submit": {} },
                 ],
             } })),
-            role("trainer", true, judge(json!({ "sessions": [lease("box", 60)] }))),
+            role("trainer", true, json!({ "target": {
+                "cwd": "/work", "sessions": [lease("box", 60)],
+            } })),
             role("scorer", true, judge(json!({ "egress": { "model": route } }))),
             role("gpu", true, runner.clone()),
             role("cpu", false, runner.clone()),
@@ -654,10 +703,10 @@ fn judged_log() -> Vec<Value> {
         answered
     };
     let ask = |job: u64| {
-        let request = json!({ "kind": "judge", "grant": "train" });
+        let request = json!({ "kind": "call", "grant": "train" });
         let timeout = "600000000000";
         let start =
-            json!({ "kind": "start_judge", "job": job, "grant": "train", "timeout_ns": timeout });
+            json!({ "kind": "start_call", "job": job, "grant": "train", "timeout_ns": timeout });
         (
             json!({ "kind": "op_arrived", "request": request }),
             json!([start]),
@@ -688,9 +737,14 @@ fn judged_log() -> Vec<Value> {
     let saw = |sandbox: &str, gpu: &str| json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": [gpu] });
     let close = |lease: u64| json!({ "kind": "close_lease", "lease": lease });
     let collected = |job: u64, result: Value| json!({ "kind": "judge_collected", "job": job, "result": result });
+    let call_returned = |job: u64, returned: Value| json!({ "kind": "call_returned", "job": job, "returned": returned });
     let failed =
-        |job: u64, reason: &str| json!({ "kind": "judge_failed", "job": job, "reason": reason });
+        |job: u64, reason: &str| json!({ "kind": "call_failed", "job": job, "reason": reason });
     let sxm = "NVIDIA A100-SXM4-80GB";
+    let target_put = json!({
+        "kind": "target_put", "job": 0, "path": "/work/payload", "bytes": 6,
+        "digest": "sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd",
+    });
     let tokens = |input: u64, output: u64, cached: u64| json!({ "input_tokens": input, "output_tokens": output, "cached_tokens": cached });
     let mut reasoned = tokens(1000, 100, 800);
     reasoned["reasoning_tokens"] = json!(40);
@@ -715,9 +769,8 @@ fn judged_log() -> Vec<Value> {
     let unstarted = "the judge's sandbox didn't start: Modal refused the helper's `create`: \
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
-    let shows_none = json!({ "returned": { "exit_status": 1 } });
     let final_judge = json!([{
-        "kind": "start_judge", "job": 4, "grant": null, "timeout_ns": "900000000000",
+        "kind": "start_judge", "job": 4, "timeout_ns": "900000000000",
     }]);
     let returned = json!({ "raw_score": 49.36 });
     let values = json!([
@@ -747,7 +800,18 @@ fn judged_log() -> Vec<Value> {
         logged(26, started(2), none()),
         logged(31, answered(2, Value::Null, None), none()),
         logged(40, asked_0, start_0),
-        logged(46, of_job("judge_started", 0), none()),
+        logged(46, of_job("call_started", 0), none()),
+        logged(47, target_put, none()),
+        logged(
+            47,
+            json!({ "kind": "target_run", "job": 0, "command": 0, "argv": ["train"] }),
+            none(),
+        ),
+        logged(
+            48,
+            json!({ "kind": "command_ended", "job": 0, "command": 0, "end": exited() }),
+            none(),
+        ),
         logged(50, tick(), boxed),
         logged(55, of_lease("lease_ready", 0), none()),
         logged(56, put, transfer),
@@ -756,10 +820,7 @@ fn judged_log() -> Vec<Value> {
         logged(62, ended(0, exited()), none()),
         logged(
             100,
-            collected(
-                0,
-                json!({ "values": [{ "name": "score", "value": 49.53 }], "returned": {} }),
-            ),
+            call_returned(0, json!([{ "name": "score", "value": 49.53 }])),
             json!([close(0)]),
         ),
         logged(102, of_lease("lease_ended", 0), none()),
@@ -778,13 +839,13 @@ fn judged_log() -> Vec<Value> {
         logged(260, failed(1, unstarted), none()),
         logged(300, asked_2, start_2),
         logged(310, saw("job-2", sxm), none()),
-        logged(310, of_job("judge_started", 2), none()),
+        logged(310, of_job("call_started", 2), none()),
         logged(320, tick(), json!([of_job("stop_judge", 2)])),
         logged(330, failed(2, "the call was stopped"), none()),
         logged(400, asked_3, start_3),
-        logged(405, of_job("judge_started", 3), none()),
-        logged(410, of_job("judge_timed_out", 3), none()),
-        logged(415, collected(3, shows_none), none()),
+        logged(405, of_job("call_started", 3), none()),
+        logged(410, of_job("call_timed_out", 3), none()),
+        logged(415, call_returned(3, json!([])), none()),
         logged(500, opened_3, start_3_lease),
         logged(505, saw("lease-3", "NVIDIA A100 80GB PCIe"), none()),
         logged(505, of_lease("lease_ready", 3), none()),
@@ -847,7 +908,7 @@ fn write_run(
         let event = &record["event"];
         let sandbox = match event["kind"].as_str() {
             Some("agent_started") => Some("agent".to_owned()),
-            Some("judge_started") => Some(format!("jobs/{}", event["job"])),
+            Some("judge_started" | "call_started") => Some(format!("jobs/{}", event["job"])),
             Some("lease_ready") => Some(format!("leases/{}", event["lease"])),
             _ => None,
         };

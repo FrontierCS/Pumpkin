@@ -123,7 +123,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     fn role(&mut self, caller: Caller) -> RoleId {
         match caller {
             Caller::Agent => self.workflow().agent().role,
-            Caller::Job(job) => self.call(job).judge,
+            Caller::Job(job) => self.call(job).role,
         }
     }
 

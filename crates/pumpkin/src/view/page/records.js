@@ -84,7 +84,7 @@ function said(record) {
       return [kind, text, reply && reply.kind === "refused" ? "refused" : ""];
     }
     case "command_ended":
-      text = "lease " + event.lease + " command " + event.command + ": " + JSON.stringify(event.end);
+      text = (event.lease === undefined ? "job " + event.job : "lease " + event.lease) + " command " + event.command + ": " + JSON.stringify(event.end);
       break;
     case "transfer_ended": {
       const moved = event.end && event.end.moved;
@@ -98,6 +98,9 @@ function said(record) {
     }
     case "judge_collected":
       text = "job " + event.job + ": " + JSON.stringify(event.result ?? event.invalid);
+      break;
+    case "call_returned":
+      text = "job " + event.job + ": " + event.returned.map((shown) => shown.name + "=" + JSON.stringify(shown.value)).join(" ");
       break;
     case "run_started":
       text = "hard end at " + clock(Number(event.hard_end_ns) / 1e9);
