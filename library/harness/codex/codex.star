@@ -146,7 +146,7 @@ def codex(
         deadline_seconds,
         finalize_grace_seconds,
         tools):
-    """An agent role's `image`, `runtime` and `egress`, for Codex on `model` at `effort`.
+    """An agent role's `image` and `runtime`, for Codex on `model` at `effort`.
 
     Codex runs once, as `codex exec`, on the prompt it reads on its standard input, with its files
     readable by the agent's user alone. It takes the arguments every harness takes, in the sense
@@ -164,8 +164,9 @@ def codex(
         carry the model's entry.
 
     Returns:
-      A dict of `image`, `base` with Codex added; `runtime`, the agent's runtime that runs it; and
-      `egress`, the route to `model`, on the Responses API, with the headers Codex sends and reads.
+      A dict of `image`, `base` with Codex added; and `runtime`, the agent's runtime that runs it,
+      with its `egress`, the route to `model`, on the Responses API, with the headers Codex sends
+      and reads.
     """
     if effort not in _EFFORTS:
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -237,11 +238,11 @@ def codex(
             "stdin": prompt,
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
+            "egress": {"model": [{
+                "api": "responses",
+                "models": [model],
+                "request_headers": _REQUEST_HEADERS,
+                "response_headers": _RESPONSE_HEADERS,
+            }]},
         }},
-        "egress": {"model": [{
-            "api": "responses",
-            "models": [model],
-            "request_headers": _REQUEST_HEADERS,
-            "response_headers": _RESPONSE_HEADERS,
-        }]},
     }

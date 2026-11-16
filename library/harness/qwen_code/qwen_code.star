@@ -33,7 +33,7 @@ def qwen_code(
         max_output_tokens,
         context_tokens,
         extra_body):
-    """An agent role's `image`, `runtime` and `egress`, for Qwen Code on `model` at `effort`.
+    """An agent role's `image` and `runtime`, for Qwen Code on `model` at `effort`.
 
     Qwen Code runs once, as `qwen --prompt`, unattended, with its files readable by the agent's
     user alone. It takes the arguments every harness takes, `max_output_tokens` and
@@ -54,9 +54,9 @@ def qwen_code(
         temperature; `effort` and `max_output_tokens` give `reasoning_effort` and `max_tokens`.
 
     Returns:
-      A dict of `image`, `base` with Qwen Code added; `runtime`, the agent's runtime that runs
-      it; and `egress`, the route to `model`, on the Chat Completions API, with the header Qwen
-      Code sends that describes its client.
+      A dict of `image`, `base` with Qwen Code added; and `runtime`, the agent's runtime that runs
+      it, with its `egress`, the route to `model`, on the Chat Completions API, with the header
+      Qwen Code sends that describes its client.
     """
     if effort not in _EFFORTS:
         fail("`{}` is not a reasoning level of Qwen Code's: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -161,10 +161,10 @@ def qwen_code(
             ],
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
+            "egress": {"model": [{
+                "api": "chat",
+                "models": [model],
+                "request_headers": ["user-agent"],
+            }]},
         }},
-        "egress": {"model": [{
-            "api": "chat",
-            "models": [model],
-            "request_headers": ["user-agent"],
-        }]},
     }

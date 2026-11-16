@@ -104,33 +104,6 @@ fn tasks() {
               "name": "neutral/judged-neutral",
               "roles": [
                 {
-                  "egress": {
-                    "model": [
-                      {
-                        "api": "responses",
-                        "models": [
-                          "model-large",
-                          "model-small"
-                        ]
-                      }
-                    ]
-                  },
-                  "grants": [
-                    {
-                      "judge": {
-                        "call_timeout_seconds": 600,
-                        "calls": 20,
-                        "name": "train",
-                        "role": "train_judge",
-                        "slot": "payload"
-                      }
-                    },
-                    {
-                      "submit": {
-                        "name": "final"
-                      }
-                    }
-                  ],
                   "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                   "name": "agent",
                   "needs": {
@@ -146,7 +119,34 @@ fn tasks() {
                         "cwd": "/workspace"
                       },
                       "deadline_seconds": 18000,
+                      "egress": {
+                        "model": [
+                          {
+                            "api": "responses",
+                            "models": [
+                              "model-large",
+                              "model-small"
+                            ]
+                          }
+                        ]
+                      },
                       "finalize_grace_seconds": 30,
+                      "grants": [
+                        {
+                          "judge": {
+                            "call_timeout_seconds": 600,
+                            "calls": 20,
+                            "name": "train",
+                            "role": "train_judge",
+                            "slot": "payload"
+                          }
+                        },
+                        {
+                          "submit": {
+                            "name": "final"
+                          }
+                        }
+                      ],
                       "stdin": "Solve judged_neutral, scored by 3 metrics: solved, _internal, rejected.\n"
                     }
                   },
@@ -255,39 +255,12 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 572 prefixes evaluate
+            == tasks/literal/task.star: 2 of 577 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
               "roles": [
                 {
-                  "egress": {
-                    "model": [
-                      {
-                        "api": "responses",
-                        "models": [
-                          "model-large",
-                          "model-small"
-                        ]
-                      }
-                    ]
-                  },
-                  "grants": [
-                    {
-                      "judge": {
-                        "call_timeout_seconds": 600,
-                        "calls": 100,
-                        "name": "train",
-                        "role": "train_judge",
-                        "slot": "payload"
-                      }
-                    },
-                    {
-                      "submit": {
-                        "name": "final"
-                      }
-                    }
-                  ],
                   "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                   "name": "agent",
                   "needs": {
@@ -318,6 +291,17 @@ fn tasks() {
                           "path": "/workspace/notes"
                         }
                       ],
+                      "egress": {
+                        "model": [
+                          {
+                            "api": "responses",
+                            "models": [
+                              "model-large",
+                              "model-small"
+                            ]
+                          }
+                        ]
+                      },
                       "files": [
                         {
                           "content": "tab\there, quote ' and AAé😀, \u0007\b\f\r\u000b, joined\n",
@@ -326,6 +310,22 @@ fn tasks() {
                         }
                       ],
                       "finalize_grace_seconds": 60,
+                      "grants": [
+                        {
+                          "judge": {
+                            "call_timeout_seconds": 600,
+                            "calls": 100,
+                            "name": "train",
+                            "role": "train_judge",
+                            "slot": "payload"
+                          }
+                        },
+                        {
+                          "submit": {
+                            "name": "final"
+                          }
+                        }
+                      ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
                     }
                   },
@@ -429,13 +429,6 @@ fn tasks() {
               "name": "neutral/loaded",
               "roles": [
                 {
-                  "grants": [
-                    {
-                      "submit": {
-                        "name": "final"
-                      }
-                    }
-                  ],
                   "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                   "name": "agent",
                   "needs": {
@@ -452,6 +445,13 @@ fn tasks() {
                       },
                       "deadline_seconds": 3600,
                       "finalize_grace_seconds": 0,
+                      "grants": [
+                        {
+                          "submit": {
+                            "name": "final"
+                          }
+                        }
+                      ],
                       "stdin": "Solve the task in /task/README.md.\n"
                     }
                   },
@@ -586,10 +586,10 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 498 prefixes evaluate
+            == lib/images.star: 0 of 505 prefixes evaluate
 
-            == lib/judged.star: 0 of 562 prefixes evaluate
+            == lib/judged.star: 0 of 570 prefixes evaluate
 
-            == lib/parts.star: 0 of 221 prefixes evaluate"#]],
+            == lib/parts.star: 0 of 224 prefixes evaluate"#]],
     );
 }

@@ -308,7 +308,11 @@ fn executed_ir<H: Shown>(
 ) -> String {
     let at = interruption(also);
     let runs = Runs::new(name);
-    let routed = ir.roles.iter().any(|role| role.egress.model.is_some());
+    let routed = ir.roles.iter().any(|role| match &role.runtime {
+        ir::Runtime::Agent(agent) => agent.egress.model.is_some(),
+        ir::Runtime::Judge(judge) => judge.egress.model.is_some(),
+        ir::Runtime::Runner(_) => false,
+    });
     let stand_in = routed.then(StandIn::start);
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
@@ -803,8 +807,8 @@ impl StandIn {
     }
 
     fn servings(stand_in: Option<&Self>, workflow: &Workflow, dir: &Path) -> ByRole<Vec<Serving>> {
-        let servings = workflow.by_role(|(_, sandbox)| {
-            let entries = sandbox.model.iter().flat_map(ir::ModelRoute::as_slice);
+        let servings = workflow.by_role(|(role, _)| {
+            let entries = (workflow.model(role).into_iter()).flat_map(ir::ModelRoute::as_slice);
             let served = entries.map(|entry| stand_in.unwrap().serving(dir, entry));
             Ok::<_, Infallible>(served.collect())
         });
@@ -1158,15 +1162,15 @@ fn when(placed: &Placed, last: Duration) -> &'static str {
 
 fn workflow(argv: &[&str]) -> Value {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    let agent = &mut ir["roles"][0];
+    let agent = &mut ir["roles"][0]["runtime"]["agent"];
     agent.as_object_mut().unwrap().remove("egress");
-    agent["runtime"]["agent"]["command"]["argv"] = json!(argv);
+    agent["command"]["argv"] = json!(argv);
     ir
 }
 
 fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
     let mut ir = workflow(argv);
-    let grant = &mut ir["roles"][0]["grants"][0]["judge"];
+    let grant = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"];
     // A call timeout shorter than the time left in any run that makes its calls soon after it
     // starts, with no cumulative limit, so that it is each call's timeout and what a reply has left
     // depends on no command's time.
@@ -1186,7 +1190,7 @@ fn ops_workflow(argv: &[&str], deadline: u64) -> Value {
 
 fn routed(mut ir: Value) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-large"] }]);
-    ir["roles"][0]["egress"] = json!({ "model": route });
+    ir["roles"][0]["runtime"]["agent"]["egress"] = json!({ "model": route });
     ir
 }
 
@@ -2031,7 +2035,7 @@ fn watches_each_provider() {
     near["needs"] = ir["roles"][0]["needs"].clone();
     near["image"] = json!(sim::image(HUNG).as_str());
     ir["roles"].as_array_mut().unwrap().push(near);
-    let grants = &mut ir["roles"][0]["grants"];
+    let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let mut grant = grants[0].clone();
     grant["judge"]["name"] = json!("near");
     grant["judge"]["role"] = json!("near_judge");
@@ -2087,7 +2091,7 @@ fn judge_stalls() {
     // A deadline seconds after the agent's ops, so that the teardown's end, which follows it,
     // comes soon.
     let mut ir = short_workflow(&argv, 2);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
     ir["roles"][2]["image"] = json!(sim::image(UNDELETABLE).as_str());
     check(
         &System,
@@ -2161,7 +2165,7 @@ fn deleted_while_torn_down() {
     let argv = ["ops", "judge train slow", "await 0 running", "exit"];
     // A call timeout far longer than the agent takes to exit, so that the stop ends the call.
     let mut ir = short_workflow(&argv, 30);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
     ir["roles"][0]["image"] = json!(sim::image(LAST).as_str());
     check(
         &System,
@@ -2678,7 +2682,7 @@ fn model_requests_kept_whole() {
     ];
     let mut ir = routed(ops_workflow(&argv, 30));
     let chat = json!({ "api": "chat", "models": ["m-large"] });
-    ir["roles"][0]["egress"]["model"]
+    ir["roles"][0]["runtime"]["agent"]["egress"]["model"]
         .as_array_mut()
         .unwrap()
         .push(chat);
@@ -3083,10 +3087,10 @@ fn model_grace_cut() {
 
 fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
     let route = json!([{ "api": "responses", "models": ["m-small"] }]);
-    ir["roles"][judge]["egress"] = json!({ "model": route });
+    ir["roles"][judge]["runtime"]["judge"]["egress"] = json!({ "model": route });
     let argv: Vec<&str> = iter::once("ops").chain(steps.iter().copied()).collect();
     ir["roles"][judge]["runtime"]["judge"]["command"]["argv"] = json!(argv);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
     ir
 }
 
@@ -3286,11 +3290,11 @@ fn budgets_spent() {
         "model m-large 5",
     ];
     let mut ir = judge_routed(ops_workflow(&argv, 30), 1, &steps);
-    ir["roles"][1]["egress"]["model"] = json!([
+    ir["roles"][1]["runtime"]["judge"]["egress"]["model"] = json!([
         { "api": "responses", "models": ["m-small"], "budget": { "microusd": 300 } },
         { "api": "responses", "models": ["m-large"] },
     ]);
-    ir["roles"][0]["egress"]["model"] = json!([
+    ir["roles"][0]["runtime"]["agent"]["egress"]["model"] = json!([
         { "api": "responses", "models": ["m-small"] },
         { "api": "chat", "models": ["m-small"], "budget": { "microusd": 50 } },
     ]);
@@ -3449,7 +3453,7 @@ fn lease_workflow(argv: &[&str], deadline: u64, image: &str) -> Value {
         "name": "gpu", "role": "gpu_runner", "instances": 2,
         "instance_seconds": 600, "commands": 4, "transfer_bytes": 64,
     } });
-    ir["roles"][0]["grants"]
+    ir["roles"][0]["runtime"]["agent"]["grants"]
         .as_array_mut()
         .unwrap()
         .insert(1, grant);
@@ -3646,7 +3650,7 @@ fn lease_transfers() {
         "finalize submit 6",
     ];
     let mut ir = lease_workflow(&argv, 30, RUNNER);
-    let lease = &mut ir["roles"][0]["grants"][1]["lease"];
+    let lease = &mut ir["roles"][0]["runtime"]["agent"]["grants"][1]["lease"];
     lease["commands"] = json!(8);
     lease["transfer_bytes"] = json!(256);
     let blob = json!({ "path": "/workspace/big/blob", "mode": "0644", "content": "x".repeat(256) });
@@ -3767,17 +3771,17 @@ fn transfer_cut() {
 
 fn judge_lease_workflow(argv: &[&str], judge: usize, judge_argv: &[&str]) -> Value {
     let mut ir = ops_workflow(argv, 30);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(20);
     ir["roles"][judge]["runtime"]["judge"]["command"]["argv"] = json!(judge_argv);
     let mut runner = ir["roles"][1].clone();
     runner["name"] = json!("box");
     runner["image"] = json!(sim::image(DAWDLING));
     runner["runtime"] = json!({ "runner": { "cwd": "/work" } });
     ir["roles"].as_array_mut().unwrap().push(runner);
-    ir["roles"][judge]["grants"] = json!([{ "lease": {
+    ir["roles"][judge]["runtime"]["judge"]["lease_grants"] = json!([{
         "name": "box", "role": "box", "instances": 1, "instance_seconds": 60,
         "transfer_bytes": 64,
-    } }]);
+    }]);
     ir
 }
 
@@ -3888,7 +3892,7 @@ fn lease_starts_by_its_holders_end() {
         "finalize submit 6",
     ];
     let mut ir = judge_lease_workflow(&argv, 1, &judge);
-    ir["roles"][0]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(1);
     ir["roles"][3]["image"] = json!(sim::image(SLOW).as_str());
     check(
         &System,

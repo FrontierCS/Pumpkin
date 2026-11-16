@@ -34,7 +34,7 @@ def pi(
         finalize_grace_seconds,
         max_output_tokens,
         context_tokens):
-    """An agent role's `image`, `runtime` and `egress`, for Pi on `model` at `effort`.
+    """An agent role's `image` and `runtime`, for Pi on `model` at `effort`.
 
     Pi runs once, as `pi --print`, unattended, with its files readable by the agent's user alone.
     It takes the arguments every harness takes, `max_output_tokens` and `context_tokens`, in the
@@ -52,9 +52,9 @@ def pi(
       context_tokens: as every harness that takes it.
 
     Returns:
-      A dict of `image`, `base` with Pi added; `runtime`, the agent's runtime that runs it; and
-      `egress`, the route to `model`, on the Chat Completions API, with the header Pi sends that
-      describes its client.
+      A dict of `image`, `base` with Pi added; and `runtime`, the agent's runtime that runs it,
+      with its `egress`, the route to `model`, on the Chat Completions API, with the header Pi
+      sends that describes its client.
     """
     if effort not in _EFFORTS:
         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -155,10 +155,10 @@ def pi(
             ],
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
+            "egress": {"model": [{
+                "api": "chat",
+                "models": [model],
+                "request_headers": ["user-agent"],
+            }]},
         }},
-        "egress": {"model": [{
-            "api": "chat",
-            "models": [model],
-            "request_headers": ["user-agent"],
-        }]},
     }

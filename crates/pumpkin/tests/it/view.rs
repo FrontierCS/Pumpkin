@@ -390,7 +390,7 @@ fn serves_runs() {
             other_build: null
             state: "finished"
             summary: "<as `wait` says it>"
-            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}],"score":false},{"kind":null,"name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}],"score":true},{"kind":null,"name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":null,"name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":null,"name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
+            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"judge call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}],"score":false},{"kind":"judge","name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":"judge","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}],"score":true},{"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
@@ -649,10 +649,12 @@ fn follows_a_live_run() {
     polls += 1;
     let read = served.read_bytes() - before;
     let size = fs::metadata(&log_path).unwrap().len();
-    // Every byte is read once, as the polls ask only for what is new, and not much more.
+    let ir = fs::metadata(dir.join("ir.json")).unwrap().len();
+    // Every byte is read once, as the polls ask only for what is new, and not much more: each
+    // poll also reads the run's `ir.json`, for the task's name.
     assert_eq!(taken, lines.concat());
     assert!(
-        read >= size && read < size + 2048 * polls,
+        read >= size && read < size + (2048 + ir) * polls,
         "{read} bytes read over {polls} polls of a log of {size}"
     );
     scratch.write(

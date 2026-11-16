@@ -280,7 +280,7 @@ fn prepared<'e>(
     } = config::read(config)?;
     let servings = task
         .workflow()
-        .by_role(|(_, sandbox)| match &sandbox.model {
+        .by_role(|(role, _)| match task.workflow().model(role) {
             Some(route) => upstreams.serving(route).context(config.display()),
             None => Ok(Vec::new()),
         })?;

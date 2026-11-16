@@ -39,19 +39,19 @@ joined\n',
                     + (-6 // 2 - -3) + (-7 % 3 - 2) + (7 % -4 - -1) + (6 % -3 - 0)
                     + ((-9223372036854775807 - 1) % -1 - 0),
                 "finalize_grace_seconds": 60,
+                "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
+                "grants": [
+                    {"judge": {
+                        "name": "train",
+                        "role": "train_judge",
+                        "slot": "payload",
+                        "calls": 100,
+                        "cumulative_seconds": None,
+                        "call_timeout_seconds": 10 * 60,
+                    }},
+                    {"submit": {"name": "final"}},
+                ],
             }},
-            "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
-            "grants": [
-                {"judge": {
-                    "name": "train",
-                    "role": "train_judge",
-                    "slot": "payload",
-                    "calls": 100,
-                    "cumulative_seconds": None,
-                    "call_timeout_seconds": 10 * 60,
-                }},
-                {"submit": {"name": "final"}},
-            ],
         },
         {
             "name": "train_judge",

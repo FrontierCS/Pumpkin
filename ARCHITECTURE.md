@@ -106,8 +106,8 @@ such as none or no limit, and whatever writes the IR picks the defaults. Review 
 check does: the IR's types default only an `Option` or an empty collection.
 
 **Architecture Invariant:** the agent never reaches the judge that scores it, nor what a judge
-runs. Parsing refuses a score whose judge one of the agent's grants names, a judge's grant other
-than a lease, and an agent's lease of a runner whose image is a judge's.
+runs. A judge's runtime holds lease grants alone, and parsing refuses a score whose judge one of
+the agent's grants names and an agent's lease of a runner whose image is a judge's.
 
 ### `crates/decision`
 
@@ -168,9 +168,9 @@ the core and the providers never see the language.
 
 Pumpkin's standard library: the files of the repository's `library/` directory, built into the
 crate (`FILES`), which `pumpkin` serves below `@pumpkin//`. A harness is a directory there, such as
-`harness/codex/`: a `.star` file whose function gives an agent role's image, runtime and route,
-and, in a directory of its own, the `Dockerfile` that adds the harness to the agent's image, so
-that the layer's inputs are that recipe alone.
+`harness/codex/`: a `.star` file whose function gives an agent role's image and runtime, with its
+route, and, in a directory of its own, the `Dockerfile` that adds the harness to the agent's image,
+so that the layer's inputs are that recipe alone.
 
 **Architecture Invariant:** it holds files and nothing else, so that what a library function gives
 rests on the language alone. It depends on no crate; its tests do.

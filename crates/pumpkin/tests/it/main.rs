@@ -504,27 +504,64 @@ fn masked(ran: &str, ids: &str) -> String {
 
 /// A workflow whose agent holds leases and runs judges, matching `judged_log`.
 fn lease_task() -> Value {
-    let gpu = json!({ "gpu": { "count": 1, "model": "NVIDIA A100-SXM4-80GB" } });
-    let lease = |name: &str, seconds: u64| json!({ "lease": { "name": name, "role": name, "instance_seconds": seconds } });
+    let gpu = json!({ "count": 1, "model": "NVIDIA A100-SXM4-80GB" });
+    let lease = |name: &str, seconds: u64| {
+        json!({
+            "name": name, "role": name, "instances": 1, "instance_seconds": seconds,
+            "transfer_bytes": 4096,
+        })
+    };
+    let command = json!({ "argv": ["/bin/true"], "cwd": "/work" });
+    let judge = |extra: Value| {
+        let mut judge = json!({
+            "command": command,
+            "slots": [{ "name": "payload", "max_bytes": 4096 }],
+            "result": { "returns": ["/score"] },
+        });
+        judge
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        json!({ "judge": judge })
+    };
+    let runner = json!({ "runner": { "cwd": "/work" } });
+    let role = |name: &str, gpus: bool, runtime: Value| {
+        let mut needs = json!({ "cpu_millis": 1000, "memory_bytes": 1_073_741_824 });
+        if gpus {
+            needs["gpu"] = gpu.clone();
+        }
+        let image = format!("sha256:{}", "1".repeat(64));
+        json!({
+            "name": name, "image": image, "user": { "uid": 1000, "gid": 1000 },
+            "needs": needs, "runtime": runtime,
+        })
+    };
+    let route = json!([{ "api": "responses", "models": ["model-a", "model-b"] }]);
     json!({
+        "ir_version": "pumpkin.ir/v0",
         "name": "example/lease",
-        "score": { "role": "scorer" },
+        "score": { "role": "scorer", "slot": "payload", "timeout_seconds": 60 },
         "roles": [
-            {
-                "name": "solver",
-                "runtime": { "agent": { "deadline_seconds": 1800 } },
-                "egress": { "model": [{ "api": "responses", "models": ["model-a", "model-b"] }] },
+            role("solver", false, json!({ "agent": {
+                "command": command,
+                "deadline_seconds": 1800,
+                "finalize_grace_seconds": 0,
+                "egress": { "model": route },
                 "grants": [
-                    { "judge": { "name": "train", "role": "trainer" } },
-                    lease("gpu", 60),
-                    lease("cpu", 1800),
+                    { "judge": {
+                        "name": "train", "role": "trainer", "slot": "payload",
+                        "call_timeout_seconds": 60,
+                    } },
+                    { "lease": lease("gpu", 60) },
+                    { "lease": lease("cpu", 1800) },
+                    { "submit": { "name": "final" } },
                 ],
-            },
-            { "name": "trainer", "needs": gpu, "grants": [lease("box", 60)] },
-            { "name": "scorer", "needs": gpu, "egress": { "model": {} } },
-            { "name": "gpu", "needs": gpu },
-            { "name": "cpu" },
-            { "name": "box" },
+            } })),
+            role("trainer", true, judge(json!({ "lease_grants": [lease("box", 60)] }))),
+            role("scorer", true, judge(json!({ "egress": { "model": route } }))),
+            role("gpu", true, runner.clone()),
+            role("cpu", false, runner.clone()),
+            role("box", false, runner),
         ],
     })
 }
@@ -886,7 +923,10 @@ fn build_first(scratch: &Scratch, task: &str, config: &str) {
 /// running `image` with a small share of a machine.
 fn workflow(image: &str, argv: &[&str]) -> Value {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
-    ir["roles"][0].as_object_mut().unwrap().remove("egress");
+    ir["roles"][0]["runtime"]["agent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("egress");
     ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
     ir["roles"][2]["runtime"]["judge"]["command"]["argv"] = json!(["sh", "-c", SCORE]);
     for role in ir["roles"].as_array_mut().unwrap() {

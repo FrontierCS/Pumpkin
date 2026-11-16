@@ -36,7 +36,7 @@ pub fn budgets(
 ) -> Result<Budgets, String> {
     let mut budgets = BTreeMap::new();
     for (role, sandbox) in workflow.roles() {
-        let Some(route) = &sandbox.model else {
+        let Some(route) = workflow.model(role) else {
             continue;
         };
         let mut limits = Vec::new();

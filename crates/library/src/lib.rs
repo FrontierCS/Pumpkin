@@ -5,9 +5,10 @@
 //! A harness is a directory of the library, `harness/<name>/`, such as `harness/codex/`: a
 //! `.star` file of its name, which exports one function, and the `Dockerfile` that adds the
 //! harness to an agent's image, which that function's `image()` builds with the agent's image as
-//! the named context `base`. The function gives a dict of an agent role's `image`, `runtime` and
-//! `egress`. Every harness's function takes `base` by position and these by keyword, each in the
-//! same sense, and its own keywords, which its file documents with what it adds to these:
+//! the named context `base`. The function gives a dict of an agent role's `image` and `runtime`,
+//! which holds the agent's `egress`. Every harness's function takes `base` by position and these
+//! by keyword, each in the same sense, and its own keywords, which its file documents with what
+//! it adds to these:
 //!
 //! - `model`: the model's name, which the route names, and the model the harness calls.
 //! - `effort`: how hard the model reasons, one of the values the harness's file lists.

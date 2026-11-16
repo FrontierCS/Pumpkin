@@ -125,19 +125,19 @@ def bench_task(
                 "image": codex_agent["image"],
                 "user": {"uid": 1000, "gid": 1000},
                 "needs": agent,
-                "runtime": codex_agent["runtime"],
-                "egress": codex_agent["egress"],
-                "grants": [
-                    {"judge": {
-                        "name": "train",
-                        "role": "train_judge",
-                        "slot": "payload",
-                        "calls": train_calls,
-                        "cumulative_seconds": train_seconds,
-                        "call_timeout_seconds": TRAIN_TIMEOUT,
-                    }},
-                    {"submit": {"name": "final"}},
-                ],
+                "runtime": {"agent": codex_agent["runtime"]["agent"] | {
+                    "grants": [
+                        {"judge": {
+                            "name": "train",
+                            "role": "train_judge",
+                            "slot": "payload",
+                            "calls": train_calls,
+                            "cumulative_seconds": train_seconds,
+                            "call_timeout_seconds": TRAIN_TIMEOUT,
+                        }},
+                        {"submit": {"name": "final"}},
+                    ],
+                }},
             },
         ] + judges,
         score = {"role": "final_judge", "slot": "payload", "timeout_seconds": final_timeout},

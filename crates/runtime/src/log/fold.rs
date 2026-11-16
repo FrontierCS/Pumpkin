@@ -286,9 +286,9 @@ impl LogFold {
         let roles = if let Some(roles) = self.roles.take() {
             roles
         } else {
-            let ir = json_file(&self.dir.join("ir.json"))?;
+            let ir = super::roles::ir_in(&self.dir)?;
             let provided = json_file(&self.dir.join("provider.json"))?;
-            Roles::of(&ir, &provided)
+            Roles::of(ir.as_ref(), &provided)
         };
         let roles = self.roles.insert(roles);
         let reading = &mut self.reading;

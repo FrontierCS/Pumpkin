@@ -11,8 +11,8 @@ AGENT = {
         "stdin": "Solve the task in /task/README.md.\n",
         "deadline_seconds": 3600,
         "finalize_grace_seconds": 0,
+        "grants": [{"submit": {"name": "final"}}],
     }},
-    "grants": [{"submit": {"name": "final"}}],
 }
 
 JUDGE_IMAGE = "sha256:2222222222222222222222222222222222222222222222222222222222222222"

@@ -50,7 +50,7 @@ def claude_code(
         deadline_seconds,
         finalize_grace_seconds,
         max_output_tokens):
-    """An agent role's `image`, `runtime` and `egress`, for Claude Code on `model` at `effort`.
+    """An agent role's `image` and `runtime`, for Claude Code on `model` at `effort`.
 
     Claude Code runs once, as `claude --print`, on the prompt it reads on its standard input,
     with its files readable by the agent's user alone. It takes the arguments every harness takes,
@@ -69,9 +69,9 @@ def claude_code(
         it can't resolve (https://code.claude.com/docs/en/env-vars).
 
     Returns:
-      A dict of `image`, `base` with Claude Code added; `runtime`, the agent's runtime that runs
-      it; and `egress`, the route to `model`, on the Messages API, with the headers Claude Code
-      sends.
+      A dict of `image`, `base` with Claude Code added; and `runtime`, the agent's runtime that
+      runs it, with its `egress`, the route to `model`, on the Messages API, with the headers
+      Claude Code sends.
     """
     if effort not in _EFFORTS:
         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -140,10 +140,10 @@ def claude_code(
             "stdin": prompt,
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
+            "egress": {"model": [{
+                "api": "messages",
+                "models": [model],
+                "request_headers": _REQUEST_HEADERS,
+            }]},
         }},
-        "egress": {"model": [{
-            "api": "messages",
-            "models": [model],
-            "request_headers": _REQUEST_HEADERS,
-        }]},
     }
