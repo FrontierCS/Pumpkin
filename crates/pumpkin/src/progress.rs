@@ -10,18 +10,18 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallSpan, Closed, Direction, Ending, LeaseSpan, Place, Progress, Readout, Record,
-    Sandbox, Unread, Work,
+    CallEnd, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
 };
-use schema::sandbox::ExitStatus;
-use schema::sandbox::op::{CommandEnd, TransferEnd};
 use stdx::Utc;
 
 use crate::next;
 
+mod child;
 pub(crate) mod cost;
 mod model;
 
+use child::{STOPPED, command, exited, judge, lease_end, lease_name};
+pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::{answered, failed_upstream, model};
@@ -771,188 +771,6 @@ pub(crate) fn agent_line(progress: &Progress) -> String {
         let _ = write!(line, "; the work phase ended at {}", clock(work_end));
     }
     line
-}
-
-fn judge(call: &CallSpan) -> String {
-    let which = call.grant.as_deref().unwrap_or("final");
-    format!("{which} judge job {}", call.job)
-}
-
-/// The line of a judge's call; the paths of what it kept are shown below `dir`, the record's.
-pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
-    let Some(at) = call.sandbox.gone else {
-        return format!(
-            "{} on {}, which never ended",
-            judge(call),
-            placed(&call.sandbox)
-        );
-    };
-    let asked = call.sandbox.asked;
-    let took = match call.sandbox.started {
-        Some(started) => format!(
-            "started after {}, ran {}",
-            span(started.saturating_sub(asked)),
-            span(at.saturating_sub(started))
-        ),
-        None => format!(
-            "never started, ended after {}",
-            span(at.saturating_sub(asked))
-        ),
-    };
-    let mut line = format!("{} on {}, {took}: ", judge(call), placed(&call.sandbox));
-    let Some(end) = &call.end else {
-        line.push_str(STOPPED);
-        return line;
-    };
-    let scored = match end {
-        CallEnd::Scored(score) => {
-            line.push_str(&shown_score(score));
-            true
-        }
-        CallEnd::Unscored(returned) => {
-            let _ = write!(
-                line,
-                "no score, returned {}",
-                clipped(returned, RETURNED_SHOWN_CHARS)
-            );
-            false
-        }
-        CallEnd::Invalid(reason) => {
-            let _ = write!(line, "an invalid result: {}", crate::escaped(reason));
-            false
-        }
-        CallEnd::Failed(reason) => {
-            let _ = write!(line, "failed: {}", crate::escaped(reason));
-            false
-        }
-    };
-    for (said, what) in [(call.stopped, "stopped"), (call.timed_out, "timed out")] {
-        if said {
-            let _ = write!(line, " ({what})");
-        }
-    }
-    let below = |path: &std::path::Path| {
-        let path = path.strip_prefix(dir).unwrap_or(path);
-        path.display().to_string()
-    };
-    let mut kept = Vec::new();
-    if let Some(stderr) = call.stderr.as_deref().filter(|_| !scored) {
-        kept.push(format!("standard error {}", below(stderr)));
-    }
-    if let Some(evidence) = call.evidence.as_deref().filter(|_| !scored) {
-        kept.push(format!("evidence {}", below(evidence)));
-    }
-    if !kept.is_empty() {
-        let _ = write!(line, "; its {}", kept.join(", its "));
-    }
-    line
-}
-
-/// The line of a lease; `now` is a time since the run started, by which an open one is charged.
-pub(crate) fn leased(lease: &LeaseSpan, now: Duration) -> String {
-    let on = format!("{} on {}", lease_name(lease), placed(&lease.sandbox));
-    let Some(gone) = lease.sandbox.gone else {
-        return format!("{on}, which never ended");
-    };
-    let commands = usize::try_from(lease.commands).unwrap_or(usize::MAX);
-    let mut line = format!(
-        "{on}, {}: charged {}, {} of it busy, {}",
-        span(gone.saturating_sub(lease.sandbox.asked)),
-        span(lease.charged(now)),
-        span(lease.busy(now)),
-        crate::counted(commands, "command")
-    );
-    if let Some(last) = &lease.last {
-        let _ = write!(line, ", the last {}", command(last));
-    }
-    let _ = write!(line, "; {}", lease_end(lease));
-    line
-}
-
-fn lease_name(lease: &LeaseSpan) -> String {
-    let name = format!("{} lease {}", lease.grant, lease.lease);
-    match lease.holder {
-        Some(job) => format!("{name} of job {job}"),
-        None => name,
-    }
-}
-
-/// How a sandbox that the core never ended ended: deleted as the run stopped short of the core's
-/// end.
-const STOPPED: &str = "deleted as the run stopped";
-
-fn lease_end(lease: &LeaseSpan) -> String {
-    match (&lease.failed, lease.closed) {
-        (Some(reason), _) => format!("failed: {}", crate::escaped(reason)),
-        (None, Some((_, Closed::Asked))) => "closed by its holder".to_owned(),
-        (None, Some((_, Closed::WorkEnded))) => "closed as the work phase ended".to_owned(),
-        (None, Some((_, Closed::CallEnded))) => "closed as its call ended".to_owned(),
-        (None, Some((_, Closed::Expired))) => "expired".to_owned(),
-        (None, None) if lease.sandbox.gone.is_some() => STOPPED.to_owned(),
-        (None, None) => "open".to_owned(),
-    }
-}
-
-fn command(work: &Work) -> String {
-    let shown = |text: &str, chars| clipped(&crate::escaped(text), chars);
-    let (what, ended) = match work {
-        Work::Command { argv, end } => {
-            let ended = end.map(|end| match end {
-                CommandEnd::TimedOut => "timed out".to_owned(),
-                CommandEnd::Unstarted => "didn't start".to_owned(),
-                CommandEnd::Exited(status) => exited(status),
-            });
-            let what = format!("`{}`", shown(&argv.join(" "), COMMAND_SHOWN_CHARS));
-            (what, ended)
-        }
-        Work::Transfer {
-            direction,
-            from,
-            to,
-            end,
-        } => {
-            let (from, to) = (shown(from, PATH_SHOWN_CHARS), shown(to, PATH_SHOWN_CHARS));
-            let what = match direction {
-                Direction::Put => format!("put {from} to {to}"),
-                Direction::Replace => format!("put {from} to {to}, replacing it"),
-                Direction::Get => format!("get {from} to {to}"),
-            };
-            let ended = end.as_ref().map(|end| match end {
-                TransferEnd::Moved { entries, bytes } => format!(
-                    "moved {}, {}",
-                    crate::counted(*entries, "entry"),
-                    crate::counted(*bytes, "byte")
-                ),
-                TransferEnd::Failed(reason) => format!("failed: {}", crate::escaped(reason)),
-            });
-            (what, ended)
-        }
-    };
-    format!("{what} {}", ended.as_deref().unwrap_or("running"))
-}
-
-/// The most characters of what a judge returned that a summary shows.
-const RETURNED_SHOWN_CHARS: usize = 160;
-
-/// The most characters of a lease's command that `ls` and a summary show.
-const COMMAND_SHOWN_CHARS: usize = 60;
-
-/// The most characters of each path of a lease's transfer that `ls` and a summary show.
-const PATH_SHOWN_CHARS: usize = 40;
-
-/// `text`, cut after `chars`, as `…` ends it then.
-fn clipped(text: &str, chars: usize) -> String {
-    match text.char_indices().nth(chars) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_owned(),
-    }
-}
-
-fn exited(status: ExitStatus) -> String {
-    match status {
-        ExitStatus::Code(code) => format!("exited {code}"),
-        ExitStatus::Signal(signal) => format!("ended by signal {signal}"),
-    }
 }
 
 fn sandboxes(progress: &Progress) -> String {
