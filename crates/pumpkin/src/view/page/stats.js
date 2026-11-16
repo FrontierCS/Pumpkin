@@ -105,7 +105,7 @@ function totalsLine(t) {
     part("Calls", callCount(t.calls), "Tool calls"),
     part("Retries", number(t.retries), "Steps that retry a failed request"),
     part("Repeats", number(t.repeats), "Steps that send again a list already answered"),
-    part("Refused", number(t.refusals), "Steps that Pumpkin refused or barred"),
+    part("Refused", number(t.refusals), "Steps that Pumpkin refused, barred or abandoned"),
     part("Failed", number(t.failures), "Steps whose upstream failed"),
     t.in_flight ? part("In flight", number(t.in_flight), "Steps not answered yet") : null,
   ];

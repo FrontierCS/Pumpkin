@@ -326,7 +326,7 @@ pub struct ModelUse {
     /// How many were answered.
     pub requests: u64,
     /// How many answers ended each way: with the upstream's status, such as `200`, or `null` if it
-    /// gave none; with `<status> cut`; or with `barred` or `refused`.
+    /// gave none; with `<status> cut`; or with `barred`, `refused` or `abandoned`.
     pub answers: BTreeMap<String, u64>,
     /// How many responses stated a failure, by the code they gave, or `None` if they gave none.
     pub failed: BTreeMap<Option<String>, u64>,
@@ -344,13 +344,12 @@ pub struct ModelUse {
     pub first_tokens: Vec<Duration>,
     /// What the responses reported.
     pub tokens: Tokens,
-    /// What the answers that name their model reported, by the API of the entry that took them
-    /// and the route's name for their model, which together name the entry.
+    /// What the answers that name their model reported, by their entry's API and model.
     pub by_model: BTreeMap<(Api, String), Tokens>,
-    /// How many responses went with tokens unreported, in whole or in part, by the API and the
-    /// model as `by_model` keys them: those with a 2xx status that were cut short, whose usage, if
-    /// any, is only the stream's so far, and those with one that came whole and reported none. An
-    /// error status and the route's own barred and refused answers are not counted.
+    /// How many responses went with tokens unreported, in whole or in part, keyed as `by_model`:
+    /// those with a 2xx status cut short, whose usage, if any, is only the stream's so far, those
+    /// with one that came whole and reported none, and the requests abandoned once handed to the
+    /// upstream. An error status and the route's own barred and refused answers are not counted.
     pub unreported: BTreeMap<(Api, String), u64>,
     /// The names of request headers that the route left behind, at most
     /// `route::MAX_DROPPED_HEADERS`.
@@ -951,16 +950,17 @@ impl ModelUse {
             }
         }
         // An upstream bills a 2xx response's tokens whether it reported them or not, and an
-        // error's not at all.
-        let unreported = upstream_status.is_some_and(|status| (200..300).contains(&status))
-            && match answer {
-                logged::Answer::Cut => true,
-                logged::Answer::Forwarded => usage.is_none(),
-                logged::Answer::Barred | logged::Answer::Refused => false,
-            };
+        // error's not at all. A request abandoned before the head may have reached the provider
+        // whole, which may bill its response.
+        let two_xx = upstream_status.is_some_and(|status| (200..300).contains(&status));
+        let unreported = match answer {
+            logged::Answer::Cut => two_xx,
+            logged::Answer::Forwarded => two_xx && usage.is_none(),
+            logged::Answer::Abandoned => true,
+            logged::Answer::Barred | logged::Answer::Refused => false,
+        };
         if unreported && let Some((api, model)) = model {
-            let key = (*api, (*model).to_owned());
-            *self.unreported.entry(key).or_default() += 1;
+            *self.unreported.entry((*api, (*model).into())).or_default() += 1;
         }
         // As the log gives the status: `null` for none.
         let status = upstream_status.map_or_else(|| "null".to_owned(), |status| status.to_string());
@@ -969,6 +969,7 @@ impl ModelUse {
             logged::Answer::Cut => format!("{status} cut"),
             logged::Answer::Barred => "barred".to_owned(),
             logged::Answer::Refused => "refused".to_owned(),
+            logged::Answer::Abandoned => "abandoned".to_owned(),
         };
         *self.answers.entry(answer).or_default() += 1;
         if let Some(usage) = usage {

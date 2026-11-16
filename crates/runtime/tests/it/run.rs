@@ -359,6 +359,7 @@ fn reads_model_answers() {
         r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream":"u","upstream_status":200,"usage":{"input_tokens":2312,"output_tokens":5,"cached_tokens":2000,"cache_write_tokens":300}}"#,
         // As a Messages stream cut short reports its `message_start`'s counts.
         r#"{"answer":{"kind":"cut"},"model":"m","api":"messages","upstream_status":200,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+        r#"{"answer":{"kind":"abandoned"},"model":"n","api":"messages","upstream_status":null}"#,
     ];
     let mut log = String::from(
         r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#,
@@ -384,11 +385,12 @@ fn reads_model_answers() {
         .unwrap();
     expect![[r#"
         ModelUse {
-            requests: 8,
+            requests: 9,
             answers: {
                 "200": 3,
                 "200 cut": 2,
                 "429": 1,
+                "abandoned": 1,
                 "barred": 1,
                 "refused": 1,
             },
@@ -397,7 +399,7 @@ fn reads_model_answers() {
                     "rate_limit_exceeded",
                 ): 1,
             },
-            not_2xx: 5,
+            not_2xx: 6,
             last_good: Some(
                 7s,
             ),
@@ -438,6 +440,10 @@ fn reads_model_answers() {
                     Messages,
                     "m",
                 ): 4,
+                (
+                    Messages,
+                    "n",
+                ): 1,
             },
             dropped_headers: {},
             more_dropped_headers: false,

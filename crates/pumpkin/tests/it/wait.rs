@@ -735,6 +735,23 @@ fn summarizes() {
             logged(37, answered_a, json!([])),
         ],
     );
+    let judge_answered = logs[0].iter().position(|record| {
+        let event = &record["event"];
+        event["kind"] == "model_answered" && event["caller"] == "job-4"
+    });
+    let started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 4 });
+    let abandoned = json!({
+        "kind": "model_answered", "caller": "job-4", "request": 4, "model": "model-b",
+        "api": "responses", "answer": { "kind": "abandoned" }, "upstream_status": null,
+    });
+    let after = judge_answered.unwrap() + 1;
+    logs[0].splice(
+        after..after,
+        [
+            logged(1030, started, json!([])),
+            logged(1099, abandoned, json!([])),
+        ],
+    );
     for (((id, _), log), places) in others.iter().zip(logs).zip(places) {
         let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
         write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
@@ -803,10 +820,10 @@ fn summarizes() {
             pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-120000-0000000c
-                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; $0.23 at the models' prices
-              model: 6 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 5500 in (2600 cached, 150 written to the cache), 550 out (40 reasoning), as 5 responses reported them; $1.78 at the models' prices, but for 1 response's unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
+                        model: 2 requests, answered 1 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out, as 1 response reported them; $0.23 at the models' prices, but for 1 response's unreported tokens
+              model: 7 requests, answered 6 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 5500 in (2600 cached, 150 written to the cache), 550 out (40 reasoning), as 5 responses reported them; $1.78 at the models' prices, but for 2 responses' unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
               budget solver (model-a): at least $0.66 of $1.00
-              cost: $1.78 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens
+              cost: $1.78 for tokens, and more for sandboxes, which lack a price, and for 2 responses' unreported tokens
             $ pumpkin wait --runs runs 20261110-120000-0000000d
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; model-a's and model-b's tokens lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end

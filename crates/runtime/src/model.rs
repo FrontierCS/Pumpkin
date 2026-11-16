@@ -239,6 +239,11 @@ fn failure(answer: &Answer) -> Option<String> {
         },
         Answer::Cut { status, .. } => Some(format!("{status}, cut short")),
         Answer::Barred { .. } => None,
+        Answer::Abandoned { .. } => {
+            unreachable!(
+                "a request is abandoned only once the route has ended, and `bear` reads no answer then"
+            )
+        }
         Answer::Refused {
             upstream_status: Some(status @ (401 | 403)),
             ..

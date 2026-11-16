@@ -132,7 +132,8 @@ impl<'h, H: Host> Log<'h, H> {
     /// response came, and `model`, `request_id`, `usage` and `failed` (with the `code` of its
     /// failure, if it gave one), each if there is one. `answer` is named by its `kind`: `forwarded`
     /// or `cut` short, for an upstream's response; `barred`, refused before an upstream; `refused`,
-    /// in place of the upstream's response; the last two with `status` and `message`, never a body.
+    /// in place of the upstream's response; the last two with `status` and `message`, never a body;
+    /// `abandoned`, given up on as the route ended, once handed to the upstream, with its `model`.
     /// `first_byte_ns` is when a response began to arrive, and `first_token_ns` when its output
     /// did; `kept` says what the exchange left in the record's `model/`.
     #[expect(
@@ -191,6 +192,10 @@ impl<'h, H: Host> Log<'h, H> {
             } => {
                 let refused = json!({ "kind": "refused", "status": status, "message": message });
                 (None, *upstream_status, request_id, (&None, &None), refused)
+            }
+            Answer::Abandoned { model } => {
+                let abandoned = json!({ "kind": "abandoned" });
+                (Some(model), None, &None, (&None, &None), abandoned)
             }
         };
         let mut event = json!({
