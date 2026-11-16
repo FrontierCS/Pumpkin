@@ -10,13 +10,13 @@ bucket of the account, so no laptop can lose it.
 | the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
 | the controller's security group: in from the sandboxes on the ephemeral ports alone; out to HTTPS | the gateway, with no listener on the Internet |
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
-| a launch template per class: the AMI, the type, IMDSv2 within one hop, a 100 GB root deleted with the instance | the EC2 classes, and what the `ec2` provider relies on |
+| a launch template per class: the AMI, the type, IMDSv2 within one hop, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
 | the timer: a schedule group and a role that terminates run instances | a kill bound outside each guest |
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports judges' images, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker and nftables | each sandbox's boot runs them, at the release's versions |
 | the controller's role and instance profile: SSM, its jobs' settings, and what the `ec2` provider's calls need | the runs' launches, timers, sweeps and pushes, from the controller |
-| the controller: an on-demand `m7i.4xlarge` on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, a 1000 GiB encrypted gp3 root at 6000 IOPS and 500 MiB/s, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
+| the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` setting that ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that reaps at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
 | with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
@@ -40,8 +40,7 @@ aws iam create-open-id-connect-provider --url https://oidc.modal.com --client-id
 ## Per person
 
 Terraform 1.11 or later, and the AWS CLI with administrator credentials for the account. In this
-directory, write `terraform.tfvars` (`variables.tf` says each value; the classes and sizes have
-defaults):
+directory, write `terraform.tfvars` (`variables.tf` says each value and its default):
 
 ```hcl
 name            = "alice"
@@ -49,8 +48,8 @@ region          = "us-west-1"
 vpc_id          = "vpc-…"
 subnet_id       = "subnet-…"
 modal_workspace = "ac-…"
-client_roles    = ["alice-laptop"] # the IAM roles and users of the person's machine,
-client_users    = []               # which the apply attaches the client policy to
+client_roles    = ["alice-laptop"] # the IAM roles and users of the person's machine
+client_users    = []
 ```
 
 Then:
@@ -70,26 +69,17 @@ concurrent `plan` or `apply` of the same state waits on its lock.
 - `terraform output -raw client_config` is the `[controller]` table of the person's
   `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]` and, for runs on Modal,
   `[controller.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
-  config` says what each does, and which programs the person's machine, Linux on x86-64, needs.
-  A Modal provider, whose profile is in `~/.modal.toml`:
-
-  ```toml
-  [controller.modal]
-  profile = "alice"
-  classes.a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
-  ```
+  config` says what each does, with an example, and which programs the person's machine, Linux on
+  x86-64, needs.
 - `terraform output -raw client_policy_arn` is the managed IAM policy that the person's machine
-  needs, which the apply attaches to `client_roles` and `client_users`; an account whose roles
-  live elsewhere attaches it by hand, as `aws iam attach-role-policy --role-name <role>
-  --policy-arn <arn>` (or `attach-user-policy`). It starts the controller, pushes a key for
-  the controller's user `pumpkin`, and reaches it by SSH over SSM (`AWS-StartSSHSession`) alone. A
-  plain `aws ssm start-session` shell is no SSH session, so the idle stop doesn't count it.
+  needs; an account whose roles live elsewhere attaches it by hand, as `aws iam attach-role-policy
+  --role-name <role> --policy-arn <arn>` (or `attach-user-policy`). `outputs.tf` says what it
+  allows. A plain `aws ssm start-session` shell is no SSH session, so the idle stop doesn't count
+  it.
 - `terraform output -raw ec2` is the body of the EC2 provider's table in `pumpkin.toml`, under a
-  header such as `[providers.aws.ec2]`: the region, the repositories, the timer, and each class's
-  template, at the version its creates launch, with the CPUs, memory, CPU flags and model it offers,
-  and the price a class's `usd_per_hour` gives it, if any, which `pumpkin ls` and a run's summary
-  price its sandboxes by; a Modal class takes `usd_per_hour` too. The controller's settings hold it
-  already; a machine that runs Pumpkin itself in the controller's security group takes it from here.
+  header such as `[providers.aws.ec2]`, whose keys `pumpkin help config` says, with each class's
+  template at the version its creates launch. The controller's settings hold it already; a machine
+  that runs Pumpkin itself in the controller's security group takes it from here.
 - `terraform output -raw modal_images` is the `images` key of the Modal provider's table, which
   the controller's settings hold already.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
@@ -102,11 +92,11 @@ An apply that changes a class or the AMI makes a new version of its templates, w
 controller's settings name from its next job on, as the `ec2` output does. A Modal class or
 profile needs no apply: it is the client's `[controller.modal]`, which each job takes.
 
-The controller costs about $0.94 an hour while it runs in us-west-1, less in us-east-1 and
-us-west-2; stopped, about $110 a month for its volume at us-east-1's rates, more in other
-regions; beside ECR's storage. A new Ubuntu release or a new cloud-init reaches it only by
-`terraform apply -replace=aws_instance.controller`, once no run is live: its volume, and the
-records on it, go with it.
+With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
+us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at
+us-east-1's rates, more in other regions; beside ECR's storage. A new Ubuntu release or a new
+cloud-init reaches it only by `terraform apply -replace=aws_instance.controller`, once no run is
+live: its volume, and the records on it, go with it.
 
 ## The public page
 
@@ -114,16 +104,13 @@ A read-only page of the controller's runs, for a team that knows its address: Cl
 over HTTPS from a private bucket, at the distribution's own `https://<id>.cloudfront.net/`, with
 no login and kept out of search engines. The controller's jobs upload the runs, live and ended.
 
-Three variables, in `terraform.tfvars`, off by default:
+Three variables in `terraform.tfvars`, which `variables.tf` says, set it up: `public_page`,
+`publish_from_jobs` and `publish_since`, such as `"2026-11-15T00:00:00Z"`.
 
-- `public_page = true` makes the bucket, its distribution, and the controller role's policy
-  `publish`, which lists the bucket and uploads to it, and nothing else: no read and no delete.
-  `terraform output -raw public_page` is the address, and `public_bucket` the bucket.
-- `publish_from_jobs = true`, which needs `public_page`, adds the `[publish]` table to the
-  controller's settings, so that each job publishes. Set it once the controller runs a Pumpkin
-  that knows the table: an older one refuses the settings that hold it.
-- `publish_since = "2026-11-15T00:00:00Z"`, which needs `publish_from_jobs`, keeps the runs that
-  started before that instant off the page.
+- The controller role's policy `publish`, which `public_page` gives it, has no read and no
+  delete. `terraform output -raw public_page` is the address, and `public_bucket` the bucket.
+- Set `publish_from_jobs` once the controller runs a Pumpkin that knows the `[publish]` table: an
+  older one refuses the settings that hold it.
 
 Then subscribe the distribution to CloudFront's free flat-rate plan, in the console: past the
 always-free 1 TB and 10 million requests a month, pay-as-you-go charges about $85 a TB, which a

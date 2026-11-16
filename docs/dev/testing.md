@@ -7,8 +7,7 @@ The rules for writing Pumpkin's tests and their snapshots.
   already guarantees
 - EARN each test: it pins what a user, a task or a later change relies on, and no other test pins
 - START a snapshot as `expect![[""]]`, fill it with
-  `cargo xtask refill --package <crate> [<test>]`, which rewrites the snapshots of this checkout
-  alone and prints `git diff --stat`, and read the diff before keeping it
+  `cargo xtask refill --package <crate> [<test>]`, and read the diff before keeping it
 - ASSERT in a file's `check` helper what holds of every case, such as files left or modes; show
   in the snapshot what the test is about, and what departs from that
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
@@ -21,19 +20,15 @@ The rules for writing Pumpkin's tests and their snapshots.
   test shares it, and its paths fit a socket's, which holds 107 bytes at most
 - RUN `cargo xtask mutants crates/decision crates/schema crates/route` at review of a change to
   the decision core, to the schema's refusals or to the route's request rules, which guard the
-  operator's key; it mutates the change in those crates alone: read each mutant it reports missed,
-  a change that no test catches, as ci doesn't run it
+  operator's key, and read each mutant it reports missed, as ci doesn't run it
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
-  files, Pumpkin's own processes and loopback sockets are fine. IGNORE each
-  test that needs a Docker engine, the static `sandboxd` or a server elsewhere (`#[ignore = "…:
-  run cargo xtask live docker"]`): `cargo xtask live docker` builds that `sandboxd` and runs the
-  ignored tests
+  files, Pumpkin's own processes and loopback sockets are fine. IGNORE each test that needs a Docker engine, the static `sandboxd` or
+  a server elsewhere (`#[ignore = "…: run cargo xtask live docker"]`)
 - SET each bound that a test chooses at its floor, and script the clock (`SimHost`) for a case
   past a bound; wait on the real clock only for a bound that production states in whole seconds
 - NEVER test against an invented model of a cloud or a service, which pins what the model answers:
-  `cargo xtask live ec2` and `cargo xtask live modal` run `examples/smoke` through the controller,
-  probe each sandbox's confinement, and check that nothing of the run is left; RUN them at review
-  of a change to a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s
+  test a provider by `cargo xtask live ec2` and `cargo xtask live modal` instead; RUN them at
+  review of a change to a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s
   listen, dial or user drop, `ec2-boot`, the EC2 entry or the Modal helper, and give the run's id
   in the pull request
 - SET `test = false` on each library and binary target: tests live in the integration test
