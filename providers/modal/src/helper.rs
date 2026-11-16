@@ -1,17 +1,10 @@
 //! The helper, `pumpkin-modal.py`, through which the provider makes each call on Modal: a Python
-//! program on Modal's SDK, which `uv`, found on `PATH`, runs once for each call, with the packages
-//! that the lock beside it pins (`uv run --frozen --script`), so that every call runs the same SDK.
+//! program on Modal's SDK, which `uv` runs once for each call, with the packages that the lock
+//! beside it pins (`uv run --frozen --script`), so that every call runs the same SDK.
 //!
 //! A call's [`Request`] goes to the helper's standard input as JSON, and its answer comes on its
-//! standard output, `{"ok": …}` or `{"error": "…"}`, which is what Modal reported. The helper
-//! gets nothing of this process's environment but `HOME` and `PATH`, the profile in
-//! `MODAL_PROFILE`, and the settings' configuration file, if they name one, in
-//! `MODAL_CONFIG_PATH`, so its token comes from that file, or Modal's own default,
-//! `~/.modal.toml`, and no variable of Modal's or of `uv`'s, such as `MODAL_TOKEN_ID` or
-//! `UV_INDEX`, steers it to another workspace or to other packages. What `uv` fetches, its cache
-//! and the Pythons it downloads, and the temporary files of `uv` and the helper, go in the
-//! provider's directory on this machine ([`Helper::new`]). Each call is killed if it hasn't ended
-//! by the deadline its caller gives ([`Helper::call`]).
+//! standard output, `{"ok": …}` or `{"error": "…"}`, which is what Modal reported. Each call is
+//! killed if it hasn't ended by the deadline its caller gives.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -26,32 +19,29 @@ use stdx::{Context as _, Deadline};
 
 use crate::Gpu;
 
-/// What the helper gets of this process's environment: what finds `uv`, and Modal's
-/// configuration, below the user's home.
+// `HOME` is where Modal's own configuration lies, and `PATH` where `uv` is. No variable of Modal's
+// or of `uv`'s, such as `MODAL_TOKEN_ID` or `UV_INDEX`, steers the helper to another workspace or
+// to other packages.
 const CALL_ENVIRONMENT: Environment = Environment::Only(&["HOME", "PATH"]);
 
-/// How long a call that only asks Modal may run before it is killed.
-// One that `uv` runs from its cache starts in about a second, and Modal answers it at once; `uv`
-// may first download the lock's packages, and an interpreter, which takes seconds more on a
-// sound link, and Modal's SDK retries a lost connection for about a minute, so past two it is
-// hung.
+// A call that `uv` runs from its cache starts in about a second, and Modal answers it at once;
+// `uv` may first download the lock's packages and an interpreter, which takes seconds more, and
+// Modal's SDK retries a lost connection for about a minute, so past two a call is hung:
+// https://github.com/modal-labs/modal-client/blob/dbb24aba92e2c6c4fa8a123234813cfa48e09b0b/py/modal/_utils/grpc_utils.py#L427-L428
 pub(crate) const ASK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// How long an import may run before it is killed.
-// Modal pulls the image and builds it within the call: a judge's image of 10 GB took minutes of
-// a probe's, and one of 130 GB, with a task's weights in it, about half an hour.
+// Modal pulls the image and builds it within the call, which takes minutes for a large image and
+// about half an hour for one that holds a task's weights.
 pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_mins(45);
 
-/// How much of what a failed helper printed on standard error its error keeps: the end, where a
-/// Python traceback says what failed.
+// How much of the end of a failed helper's standard error its error carries: the end, where a
+// Python traceback says what failed.
 const REPORTED_BYTES: usize = 4096;
 
-/// A profile of Modal's configuration, `~/.modal.toml`, by its name, which Modal refuses if the
-/// configuration lacks it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+// The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
 pub(crate) struct Profile(String);
 
-/// A file of Modal's configuration, `~/.modal.toml`'s form, by its absolute path.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "PathBuf")]
 pub(crate) struct ConfigFile(PathBuf);
@@ -72,28 +62,25 @@ impl TryFrom<PathBuf> for ConfigFile {
     }
 }
 
-/// A call that the helper makes, as its standard input holds it.
+/// A call of the helper, which it reads on its standard input as JSON, `call` naming it.
 #[derive(Serialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub(crate) enum Request<'a> {
     /// Reaches the workspace that the profile names.
     Ready,
     /// Imports the image at `reference`, a reference by digest, which Modal pulls with the AWS
-    /// role `role_arn` in `region`, and returns its id.
+    /// role `role_arn` in `region`, and answers its id.
     Import {
         reference: &'a str,
         role_arn: &'a str,
         region: &'a str,
     },
-    /// Creates a sandbox of `run`, for `role`, as the helper's own doc says, and returns its id,
-    /// its App, and its tunnel's host and port.
+    /// Creates a sandbox of `run`, for `role`, and answers its id and its tunnel's host and port.
     Create {
         run: &'a str,
         role: &'a str,
-        /// The image's id in Modal.
         image: &'a str,
         sandboxd: Sandboxd<'a>,
-        /// The role's user, `uid:gid`, which `sandboxd` becomes.
         user: String,
         ops: bool,
         model: bool,
@@ -101,8 +88,8 @@ pub(crate) enum Request<'a> {
         cpu_millis: u64,
         memory_mib: u64,
         gpu: Option<&'a Gpu>,
-        /// The run's hard end, in whole seconds since the Unix epoch, from which the helper
-        /// takes the sandbox's timeout as it creates it, as Modal counts that from then.
+        /// The run's hard end, in whole seconds since the Unix epoch, from which the helper takes
+        /// the sandbox's timeout as it creates it, as Modal counts that from then.
         hard_end: u64,
         /// When the sandbox's start is due by, in whole seconds since the Unix epoch, which its
         /// `sandboxd` takes as `--by`, so that one no start claims ends itself.
@@ -112,22 +99,18 @@ pub(crate) enum Request<'a> {
     },
     /// The sandboxes of `run` that haven't finished, each with whether it has ended.
     List { run: &'a str },
-    /// Terminates each of `run`'s sandboxes that `ids` name, and returns why each that failed
-    /// did.
+    /// Terminates each of `run`'s sandboxes that `ids` name, and answers why each that failed did.
     Delete { run: &'a str, ids: Vec<&'a str> },
     /// The end of what sandbox `id` of `run` has printed.
     Console { run: &'a str, id: &'a str },
 }
 
-/// A published `sandboxd`: the file at `path` on this machine, whose SHA-256 is `sha256`, in
-/// hexadecimal digits.
 #[derive(Serialize)]
 pub(crate) struct Sandboxd<'a> {
     pub(crate) path: &'a str,
     pub(crate) sha256: &'a str,
 }
 
-/// What the helper prints on standard output.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Answer<T> {
@@ -135,8 +118,9 @@ enum Answer<T> {
     Error(String),
 }
 
-/// The helper at a path, with its lock beside it, run with a profile, of a configuration file
-/// if not Modal's default.
+/// The helper at `script`, with its lock beside it, run with a profile, of a configuration file if
+/// not Modal's default. What `uv` fetches, its cache and the Pythons it downloads, and the
+/// temporary files of `uv` and the helper, go under `dir`.
 #[derive(Debug)]
 pub(crate) struct Helper {
     script: PathBuf,
@@ -146,8 +130,6 @@ pub(crate) struct Helper {
 }
 
 impl Helper {
-    /// The helper at `script`, which `uv` runs with its cache in `dir/uv`, the Pythons it
-    /// downloads in `dir/python`, and the temporary directory in `dir/tmp`.
     pub(crate) fn new(
         script: &Path,
         dir: &Path,
@@ -162,8 +144,8 @@ impl Helper {
         }
     }
 
-    /// Makes `request`, and returns what the helper answers, as a `T`, or kills the helper at
-    /// `by`, if it hasn't ended by then.
+    /// Makes `request` and returns the helper's answer, a `T`, or kills the helper if it hasn't
+    /// ended by `by`.
     pub(crate) fn call<T: DeserializeOwned>(
         &self,
         request: &Request<'_>,
@@ -184,6 +166,7 @@ impl Helper {
         if let Some(ConfigFile(config)) = &self.config {
             uv.env("MODAL_CONFIG_PATH", config);
         }
+        // Runs the lock file beside the script as it is, and reads no `uv` configuration.
         uv.args(["run", "--frozen", "--quiet", "--no-config", "--script"]);
         uv.arg(&self.script);
         let output = match stdx::process::fed(&mut uv, input.to_string().as_bytes(), by) {

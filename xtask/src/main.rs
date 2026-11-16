@@ -1,6 +1,6 @@
-//! See <https://github.com/matklad/cargo-xtask/>.
-//!
-//! This is integrated as a `cargo` subcommand by using an alias in `.cargo/config.toml`.
+//! The contributor tasks of the workspace, in the shape of
+//! [matklad's `cargo xtask`](https://github.com/matklad/cargo-xtask/), run through the alias in
+//! `.cargo/config.toml`.
 //!
 //! A check that every change must pass is a step of `ci`, as `tidy`'s are; the checks that reach
 //! a real environment are `live`'s.
@@ -33,9 +33,10 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The target the static `sandboxd` and `ec2-boot` are built for.
+/// The target that the static `sandboxd` and `ec2-boot` are built for.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
+/// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
 const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
 
 mod flags {
@@ -314,7 +315,6 @@ impl Cargo {
     }
 }
 
-/// The workspace's root, which holds `xtask/`.
 fn root() -> &'static Path {
     let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
     let Some(root) = xtask.parent() else {
@@ -443,9 +443,9 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let line = run.to_string();
     let status = Command::from(run).status();
     let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
-    // cargo-mutants exits with 2 when the tests missed a mutant, and 3 when one timed out.
     match status.code() {
         Some(0) => Ok(()),
+        // cargo-mutants exits with 2 when it missed a mutant and with 3 when one timed out.
         Some(2 | 3) => {
             let report = root().join("mutants.out");
             println!(
@@ -513,7 +513,6 @@ fn release(cargo: &Cargo, package: &str, args: &[&str]) -> Result<PathBuf> {
 fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     let mut executables = Vec::new();
-    // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
         let message: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;

@@ -1,6 +1,7 @@
-//! The checks of the repository's Rust files, its `ARCHITECTURE.md`, its figures and the images
-//! its documents embed, and the files under its `tests/` directories that `cargo xtask ci` runs,
-//! each for a rule of `docs/dev/writing.md`, `docs/dev/style.md` or `docs/dev/testing.md`.
+//! The checks of the writing rule, of `ARCHITECTURE.md`'s links, of the figures and of the layout
+//! of `tests/` that a machine can make, which `cargo xtask ci` runs. `docs/dev/writing.md`,
+//! `docs/dev/style.md` and `docs/dev/testing.md` hold the rules, and each problem says what is
+//! wrong and what to do.
 //!
 //! Each file is read as proc-macro2's tokens, so a string literal is never taken for a comment: a
 //! doc comment is a token, and any other comment lies between two. Code in a comment is told from
@@ -22,23 +23,18 @@ use crate::Result;
 mod figures;
 
 // The 95th percentiles of module docs' and item docs' lengths in comparable Rust applications.
-
-/// The most lines a module's doc, its inner doc comments and `#![doc = "…"]` attributes, may
-/// span.
 const MODULE_CAP: usize = 25;
 
-/// The most lines an item's doc, its outer doc comments and `#[doc = "…"]` attributes, may span.
 const ITEM_CAP: usize = 9;
 
-/// The most lines a run of `//` comments right above or among a test's attributes may span.
 const TEST_COMMENT_CAP: usize = 2;
 
-/// The most columns a line that holds a comment may span, rustfmt's `max_width` for code.
+// Rustfmt's `max_width` for code.
 const WIDTH: usize = 100;
 
 /// Fails unless each of the repository's Rust files, tracked or not yet, but not ignored, its
 /// `ARCHITECTURE.md`, its Markdown documents, its figures and the files under its `tests/`
-/// directories pass the checks.
+/// directories pass the checks. The error holds a line for each problem.
 pub(crate) fn check(sh: &Shell) -> Result<()> {
     let mut problems = Vec::new();
     let mut names = BTreeSet::new();
@@ -105,16 +101,14 @@ pub(crate) fn check(sh: &Shell) -> Result<()> {
     }
 }
 
-/// The repository's files that end in `.<extension>`, tracked or not yet, but not ignored, and
-/// not a tracked one deleted from the working tree, which has nothing left to check.
+/// The files that Git lists, see [`check`], whose extension is `extension`.
 pub(crate) fn files(sh: &Shell, extension: &str) -> Result<Vec<String>> {
     let mut files = listed(sh)?;
     files.retain(|path| Path::new(path).extension() == Some(extension.as_ref()));
     Ok(files)
 }
 
-/// The repository's files, tracked or not yet, but not ignored, and not a tracked one deleted
-/// from the working tree.
+/// The paths of the files that Git lists, tracked or untracked and not ignored, that exist.
 fn listed(sh: &Shell) -> Result<Vec<String>> {
     // Every file, filtered here: a pathspec's meaning changes with Git's variables, such as
     // `GIT_LITERAL_PATHSPECS`, and `-z` keeps unusual names as they are rather than quoted.
@@ -123,9 +117,8 @@ fn listed(sh: &Shell) -> Result<Vec<String>> {
     Ok(files.split('\0').filter(kept).map(str::to_owned).collect())
 }
 
-/// Each of `paths` that isn't Rust and lies under a `tests/` directory, as a problem, but for the
-/// inputs written in the language under test: `crates/lang`'s vendored conformance suites, whole,
-/// and its `.star` fixtures.
+/// The problems of `paths`: a file under a `tests/` directory that isn't Rust, but for
+/// `crates/lang`'s vendored suites and the `.star` fixtures, which are input and not test data.
 fn test_data(paths: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for path in paths {
@@ -146,9 +139,7 @@ fn test_data(paths: &[String]) -> Vec<String> {
     problems
 }
 
-/// Each Markdown link in `ARCHITECTURE.md`, if the repository has one, to anything but a web page,
-/// a heading or a Markdown document of the repository, as a problem: it links documents and
-/// names code, and a link to a document that isn't there is a problem too.
+/// The problems of `ARCHITECTURE.md`'s links: one to code, or to a document that isn't there.
 fn architecture(sh: &Shell) -> Result<Vec<String>> {
     const PATH: &str = "ARCHITECTURE.md";
     if !sh.path_exists(PATH) {
@@ -184,17 +175,16 @@ fn architecture(sh: &Shell) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// What [`scan`] finds in a file.
+/// What `scan` finds in a file.
 #[derive(Default)]
 struct Found {
-    /// Each doc over its cap.
     docs: Vec<Doc>,
-    /// Where each banned form starts, with what is wrong.
     banned: Vec<(LineColumn, String)>,
     /// For each `#[test]` item, the lines from its first attribute's to its own, left out.
     tests: Vec<Range<usize>>,
 }
 
+/// A doc, or a module doc, that is over its cap.
 struct Doc {
     line: usize,
     what: &'static str,
@@ -202,11 +192,8 @@ struct Doc {
     cap: usize,
 }
 
-/// Adds to `found` what is in `tokens`, a module's or an item's body in `file`, and in the bodies
-/// within it: each doc over its cap, each `#[test]` item's lines, and where each banned form
-/// starts, with what is wrong: a doc on a `#[test]` item, a doc whose first sentence only
-/// restates its item, an `unreachable!` without a message, or a `debug_assert!`,
-/// `debug_assert_eq!` or `debug_assert_ne!`.
+/// Adds to `found` what is wrong in `tokens`, those of `file`, and in each group of them, and the
+/// line ranges of its tests.
 ///
 /// A module's doc is its inner `doc = "…"` attributes, doc comments included, and an item's the
 /// outer ones in its run of attributes; each counts the lines it spans.
@@ -278,9 +265,8 @@ fn scan(file: &str, tokens: TokenStream, found: &mut Found) {
     found.docs.extend(module.over("the module doc", MODULE_CAP));
 }
 
-/// The attributes of one module or one item: the line of the first, where the first doc attribute
-/// starts and how many lines the doc attributes span, the text of its `///` comments, and whether
-/// one is `#[test]`.
+/// The attributes above an item, or the inner attributes of a module: where they start, how many
+/// lines of doc they hold, its prose, and whether the item is a test.
 #[derive(Default)]
 struct Block<'a> {
     start: Option<usize>,
@@ -304,7 +290,6 @@ impl Block<'_> {
         })
     }
 
-    /// Where the doc of a `#[test]` item starts, with what is wrong.
     fn on_test(&self) -> Option<(LineColumn, String)> {
         let (first, _) = self.doc.filter(|_| self.test)?;
         let problem = "a test has a doc: remove it, and put a why the test needs in a `//` comment \
@@ -312,9 +297,8 @@ impl Block<'_> {
         Some((first, problem.to_owned()))
     }
 
-    /// Where the doc starts, with what is wrong, if its `///` comments' first sentence holds no
-    /// word but filler ([`FILLER`]) and those of the identifiers on the line of the item that
-    /// `tokens`, in `file`, start: its name, its type, its parameters.
+    /// A problem if each word of the doc's first sentence, but the `FILLER`, is one that the item's
+    /// first line already holds, in its name, its type or its parameters, stems alike.
     fn restated(&self, file: &str, tokens: &[TokenTree]) -> Option<(LineColumn, String)> {
         let (first, _) = self.doc?;
         if self.prose.first()?.starts_with("```") {
@@ -341,7 +325,7 @@ impl Block<'_> {
     }
 }
 
-/// The words a first sentence may hold besides the item's own and still restate it.
+/// The words that a doc's first sentence may hold without saying more than its item's line does.
 const FILLER: &[&str] = &[
     "a", "an", "the", "its", "it", "it's", "this", "that", "these", "those", "their", "his", "her",
     "them", "they", "of", "for", "to", "in", "on", "at", "by", "from", "with", "as", "into",
@@ -351,7 +335,8 @@ const FILLER: &[&str] = &[
     "every", "one", "some", "any", "all", "no", "not", "here", "there", "now",
 ];
 
-/// The name of the item, field or variant that `tokens` start with, if they start one.
+/// The name that the item at the start of `tokens` declares, if it declares one: of a function,
+/// a type, a constant, a macro, a field or a variant.
 fn name(tokens: &[TokenTree]) -> Option<String> {
     match unqualified(tokens) {
         [
@@ -395,7 +380,7 @@ fn name(tokens: &[TokenTree]) -> Option<String> {
     }
 }
 
-/// `tokens` past the visibility and qualifiers, such as `pub(crate) const unsafe`, they start with.
+/// `tokens` without the qualifiers that an item begins with, such as `pub(crate)` or `async`.
 fn unqualified(tokens: &[TokenTree]) -> &[TokenTree] {
     let mut at = 0;
     while let Some(token) = tokens.get(at) {
@@ -423,7 +408,6 @@ fn unqualified(tokens: &[TokenTree]) -> &[TokenTree] {
     &tokens[at..]
 }
 
-/// The text of `token` if it is an identifier, and otherwise none.
 fn word(token: &TokenTree) -> String {
     match token {
         TokenTree::Ident(word) => word.to_string(),
@@ -448,8 +432,8 @@ fn identifiers(line: &str) -> Vec<&str> {
     identifiers
 }
 
-/// The lowercase words of `identifier`, split at `_` and where its case changes, as `HTTPServer`
-/// splits into `http` and `server`.
+/// The lowercase words of `identifier`, as written in snake or camel case: `HTTPServer2` gives
+/// `http`, `server` and `2`.
 fn split(identifier: &str) -> Vec<String> {
     let chars: Vec<char> = identifier.chars().collect();
     let mut parts = Vec::new();
@@ -486,7 +470,7 @@ fn split(identifier: &str) -> Vec<String> {
     parts
 }
 
-/// `word` without the first of a few suffixes it ends with, if more than two letters are left.
+/// `word` without a usual ending, so that `listed` and `lists` are of the one stem as `list` is.
 fn stem(word: &str) -> &str {
     for suffix in ["ies", "es", "s", "ed", "ing", "er"] {
         if word.len() > suffix.len() + 2
@@ -498,7 +482,7 @@ fn stem(word: &str) -> &str {
     word
 }
 
-/// The first sentence of `prose`, up to the first `.`, `!` or `?` before a space or the end.
+/// The text of `prose` to the first stop that is followed by a space or the end.
 fn first_sentence(prose: &str) -> &str {
     let end = prose.char_indices().skip(1).find(|&(at, c)| {
         matches!(c, '.' | '!' | '?')
@@ -533,6 +517,7 @@ fn words(sentence: &str) -> Vec<String> {
     words
 }
 
+/// An attribute, with the lines that it takes and the prose of it if it is a doc.
 struct Attribute<'a> {
     inner: bool,
     /// How many of the tokens it takes.
@@ -545,6 +530,7 @@ struct Attribute<'a> {
     test: bool,
 }
 
+/// The attribute that `tokens`, those of `file`, begin with, if one.
 fn attribute<'a>(file: &'a str, tokens: &[TokenTree]) -> Option<Attribute<'a>> {
     let [TokenTree::Punct(hash), rest @ ..] = tokens else {
         return None;
@@ -588,9 +574,8 @@ fn attribute<'a>(file: &'a str, tokens: &[TokenTree]) -> Option<Attribute<'a>> {
     })
 }
 
-/// Where each run of `//` comments that start their lines, in `file`, spans more than
-/// [`TEST_COMMENT_CAP`] lines right above or among the attributes of a test, each of whose lines
-/// `tests` gives, with what is wrong.
+/// The problems of the `comments` in `tests`, ranges of lines of tests, or right above them: a
+/// block of `//` lines over `TEST_COMMENT_CAP`.
 fn test_comments(
     file: &str,
     comments: &[Comment<'_>],
@@ -638,23 +623,23 @@ fn test_comments(
 
 const MARKERS: [&str; 3] = ["TODO", "FIXME", "XXX"];
 
-/// A doc comment, or a comment the lexer skips.
+/// A comment of a file, with where it starts in the text and whether it documents an item.
 struct Comment<'a> {
-    /// The byte it starts at in its file.
     at: usize,
     text: &'a str,
     doc: bool,
 }
 
 impl Comment<'_> {
-    /// Where the comment, in `file`, holds a word of [`MARKERS`] or, as a `//` comment, a line of
-    /// code, and where a line of it is over [`WIDTH`] columns, with what is wrong.
+    /// What is wrong in the comment: a marker of unfinished work, code, and a line over `WIDTH`.
+    /// `file` is the text it lies in.
     fn problems(&self, file: &str) -> Vec<(LineColumn, String)> {
         let mut problems = Vec::new();
         let part = |c: char| c.is_alphanumeric() || c == '_';
         for marker in MARKERS {
             for (at, _) in self.text.match_indices(marker) {
                 let (before, after) = (&self.text[..at], &self.text[at + marker.len()..]);
+                // The marker as a word of its own, not inside another.
                 if !before.ends_with(part) && !after.starts_with(part) {
                     problems.push((
                         position(file, self.at + at),
@@ -710,7 +695,8 @@ impl Comment<'_> {
     }
 }
 
-/// Each comment in `text`, whose tokens are `tokens`, top to bottom.
+/// The comments of `text`, whose tokens are `tokens`: a doc is a token, and each other comment
+/// lies in the text between the tokens' spans.
 fn comments(text: &str, tokens: TokenStream) -> Vec<Comment<'_>> {
     let mut spans = Vec::new();
     spans_of(tokens, &mut spans);
@@ -767,7 +753,7 @@ fn spans_of(tokens: TokenStream, spans: &mut Vec<Range<usize>>) {
     }
 }
 
-/// How many bytes the block comment that `text` starts with takes, with those nested in it.
+/// The length of the block comment that `text` begins with, in which block comments nest.
 fn block_len(text: &str) -> usize {
     let mut depth = 0_usize;
     let mut at = 0;
@@ -789,8 +775,7 @@ fn block_len(text: &str) -> usize {
     unreachable!("the lexer took the text as tokens, so each block comment in it ends")
 }
 
-/// Where byte `at` of `text` lies, its column counted from 0 in characters, as proc-macro2
-/// counts.
+/// The line, from 1, and the column, from 0 in characters, of the byte `at` of `text`.
 fn position(text: &str, at: usize) -> LineColumn {
     let before = &text[..at];
     let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);

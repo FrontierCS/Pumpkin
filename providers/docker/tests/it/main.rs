@@ -1,6 +1,3 @@
-//! The Docker provider, against a real Docker daemon. These tests need Docker, so they are
-//! ignored.
-
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -50,12 +47,11 @@ use tempfile::TempDir;
 use test_support::suite::{Locals, Subject, reserve_with_room};
 use test_support::{BUSYBOX, docker, hung};
 
-/// The variable that makes this test binary, run again by [`hung_create`], make a create through
-/// the stand-in `docker`, and write what came of it to `created` in the directory it names.
+// The directory, in this variable, in which this binary, run again by `hung_create`, makes a create
+// through the stand-in `docker` and writes what came of it, to `created`.
 const STAND_IN: &str = "PUMPKIN_TEST_STAND_IN";
 
-/// The roles of the tests' runs, each its own phase, whose sandboxes a fixture's run holds one
-/// CPU for at a time.
+// The roles that a fixture reserves for, one to a phase, so that a test may start any of them.
 const ROLES: [&str; 13] = [
     "confined",
     "first",
@@ -72,16 +68,13 @@ const ROLES: [&str; 13] = [
     "unpulled",
 ];
 
-/// The environment of one test: its run tags and a directory for sockets and collected files.
-/// Dropping it removes the containers of its runs, after showing their logs if the test failed.
 struct Fixture {
     sandboxd: PathBuf,
     dir: TempDir,
-    /// Where its sandboxes meet the gateway, below `dir`.
     sockets: Sockets,
     run: RunTag,
     other_run: RunTag,
-    /// What the provider holds for `run`, whose sandboxes are of [`ROLES`].
+    // Held for the fixture's life: a create takes its share of the run's reservation.
     _held: Reservation,
 }
 
@@ -108,17 +101,11 @@ impl Fixture {
         }
     }
 
-    /// Starts a passive sandbox for role `role`, which runs as 4242:4243.
     fn start(&self, run: &RunTag, role: &str) -> Started {
         self.try_start(run, role, &self.sandboxd, &image(), None, false)
             .unwrap()
     }
 
-    /// Starts a sandbox for role `role` as the runtime does: creates what
-    /// [`publish`](Self::publish) gives, and accepts its session where it dials, set up by the
-    /// startup the provider declares, taking ops within `ops` if it gives a limit, and model
-    /// requests if `model`, which has the sandbox serve the model endpoint. A sandbox whose
-    /// session fails is deleted, and the error quotes its console.
     fn try_start(
         &self,
         run: &RunTag,
@@ -133,8 +120,6 @@ impl Fixture {
         Self::start_created(&create, dial, registration, ops, model)
     }
 
-    /// Starts the sandbox that `create` describes, as [`try_start`](Self::try_start) does, its
-    /// session meeting it at `registration`, where `dial` names.
     fn start_created(
         create: &Create,
         dial: SocketDial,
@@ -146,7 +131,6 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
-        // Nothing stops the start: its sandbox dials, or its create fails.
         let accepted = registration.accept(by, ops, model, sender, |arrival| arrival, || false);
         let set_up = accepted
             .map_err(|error| error.to_string())
@@ -173,9 +157,6 @@ impl Fixture {
         }
     }
 
-    /// Publishes `image` and `sandboxd` through the provider, and returns the create of a
-    /// sandbox of run `run` for role `role`, which runs them as 4242:4243, makes ops if `ops`
-    /// and serves the model endpoint if `model`, the socket it dials, and its registration.
     fn publish(
         &self,
         run: &RunTag,
@@ -204,14 +185,12 @@ impl Fixture {
             model,
             // Far past the test's end, which comes within minutes.
             hard_end: now.saturating_add(Duration::from_hours(1)),
-            // As the start that the create begins, by the startup the provider declares.
             by: now.saturating_add(declared_startup()),
         };
         Ok((create, dial, registration))
     }
 }
 
-/// Role `name`, as the tests' sandboxes have it: run as 4242:4243, with half a CPU and 256 MiB.
 fn role(name: &str) -> Role {
     Role {
         name: Name::try_from(name.to_owned()).unwrap(),
@@ -225,8 +204,6 @@ fn role(name: &str) -> Role {
     }
 }
 
-/// A sandbox that the fixture started, its session, and what arrives on it. The fixture's drop
-/// deletes it.
 #[derive(Debug)]
 struct Started {
     id: SandboxId,
@@ -245,10 +222,10 @@ impl Started {
 }
 
 impl Drop for Fixture {
-    // Nothing here panics, since a panic while a failed test unwinds would abort the test
-    // binary and hide the other tests' results: failures are printed instead. Without an
-    // engine, no test started a container.
     fn drop(&mut self) {
+        // Nothing here panics, since a panic while a failed test unwinds would abort the test
+        // binary and hide the other tests' results: failures are printed instead. Without an
+        // engine, no test started a container.
         if let Ok(provider) = connected() {
             let provider: &dyn Provider = provider;
             for run in [&self.run, &self.other_run] {
@@ -308,8 +285,6 @@ fn ids(listed: Vec<Listed>) -> Vec<SandboxId> {
         .collect()
 }
 
-/// What `format` shows of each of the run's containers, running or not, as `docker ps` finds
-/// them by their run's label, sorted.
 fn containers(run: &RunTag, format: &str) -> Result<Vec<String>, String> {
     let filter = format!("label=pumpkin.run={}", run.as_str());
     let ps = [
@@ -348,15 +323,13 @@ fn show_logs(run: &RunTag) -> Result<(), String> {
     Ok(())
 }
 
-/// The ID of the image the tests share, its manifest's digest, as the IR names it: `busybox` with
-/// a world-writable `/workspace`, which a role's user needs, since the writable layer is the
-/// workspace, and a world-writable `VOLUME` at `/volume`, for which Docker makes each container
-/// an anonymous volume. Built once, from the pinned image, by the engine, as `pumpkin build`
-/// builds, so that every sandbox the tests start runs an image as a workflow's are made; a build
-/// of the same inputs is found by its tag, so test processes that run at once share the image.
 fn image() -> Image {
     static ID: OnceLock<Image> = OnceLock::new();
     let id = ID.get_or_init(|| {
+        // `/workspace` is world-writable, as a role's user needs, since the writable layer is the
+        // workspace, and so is `/volume`, for which Docker makes each container an anonymous
+        // volume. The engine builds it as `pumpkin build` does, and finds a build of the same
+        // inputs by its tag, so that test processes that run at once share the image.
         let recipe =
             format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
         let context = BuildContext::default();
@@ -372,7 +345,6 @@ fn image() -> Image {
     id.clone()
 }
 
-/// An image that no engine has: its digest is all zeros.
 fn unpulled() -> Image {
     Image::try_from(format!("sha256:{}", "0".repeat(64))).unwrap()
 }
@@ -390,8 +362,6 @@ fn relative(path: &str) -> RelativePath {
     RelativePath::try_from(path.to_owned()).unwrap()
 }
 
-/// How to run `script` as the n-th command, in `/pumpkin/home`, with its output in
-/// `/pumpkin/log`. It may call `sandboxctl` if the sandbox serves ops.
 fn launch(n: u32, script: &str) -> Launch {
     Launch {
         argv: Argv::try_from(["sh", "-c", script].map(str::to_owned).to_vec()).unwrap(),
@@ -406,8 +376,6 @@ fn launch(n: u32, script: &str) -> Launch {
     }
 }
 
-/// Runs `script` as the n-th command ([`launch`]), and returns how it exited, which it has 30 s
-/// to, with no op arriving before its exit.
 fn sh(sandbox: &mut Started, n: u32, script: &str) -> ExitStatus {
     let process = sandbox.session().start(launch(n, script), hung()).unwrap();
     match sandbox.arrivals.recv_timeout(Duration::from_secs(30)) {
@@ -419,8 +387,6 @@ fn sh(sandbox: &mut Started, n: u32, script: &str) -> ExitStatus {
     }
 }
 
-/// Waits for `process` to exit as the session's owner does, answering each op that arrives
-/// meanwhile ([`reply`]). Returns how it exited, which it has 30 s to, and what each op asked.
 fn serve(sandbox: &mut Started, process: Process, payload: &[u8]) -> (ExitStatus, Vec<String>) {
     let deadline = Deadline::after(Duration::from_secs(30));
     let mut asked = Vec::new();
@@ -473,8 +439,6 @@ fn list(base: &Path, dir: &Path, lines: &mut Vec<String>) {
     }
 }
 
-/// The commands of the container's processes, from the host, by process ID, listed every
-/// 10 ms until `done` holds of the list or 30 s pass.
 fn processes(sandbox: &Started, done: impl Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -520,13 +484,13 @@ fn judge() {
                 (sleep 600 &); setsid sleep 600 &
                 exit 3"#;
             let mut lines = vec![format!("{:?}", sh(&mut sandbox, 1, script))];
-            // The script exits without waiting for its sleeps, which may not run yet: until
-            // then, each shows as the command that starts it.
+            // The script exits without waiting for its sleeps, which may not run yet: until then,
+            // each shows as the command that starts it.
             let sleeping = |listed: &str| listed.split(", ").filter(|c| *c == "sleep 600").count();
             let before = processes(&sandbox, |listed| sleeping(listed) == 2);
             lines.push(format!("before freezing: {before}"));
-            sandbox.session().freeze(hung()).unwrap();
             // Freezing returns once the processes it kills are gone.
+            sandbox.session().freeze(hung()).unwrap();
             let after = processes(&sandbox, |_| true);
             lines.push(format!("after freezing: {after}"));
             lines.extend(collect(fixture, &mut sandbox, "out"));
@@ -578,11 +542,11 @@ fn confinement() {
             let status = sh(&mut sandbox, 1, script);
             let mut lines = vec![format!("{status:?}")];
             lines.extend(collect(fixture, &mut sandbox, "log"));
-            // Rootless Docker and user namespaces each map the container's users to others on
-            // the host; a rootful engine without them maps every user to itself.
             collect(fixture, &mut sandbox, "out");
             let uid_map =
                 fs::read_to_string(fixture.dir.path().join("collected-out/uid_map")).unwrap();
+            // Rootless Docker and user namespaces each map the container's users to others on the
+            // host; a rootful engine without them maps every user to itself.
             let identity = uid_map.split_whitespace().eq(["0", "0", "4294967295"]);
             let Security {
                 rootless,
@@ -620,8 +584,6 @@ fn confinement() {
     );
 }
 
-// Each run's containers run on whole cores of their own, apart from every other run's, and see
-// only those; a run that needs more than the others leave is refused, naming those that hold them.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
@@ -694,7 +656,7 @@ fn cpus() {
             let held = sets.iter().flatten().map(|&cpu| siblings(cpu));
             let held = held.collect::<BTreeSet<_>>().len() as u64;
             let wide = RunTag::try_from(format!("{}-wide", fixture.run.as_str())).unwrap();
-            // A core more than those runs leave.
+            // One core more than the others leave.
             let left = threads * (cores as u64 - held + 1);
             let left = provider().reserve(&wide, &[vec![sized("wide", left)]]);
             let refused = left.unwrap_err();
@@ -724,8 +686,6 @@ fn cpus() {
     );
 }
 
-/// The CPUs that the engine gave `sandbox`'s container, and those its processes may run on, as
-/// they see them.
 fn given_and_seen(fixture: &Fixture, sandbox: &mut Started) -> (BTreeSet<u32>, BTreeSet<u32>) {
     let inspect = [
         "inspect",
@@ -746,13 +706,11 @@ fn given_and_seen(fixture: &Fixture, sandbox: &mut Started) -> (BTreeSet<u32>, B
     (given, cpu_list(seen.unwrap_or_default()))
 }
 
-/// The CPUs that share a core with `cpu`, `cpu` among them.
 fn siblings(cpu: u32) -> BTreeSet<u32> {
     let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
     cpu_list(&fs::read_to_string(path).unwrap())
 }
 
-/// The CPUs that `text`, as the kernel writes a list of them, names.
 fn cpu_list(text: &str) -> BTreeSet<u32> {
     let ranges = text.trim().split(',').filter(|range| !range.is_empty());
     ranges
@@ -763,16 +721,12 @@ fn cpu_list(text: &str) -> BTreeSet<u32> {
         .collect()
 }
 
-// What the provider declares as ready: the engine's report, and its one class, which offers
-// what the host has.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn ready() {
     let mut ready = serde_json::to_value(provider().ready()).unwrap();
     let reported: Vec<&String> = ready["report"].as_object().unwrap().keys().collect();
     let reported = format!("{reported:?}");
-    // The host's, which every engine has its own of: of its CPU's flags, whether they hold
-    // `sse2`, which every x86-64 CPU has.
     let classes = ready["classes"].as_object_mut().unwrap();
     for class in classes.values_mut() {
         let offers = &mut class["offers"];
@@ -782,6 +736,8 @@ fn ready() {
             .as_array()
             .unwrap()
             .contains(&"sse2".into());
+        // Whether the flags hold `sse2`, which every x86-64 CPU has, stands for them: the rest are
+        // the host's own.
         offers["cpu_features"] = format!("<the host's, with sse2: {sse2}>").into();
     }
     let ready = format!(
@@ -792,8 +748,6 @@ fn ready() {
     .assert_eq(&ready);
 }
 
-// Deleting what a run's list finds removes its containers' anonymous volumes, and no other
-// run's.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn volumes() {
@@ -833,7 +787,6 @@ fn suite() {
     test_support::suite::check(&[("docker", &Platform)]);
 }
 
-/// The provider on the tests' engine, as the suite's subject: each instance connects afresh.
 struct Platform;
 
 impl Subject for Platform {
@@ -865,17 +818,17 @@ impl Subject for Platform {
         held.into_iter().map(SandboxId::from).collect()
     }
 
-    // The engine's ledger holds each run's cores.
     fn reserves(&self) -> bool {
         true
     }
 }
 
-// A create whose `docker create` hangs after the engine has made its container fails once its
-// deadline has passed, and the run's list finds the container it left.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn hung_create() {
+    // The test runs twice: as the caller of a `create` that hangs, in a child whose `PATH` has a
+    // `docker` that runs the real `create`, and then sleeps, and as the test that reads what the
+    // child saw.
     if let Some(dir) = env::var_os(STAND_IN) {
         let fixture = Fixture::new("hung-create-caller");
         let made = fixture.publish(
@@ -900,10 +853,6 @@ fn hung_create() {
         |fixture| {
             let bin = fixture.dir.path().join("bin");
             fs::create_dir(&bin).unwrap();
-            // `--context=<name>` comes first, and Docker's `docker` on `PATH` after `bin`. Docker's
-            // create runs in a session of its own, which the kill at the deadline doesn't reach, so
-            // it makes its container however slow the engine is, and the provider's create, which
-            // waits for the output it holds, returns once it has ended.
             let script = "#!/bin/sh\nPATH=${PATH#*:}\n\
                           [ \"$2\" = create ] && { setsid --wait docker \"$@\"; exec sleep 60; }\n\
                           exec docker \"$@\"\n";
@@ -911,6 +860,10 @@ fn hung_create() {
             fs::write(&docker, script).unwrap();
             fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
             let path = format!("{}:{}", bin.display(), env::var("PATH").unwrap());
+            // `--context=<name>` comes first, and Docker's `docker` on `PATH` after `bin`. Docker's
+            // create runs in a session of its own, which the kill at the deadline doesn't reach, so
+            // it makes its container however slow the engine is, and the provider's create, which
+            // waits for the output it holds, returns once it has ended.
             let kept = &[
                 "HOME",
                 "DOCKER_CONFIG",
@@ -967,9 +920,7 @@ fn failed_start() {
     );
 }
 
-/// `message`, with the fixture's directory as `<dir>`, the tests' context as `<context>`, and
-/// `…` for what a failed `docker start` reports, which varies with the container runtime and its
-/// version.
+// What `docker start` reports varies with the container runtime and its version.
 fn redact(fixture: &Fixture, message: &str) -> String {
     let context = format!("context `{}`", engine().report().context.as_str());
     let message = (message.replace(&fixture.dir.path().display().to_string(), "<dir>"))
@@ -983,8 +934,6 @@ fn redact(fixture: &Fixture, message: &str) -> String {
     message
 }
 
-// Once a sandbox's container has stopped, its console holds what its `sandboxd` printed: here a
-// stand-in's, which exits without dialing.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn console() {
@@ -1007,13 +956,11 @@ fn console() {
     );
 }
 
-/// Runs `docker` with `args`, which must succeed.
 fn run(args: &[&str]) {
     let output = docker().args(args).output().unwrap();
     assert!(output.status.success(), "{output:?}");
 }
 
-/// A `sandboxd` in `dir` that fails as it starts, saying why.
 fn mute_sandboxd(dir: &Path) -> PathBuf {
     let mute = dir.join("stand-in-sandboxd");
     let script = "#!/bin/sh\necho 'sandboxd: a stand-in, which exits without dialing' >&2\n";
@@ -1022,13 +969,11 @@ fn mute_sandboxd(dir: &Path) -> PathBuf {
     mute
 }
 
-/// A shell function, `ctl`, that runs `sandboxctl` with its arguments, and shows how it exited
-/// and what it printed.
 const CTL: &str = r#"
     ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
 
-// `sandboxd` closes the control socket's directory to all but the role's user, and `sandboxctl`
-// is read-only, so writing it fails the last command.
+// `sandboxd` closes the control socket's directory to all but the role's user, and `sandboxctl` is
+// read-only, so writing it fails the last command.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(
@@ -1156,8 +1101,8 @@ fn ops() {
     );
 }
 
-// A refused call fails its caller alone, so that the session serves the next; `/proc/1/mem`
-// can't be opened, as `sandboxd` is non-dumpable.
+// A refused call fails its caller alone, so that the session serves the next; `/proc/1/mem` can't
+// be opened, as `sandboxd` is non-dumpable.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn refused_calls() {
@@ -1192,8 +1137,8 @@ fn refused_calls() {
                 huge = MAX_OP_PAYLOAD_BYTES + 1,
             );
             let process = sandbox.session().start(launch(1, &script), hung()).unwrap();
-            // The command waits for the second `sandboxd`, which waits for its session to open,
-            // so that session is accepted beside the owner's loop.
+            // The command waits for the second `sandboxd`, which waits for its session to open, so
+            // that session is accepted beside the owner's loop.
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
@@ -1247,11 +1192,6 @@ fn turns() {
             let sandboxd = &fixture.sandboxd;
             let sandbox = fixture.try_start(&fixture.run, "turns", sandboxd, &image(), ops, false);
             let mut sandbox = sandbox.unwrap();
-            // The owner holds the first op, and puts `in/held`, while the other callers arrive.
-            // `sent` waits until a caller's `sandboxctl` sleeps, which it does only as it waits
-            // for its answer, since connecting to a Unix socket waits only on a full backlog.
-            // Once each has sent its call, the script touches `ready`, which the second command
-            // waits for, and the owner answers the first op.
             let script = r#"
                 exec 2>&1
                 ctl=/.pumpkin/bin/sandboxctl
@@ -1273,6 +1213,11 @@ fn turns() {
                 wait $third; echo "status 3: exit $?: $(cat 3.out)"
                 wait $fourth; echo "judge train swapped: exit $?: $(cat swapped.out)"
                 ninth=$($ctl status 9 2>&1); echo "status 9: exit $?: $ninth""#;
+            // The owner holds the first op, and puts `in/held`, while the other callers arrive. In
+            // the script, `sent` waits until a caller's `sandboxctl` sleeps, which it does only as
+            // it waits for its answer, since connecting to a Unix socket waits only on a full
+            // backlog. Once each has sent its call, the script touches `ready`, which the second
+            // command waits for, and the owner answers the first op.
             let session = sandbox.session();
             let callers = session.start(launch(1, script), hung()).unwrap();
             let first = sandbox
@@ -1284,8 +1229,8 @@ fn turns() {
                 .session()
                 .put(&absolute("/pumpkin/in"), held, hung())
                 .unwrap();
-            // No op can arrive while the first is in flight.
             sh(&mut sandbox, 2, "until [ -e ready ]; do sleep 0.01; done");
+            // No op can arrive while the first is in flight.
             let mut arrived = vec![reply(sandbox.session(), first, &[])];
             let (status, rest) = serve(&mut sandbox, callers, &[]);
             arrived.extend(rest);
@@ -1311,8 +1256,6 @@ fn turns() {
     );
 }
 
-// A full flight of requests is held while the one past it is refused (503); what the protocol
-// or the endpoint's bound forbids is refused before it reaches the session.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn model_endpoint() {
@@ -1349,8 +1292,8 @@ fn model_endpoint() {
                 post 'POST /responses HTTP/1.0\r\n\r\n'
                 post "GET / HTTP/1.1\r\nx: $(head -c {pad} /dev/zero | tr '\0' a)""#,
                 over = MAX_MODEL_REQUEST_BYTES + 1,
-                // A head of 16 KiB, the endpoint's bound, with no end: all of it is read, so
-                // the refusal reaches the client before the connection closes.
+                // A head of 16 KiB, the endpoint's bound, with no end: all of it is read, so the
+                // refusal reaches the client before the connection closes.
                 pad = (16 << 10) - "GET / HTTP/1.1\r\nx: ".len(),
             );
             let session = sandbox.session();
@@ -1396,8 +1339,6 @@ fn model_endpoint() {
     );
 }
 
-/// Takes a full flight of model requests, then answers them once a command in the sandbox finds
-/// that the client past the flight was refused. Returns what they asked, each once.
 fn hold_flight(sandbox: &mut Started) -> Vec<String> {
     let held: Vec<IncomingModelRequest> = (0..MAX_MODEL_REQUESTS_IN_FLIGHT)
         .map(|_| next_model_request(&sandbox.arrivals))
@@ -1409,12 +1350,10 @@ fn hold_flight(sandbox: &mut Started) -> Vec<String> {
     asked.iter().map(|line| format!("{line}, held")).collect()
 }
 
-/// Answers the request for `/late` ([`respond`]) once its client has sent a byte past it, which
-/// `sandboxd` leaves unread, as a command in the sandbox finds. Returns what it asked.
 fn respond_late(sandbox: &mut Started) -> String {
-    let incoming = next_model_request(&sandbox.arrivals);
     // `sandboxd` has read the request, and reads no further, so the byte the client sends once
     // told to waits unread in `sandboxd`'s queue, where the command finds it.
+    let incoming = next_model_request(&sandbox.arrivals);
     let late = [Put::Dir(relative("late"), dir_mode())];
     sandbox
         .session()
@@ -1428,7 +1367,6 @@ fn respond_late(sandbox: &mut Started) -> String {
     respond(incoming)
 }
 
-/// The next of `arrivals`, which must be a model request that arrives within 30 s.
 fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
     match arrivals.recv_timeout(Duration::from_secs(30)) {
         Ok(Arrival::ModelRequest(incoming)) => incoming,
@@ -1436,9 +1374,6 @@ fn next_model_request(arrivals: &Receiver<Arrival>) -> IncomingModelRequest {
     }
 }
 
-/// Waits for `process` to exit as the session's owner does, answering each model request that
-/// arrives meanwhile ([`respond`]). Returns how it exited, which it has 30 s to, and what each
-/// request asked.
 fn serve_models(sandbox: &mut Started, process: Process) -> (ExitStatus, Vec<String>) {
     let deadline = Deadline::after(Duration::from_secs(30));
     let mut asked = Vec::new();
@@ -1458,11 +1393,6 @@ fn serve_models(sandbox: &mut Started, process: Process) -> (ExitStatus, Vec<Str
     }
 }
 
-/// Responds to a model request as the session's owner: to `/headless` with a head too long for a
-/// frame, and to `/late` with 200 and a body of 1 MiB; to any other with 204 for `/empty`, 103 for
-/// `/interim`, 404 for a `GET` and 200 otherwise, then one event, then the end for an empty body, a
-/// cut for a body of `{}`, and a second event and the end for any other. Each head also frames the
-/// body, which `sandboxd` frames itself, so it drops that field. Returns what it asked.
 fn respond(incoming: IncomingModelRequest) -> String {
     let request = &incoming.request;
     let body = String::from_utf8_lossy(&request.body).into_owned();
@@ -1507,8 +1437,6 @@ fn respond(incoming: IncomingModelRequest) -> String {
     asked
 }
 
-/// The lines of the first command's standard output, from the sandbox's `/pumpkin/log`, and
-/// its standard error, if anything was written there.
 fn log(fixture: &Fixture, sandbox: &mut Started) -> Vec<String> {
     collect(fixture, sandbox, "log");
     let stdout = fs::read_to_string(fixture.dir.path().join("collected-log/1.stdout")).unwrap();
@@ -1517,18 +1445,13 @@ fn log(fixture: &Fixture, sandbox: &mut Started) -> Vec<String> {
     stdout.lines().map(str::to_owned).chain(stderr).collect()
 }
 
-/// A payload of 2.5 MiB, over two frames, whose bytes are not UTF-8.
+// Bytes that are no UTF-8, 2.5 MiB of them.
 fn payload() -> Vec<u8> {
     (0..5 << 19)
         .map(|n: u32| n.to_le_bytes()[0] | 0x80)
         .collect()
 }
 
-/// Answers `arrival`, an op, as a stand-in for the session's owner: one over the limit with its
-/// refusal; ops with no grants; a judge call with job 1; a submission as stored, or accepted if
-/// final; and the status of job 1, which completed and scored, of job 5, which did not, of job 2,
-/// which errored, or else a refusal. Returns what it asked, saying whether its payload is
-/// `payload`.
 fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
@@ -1597,7 +1520,6 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
     asked
 }
 
-/// What a lease op asked, as the owner notes it, and the stand-in's answer.
 fn lease_reply(op: &Op) -> (String, OpReply) {
     match op {
         Op::LeaseOpen {
@@ -1657,7 +1579,6 @@ fn lease_reply(op: &Op) -> (String, OpReply) {
     }
 }
 
-/// What the stand-in's leases have left.
 const LEASE_LEFT: LeaseRemaining = LeaseRemaining {
     instances: 0,
     instance_seconds: 60,
@@ -1665,7 +1586,6 @@ const LEASE_LEFT: LeaseRemaining = LeaseRemaining {
     commands: Some(3),
 };
 
-/// The reply that names lease `lease`.
 fn leased(lease: u64) -> OpReply {
     OpReply::Lease(LeaseReply {
         lease,
@@ -1673,8 +1593,6 @@ fn leased(lease: u64) -> OpReply {
     })
 }
 
-/// The status of job `job`, with `remaining`: job 1 completed and scored, job 5 completed and
-/// unscored, job 2 errored, and any other is refused.
 fn status(job: u64, remaining: Remaining) -> OpReply {
     let state = match job {
         1 => {

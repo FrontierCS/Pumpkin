@@ -36,9 +36,8 @@ use tempfile::TempDir;
 /// A provider under the suite: the platform it reaches, how that platform makes a sandbox's
 /// `sandboxd` misbehave, and what the platform holds.
 pub trait Subject {
-    /// A new instance of the provider, connected to the platform as a run connects. The suite
-    /// makes each call on an instance of its own, as [`Provider`]'s rule on its instances
-    /// allows.
+    /// A new instance of the provider, connected to the platform as a run connects. The suite makes
+    /// each call on an instance of its own, as [`Provider`]'s rule on its instances allows.
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String>;
 
     /// What the suite publishes, which may need a file in `dir`, a directory the suite removes.
@@ -48,13 +47,12 @@ pub trait Subject {
     /// request.
     fn stall(&self, id: &SandboxId);
 
-    /// The sandboxes of `run` that the platform holds, as it shows them itself rather than
-    /// through the provider: those in which anything still runs, or whose resources are still
-    /// to free.
+    /// The sandboxes of `run` that the platform holds, as it shows them itself rather than through
+    /// the provider: those in which anything still runs, or whose resources are still to free.
     fn held(&self, run: &RunTag) -> Vec<SandboxId>;
 
-    /// Whether the provider shares a host between runs, and so refuses a create for a role its
-    /// run holds nothing for ([`Provider::reserve`]).
+    /// Whether the provider shares a host between runs, and so refuses a create for a role its run
+    /// holds nothing for ([`Provider::reserve`]).
     fn reserves(&self) -> bool;
 }
 
@@ -74,18 +72,18 @@ pub struct Locals {
     pub unreachable_sandboxd: PathBuf,
 }
 
-/// A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading,
-/// no longer than any provider's startup, so that no outcome rests on its length.
+// A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
+// longer than any provider's startup, so that no outcome rests on its length.
 fn soon() -> Deadline {
     Deadline::after(Duration::from_secs(1))
 }
 
-/// The roles of the suite's run, each of which it starts sandboxes of only once those of the one
-/// before are gone; the other run's is the first alone.
+// The roles of the suite's run, each of which it starts sandboxes of only once those of the one
+// before are gone; the other run's is the first alone.
 const ROLES: [&str; 6] = ["lifecycle", "killed", "mute", "stalled", "broken", "late"];
 
-/// How long the suite waits for room to reserve on its provider, which other tests may hold
-/// for as long as they run.
+// How long the suite waits for room to reserve on its provider, which other tests may hold for as
+// long as they run.
 const ROOM: Duration = Duration::from_mins(10);
 
 /// Runs the suite against each of `subjects` and checks that their outcomes are the same.
@@ -142,8 +140,6 @@ pub fn check(subjects: &[(&str, &dyn Subject)]) {
         deleting what it left: done"#]].assert_eq(&lines);
 }
 
-/// The suite's outcomes on `subject`, one to a line, from a run that `name` tags, which it cleans
-/// up before it returns.
 fn run(name: &str, subject: &dyn Subject) -> String {
     let mut suite = Suite::new(name, subject);
     let Locals {
@@ -188,12 +184,6 @@ fn run(name: &str, subject: &dyn Subject) -> String {
     lines.join("\n")
 }
 
-/// A sandbox started, listed, read and deleted, which another run can neither list, read nor
-/// delete, though it can create one of the same name, a namesake, from what it published itself
-/// (`theirs`), and delete it, leaving the sandbox. Each id of a delete is tried on its own: a
-/// delete of a namesake, an id no sandbox has and the sandbox, at once, fails, naming the
-/// namesake, which it leaves for its own run to delete, yet deletes the sandbox; and deleting the
-/// sandbox again, with an id no sandbox has, succeeds.
 fn lifecycle(
     suite: &mut Suite<'_>,
     image: &ImageRef,
@@ -226,8 +216,8 @@ fn lifecycle(
         suite.listed(),
     ];
     // Each namesake's registration is kept until the namesake is deleted, so that its `sandboxd`
-    // waits there to be accepted rather than end: to a delete, an ended sandbox that a provider
-    // has freed itself would be no sandbox, not another run's.
+    // waits there to be accepted rather than end: to a delete, an ended sandbox that a provider has
+    // freed itself would be no sandbox, not another run's.
     let (namesake, _first) = suite.namesake("lifecycle", &theirs.0, &theirs.1);
     lines.extend([
         format!(
@@ -257,8 +247,6 @@ fn lifecycle(
     lines
 }
 
-/// A sandbox whose command is killed: its exit arrives, by the signal, and the sandbox still
-/// starts commands, as a kill ends one command, not the sandbox.
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
     let (mut session, arrivals) = started.unwrap();
@@ -283,8 +271,6 @@ fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec
     ]
 }
 
-/// How to start `sleep 60` in a suite's sandbox, as the role's commands start: in its home, with
-/// its output in its log.
 fn sleep() -> Launch {
     let path = |path: &str| AbsolutePath::try_from(path.to_owned()).unwrap();
     Launch {
@@ -297,8 +283,6 @@ fn sleep() -> Launch {
     }
 }
 
-/// A sandbox whose `sandboxd` exits without dialing: by its startup the run's lists find it
-/// ended, and it is deleted.
 fn exits(suite: &mut Suite<'_>, image: &ImageRef, mute: &SandboxdRef) -> Vec<String> {
     let startup = suite.startup();
     let (id, _) = suite
@@ -311,8 +295,6 @@ fn exits(suite: &mut Suite<'_>, image: &ImageRef, mute: &SandboxdRef) -> Vec<Str
     ]
 }
 
-/// A sandbox whose `sandboxd` stalls: a request then times out, the run's list finds it still
-/// running, as it hasn't exited, and it is deleted.
 fn stalls(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, session) = suite.start("stalled", image, sandboxd);
     let started = format!("stalled: {}", outcome(&session));
@@ -326,21 +308,16 @@ fn stalls(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Ve
     ]
 }
 
-/// A create whose `sandboxd` can't run, which fails at once or makes a sandbox that ends: by its
-/// startup, the run's list finds whatever it left that the platform holds
-/// ([`Creator::create`](provider::Creator::create)).
 fn fails(suite: &mut Suite<'_>, image: &ImageRef, broken: &SandboxdRef) -> Vec<String> {
     let startup = suite.startup();
-    // A provider may return from a create before its sandbox starts, so only what the create
-    // left is checked, not whether it failed.
+    // A provider may return from a create before its sandbox starts, so only what the create left
+    // is checked, not whether it failed.
     let _ = suite.create("broken", image, broken, from_now(startup));
     suite.await_ended(&Deadline::after(startup));
     let [found, deleted] = suite.left();
     vec![format!("broken: {found}"), deleted]
 }
 
-/// A create whose deadline has passed, which fails: the run's list finds whatever it left that the
-/// platform holds ([`Creator::create`](provider::Creator::create)).
 fn late(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     // The Unix epoch, a deadline long past.
     let created = suite.create("late", image, sandboxd, UnixTime::of(UNIX_EPOCH).unwrap());
@@ -352,7 +329,6 @@ fn late(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<
     vec![format!("late: {failed}; {found}"), deleted]
 }
 
-/// Whether a publish succeeded or was refused, whatever its error says.
 fn published<T>(published: &Result<T, String>) -> &'static str {
     match published {
         Ok(_) => "published",
@@ -360,18 +336,16 @@ fn published<T>(published: &Result<T, String>) -> &'static str {
     }
 }
 
-/// Whether a console was read or refused, whatever it holds.
 fn read(console: &Result<Console, String>) -> &'static str {
-    // A provider keeps a console as its platform does (`Console`), and a platform may keep it
-    // late, as a cloud machine's serial console is a snapshot the platform takes when it
-    // chooses: it need not yet hold what `sandboxd` printed, so only its read is checked.
+    // A provider keeps a console as its platform does (`Console`), and a platform may keep it late,
+    // as a cloud machine's serial console is a snapshot the platform takes when it chooses: it need
+    // not yet hold what `sandboxd` printed, so only its read is checked.
     match console {
         Ok(_) => "read",
         Err(_) => "refused",
     }
 }
 
-/// Whether a sandbox's session was accepted and set up, or how that failed.
 fn outcome<T>(session: &Result<T, String>) -> String {
     match session {
         Ok(_) => "accepted and set up by its startup".to_owned(),
@@ -379,11 +353,10 @@ fn outcome<T>(session: &Result<T, String>) -> String {
     }
 }
 
-/// How a put of more than a socket's buffers hold fails, or that it succeeds, by [`soon`].
 fn put(mut session: Session) -> String {
     // Many times what a Unix socket holds unread with the default buffers
-    // (`net.core.wmem_default`, about 200 KiB), which the suite assumes of its host: buffers
-    // that held it all would let the put succeed.
+    // (`net.core.wmem_default`), which the suite assumes of its host: buffers that held it all
+    // would let the put succeed.
     let (path, bytes) = (
         RelativePath::try_from("big".to_owned()).unwrap(),
         vec![0; 4 << 20],
@@ -395,31 +368,16 @@ fn put(mut session: Session) -> String {
     }
 }
 
-/// The suite's run on one subject, another run's tag, and a directory for what it publishes
-/// and the sockets its sandboxes dial. Dropping it deletes what each run's list finds, and
-/// removes the directory.
 struct Suite<'a> {
     subject: &'a dyn Subject,
-    /// Where the provider's sandboxes meet the gateway, if they dial it.
     sockets: Sockets,
-    /// Where the suite dials the sandboxes of a provider whose sandboxes listen, behind the
-    /// stand-in TLS edge.
     dialer: Dialer,
     run: RunTag,
     other: RunTag,
-    /// The sandboxes created, each by its id, its role, by which the outcomes name it, and
-    /// whether the suite has deleted it.
     made: Vec<(SandboxId, &'static str, bool)>,
-    /// The other run's sandboxes created, each by its id and the role whose name it shares, by
-    /// which the outcomes name it, as that role's namesake.
     namesakes: Vec<(SandboxId, &'static str)>,
-    /// The provider's slowest class, by its name, which each sandbox is created in, and its
-    /// startup, which bounds each create.
     slowest: (Name, Duration),
-    /// What the provider holds for the run and the other run, each of whose roles' sandboxes
-    /// it creates.
     _held: [Reservation; 2],
-    /// Last, so that it is removed once the sockets in it are.
     dir: TempDir,
 }
 
@@ -459,20 +417,15 @@ impl<'a> Suite<'a> {
         }
     }
 
-    /// A new instance of the subject's provider, for one call.
     fn connect(&self) -> Box<dyn Provider + 'a> {
         self.subject.connect().unwrap()
     }
 
-    /// What publishing `image` and `sandboxd`, each by a call of its own, returns.
     fn publish(&self, image: &Image, sandboxd: &Path) -> (ImageRef, SandboxdRef) {
         let image = self.connect().publish_image(image).unwrap();
         (image, self.connect().publish_sandboxd(sandboxd).unwrap())
     }
 
-    /// Creates a sandbox of the run for `role`, named for it, which runs `image` and `sandboxd`,
-    /// by `by`, and returns its id and the registration of where it dials, or how its create
-    /// failed.
     fn create(
         &mut self,
         role: &'static str,
@@ -485,9 +438,6 @@ impl<'a> Suite<'a> {
         Ok((id, registration))
     }
 
-    /// Creates a sandbox of the other run for `role`, named as one of the run's is, which runs
-    /// `image` and `sandboxd`, by the startup of the provider's slowest class, and returns its id
-    /// and the registration of where it dials.
     fn namesake(
         &mut self,
         role: &'static str,
@@ -502,11 +452,6 @@ impl<'a> Suite<'a> {
         (id, registration)
     }
 
-    /// Creates a sandbox of `run` for `role`, named for it, in the provider's slowest class, which
-    /// runs `image` and `sandboxd`, meets the gateway where the provider's meeting says, at the
-    /// socket the suite's sockets issue as `socket` or where the suite dials it, and gives up by
-    /// `by`; returns its id and the registration of where it meets the gateway, or how its create
-    /// failed.
     fn make(
         &self,
         run: &RunTag,
@@ -535,14 +480,10 @@ impl<'a> Suite<'a> {
         }
     }
 
-    /// The startup of the provider's slowest class.
     fn startup(&self) -> Duration {
         self.slowest.1
     }
 
-    /// Whether the run's list finds all that the platform holds of the run, which, once the
-    /// suite has deleted every sandbox it made, is what a create left; then what deleting what
-    /// the list finds returns.
     fn left(&mut self) -> [String; 2] {
         let left = self.subject.held(&self.run);
         let listed = ids(self.connect().list(&self.run).unwrap());
@@ -556,7 +497,6 @@ impl<'a> Suite<'a> {
         ]
     }
 
-    /// Waits until the run's list finds none of its sandboxes running, or `by` has passed.
     fn await_ended(&self, by: &Deadline) {
         let running = |listed: Vec<Listed>| listed.iter().any(|listed| !listed.ended);
         // A sandbox whose `sandboxd` can't serve may still run as its create returns.
@@ -565,8 +505,6 @@ impl<'a> Suite<'a> {
         }
     }
 
-    /// Creates a sandbox for `role`, as [`create`](Self::create) does, and accepts its session,
-    /// set up, by the startup of the provider's slowest class, from the create's start.
     fn start(
         &mut self,
         role: &'static str,
@@ -589,8 +527,6 @@ impl<'a> Suite<'a> {
         (id, session)
     }
 
-    /// What deleting `ids` from the run returns, as [`delete`](Self::delete) shows it; the
-    /// suite counts each as deleted from then on.
     fn delete_ours(&mut self, ids: &[SandboxId]) -> String {
         let run = self.run.clone();
         let deleted = self.delete(&run, ids);
@@ -600,10 +536,6 @@ impl<'a> Suite<'a> {
         deleted
     }
 
-    /// Whether deleting `ids` as `run`'s, one of the suite's two runs, is done, or fails, and
-    /// then which of `ids` its error names; then those of `ids` whose sandboxes the platform held
-    /// before the delete and, against [`Sweep::delete`](provider::Sweep::delete)'s contract, still
-    /// holds after it, of `run`, or no longer holds, of the other run, each [named](Self::named).
     fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> String {
         let runs = [&self.run, &self.other];
         let held = || runs.map(|run| self.subject.held(run));
@@ -634,11 +566,6 @@ impl<'a> Suite<'a> {
         shown
     }
 
-    /// What the run's list finds, as the run takes it: each sandbox the suite created that the
-    /// list finds, or that the suite hasn't deleted, [named](Self::named), marked ended if the
-    /// list says so, or if it leaves the sandbox out once the platform no longer holds it, and
-    /// marked left out if it leaves it out while the platform holds it, which
-    /// [`Sweep::list`](provider::Sweep::list) forbids; then any other sandbox the list finds.
     fn listed(&self) -> String {
         let listed = self.connect().list(&self.run).unwrap();
         let held = self.subject.held(&self.run);
@@ -665,8 +592,6 @@ impl<'a> Suite<'a> {
         format!("listed: {:?}", sorted(shown.into_iter()))
     }
 
-    /// Each id as the role of the sandbox it names, or as that role's namesake, if the suite
-    /// created one, or else the id, sorted.
     fn named(&self, ids: Vec<SandboxId>) -> Vec<String> {
         let named = ids.into_iter().map(|id| {
             let namesake = (self.namesakes.iter()).find(|(namesake, _)| *namesake == id);
@@ -686,8 +611,6 @@ impl<'a> Suite<'a> {
     }
 }
 
-/// The create of a sandbox of `run` for `role`, named for it, of class `class`, which runs
-/// `image` and `sandboxd` as [`suite_role`] says, and gives up by `by`.
 fn asked(
     run: &RunTag,
     role: &str,
@@ -711,8 +634,6 @@ fn asked(
     }
 }
 
-/// What `provider` holds for `run`, whose `roles` run one after another, as
-/// [`suite_role`] says each is ([`reserve_with_room`]).
 fn reserved(provider: &dyn Provider, run: &RunTag, roles: &[&str]) -> Reservation {
     let phases: Vec<Vec<Role>> = (roles.iter()).map(|&role| vec![suite_role(role)]).collect();
     reserve_with_room(provider, run, &phases)
@@ -739,8 +660,6 @@ pub fn reserve_with_room(
     }
 }
 
-/// Role `role`, as the suite's sandboxes have it: run as 4242:4243, with half a CPU and 256 MiB,
-/// one at a time.
 fn suite_role(role: &str) -> Role {
     Role {
         name: Name::try_from(role.to_owned()).unwrap(),
@@ -766,10 +685,11 @@ fn sorted(names: impl Iterator<Item = String>) -> Vec<String> {
 }
 
 impl Drop for Suite<'_> {
-    // An error here is printed, never panicked on, since a panic while a failed test unwinds
-    // would abort the test binary and hide the other tests' results; only a bug panics.
     fn drop(&mut self) {
         for run in [&self.run, &self.other] {
+            // An error here is printed, never panicked on, since a panic while a failed test
+            // unwinds would abort the test binary and hide the other tests' results; only a bug
+            // panics.
             let deleted = self.subject.connect().and_then(|provider| {
                 let listed = provider.list(run)?;
                 provider.delete(run, &ids(listed))

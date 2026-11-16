@@ -1,28 +1,27 @@
-//! The model endpoint: an HTTP/1.1 server on the sandbox's loopback, at [`MODEL_PORT`], through
-//! which a harness in the sandbox reaches the model route. Each request goes over the
-//! session whole, as a model request, by [the protocol's rules](schema::sandbox), with
-//! its method, its target and every header, names in lowercase, and its response comes back as
-//! it arrives.
+//! The model endpoint: an HTTP/1.1 server on the sandbox's loopback, at `MODEL_PORT`, through
+//! which a harness in the sandbox reaches the model route. Each request goes over the session
+//! whole, as a model request, and its response comes back as it arrives.
 //!
 //! It serves one request per connection, and answers these itself, so they never reach the
 //! session, whose bounds they would break:
 //!
-//! - a head over [`MAX_HEAD_BYTES`], with 431, or one malformed, with 400;
+//! - a head over `MAX_HEAD_BYTES`, with 431, or one malformed, with 400;
 //! - HTTP/1.0, whose clients don't read a chunked response, with 426, which names HTTP/1.1 to
 //!   send instead, and another major version, with 505, while a later minor version of HTTP/1
 //!   is served as HTTP/1.1;
 //! - a chunked body, with 411: a body's length is its `content-length`, 0 without one;
-//! - a body over [`MAX_MODEL_REQUEST_BYTES`], with 413;
-//! - a request while [`MAX_MODEL_REQUESTS_IN_FLIGHT`] are in flight, with 503.
+//! - a body over `MAX_MODEL_REQUEST_BYTES`, with 413;
+//! - a request while `MAX_MODEL_REQUESTS_IN_FLIGHT` are in flight, with 503.
 //!
 //! It writes a response as the session's owner sends it: the status and headers, but those that
-//! frame a message, which are its own, then the body chunked, then the last chunk. A response cut
-//! short, ended without a head, or with an interim status (1xx) ends with the connection, before
-//! any last chunk, so that its client doesn't take it as whole. A response to `HEAD`, or with a
-//! status of 204 or 304, is its head alone, as is a refusal to `HEAD`.
+//! frame a message, which are its own, then the body chunked, then the last chunk. A response
+//! cut short, ended without a head, or with an interim status (1xx) ends with the connection,
+//! before any last chunk, so that its client doesn't take it as whole. A response to `HEAD`, or
+//! with a status of 204 or 304, is its head alone, as is a refusal to `HEAD`.
 //!
-//! As with [ops](crate::ops), a client that holds its connection holds a thread, with no
-//! timeout, which harms only the sandbox's own run.
+//! As with ops, a client that holds its connection, before its request is whole or past the end
+//! of its response or refusal, holds a thread, with no timeout, which harms only the sandbox's own
+//! run.
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Write as _};
@@ -41,15 +40,15 @@ use stdx::{Context, unpoisoned};
 
 use crate::session::Sender;
 
-/// The longest request head `sandboxd` reads: the request line and the headers. As JSON, a head
-/// grows to at most ten thirds of its size, from its shortest header line, `":` and a line feed,
-/// to `["\"",""],`, so a request's opening stays within a frame's message.
+// As JSON, a head grows to at most ten thirds of its size, from its shortest header line, three
+// bytes, which becomes `["a",""],`; and a head holds no control characters but tabs, which
+// escape to two. So a request's opening stays within a frame's message.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 
 const _: () = assert!(MAX_HEAD_BYTES * 10 / 3 + 1024 <= MAX_MESSAGE_BYTES);
 
-/// The names of the response fields that frame a message or concern its connection, which
-/// `sandboxd` writes itself, so it drops any the session's owner sends.
+// The response fields that frame a message or concern its connection, which `sandboxd` writes
+// itself, so it drops any that the session's owner sends.
 const FRAMING: [&str; 5] = [
     "content-length",
     "transfer-encoding",
@@ -58,9 +57,9 @@ const FRAMING: [&str; 5] = [
     "upgrade",
 ];
 
-/// The model requests in flight, which the threads carrying them and the session, which
-/// receives their responses, share.
 #[derive(Clone, Default)]
+/// The model requests in flight, which the threads that carry them and the session, which
+/// receives their responses, share.
 pub(crate) struct Model(Arc<Mutex<Flight>>);
 
 #[derive(Default)]
@@ -68,8 +67,8 @@ struct Flight {
     /// The number the next request takes, unless one in flight has it.
     next: u32,
     /// Where the parts of each response go, by request: to its client's thread, which may have
-    /// gone. They queue without a bound, so that a client slow to read never holds up the
-    /// session, which reads every other request's frames too.
+    /// gone. They queue without a bound, so that a client slow to read never holds up the session,
+    /// which reads every other request's frames too.
     waiting: BTreeMap<u32, PartSender<Part>>,
 }
 
@@ -79,7 +78,6 @@ pub(crate) enum Part {
         headers: Vec<(String, String)>,
     },
     Data(Vec<u8>),
-    /// The end: whole, or `cut` short.
     End {
         cut: bool,
     },
@@ -95,27 +93,25 @@ struct Request {
 /// Why a request can't be carried: its status, and what to tell the client.
 struct Refusal(u16, String);
 
-/// What [`relay`] holds, or has written, of a response.
 enum Relayed {
     Nothing,
     /// The status and headers of a response without a body, held until it ends whole, then
     /// written alone; its data is dropped.
     // Nothing after the head could show its client that the response was cut short.
     Bodiless(u16, Vec<(String, String)>),
-    /// The head of a chunked response, and any chunks after it.
     Chunked,
 }
 
 impl Model {
-    /// Serves clients on the loopback, at [`MODEL_PORT`], on a thread of its own. The port is
-    /// bound before this returns, so before the session serves its first request, and so before
-    /// any command can take it.
+    /// Serves clients on the loopback, on a thread of its own. The port is bound before this
+    /// returns, so before the session serves its first request, and so before any command can
+    /// take it.
     pub(crate) fn serve(&self, sender: Sender) -> Result<(), String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, MODEL_PORT))
             .context(format_args!("127.0.0.1:{MODEL_PORT}"))?;
         let model = self.clone();
-        // Accepts clients while the session's thread serves the gateway.
         thread::Builder::new()
+            // Accepts clients while the session's thread serves the gateway.
             .name("model".to_owned())
             .spawn(move || model.accept(&listener, &sender))
             .context("the thread that accepts clients didn't start")?;
@@ -130,15 +126,16 @@ impl Model {
                 continue;
             };
             let (model, sender) = (self.clone(), sender.clone());
-            // A client that can't get a thread sees its connection close.
             let _ = thread::Builder::new()
+                // A client that can't get a thread sees its connection close.
                 .name("model-request".to_owned())
                 .spawn(move || model.carry(connection, &sender));
         }
     }
 
-    /// Hands a part of the response to request `request` to its client. The end takes the
-    /// request out of flight.
+    /// Hands a part of the response to request `request` to its client; the end takes the request
+    /// out of flight. A part for a request not in flight breaks the protocol, and the error ends
+    /// the session.
     pub(crate) fn part(&self, request: u32, part: Part) -> io::Result<()> {
         let mut flight = self.lock();
         let client = match part {
@@ -181,12 +178,11 @@ impl Model {
         }
         // A response streams in small chunks, which Nagle's algorithm would hold back.
         let _ = connection.set_nodelay(true);
+        // A request stays in flight until the gateway ends it, though its client has left.
         relay(&parts, &mut connection, to_head);
         close(&mut connection);
     }
 
-    /// Puts a new request in flight, and returns its number and where its response will
-    /// arrive.
     fn open(&self) -> Result<(u32, Receiver<Part>), Refusal> {
         let mut flight = self.lock();
         if flight.waiting.len() >= MAX_MODEL_REQUESTS_IN_FLIGHT {
@@ -198,8 +194,8 @@ impl Model {
                 ),
             ));
         }
-        // A request held in flight while the numbers wrap around keeps its own.
         let mut number = flight.next;
+        // A request held in flight while the numbers wrap around keeps its own.
         while flight.waiting.contains_key(&number) {
             number = number.wrapping_add(1);
         }
@@ -214,8 +210,8 @@ impl Model {
     }
 }
 
-/// Reads a request whole, or why it can't be carried, with whether it is of `HEAD`: false for a
-/// head refused before its method is parsed.
+/// Reads a request whole, or why it can't be carried, with whether it is of `HEAD`: false for
+/// a head refused before its method is parsed.
 fn read(reader: &mut impl BufRead) -> io::Result<Result<Request, (Refusal, bool)>> {
     let mut head = Vec::new();
     let mut lines = reader.take(MAX_HEAD_BYTES as u64);
@@ -258,14 +254,11 @@ fn read(reader: &mut impl BufRead) -> io::Result<Result<Request, (Refusal, bool)
 
 type Head = (String, String, Vec<(String, String)>);
 
-/// The method, the target and the headers, names in lowercase, of a head of HTTP/1.1, or of a
-/// later minor version, that ends in an empty line; or why not, with whether the head is of
-/// `HEAD`, as [`read`] gives it. A head holds no control characters but tabs, so that its JSON
-/// escapes no character with more than two bytes.
 fn parse_head(head: &[u8]) -> Result<Head, (Refusal, bool)> {
     // A head that isn't text, or opens with no request line, is refused before its method is
     // parsed.
     let malformed = |message: String| (Refusal(400, message), false);
+    // No control characters but tabs, so that JSON escapes none with more than two bytes.
     let head = std::str::from_utf8(head)
         .ok()
         .filter(|head| !head.contains(|c: char| c.is_control() && !"\t\r\n".contains(c)))
@@ -295,11 +288,11 @@ fn parse_head(head: &[u8]) -> Result<Head, (Refusal, bool)> {
         (Refusal(status, message), to_head)
     };
     match (major, minor) {
-        // A later minor version is compatible with 1.1, the latest this server implements, so
-        // it is served as 1.1.
+        // A later minor version is compatible with 1.1, the latest this server implements, so it is
+        // served as 1.1.
         (b'1', b'1'..=b'9') => {}
-        // A client of HTTP/1.0 doesn't read a chunked response, as most responses here are, so
-        // it is told the version to send instead.
+        // A client of HTTP/1.0 doesn't read a chunked response, as most responses here are, so it
+        // is told the version to send instead.
         (b'1', _) => return Err(unserved(426)),
         _ => return Err(unserved(505)),
     }
@@ -323,13 +316,13 @@ fn parse_head(head: &[u8]) -> Result<Head, (Refusal, bool)> {
     Ok((method.to_owned(), target.to_owned(), headers))
 }
 
-/// The length of the body that `headers` announce: 0 without a `content-length`.
 fn body_length(headers: &[(String, String)]) -> Result<u64, Refusal> {
     if headers.iter().any(|(name, _)| name == "transfer-encoding") {
         let message = "a chunked body is refused: send its content-length instead";
         return Err(Refusal(411, message.to_owned()));
     }
-    // Digits alone, as a length is written: parsing alone would take a sign too.
+    // Digits alone, as a length is written: parsing alone would take a sign too. Repeats of one
+    // length are one.
     let mut lengths = headers
         .iter()
         .filter(|(name, _)| name == "content-length")
@@ -355,7 +348,6 @@ fn body_length(headers: &[(String, String)]) -> Result<u64, Refusal> {
     Ok(length)
 }
 
-/// Sends request `number`: its opening, with its body's size, then the body's bytes.
 fn send(sender: &Sender, number: u32, request: Request) -> io::Result<()> {
     let Request {
         method,
@@ -379,13 +371,13 @@ fn send(sender: &Sender, number: u32, request: Request) -> io::Result<()> {
 
 /// Writes the parts of a response to the client as they arrive, until its end, the client's
 /// going, or the session's end. `to_head` says the request's method is `HEAD`, whose response,
-/// as some statuses' do, goes without a body ([`Relayed::Bodiless`]).
+/// as some statuses' do, goes without a body.
 fn relay(parts: &Receiver<Part>, connection: &mut TcpStream, to_head: bool) {
     let mut relayed = Relayed::Nothing;
     for part in parts {
+        // A request gets one head, so no final response can follow an interim one: it ends with the
+        // connection, with nothing written.
         let written = match (part, &relayed) {
-            // A request gets one head, so no final response can follow an interim one: it ends
-            // with the connection, with nothing written.
             (
                 Part::Head {
                     status: 100..=199, ..
@@ -430,8 +422,8 @@ fn relay(parts: &Receiver<Part>, connection: &mut TcpStream, to_head: bool) {
                 let _ = connection.write_all(b"0\r\n\r\n");
                 return;
             }
-            // A response cut short, or ended without a head, ends with the connection, and so
-            // does one out of order, which the gateway never sends.
+            // A response cut short, or ended without a head, ends with the connection, and so does
+            // one out of order, which the gateway never sends.
             (Part::Data(_) | Part::End { .. }, Relayed::Nothing)
             | (
                 Part::End { cut: true } | Part::Head { .. },
@@ -454,12 +446,14 @@ fn refuse(connection: &mut TcpStream, Refusal(status, message): Refusal, to_head
     let length = body.len().to_string();
     let mut headers = vec![("content-type", "application/json")];
     if status == 426 {
-        // A 426 names the version to send instead, in a field that the connection's options
-        // must then keep to this connection.
+        // A 426 names the version to send in `upgrade`, which `connection` must then list, as it
+        // is hop-by-hop. With the `close` that `write_head` adds, the two `connection` lines are
+        // one field, `upgrade, close`, as `connection` is a list (RFC 9110, section 5.3:
+        // https://www.rfc-editor.org/rfc/rfc9110#section-5.3).
         headers.extend([("upgrade", "HTTP/1.1"), ("connection", "upgrade")]);
     }
-    // To `HEAD`, it must be the length of the body that the same request of `GET` would get,
-    // which it is: no message refusing a request whose method is parsed names the method.
+    // To `HEAD`, it must be the length of the body that the same request of `GET` would get, which
+    // it is: no message refusing a request whose method is parsed names the method.
     headers.push(("content-length", &length));
     let body = if to_head { "" } else { &body };
     // A client that has gone has nobody to tell.
@@ -473,8 +467,8 @@ fn refuse(connection: &mut TcpStream, Refusal(status, message): Refusal, to_head
 fn close(connection: &mut TcpStream) {
     // A client that has gone has closed already.
     let _ = connection.shutdown(Shutdown::Write);
-    // A close with bytes unread resets the connection, and the reset discards what of the
-    // response is still queued to send, as the end of one larger than the client's buffers.
+    // A close with bytes unread resets the connection, and the reset discards what of the response
+    // is still queued to send, as the end of one larger than the client's buffers.
     let _ = io::copy(connection, &mut io::sink());
 }
 
@@ -492,7 +486,7 @@ fn write_head(
     connection.write_all(head.as_bytes())
 }
 
-/// A status's reason phrase, which clients ignore; empty for the rarer ones.
+// A status's reason phrase, which clients ignore; empty for the rarer ones.
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",

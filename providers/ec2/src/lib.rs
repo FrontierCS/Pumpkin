@@ -73,9 +73,9 @@ pub struct Settings {
 ///
 /// A create that returns an instance has made its one-shot schedule in the group, named by the
 /// run's tag and the ID ([`launch::timer_name`]), which terminates it after the boot's own timer
-/// ([`launch::HardEnd::timer`]), then deletes itself. A create that can't make it terminates the
-/// instance and fails; a delete deletes it once the instance is terminated, and one a lost run
-/// leaves fires on an instance gone already.
+/// ([`launch::HardEnd::timer`]), then deletes itself. A create that can't make it fails and leaves
+/// the instance, as its errors say ([`Ec2::create_instance`]); a delete deletes it once the
+/// instance is terminated, and one a lost run leaves fires on an instance gone already.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Timer {

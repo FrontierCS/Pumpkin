@@ -1,20 +1,19 @@
-//! Ops: calls that callers in the sandbox make through `sandboxctl`, and that `sandboxd`
-//! carries over the session to its owner, by [the protocol's rules](schema::sandbox).
+//! Ops: calls that callers in the sandbox make through `sandboxctl`, and that `sandboxd` carries
+//! over the session to its owner.
 //!
-//! `sandboxd` serves them on the [control socket](CONTROL_SOCKET), in a directory it makes,
-//! which only the sandbox's user may enter. A caller connects and sends one frame: its message
-//! is the [`OpCall`], and its body, for an [`OpCall::Judge`] or an [`OpCall::Submit`], the
-//! absolute path of the payload's file, which `sandboxd` reads itself, since both run as the
-//! same user, and opens through no symbolic link ([`sys::open_regular`]); any other call's body
-//! is ignored. The caller keeps the connection open until one frame comes back, a
-//! `Result<OpReply, String>`: the reply, or why the op couldn't be carried. Callers take turns
-//! ([`Ops::call`]). The connection closes unanswered if the session ends first, as `sandboxd`
-//! then exits, or if `sandboxd` can't start a thread for the caller or write its answer.
+//! `sandboxd` serves them on the control socket, in a directory it makes, which only the
+//! sandbox's user may enter. A caller connects and sends one frame: its message is the
+//! `OpCall`, and its body, for a judge call or a submission, the absolute path of the payload's
+//! file, which `sandboxd` reads itself, since both run as the same user, and opens through no
+//! symbolic link; any other call's body is ignored. The caller keeps the connection open until
+//! one frame comes back, a `Result<OpReply, String>`: the reply, or why the op couldn't be
+//! carried. Callers take turns. The connection closes unanswered if the session ends first, as
+//! `sandboxd` then exits, or if `sandboxd` can't start a thread for the caller or write its
+//! answer.
 //!
-//! Nothing here is a security boundary: any code in the sandbox may connect, and the owner
-//! decides what each op may do. A caller that connects and sends nothing holds a thread, with
-//! no timeout, so thousands can use up the sandbox's process limit, which harms only the
-//! sandbox's own run, as a fork bomb in it would.
+//! A caller that connects and sends nothing holds a thread, with no timeout, so thousands can
+//! use up the sandbox's process limit, which harms only the sandbox's own run, as a fork bomb
+//! in it would.
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
@@ -36,14 +35,14 @@ use stdx::{Context, unpoisoned};
 use crate::session::Sender;
 use crate::sys;
 
-/// The op in flight and the callers' turns, which the threads carrying ops and the session,
-/// which receives their replies, share.
 #[derive(Clone, Default)]
+/// The op in flight and the callers' turns, which the threads that carry ops and the session,
+/// which receives their replies, share.
 pub(crate) struct Ops(Arc<Shared>);
 
+#[derive(Default)]
 // The threads that carry callers' ops wait their turns on `turn_ended`, and the session's
 // thread takes the op in flight out of `flight` to hand over its reply.
-#[derive(Default)]
 struct Shared {
     flight: Mutex<Flight>,
     turn_ended: Condvar,
@@ -84,9 +83,8 @@ enum Unanswered {
 }
 
 impl Ops {
-    /// Serves callers at [`CONTROL_SOCKET`], on a thread of its own. Its directory, which must
-    /// not exist yet, is made closed to all but the sandbox's user, so that nothing else is
-    /// there.
+    /// Serves callers at the control socket, on a thread of its own. Its directory, which must not
+    /// exist yet, is made closed to all but the sandbox's user, so that nothing else is there.
     pub(crate) fn serve(&self, sender: Sender) -> Result<(), String> {
         let socket = Path::new(CONTROL_SOCKET);
         let Some(dir) = socket.parent() else {
@@ -95,8 +93,8 @@ impl Ops {
                  path to a file in one"
             )
         };
-        // Made with no more than the mode, then set to it, since a umask may take bits from
-        // the first but not the second.
+        // Made with no more than the mode, then set to it, since a umask may take bits from the
+        // first but not the second.
         DirBuilder::new()
             .mode(0o700)
             .create(dir)
@@ -110,8 +108,8 @@ impl Ops {
             })?;
         let listener = UnixListener::bind(socket).context(CONTROL_SOCKET)?;
         let ops = self.clone();
-        // Accepts callers while the session's thread serves the gateway.
         thread::Builder::new()
+            // Accepts callers while the session's thread serves the gateway.
             .name("ops".to_owned())
             .spawn(move || ops.accept(&listener, &sender))
             .context("the thread that accepts callers didn't start")?;
@@ -126,15 +124,16 @@ impl Ops {
                 continue;
             };
             let (ops, sender) = (self.clone(), sender.clone());
-            // A thread per caller, which blocks while the caller waits its turn and its op's
-            // reply. A caller that can't get a thread sees its connection close.
             let _ = thread::Builder::new()
+                // A thread per caller, which blocks while the caller waits its turn and its op's
+                // reply. A caller that can't get a thread sees its connection close.
                 .name("op".to_owned())
                 .spawn(move || ops.carry(connection, &sender));
         }
     }
 
-    /// Hands the gateway's reply to op `op` to the caller waiting for it.
+    /// Hands the gateway's reply to op `op` to the caller waiting for it. An op that is not in
+    /// flight breaks the protocol, and the error ends the session.
     pub(crate) fn reply(&self, op: u32, reply: OpReply) -> io::Result<()> {
         let in_flight = self.lock().waiting.take_if(|(number, _)| *number == op);
         let Some((_, caller)) = in_flight else {
@@ -147,8 +146,8 @@ impl Ops {
         };
         match caller.try_send(reply) {
             // A caller stops waiting for its op's reply only when sending the op failed, which
-            // leaves part of the op unsent and the session ending. So only a gateway that
-            // answers an op before it is whole gets here, with nobody left to tell.
+            // leaves part of the op unsent and the session ending. So only a gateway that answers
+            // an op before it is whole gets here, with nobody left to tell.
             Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(()),
             // A one-shot channel would take a dependency or one written here, as std's
             // (`sync::oneshot`) is unstable.
@@ -176,9 +175,9 @@ impl Ops {
         let _ = frame::write(&mut connection, &answer, &[]);
     }
 
-    /// Carries one op, whose request has `body`, for the caller on `connection`, in the
-    /// caller's turn, which passes to the next caller once the gateway has answered, or at once
-    /// if the op failed or was dropped: so one op is in flight, and one payload held, at most.
+    /// Carries one op, whose request has `body`, for the caller on `connection`, in the caller's
+    /// turn, which passes to the next caller once the gateway has answered, or at once if the op
+    /// failed or was dropped: so one op is in flight, and one payload held, at most.
     fn call(
         &self,
         call: OpCall,
@@ -189,16 +188,16 @@ impl Ops {
         let path = (call.takes_payload())
             .then(|| payload_path(body))
             .transpose()?;
-        let _turn = self.turn();
-        // Read in the caller's turn, and before the op opens, since an open op can't be
-        // withdrawn: waiting callers hold no payload, and a file that can't be read, or one over
+        // Read in the caller's turn, and before the op opens, since an open op can't be withdrawn:
+        // waiting callers hold no payload, and a file that can't be read, or one over
         // `MAX_OP_PAYLOAD_BYTES`, fails this caller alone.
+        let _turn = self.turn();
         let payload = path
             .map_or(Ok(Vec::new()), read_payload)
             .map_err(Unanswered::Failed)?;
-        // A caller gone by its turn, as one killed while it waited, is dropped unsent, so that
-        // a call given up on costs nothing; closing only its writing side counts as gone. Once
-        // sent, the op is carried out even if its caller leaves.
+        // A caller gone by its turn, as one killed while it waited, is dropped unsent, so that a
+        // call given up on costs nothing; closing only its writing side counts as gone. Once sent,
+        // the op is carried out even if its caller leaves.
         if sys::peer_closed(connection) {
             return Err(Unanswered::Left);
         }
@@ -218,8 +217,8 @@ impl Ops {
         Ok(reply)
     }
 
-    /// Waits for the caller's turn, which comes once each caller that arrived before it has
-    /// had its own.
+    /// Waits for the caller's turn, which comes once each caller that arrived before it has had
+    /// its own.
     fn turn(&self) -> Turn<'_> {
         let mut flight = self.lock();
         let turn = flight.next_turn;
@@ -230,9 +229,9 @@ impl Ops {
         Turn(self)
     }
 
-    /// Puts a new op in flight, in the caller's turn, and returns its number and where its
-    /// reply will arrive. An op left in flight by an earlier turn whose session failed gets no
-    /// reply, so this one replaces it.
+    /// Puts a new op in flight, in the caller's turn, and returns its number and where its reply
+    /// will arrive. An op left in flight by an earlier turn whose session failed gets no reply, so
+    /// this one replaces it.
     fn open(&self) -> (u32, Receiver<OpReply>) {
         let mut flight = self.lock();
         let op = flight.next;
@@ -247,7 +246,6 @@ impl Ops {
     }
 }
 
-/// The path of the payload's file, which `body`, a request's, holds, if it is absolute.
 fn payload_path(body: &[u8]) -> Result<&Path, Unanswered> {
     let path = Path::new(OsStr::from_bytes(body));
     // A relative path would be read from `sandboxd`'s working directory, not the caller's.
@@ -262,9 +260,8 @@ fn payload_path(body: &[u8]) -> Result<&Path, Unanswered> {
 }
 
 /// Reads the payload in the file at `path`, which must be a regular file of at most
-/// [`MAX_OP_PAYLOAD_BYTES`]. [`sys::open_regular`] opens it, so its type is checked before
-/// anything is read, and a read that would block fails. A file too long is refused before it
-/// is read, and one that grows while it is read is read no further than a byte past the limit.
+/// `MAX_OP_PAYLOAD_BYTES`. `sys::open_regular` opens it, so its type is checked before anything
+/// is read, and a read that would block fails.
 fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
     let too_long = || {
         format!(
@@ -287,6 +284,7 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
         )
     };
     let mut payload = Vec::with_capacity(capacity);
+    // A file that grew since its size was read is read to one byte over the limit, and refused.
     file.take(MAX_OP_PAYLOAD_BYTES + 1)
         .read_to_end(&mut payload)
         .context(path.display())?;
@@ -296,7 +294,6 @@ fn read_payload(path: &Path) -> Result<Vec<u8>, String> {
     Ok(payload)
 }
 
-/// Sends op `op`: its call with its payload's size, then the payload's bytes.
 fn send(sender: &Sender, op: u32, call: OpCall, payload: &[u8]) -> io::Result<()> {
     let size = payload.len() as u64;
     sender.send(&FromSandbox::Op { op, call, size }, &[])?;
