@@ -7,25 +7,49 @@ use alloc::vec::Vec;
 use core::mem;
 
 use super::{Evaluation, Locals, MAX_CALLS, Scope, assign};
-use crate::builtins::{Call, called, lacks, place};
+use crate::builtins::{Call, called, lacks, origin, place};
 use crate::problem::Fault;
-use crate::syntax::{Def, Simple, Step};
-use crate::value::{FileId, Function, Kind, Value};
+use crate::syntax::{Def, Inside, Misfit, Simple, Step};
+use crate::value::{FileId, Function, Kind, Span, Value};
 use crate::{Loader, MAX_NESTING};
 
 impl<L: Loader> Evaluation<'_, L> {
     /// The function that `def` makes, run at `module`'s top level, where its defaults are
-    /// evaluated.
+    /// evaluated, each refused unless it fits its parameter's annotation.
     pub(super) fn define(&mut self, def: &Rc<Def>, module: FileId) -> Result<Value, Fault> {
         let scope = Scope::Top(module);
-        let defaults = (def.params.iter())
-            .map(|param| {
-                let default = param.default.as_ref();
-                default
-                    .map(|default| self.eval(&scope, default))
-                    .transpose()
-            })
-            .collect::<Result<_, _>>()?;
+        let mut defaults = Vec::new();
+        for param in &def.params {
+            let Some(default) = &param.default else {
+                defaults.push(None);
+                continue;
+            };
+            let value = self.eval(&scope, default)?;
+            // Where the `def` runs, so that a default that doesn't fit is refused though no call
+            // takes it, as Bazel checks it:
+            // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/eval/Eval.java#L260-L270
+            if let Some(annotation) = &param.annotation {
+                match annotation.misfit(&value) {
+                    None => {}
+                    Some(Misfit::Whole) => {
+                        let message = format!(
+                            "`{}` is {}, and can't default to {}: give {}",
+                            param.name.text,
+                            annotation.describe(),
+                            value.shown(),
+                            annotation.describe()
+                        );
+                        let fault = Fault::new(default.span, message);
+                        return Err(origin(fault, "the default", &value));
+                    }
+                    Some(Misfit::Inside(inside)) => {
+                        let whole = format!("`{}`'s default", param.name.text);
+                        return Err(refusal_inside(&inside, &whole, default.span));
+                    }
+                }
+            }
+            defaults.push(Some(value));
+        }
         let function = Function::new(Rc::clone(def), module, defaults, self.budget)?;
         Ok(Value {
             kind: Kind::Function(Rc::new(function)),
@@ -39,7 +63,8 @@ impl<L: Loader> Evaluation<'_, L> {
     /// # Errors
     ///
     /// The function runs already, `MAX_CALLS` run, the body would nest deeper than
-    /// `MAX_NESTING` there, the arguments bind no parameters, or the body's error, with a note
+    /// `MAX_NESTING` there, the arguments bind no parameters or don't fit their annotations, or
+    /// the body's error, or a returned value that doesn't fit the type after `->`, with a note
     /// that names the call.
     pub(super) fn function(
         &mut self,
@@ -79,11 +104,8 @@ impl<L: Loader> Evaluation<'_, L> {
         let returned = self.steps(function.module, &mut locals, &def.body);
         self.calls.pop();
         self.depth = caller;
-        let returned = returned.map_err(|fault| fault.note(called(def), Some(at)))?;
-        Ok(returned.unwrap_or(Value {
-            kind: Kind::None,
-            span: at,
-        }))
+        let returned = returned.and_then(|returned| checked_return(def, returned, at));
+        returned.map_err(|fault| fault.note(called(def), Some(at)))
     }
 
     fn steps<'d>(
@@ -91,7 +113,7 @@ impl<L: Loader> Evaluation<'_, L> {
         module: FileId,
         locals: &mut Locals<'d>,
         steps: &'d [Step],
-    ) -> Result<Option<Value>, Fault> {
+    ) -> Result<Option<(Span, Value)>, Fault> {
         for step in steps {
             let scope = Scope::Function {
                 module,
@@ -114,7 +136,7 @@ impl<L: Loader> Evaluation<'_, L> {
                             span: *keyword,
                         },
                     };
-                    return Ok(Some(value));
+                    return Ok(Some((*keyword, value)));
                 }
                 Step::If {
                     branches,
@@ -127,8 +149,8 @@ impl<L: Loader> Evaluation<'_, L> {
                             break;
                         }
                     }
-                    if let Some(value) = self.steps(module, locals, chosen)? {
-                        return Ok(Some(value));
+                    if let Some(returned) = self.steps(module, locals, chosen)? {
+                        return Ok(Some(returned));
                     }
                 }
             }
@@ -146,16 +168,95 @@ fn bind<'d>(function: &'d Function, call: &Call<'_>) -> Result<Locals<'d>, Fault
     let mut locals: Locals<'d> = (def.locals.iter())
         .map(|local| (local.as_str(), None))
         .collect();
+    let mut arguments = Vec::new();
     let mut missing = Vec::new();
     for ((param, given), default) in def.params.iter().zip(given).zip(&function.defaults) {
-        let Some(value) = given.or_else(|| default.clone()) else {
-            missing.push(param.name.text.as_str());
-            continue;
-        };
+        match (given, default) {
+            (Some(value), _) => arguments.push((param, value)),
+            // Not checked against its annotation here, as `define` checked it, as Bazel does:
+            // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/eval/StarlarkFunction.java#L626-L628
+            (None, Some(default)) => {
+                locals.insert(&param.name.text, Some(default.clone()));
+            }
+            (None, None) => missing.push(param.name.text.as_str()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(lacks(&def.name.text, &missing, call.at));
+    }
+    // Each argument is checked once all parameters are bound, as starlark-rust checks them:
+    // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/compiler/def.rs#L796-L815
+    for (param, value) in arguments {
+        if let Some(annotation) = &param.annotation {
+            match annotation.misfit(&value) {
+                None => {}
+                Some(Misfit::Whole) => {
+                    let message = format!(
+                        "`{}`'s `{}` can't be {}: give {}",
+                        def.name.text,
+                        param.name.text,
+                        value.shown(),
+                        annotation.describe()
+                    );
+                    return Err(origin(Fault::new(call.at, message), "the argument", &value));
+                }
+                Some(Misfit::Inside(inside)) => {
+                    let whole = format!("`{}`'s `{}`", def.name.text, param.name.text);
+                    return Err(refusal_inside(&inside, &whole, call.at));
+                }
+            }
+        }
         locals.insert(&param.name.text, Some(value));
     }
-    if missing.is_empty() {
-        return Ok(locals);
+    Ok(locals)
+}
+
+/// What a call of `def` at `at` gives: `returned`, a `return`'s keyword and its value, or else
+/// `None`, refused unless it fits the type annotated after `->`.
+// A value that doesn't fit is refused at its `return`, as starlark-rust refuses it there, or else
+// at the function's name, where starlark-rust refuses it at the end of the body's last
+// statement, a span that the subset's steps don't hold:
+// https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/bc/compiler/stmt.rs#L185-L196
+// https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/bc/compiler/stmt.rs#L267-L279
+fn checked_return(def: &Def, returned: Option<(Span, Value)>, at: Span) -> Result<Value, Fault> {
+    let none = Value {
+        kind: Kind::None,
+        span: at,
+    };
+    let (end, value) = returned.unwrap_or((def.name.span, none));
+    if let Some(returns) = &def.returns {
+        match returns.misfit(&value) {
+            None => {}
+            Some(Misfit::Whole) => {
+                let message = format!(
+                    "`{}` can't return {}: it returns {}",
+                    def.name.text,
+                    value.shown(),
+                    returns.describe()
+                );
+                return Err(Fault::new(end, message));
+            }
+            Some(Misfit::Inside(inside)) => {
+                let whole = format!("what `{}` returns", def.name.text);
+                return Err(refusal_inside(&inside, &whole, end));
+            }
+        }
     }
-    Err(lacks(&def.name.text, &missing, call.at))
+    Ok(value)
+}
+
+/// The refusal, at `at`, of the value that `inside` finds in the one that `whole` names, with a
+/// note on where that value is made.
+fn refusal_inside(inside: &Inside, whole: &str, at: Span) -> Fault {
+    let mut named = format!("{} ", inside.part.of());
+    for part in &inside.outer {
+        named.push_str(part.of());
+        named.push(' ');
+    }
+    let message = format!(
+        "{named}{whole} can't be {}: give {}",
+        inside.found.shown(),
+        inside.fits
+    );
+    origin(Fault::new(at, message), inside.part.the(), &inside.found)
 }

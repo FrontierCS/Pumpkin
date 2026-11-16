@@ -560,12 +560,12 @@ fn bad() {
             == bad/stack/lib.star
 
             == bad/stack/task.star: 0 of 7 prefixes evaluate
-            bad/stack/lib.star:71:11: `+` can't take an int and a bool: give it two numbers, two strings, two lists or two tuples
-                71 |         1 + (DEEP == DEEP)
-                   |           ^
-                the left operand, `1`, is made at bad/stack/lib.star:71:9
-                the right operand, `True`, is made at bad/stack/lib.star:71:14
-                in `deepest()`, called at bad/stack/lib.star:138:11"#]],
+            bad/stack/lib.star:85:18: `+` can't take an int and a bool: give it two numbers, two strings, two lists or two tuples
+                85 |         t(INNER) + (DEEP == DEEP)
+                   |                  ^
+                the left operand, `1`, is made at bad/stack/lib.star:20:12
+                the right operand, `True`, is made at bad/stack/lib.star:85:21
+                in `deepest()`, called at bad/stack/lib.star:153:11"#]],
     );
 }
 
