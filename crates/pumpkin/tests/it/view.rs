@@ -1514,10 +1514,11 @@ fn traces_a_caller() {
     }
     let back = json!({ "role": "assistant", "content": "let me look",
         "tool_calls": [{ "id": "t1", "type": "function", "function": { "name": "grep", "arguments": "{}" } }] });
+    let sent = [system, asked, back, tool];
     let kept = model.keep(
         8,
         "messages",
-        &[system, asked, back, tool],
+        &sent,
         &[],
         chat_rest(),
         Some(&chat(
@@ -1526,6 +1527,17 @@ fn traces_a_caller() {
         )),
     );
     log.push(answered(15, "job-0", 8, 200, kept, None));
+    // And the same again, abandoned as the judge's route ended.
+    log.push(started(16, "job-0", 9));
+    let ended = "{\"error\":{\"message\":\"the model route has ended\"}}";
+    let kept = model.keep(9, "messages", &sent, &[], chat_rest(), Some(ended));
+    let mut abandoned = answered(17, "job-0", 9, 0, kept, None);
+    let event = abandoned["event"].as_object_mut().unwrap();
+    event.remove("usage");
+    event.insert("answer".to_owned(), json!({ "kind": "abandoned" }));
+    event.insert("upstream_status".to_owned(), Value::Null);
+    event.insert("model".to_owned(), json!("glm-5.3-flash"));
+    log.push(abandoned);
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
         &scratch,
@@ -1566,8 +1578,10 @@ fn traces_a_caller() {
     ));
     let entries = served.get(&format!("{run}/trace/job-0/entries?from=0&to=9"));
     said.push(format!("its entries:\n{}", entries_text(&entries)));
-    let folded = served.get(&format!("{run}/trace/job-0/stats?by=thread"));
-    said.push(format!("by thread:\n{}", columns_text(&folded, "rows")));
+    for by in ["step", "thread"] {
+        let folded = served.get(&format!("{run}/trace/job-0/stats?by={by}"));
+        said.push(format!("by {by}:\n{}", columns_text(&folded, "rows")));
+    }
     let exchange = served.get(&format!("{run}/exchange/1"));
     said.push(format!("exchange 1:\n{}", fields(&exchange, &[])));
     let (status, request) = served.get_with(&format!("{run}/exchange/1/request"), &[]);
@@ -1649,7 +1663,7 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="cut" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
             caller: "agent"
-            end: 5369
+            end: 5863
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -1709,11 +1723,12 @@ fn traces_a_caller() {
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.08333333333333333 cached=50 calls=["grep"] end_ns="13000000000" input=600 items=2 kept_bytes=243 output=10 request=6 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
+            added=2 added_entries=1 answer="abandoned" answers=0 back_bytes=49 calls=[] differs=[] end_ns="17000000000" items=4 kept_bytes=391 model_ns=1000000001 parent=6 repeat_of=8 request=9 sent_bytes=100 start_ns="15999999999" thread=6 tools=0 turn=6 whole=true
             caller: "job-0"
-            end: 5369
+            end: 5863
             live: false
             log_epoch: 0
-            thread_spans: {"span_ns":[null],"thread":[6]}
+            thread_spans: {"span_ns":[1000000001],"thread":[6]}
             threads: 1
             tool_lists: [{"digest":null,"names":["grep"]}]
 
@@ -1730,12 +1745,22 @@ fn traces_a_caller() {
             {"at":"7/out/2","call_id":"t2","digest":null,"index":4,"kind":"call","name":"grep","request":7,"side":"answer","text":"{}"}
             {"at":"8/in/3/0","call":"6/out/2","call_id":"t1","digest":"000000000000000000000000000000000000000000000000000000000000000b","index":0,"kind":"output","request":8,"side":"added","text":"found"}
             {"at":"8/out/0","digest":null,"index":1,"kind":"assistant","request":8,"side":"answer","text":"yes"}
+            {"at":"9/in/3/0","call":"6/out/2","call_id":"t1","digest":"000000000000000000000000000000000000000000000000000000000000000b","index":0,"kind":"output","request":9,"side":"added","text":"found"}
             next: null
+            by step:
+            cache_hit=0.08333333333333333 cached=50 calls={"grep":1} input=600 outcome="ok" output=10 request=6 status=200 thread=6 turn=6
+            cache_hit=0.07142857142857142 cached=50 calls={"grep":1} input=700 outcome="ok" output=10 repeat_of=6 request=7 status=200 thread=6 turn=6
+            cache_hit=0.0625 cached=50 calls={} input=800 outcome="ok" output=10 request=8 status=200 thread=6 turn=6
+            calls={} model_ns=1000000001 outcome="refused" queue_ns=2999999999 repeat_of=8 request=9 thread=6 turn=6
+            by: "step"
+            caller: "job-0"
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":4,"cached":150,"cached_unknown":1,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":4,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":1,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":4,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":4,"model_ns":1000000001,"model_ns_unknown":3,"output":30,"output_unknown":1,"queue_ns":2999999999,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":4,"refusals":1,"repeats":2,"retries":0,"span_ns":1000000001,"steps":4,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":4}
+
             by thread:
-            cache_hit=0.07142857142857142 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"grep":2} decode_ns_unknown=3 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=0 median_to_first_byte_ns_unknown=3 median_to_first_token_ns_unknown=3 model_ns_unknown=3 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=0 steps=3 thread=6 usd_unknown=3
+            cache_hit=0.07142857142857142 cache_write_unknown=4 cached=150 cached_unknown=1 calls={"grep":2} decode_ns_unknown=4 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=1 median_to_first_byte_ns_unknown=4 median_to_first_token_ns_unknown=4 model_ns=1000000001 model_ns_unknown=3 output=30 output_unknown=1 queue_ns=2999999999 queue_ns_unknown=3 reasoning_unknown=4 refusals=1 repeats=2 retries=0 span_ns=1000000001 steps=4 thread=6 usd_unknown=4
             by: "thread"
             caller: "job-0"
-            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":3,"cached":150,"cached_unknown":0,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":3,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":0,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":3,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":3,"model_ns":null,"model_ns_unknown":3,"output":30,"output_unknown":0,"queue_ns":null,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":1,"retries":0,"span_ns":null,"steps":3,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":3}
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":4,"cached":150,"cached_unknown":1,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":4,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":1,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":4,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":4,"model_ns":1000000001,"model_ns_unknown":3,"output":30,"output_unknown":1,"queue_ns":2999999999,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":4,"refusals":1,"repeats":2,"retries":0,"span_ns":1000000001,"steps":4,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":4}
 
             exchange 1:
             answer: {"kind":"forwarded"}

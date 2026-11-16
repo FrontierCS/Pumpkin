@@ -284,6 +284,7 @@ pub(super) enum Answer {
     Cut,
     Barred,
     Refused,
+    Abandoned,
 }
 
 #[derive(Debug, Default, Deserialize)]

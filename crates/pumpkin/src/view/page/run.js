@@ -547,7 +547,7 @@ function drawFacts(facts, data) {
   // How long each request in flight has gone unanswered, to now, or to the end of a run that ended.
   const at = times ? (times.now ?? times.end ?? times.last) : 0;
   const flying = model ? [...model.in_flight].sort((a, b) => a.since - b.since) : [];
-  const notOk = "not forwarded whole with a 2xx status: cut short, refused or barred by the route, or answered with another status";
+  const notOk = "not forwarded whole with a 2xx status: cut short, refused, barred or abandoned by the route, or answered with another status";
   fill(
     facts,
     fact("Task", data.task || "-"),

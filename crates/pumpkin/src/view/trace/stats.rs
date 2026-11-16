@@ -34,7 +34,7 @@ enum Outcome {
     Ok,
     /// Answered by its upstream with a failure, or cut short.
     Failed,
-    /// Refused or barred by Pumpkin.
+    /// Refused, barred or abandoned by Pumpkin.
     Refused,
     #[default]
     InFlight,
@@ -175,7 +175,10 @@ impl Trace {
                 })
             });
         let (retry_of, repeat_of) = self.same(exchanges, step);
-        let refused = matches!(event["answer"]["kind"].as_str(), Some("refused" | "barred"));
+        let refused = matches!(
+            event["answer"]["kind"].as_str(),
+            Some("refused" | "barred" | "abandoned")
+        );
         let outcome = match self.answered_ok(exchanges, index) {
             None => Outcome::InFlight,
             Some(true) => Outcome::Ok,

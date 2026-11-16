@@ -104,6 +104,9 @@ pub enum Answer {
         status: u16,
         message: String,
     },
+    /// With the route's end, after the request for `model` was handed to the upstream's
+    /// connection, which may have sent it whole, and before the response's head came.
+    Abandoned { model: ModelName },
 }
 
 /// How a run serves a model route's entry for one API: the upstream that its requests reach, of
@@ -284,12 +287,8 @@ impl Upstream {
         let response = match call.send(closed.body()) {
             Ok(response) => response,
             Err(error) => {
-                let refusal = if self.was_shut_down() {
-                    Refusal::ended()
-                } else {
-                    unanswered(&error)
-                };
-                return refuse(refusal, (None, None), closed, client, answered);
+                let (refusal, answer) = self.without_head(&error, closed);
+                return refuse(refusal, answer, closed, client, answered);
             }
         };
         let status = response.status().as_u16();
@@ -340,6 +339,20 @@ impl Upstream {
             Relayed::Whole => client.end(),
             Relayed::BrokeOff => client.cut(),
             Relayed::Unsent(error) => Err(error),
+        }
+    }
+
+    /// The refusal that answers `closed` once sending it failed with `error`, before the
+    /// response's head, and the answer told for it: the route's end if the route has shut down,
+    /// which abandoned the request, and else no answer from the provider.
+    fn without_head(&self, error: &ureq::Error, closed: &Closed<'_>) -> (Refusal, Answer) {
+        if self.was_shut_down() {
+            let model = closed.model().clone();
+            (Refusal::ended(), Answer::Abandoned { model })
+        } else {
+            let refusal = unanswered(error);
+            let answer = refusal.answered(None, None);
+            (refusal, answer)
         }
     }
 
@@ -535,12 +548,11 @@ fn bound(until: Deadline) -> Option<Duration> {
     }
 }
 
-/// Answers `client`'s request with `refusal`, in place of the upstream's response with the
-/// status and request id `upstream`, if one came, once the refusal is kept and `answered` is
-/// told so.
+/// Answers `client`'s request with `refusal`, which came in place of any response of the
+/// upstream's, once the refusal is kept and `answered` is told `answer`.
 fn refuse(
     refusal: Refusal,
-    (upstream_status, request_id): (Option<u16>, Option<String>),
+    answer: Answer,
     closed: &Closed<'_>,
     client: Client<'_>,
     answered: impl FnOnce(Answer),
@@ -548,7 +560,7 @@ fn refuse(
     let Client { request, by, keep } = client;
     let api = closed.route().api();
     keep.response(refusal.body(api).as_bytes());
-    answered(refusal.answered(upstream_status, request_id));
+    answered(answer);
     refusal.answer(api, request, by)
 }
 
