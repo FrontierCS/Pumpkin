@@ -10,14 +10,15 @@ use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 
 impl Workflow {
-    /// Parses a deserialized IR: resolves its names to ids and checks the rules that span its
-    /// parts.
-    ///
-    /// # Errors
-    ///
-    /// Returns the rules the IR breaks, each [at](super::ParseError::at) its place in the IR,
-    /// such as a name that resolves to nothing or a second agent. A rule about parts that fail
-    /// to resolve is not checked, so fixing those errors may reveal others.
+    /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
+    /// [at](super::ParseError::at) its place. The rules: one agent and one submit grant; names
+    /// unique among roles, among a role's slots and among its grants; a judge holds lease grants
+    /// alone, a runner no grant and no model route; the agent's `dirs` and `files` give each path
+    /// once, none below a file; a slot's `max_bytes` and a lease grant's `transfer_bytes` are
+    /// within the protocol's limits; each grant names a role of its kind that no other grant of its
+    /// kind names, a judge grant a slot it has; an agent's runner has an image no judge has; every
+    /// runner is leased; the score's judge is named by no judge grant. A rule about parts that
+    /// fail to resolve goes unchecked, so fixing these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -27,18 +28,13 @@ impl Workflow {
 struct Parser<'ir> {
     errors: Errors,
     role_ids: BTreeMap<&'ir str, RoleId>,
-    /// Each role's sandbox, in the IR's order.
     roles: Vec<Sandbox>,
-    /// Every role with an agent runtime, each at its place in the IR, with the grants it holds.
     agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
     judges: BTreeMap<RoleId, Judge>,
     runners: BTreeMap<RoleId, Runner>,
-    /// Every role whose lease grants are parsed, the first agent, then each judge with grants in
-    /// the IR's order, at its place in the IR, with the grants it holds.
     holders: Vec<(JsonPointer, RoleId, &'ir [ir::Grant])>,
 }
 
-/// The agent's grants, parsed: its judge grants and its one submit grant.
 type Grants = (
     Result<Vec<JudgeGrant>, Reported>,
     Result<SubmitGrant, Reported>,
@@ -56,6 +52,7 @@ impl<'ir> Parser<'ir> {
         // With no agent, it holds no grants, so the score is checked against none.
         let (agent, grants) = match self.first_agent() {
             Ok((at, agent, grants)) => {
+                // The agent's lease grants come first, as [`Workflow::lease_grants`] says.
                 (self.holders).insert(0, (at.clone(), agent.role, grants));
                 (Ok((agent, self.grants(&at, grants))), grants)
             }
@@ -154,6 +151,7 @@ impl<'ir> Parser<'ir> {
                     self.runners.insert(id, runner);
                 }
             }
+            // A name given twice, which `unique` has reported, resolves to its first role.
             self.role_ids.entry(name.as_str()).or_insert(id);
         }
     }
@@ -188,12 +186,9 @@ impl<'ir> Parser<'ir> {
         self.agents.push((at, agent, grants));
     }
 
-    /// Reports each path of the agent's `dirs` and `files`, in the runtime at `runtime`, that
-    /// comes again, or is below a file.
     fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
         let file_paths = files.iter().map(|file| &file.path);
         let all: Vec<&RolePath> = dirs.iter().map(|dir| &dir.path).chain(file_paths).collect();
-        // The place of the entry at `index` in `all`: a dir, or past them, a file.
         let at = |index: usize| match index.checked_sub(dirs.len()) {
             None => runtime.token("dirs").token(index),
             Some(file) => runtime.token("files").token(file),
@@ -217,8 +212,6 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// The workflow's first agent, at its place in the IR, with the grants it holds. Reports a
-    /// workflow with none, and each agent after the first, so a workflow has exactly one.
     fn first_agent(&mut self) -> Result<(JsonPointer, Agent, &'ir [ir::Grant]), Reported> {
         let mut agents = std::mem::take(&mut self.agents).into_iter();
         let Some(first) = agents.next() else {
@@ -248,9 +241,9 @@ impl<'ir> Parser<'ir> {
         let list = at.token("runtime").token("judge").token("slots");
         let names = slots.iter().map(|slot| &slot.name);
         self.errors.unique(names, |index| list.token(index));
-        // Every payload reaches its judge through an op, which carries no more.
         for (index, slot) in slots.iter().enumerate() {
             let max_bytes = slot.max_bytes.get();
+            // Every payload reaches its judge through an op, which carries no more.
             if max_bytes > MAX_OP_PAYLOAD_BYTES {
                 self.errors.report(
                     list.token(index).token("max_bytes"),
@@ -262,8 +255,8 @@ impl<'ir> Parser<'ir> {
                 );
             }
         }
-        // A slot over the limit is kept, so that the calls that name it resolve, and reported,
-        // so that no parsed workflow holds it.
+        // A slot over the limit is kept, so that the calls that name it resolve, and reported, so
+        // that no parsed workflow holds it.
         let slots = (slots.iter())
             .map(|ir::Slot { name, max_bytes }| Slot {
                 name: name.clone(),
@@ -278,7 +271,6 @@ impl<'ir> Parser<'ir> {
         self.judges.insert(role, judge);
     }
 
-    /// The judge grants of the agent at `agent` and its one submit grant, of its `grants`.
     fn grants(&mut self, agent: &JsonPointer, grants: &'ir [ir::Grant]) -> Grants {
         let list = agent.token("grants");
         let mut judge_grants = Vec::new();
@@ -299,9 +291,6 @@ impl<'ir> Parser<'ir> {
         (judge_grants.into_iter().collect(), submit_grant)
     }
 
-    /// Every holder's lease grants, in `holders`' order, each holder's grants named once among
-    /// them, `agent` being the agent's role, if the workflow has one. Reports each runner that
-    /// none of them names.
     fn lease_grants(&mut self, agent: Option<RoleId>) -> Result<Vec<LeaseGrant>, Reported> {
         let holders = std::mem::take(&mut self.holders);
         let mut parsed = Vec::new();
@@ -324,9 +313,6 @@ impl<'ir> Parser<'ir> {
         parsed.into_iter().collect()
     }
 
-    /// A lease grant of role `holder`'s, at `at`, whose runner none of the `earlier` lease grants
-    /// names: a runner, whose image, if `holder` is the `agent`, no judge has, so that the agent
-    /// never runs what a judge's image holds.
     fn lease_grant(
         &mut self,
         at: &JsonPointer,
@@ -371,6 +357,7 @@ impl<'ir> Parser<'ir> {
             }
             None => Ok(()),
         };
+        // After the rules above, so that they are reported though the role fails to resolve.
         let id = self.resolve(&role_at, role)?;
         if !self.runners.contains_key(&id) {
             let kind = self.kind(id);
@@ -393,9 +380,8 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// Reports, at `at`, the agent's runner `runner` if its image is a judge's
-    /// ([`ir::LeaseGrant::role`]).
     fn agents_runner(&mut self, at: &JsonPointer, runner: RoleId) -> Result<(), Reported> {
+        // So that the agent never runs what a judge's image holds ([`ir::LeaseGrant::role`]).
         let (role, image) = (&self.roles[runner.0].name, &self.roles[runner.0].image);
         let judge = (self.judges.keys()).find(|judge| self.roles[judge.0].image == *image);
         let Some(judge) = judge else {
@@ -411,8 +397,6 @@ impl<'ir> Parser<'ir> {
         ))
     }
 
-    /// Reports each runner that none of `grants`, every role's lease grants, names, at its place
-    /// in the IR.
     fn unleased(&mut self, grants: &[(RoleId, &ir::LeaseGrant)]) {
         let named = |role: &Name| grants.iter().any(|(_, grant)| grant.role == *role);
         let runners: Vec<RoleId> = self.runners.keys().copied().collect();
@@ -426,7 +410,6 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// The role named `name`, which a reference at `at` names; reports an unknown name.
     fn resolve(&mut self, at: &JsonPointer, name: &Name) -> Result<RoleId, Reported> {
         let id = self.role_ids.get(name.as_str()).copied();
         id.ok_or_else(|| {
@@ -435,7 +418,6 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// The kind of role `id` is, as a refusal names it, such as `a judge`.
     fn kind(&self, id: RoleId) -> &'static str {
         if self.judges.contains_key(&id) {
             "a judge"
@@ -446,7 +428,6 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    /// A judge grant, at `at`, whose judge none of the `earlier` grants names.
     fn judge_grant(
         &mut self,
         at: &JsonPointer,
@@ -472,6 +453,7 @@ impl<'ir> Parser<'ir> {
             )),
             None => Ok(()),
         };
+        // After the rule above, so that it is reported though the slot fails to resolve.
         let slot = self.judge_slot(at, role, slot)?;
         shared.map(|()| JudgeGrant {
             name: name.clone(),
@@ -482,8 +464,6 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// The agent's one submit grant, of those named at their places in its grants. Reports
-    /// none, at `at`, and each after the first.
     fn submit_grant(
         &mut self,
         at: &JsonPointer,
@@ -506,8 +486,6 @@ impl<'ir> Parser<'ir> {
         parsed
     }
 
-    /// The score: a slot of a judge that none of the agent's `grants` names, so that the judge
-    /// that scores the selection returns nothing to the agent.
     fn score(&mut self, score: &ir::Score, grants: &[ir::Grant]) -> Result<Score, Reported> {
         let ir::Score {
             role,
@@ -515,6 +493,7 @@ impl<'ir> Parser<'ir> {
             timeout_seconds,
         } = score;
         let at = JsonPointer::root().token("score");
+        // So that the judge that scores the selection returns nothing to the agent.
         let shared = match self.judge_grant_naming(role, grants) {
             Some(grant) => Err(self.errors.report(
                 at.token("role"),
@@ -532,14 +511,13 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// The first of `grants` that is a judge grant naming `role`, if `role` is a judge.
     fn judge_grant_naming<'g>(
         &self,
         role: &Name,
         grants: &'g [ir::Grant],
     ) -> Option<&'g ir::JudgeGrant> {
-        // The grants are compared by the role they name in the IR, so that a rule about the
-        // judges they name holds even where a grant's slot or the score's fails to resolve.
+        // The grants are compared by the role they name in the IR, so that a rule about the judges
+        // they name holds even where a grant's slot or the score's fails to resolve.
         let id = self.role_ids.get(role.as_str())?;
         if !self.judges.contains_key(id) {
             return None;
@@ -550,7 +528,6 @@ impl<'ir> Parser<'ir> {
         })
     }
 
-    /// Resolves a judge call's slot, `slot` of the judge `role`, with the call at `at`.
     fn judge_slot(
         &mut self,
         at: &JsonPointer,
@@ -579,9 +556,8 @@ impl<'ir> Parser<'ir> {
     }
 }
 
-/// The place of `grant`, the `index`th of the list at `list`: its fields are below its kind, as in
-/// `{"judge": {…}}`.
 fn place(list: &JsonPointer, index: usize, grant: &ir::Grant) -> JsonPointer {
+    // Below the grant's kind, as in `{"judge": {…}}`.
     let kind = match grant {
         ir::Grant::Judge(_) => "judge",
         ir::Grant::Lease(_) => "lease",

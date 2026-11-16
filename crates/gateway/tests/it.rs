@@ -1,10 +1,9 @@
-//! The gateway's end of a session, against a fake sandbox that answers the gateway's first
-//! request with frames of its choosing, ops and model requests among them, waiting where it
-//! chooses for an op's reply or a model response's end, for a while or for the gateway to hang
-//! up, and then ends the session: it sends what a buggy `sandboxd` might. Other fakes open their
-//! sessions with first frames of their own. An accept that is stopped takes no connection. A
-//! dialer's fakes listen behind the stand-in TLS edge.
-
+//! The gateway's end of a session, against a fake sandbox that answers the gateway's first request
+//! with frames of its choosing, ops and model requests among them, waiting where it chooses for an
+//! op's reply or a model response's end, for a while or for the gateway to hang up, and then ends
+//! the session: it sends what a buggy `sandboxd` might. Other fakes open their sessions with first
+//! frames of their own. An accept that is stopped takes no connection. A dialer's fakes listen
+//! behind the stand-in TLS edge.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -42,48 +41,38 @@ use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::{HUNG, hung};
 
-/// What the gateway asks of the fake sandbox, given what arrives, and what came of it.
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
-/// The frames the fake sandbox sends in answer to the request on `stream`, with
-/// [`await_reply`], [`pause`], [`until_hang_up`] and [`stall`] where it waits, before it ends the
-/// session.
 type Answer = fn(stream: u32) -> Vec<(Value, Vec<u8>)>;
 
-/// What a fake sandbox sends first on its connection, if anything ([`opened`]).
 type Opening = fn(&mut UnixStream);
 
-/// How long the fake sandbox reads and sends nothing where its answer has a [`pause`], as over
-/// a slow link, whose end no event marks. A request by a [`hung`] deadline outlasts it, so no
-/// outcome rests on a margin; a bound of the gateway's own shorter than it would show.
+// How long the fake sandbox reads and sends nothing where its answer has a `pause`, as over a slow
+// link, whose end no event marks. A request by a `hung` deadline outlasts it, so no outcome rests
+// on a margin.
 const PAUSE: Duration = Duration::from_millis(30);
 
-/// How long a grant listener gives a peer to say its hello, where a silent one shows the bound:
-/// each other peer says its hello as it dials, which the listener reads even once the bound has
-/// passed, so no outcome rests on a margin.
+// How long a grant listener gives a peer to say its hello, where a silent one shows the bound: each
+// other peer says its hello as it dials, which the listener reads even once the bound has passed,
+// so no outcome rests on a margin.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
-/// A request's deadline that passes soon, while the fake sandbox waits for the gateway to hang
-/// up ([`until_hang_up`]).
 fn short() -> Deadline {
     Deadline::after(Duration::from_millis(100))
 }
 
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
-    // Kept if the test fails.
     let dir = tempfile::Builder::new()
         .prefix("gateway-")
         .tempdir()
         .unwrap()
+        // Kept if the test fails.
         .keep();
     let lines = scenario(&dir);
     expect.assert_eq(&lines.join("\n"));
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// A scenario that runs each case against a fake sandbox of its own, whose session takes ops
-/// within `ops`, if it gives a limit, and model requests if `models`, in a directory of its own,
-/// and reports what came of each.
 fn fakes(
     ops: Option<OpPayloadLimit>,
     models: bool,
@@ -98,7 +87,6 @@ fn fakes(
     }
 }
 
-/// What came of `action`, and the op replies and model responses the fake sandbox heard, if any.
 fn run(
     dir: &Path,
     ops: Option<OpPayloadLimit>,
@@ -115,8 +103,6 @@ fn run(
     heard(outcome, session, arrivals, sandbox)
 }
 
-/// What `f` returns, run on a thread of its own, so that an `f` that hangs fails the test
-/// rather than hanging it.
 fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
     let (returned, result) = mpsc::channel();
     let thread = thread::spawn(move || {
@@ -130,8 +116,6 @@ fn bounded<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static
     }
 }
 
-/// A run's sockets, made at `dir`, where nothing is yet, the registration of a sandbox's socket
-/// in them, and the socket's path.
 fn issued(dir: &Path) -> (Sockets, Registration, PathBuf) {
     let sockets = Sockets::create(dir.to_owned()).unwrap();
     let name = Name::try_from("sandbox".to_owned()).unwrap();
@@ -139,10 +123,6 @@ fn issued(dir: &Path) -> (Sockets, Registration, PathBuf) {
     (sockets, registration, dir.join(SOCKET_NAME))
 }
 
-/// A session, accepted with `ops` and `models`, with a fake sandbox in the new directory `dir`
-/// that answers the session's first request with `answer`'s frames, what arrives for the
-/// session's owner, and the sandbox's thread, which returns the op replies and model responses
-/// it heard.
 fn connect(
     dir: &Path,
     ops: Option<OpPayloadLimit>,
@@ -162,8 +142,8 @@ fn connect(
             Some(HelloReply::Accepted { grant: None }),
             "the answer to the hello"
         );
-        // The gateway sends no request if it ends the session first.
         let Some((request, _)) = frame::read::<ToSandbox>(&mut connection).unwrap() else {
+            // The gateway sends no request if it ends the session first.
             return Vec::new();
         };
         let mut replies = Vec::new();
@@ -174,8 +154,8 @@ fn connect(
                 thread::sleep(PAUSE);
                 true
             } else if message == "stall" {
-                // Here and below, it reads nothing more, as a stuck sandbox: what the
-                // connection's buffers hold by the hang-up depends on their sizes.
+                // Here and below, it reads nothing more, as a stuck sandbox: what the connection's
+                // buffers hold by the hang-up depends on their sizes.
                 send_unended(&mut connection);
                 return replies;
             } else if message == "hang_up_unread" {
@@ -193,9 +173,9 @@ fn connect(
                 break;
             }
         }
-        // End the session, as a sandbox that closes its end of the connection does, but note
-        // the op replies and model responses until the gateway closes its end too. A connection
-        // the gateway has closed already is fine.
+        // End the session, as a sandbox that closes its end of the connection does, but note the op
+        // replies and model responses until the gateway closes its end too. A connection the
+        // gateway has closed already is fine.
         let _ = connection.shutdown(Shutdown::Write);
         while hear_reply(&mut connection, &mut replies) {}
         replies
@@ -209,10 +189,6 @@ fn connect(
     (session, arrivals, sandbox)
 }
 
-/// A fake sandbox in the new directory `dir` that connects and sends `opening` before the accept
-/// begins, so that the accept, by `by`, takes its connection at once: what the sandbox heard in
-/// answer, then what came of the accept, and of a freeze, which the sandbox answers, if the
-/// session opened.
 fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
     let (_sockets, registration, socket) = issued(dir);
     let mut connection = UnixStream::connect(socket).unwrap();
@@ -237,8 +213,6 @@ fn opened(dir: &Path, opening: Opening, by: Deadline) -> String {
     format!("heard {}; {outcome}", sandbox.join().unwrap())
 }
 
-/// `outcome`, and the op replies and model responses that `sandbox` heard by the end of
-/// `session`, if any.
 fn heard(
     outcome: String,
     session: Session,
@@ -263,8 +237,6 @@ fn heard(
     }
 }
 
-/// Reads what the gateway sends until an op's reply or a model response's end, noting each in
-/// `replies` with the parts of model responses before it: `false` if the session ends first.
 fn hear_reply(connection: &mut UnixStream, replies: &mut Vec<String>) -> bool {
     while let Ok(Some((message, body))) = frame::read::<ToSandbox>(connection) {
         let answered = matches!(
@@ -279,7 +251,6 @@ fn hear_reply(connection: &mut UnixStream, replies: &mut Vec<String>) -> bool {
     false
 }
 
-/// An op's reply or a part of a model response, as the fake sandbox notes it.
 fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
     match message {
         ToSandbox::OpReply { op, reply } => Some(format!(
@@ -310,8 +281,6 @@ fn note(message: ToSandbox, body: &[u8]) -> Option<String> {
     }
 }
 
-/// Sends the frame of `message` and `body` over and over, as fast as the gateway reads them,
-/// and reads nothing, until the gateway hangs up, which a write then shows by failing.
 fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
     let hung = hung();
     while frame::write(connection, message, body).is_ok() {
@@ -322,9 +291,6 @@ fn await_hang_up(connection: &mut UnixStream, message: &Value, body: &[u8]) {
     }
 }
 
-/// Sends a frame a byte at a time, a millisecond apart, and reads nothing, until the gateway
-/// hangs up, which a write then shows by failing. The frame's body is a full one, whose last byte
-/// is never sent, so the gateway reads no whole frame to act on.
 fn send_unended(connection: &mut UnixStream) {
     let mut unended = Vec::new();
     let (message, _) = done(0);
@@ -343,7 +309,6 @@ fn send_unended(connection: &mut UnixStream) {
     }
 }
 
-/// The stream a request names: `None` for an op's reply or a part of a model response.
 fn stream_of(request: &ToSandbox) -> Option<u32> {
     match *request {
         ToSandbox::Put { stream, .. }
@@ -361,7 +326,6 @@ fn stream_of(request: &ToSandbox) -> Option<u32> {
     }
 }
 
-/// Collects `/out` within small limits, and lists the files that arrived.
 fn collect(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let into = dir.join("collected");
     let limits = Limits {
@@ -394,7 +358,6 @@ fn launch() -> Launch {
     }
 }
 
-/// Starts a command and, while it runs, freezes the sandbox.
 fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let process = session.start(launch(), hung());
     let frozen = session.freeze(hung());
@@ -405,8 +368,6 @@ fn start_and_freeze(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> S
     )
 }
 
-/// Asks for an op payload limit over the protocol's, which is refused, then answers ops as
-/// [`freeze_and_take`] does.
 fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let refused = OpPayloadLimit::try_from(MAX_OP_PAYLOAD_BYTES + 1).unwrap_err();
     format!(
@@ -415,15 +376,11 @@ fn over_the_cap(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path)
     )
 }
 
-/// Freezes the sandbox, whose answer may carry ops and model requests, then takes what arrives
-/// ([`take`]).
 fn freeze_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let frozen = outcome(session.freeze(hung()));
     format!("freeze: {frozen}; {}", take(session, arrivals, None))
 }
 
-/// Starts a command, whose stream carries what the fake sandbox answers, then takes what
-/// arrives ([`take`]), whether it started or not.
 fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     match session.start(launch(), hung()) {
         Ok(process) => format!("started; {}", take(session, arrivals, Some(process))),
@@ -435,15 +392,11 @@ fn start_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
     }
 }
 
-/// Collects `/out` as [`collect`] does, then takes what arrives ([`take`]).
 fn collect_and_take(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let collected = collect(session, arrivals, dir);
     format!("{collected}; {}", take(session, arrivals, None))
 }
 
-/// Answers each op that arrives, refuses each whose payload was over the limit, answers each
-/// model request as [`answer_model`] does, and notes each command's exit, saying whether it is
-/// `started`'s, until the session's end, and then anything that arrives after it.
 fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Process>) -> String {
     let mut lines = Vec::new();
     loop {
@@ -490,7 +443,6 @@ fn take(session: &mut Session, arrivals: &Receiver<Arrival>, started: Option<Pro
     lines.join("; ")
 }
 
-/// The next arrival, or `None` once the session's reader has stopped.
 fn next(arrivals: &Receiver<Arrival>) -> Option<Arrival> {
     match arrivals.recv_timeout(HUNG) {
         Ok(arrival) => Some(arrival),
@@ -499,7 +451,6 @@ fn next(arrivals: &Receiver<Arrival>) -> Option<Arrival> {
     }
 }
 
-/// The next arrival, which must be an op that arrived whole.
 fn next_op(arrivals: &Receiver<Arrival>) -> IncomingOp {
     match next(arrivals) {
         Some(Arrival::Op(op)) => op,
@@ -507,7 +458,6 @@ fn next_op(arrivals: &Receiver<Arrival>) -> IncomingOp {
     }
 }
 
-/// An `ops` reply with no grants.
 fn no_grants() -> OpReply {
     OpReply::Ops(OpsReply {
         remaining_seconds: 0,
@@ -519,11 +469,6 @@ fn no_grants() -> OpReply {
     })
 }
 
-/// Starts a command on the session, whose sandbox's answer carries op 0, and on another
-/// session, whose sandbox's answer carries op 0 and then op 1, over the limit, and notes
-/// whether the two commands, each on its session's first stream, compare equal. Then answers
-/// the first session's op 0 on the other session, the other's own, and refuses the other's op 1
-/// on the first session.
 fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &Path) -> String {
     let ops = Some(OpPayloadLimit::NONE);
     let (mut other, others, sandbox) = connect(&dir.join("other"), ops, false, |s| {
@@ -557,8 +502,6 @@ fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
     heard(outcome, other, others, sandbox)
 }
 
-/// What came of `answer`, or the message of its panic, on a thread of its own, where a panic
-/// ends that thread alone, so the test goes on.
 fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
     match thread::scope(|scope| scope.spawn(answer).join()) {
         Ok(answered) => outcome(answered),
@@ -566,8 +509,6 @@ fn panicked(answer: impl FnOnce() -> std::io::Result<()> + Send) -> String {
     }
 }
 
-/// Freezes the sandbox, whose answer carries two ops, one after the other, then answers the
-/// first with a reply too long for a frame, and the second with a short one.
 fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     let mut lines = vec![format!("freeze: {}", outcome(session.freeze(hung())))];
     for message in ["x".repeat(frame::MAX_MESSAGE_BYTES), "no".to_owned()] {
@@ -581,11 +522,6 @@ fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
     lines.join("; ")
 }
 
-/// Answers `incoming` as its path says, and notes it and what came of the answer: `/cut` and
-/// `/drop` with a response cut short and dropped after its first part, `/long` with a head too
-/// long for a frame, `/late` by a deadline that has passed, `/stale` with a body larger than the
-/// connection's buffers hold by a [`short`] deadline, and any other with the response whole, in
-/// two parts.
 fn answer_model(incoming: IncomingModelRequest) -> String {
     let request = &incoming.request;
     let body = String::from_utf8_lossy(&request.body);
@@ -621,10 +557,6 @@ fn answer_model(incoming: IncomingModelRequest) -> String {
     format!("{line}: {}", outcome(answered))
 }
 
-/// Answers the model request that the sandbox of a session of its own makes on another thread,
-/// with a body larger than the connection's buffers hold by a deadline only a hang reaches,
-/// while that sandbox reads nothing; then, while the answer waits on it, drops the session, which
-/// fails the answer at once, for the session's end.
 fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let (mut session, arrivals, sandbox) = connect(&dir.join("other"), None, true, |s| {
         vec![done(s), model_request(3, "/", 0), stall()]
@@ -646,8 +578,6 @@ fn answer_on_a_thread(_: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> Str
     format!("an answer on another thread, as its session ends: {answered}")
 }
 
-/// What came of `first`, a request, and then of freezing the sandbox by a deadline only a hang
-/// reaches, as the request after a failed one does.
 fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     format!(
         "{}; then {}",
@@ -656,30 +586,25 @@ fn then_freeze(session: &mut Session, first: std::io::Result<()>) -> String {
     )
 }
 
-/// Freezes the sandbox by `by`, then again ([`then_freeze`]).
 fn freezes(session: &mut Session, by: Deadline) -> String {
     let first = session.freeze(by);
     then_freeze(session, first)
 }
 
-/// Freezes the sandbox, which then ends the session, and again ([`freezes`]), which fails only
-/// once the session has ended, then once more by a deadline that has passed.
 fn after_the_end(session: &mut Session, _: &Receiver<Arrival>, _: &Path) -> String {
     let ended = freezes(session, hung());
     let late = outcome(session.freeze(Deadline::after(Duration::ZERO)));
     format!("{ended}; then by a passed deadline {late}")
 }
 
-/// Puts a file larger than the connection's buffers hold, by `by`.
 fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
     let file = RelativePath::try_from("big".to_owned()).unwrap();
+    // More than the socket's buffers hold, so that the put waits on a sandbox that reads nothing.
     let bytes = vec![0; 8 << 20];
     session.put(&dir, [Put::File(file, file_mode(), &bytes)], by)
 }
 
-/// Freezes the sandbox, whose answer carries an op, answers the op by a deadline that has
-/// passed, and freezes it again ([`then_freeze`]).
 fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     session.freeze(hung()).unwrap();
     let op = next_op(arrivals);
@@ -687,7 +612,6 @@ fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> 
     then_freeze(session, replied)
 }
 
-/// Collects `/out` by a [`short`] deadline, within limits no tree reaches.
 fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> String {
     let limits = Limits {
         bytes: u64::MAX,
@@ -697,7 +621,6 @@ fn collect_short(session: &mut Session, _: &Receiver<Arrival>, dir: &Path) -> St
     outcome(session.collect(&out, &dir.join("collected"), limits, short()))
 }
 
-/// The files below `dir`, and the empty directories, each file with its contents.
 fn walk(dir: &Path) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for entry in fs::read_dir(dir).unwrap() {
@@ -763,7 +686,6 @@ fn op_data(number: u32, bytes: &[u8]) -> (Value, Vec<u8>) {
     (json!({ "type": "op_data", "op": number }), bytes.to_vec())
 }
 
-/// Opens model request `number`, a `POST` to `path` whose body is `size` bytes.
 fn model_request(number: u32, path: &str, size: u64) -> (Value, Vec<u8>) {
     let message = json!({
         "type": "model_request",
@@ -781,38 +703,28 @@ fn model_data(number: u32, bytes: &[u8]) -> (Value, Vec<u8>) {
     (message, bytes.to_vec())
 }
 
-/// The numbers of as many model requests as may be in flight at once, from 0.
 fn flight() -> Range<u32> {
     0..u32::try_from(MAX_MODEL_REQUESTS_IN_FLIGHT).unwrap()
 }
 
-/// Not a frame: where the fake sandbox waits for the gateway's next answer: the reply to the op
-/// in flight, as `sandboxd` waits before it opens another, or a model response's end.
+// Not frames: `await_reply`, `pause`, `until_hang_up`, `stall` and `hang_up_unread` mark where the
+// fake sandbox waits, and `connect` acts on them.
 fn await_reply() -> (Value, Vec<u8>) {
     (Value::Null, Vec::new())
 }
 
-/// Not a frame: where the fake sandbox reads and sends nothing for [`PAUSE`], as a sandbox
-/// over a slow link does.
 fn pause() -> (Value, Vec<u8>) {
     (Value::from("pause"), Vec::new())
 }
 
-/// Not a frame: where the fake sandbox sends the frame it wraps over and over, reading nothing,
-/// until the gateway hangs up ([`await_hang_up`]).
 fn until_hang_up((message, body): (Value, Vec<u8>)) -> (Value, Vec<u8>) {
     (json!({ "until_hang_up": message }), body)
 }
 
-/// Not a frame: where the fake sandbox reads and answers nothing until the gateway hangs up, as a
-/// stuck sandbox does ([`send_unended`]).
 fn stall() -> (Value, Vec<u8>) {
     (Value::from("stall"), Vec::new())
 }
 
-/// Not a frame: where the fake sandbox closes the connection once the gateway's next frame has
-/// come, with all of it but its first byte unread, as a sandbox that exits does, which resets
-/// the connection rather than ends it cleanly.
 fn hang_up_unread() -> (Value, Vec<u8>) {
     (Value::from("hang_up_unread"), Vec::new())
 }
@@ -850,14 +762,13 @@ fn sandbox_answers() {
                 (collect, |s| {
                     vec![entry(s, json!({ "kind": "link", "path": "a" }))]
                 }),
-                // No mode a tree keeps has a set-ID or sticky bit.
                 (collect, |s| {
+                    // No mode a tree keeps has a set-ID or sticky bit.
                     let setuid = json!({ "kind": "file", "path": "f", "size": 0, "mode": "04755" });
                     vec![entry(s, setuid)]
                 }),
-                // A malformed tree ends the session, which the sandbox leaves open, stalling, so
-                // that the gateway's end comes first; a tree that passes a limit fails only its
-                // collect.
+                // A malformed tree ends the session, which the sandbox leaves stalling, so that the
+                // gateway's end comes first; a tree that passes a limit fails only its collect.
                 (collect, |s| vec![dir(s, "a/a/a"), stall()]),
                 (collect, |s| vec![file(s, "a/b", 0), stall()]),
                 (collect, |s| vec![file(s, "a", 0), dir(s, "a/b"), stall()]),
@@ -1040,7 +951,6 @@ fn sandbox_model_requests() {
             None,
             true,
             &[
-                // A body in two parts, and none.
                 (freeze_and_take, |s| {
                     let body = [br#"{"a""#.as_slice(), b":1}"].map(|part| model_data(3, part));
                     let mut frames = vec![done(s), model_request(3, "/", 7)];
@@ -1284,9 +1194,9 @@ fn arrivals() {
                         await_reply(),
                     ]
                 }),
-                // The sandbox goes on sending, reading nothing, until the gateway hangs up.
                 (
                     |session, _, _| outcome(session.freeze(hung())),
+                    // The sandbox goes on sending, reading nothing, until the gateway hangs up.
                     |s| vec![done(s), stall()],
                 ),
             ],
@@ -1433,7 +1343,6 @@ fn hellos() {
                     |c| {
                         let mut written = Vec::new();
                         frame::write(&mut written, &hello(None), &[]).unwrap();
-                        // All but the body's length, the last 4 bytes.
                         c.write_all(&written[..written.len() - 4]).unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
@@ -1471,9 +1380,6 @@ fn hellos() {
     );
 }
 
-/// A grant listener on a port of the loopback that the kernel picks, which gives each peer
-/// `hello_timeout` to say its hello, and the address that the dial of the grant it issues first
-/// names.
 fn listen(hello_timeout: Duration) -> (GrantListener, SocketAddr) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let address = GatewayAddress::try_from(loopback).unwrap();
@@ -1482,16 +1388,12 @@ fn listen(hello_timeout: Duration) -> (GrantListener, SocketAddr) {
     (listener, gateway)
 }
 
-/// A fake sandbox's connection to `address`, whose reads give up after [`HUNG`], which only a
-/// test that hangs waits.
 fn dial(address: SocketAddr) -> TcpStream {
     let connection = TcpStream::connect(address).unwrap();
     connection.set_read_timeout(Some(HUNG)).unwrap();
     connection
 }
 
-/// The gateway's answer to a hello on `connection`: its first frame, or `none` if it closes the
-/// connection first.
 fn answered(connection: &mut TcpStream) -> String {
     match frame::read::<Value>(connection) {
         Ok(Some((answer, _))) => answer.to_string(),
@@ -1500,15 +1402,12 @@ fn answered(connection: &mut TcpStream) -> String {
     }
 }
 
-/// Dials `address`, says `hello`, and returns the gateway's answer.
 fn present(address: SocketAddr, hello: &Value) -> String {
     let mut connection = dial(address);
     frame::write(&mut connection, hello, &[]).unwrap();
     answered(&mut connection)
 }
 
-/// A grant that `listener`, at `address`, issues, as the dial to that address that it issues,
-/// and its registration.
 fn issue(listener: &GrantListener, address: SocketAddr) -> (RegistrationGrant, Registration) {
     let (TcpDial { gateway, grant }, registration) = listener.issue().unwrap();
     assert_eq!(gateway, address, "the address the dial names");
@@ -1519,21 +1418,16 @@ fn granted(grant: &RegistrationGrant) -> Value {
     serde_json::to_value(hello(Some(grant.clone()))).unwrap()
 }
 
-/// The hello that presents `grant`, if any, and names no GPU.
 fn hello(grant: Option<RegistrationGrant>) -> Hello {
     Hello { grant, gpus: None }
 }
 
-/// The messages a fake sandbox named `name` sends in answer to the request on `stream`.
 type Named = fn(stream: u32, name: &str) -> Vec<Value>;
 
 fn named(stream: u32, name: &str) -> Vec<Value> {
     vec![json!({ "type": "failed", "stream": stream, "message": format!("I am {name}") })]
 }
 
-/// A fake sandbox, named as `said` says, that dials `address` once `pause` has passed and says
-/// `hello`, then tells `said` the gateway's answer, after its name. It then answers the session's
-/// first request with `answer`'s messages, and reads until the session ends.
 fn sandbox(
     address: SocketAddr,
     hello: Value,
@@ -1559,8 +1453,6 @@ fn sandbox(
     })
 }
 
-/// Two fake sandboxes named `name` that each dial `address` and say `hello` at once, and tell
-/// `said` the gateway's answer ([`sandbox`]).
 fn twice(
     address: SocketAddr,
     hello: &Value,
@@ -1573,17 +1465,12 @@ fn twice(
     })
 }
 
-/// What came of `registration`'s accept by `by`, taking no ops or model requests, and of a
-/// freeze on the session it opens, which the sandbox answers as it chooses.
 fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
     let (sender, _arrivals) = mpsc::channel();
     let accepted = registration.accept(by, None, false, sender, |arrival| arrival, || false);
     outcome(accepted.and_then(|mut session| session.freeze(hung())))
 }
 
-/// Hellos that the gateway at `address` refuses, as they are of another version or form, or
-/// present no grant of `listener`'s that opens a session; and the accept of a grant by a passed
-/// deadline.
 fn refusals(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     let [(late, late_registration), (dropped, dropped_registration)] =
         [(); 2].map(|()| issue(listener, address));
@@ -1616,9 +1503,6 @@ fn refusals(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     lines
 }
 
-/// A sandbox that presents at `address` a grant `listener` issued for it, after a pause, so that
-/// its accept most likely waits for it, which accepts it with ops; and what came of its session,
-/// in which it opens a payload-free op, and of its grant, presented again.
 fn awaited(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
     let (grant, registration) = issue(listener, address);
@@ -1640,11 +1524,6 @@ fn awaited(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     lines
 }
 
-/// Sandboxes `a` and `b`, which present at `address` the grants `listener` issued for them before
-/// either is accepted, each [`twice`], so that the gateway refuses one of each as presented
-/// already, which shows it holds the other before either accept; and what came of their sessions,
-/// accepted in reverse order, each of which reaches its own sandbox, which fails the gateway's
-/// first request with its name.
 fn early(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
     let pairs = ["a", "b"].map(|name| {
@@ -1665,9 +1544,6 @@ fn early(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     lines
 }
 
-/// A sandbox that presents at `address`, [`twice`], a grant `listener` issued for it, whose
-/// registration then drops unaccepted; and what came of its connections, and of its grant,
-/// presented again.
 fn dropped(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
     let (grant, registration) = issue(listener, address);
@@ -1685,13 +1561,9 @@ fn dropped(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     ]
 }
 
-/// A registration whose sandbox never presents its grant, and whose accept is stopped while it
-/// waits; and what came of the accept, whether it returned before its far-off deadline, and
-/// what came of its grant, presented after.
 fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     let (grant, registration) = issue(listener, address);
     let by = hung();
-    // Stopped at its third look, as it waits.
     let looks = Cell::new(0);
     let stopped = || {
         looks.set(looks.get() + 1);
@@ -1700,7 +1572,6 @@ fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> 
     let (sender, _) = mpsc::channel();
     let accepted = registration.accept(by, None, false, sender, |arrival| arrival, stopped);
     let accepted = outcome(accepted.map(drop));
-    // `Other` alone would also come of a wait that reads the stop only at its deadline.
     let returned = by.remaining().map_or("past", |_| "before");
     vec![
         format!("an accept stopped as it waits returned {returned} its deadline: {accepted}"),
@@ -1708,8 +1579,6 @@ fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> 
     ]
 }
 
-/// A sandbox that presents at `address` the grant whose registration's accept, `waiting`, has
-/// waited as the other meetings ran; and what came of it.
 fn meet(address: SocketAddr, grant: &RegistrationGrant, waiting: JoinHandle<String>) -> String {
     let (said, heard) = mpsc::channel();
     let hello = granted(grant);
@@ -1720,19 +1589,15 @@ fn meet(address: SocketAddr, grant: &RegistrationGrant, waiting: JoinHandle<Stri
     format!("the accept waiting meanwhile: {heard}; then a freeze: {accepted}")
 }
 
-/// Holds as many silent connections to a listener of its own as it reads hellos from at once,
-/// and dials one more, which hears nothing.
 fn crowd() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
+    // The most hellos the listener reads at once.
     let silent: Vec<TcpStream> = (0..100).map(|_| dial(address)).collect();
     let heard = answered(&mut dial(address));
     drop(silent);
     format!("one past the hellos read at once: heard {heard}")
 }
 
-/// Says 101 hellos, one more than a listener of its own reads at once, each once the one before
-/// has its answer, which shows that a hello's place comes back once it is read; and their answers,
-/// a run of equal ones told once.
 fn turns() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
     let hello = json!({ "version": PROTOCOL_VERSION });
@@ -1777,8 +1642,6 @@ fn registrations() {
         |_| {
             let (listener, address) = listen(HELLO_BOUND);
             let mut silent = dial(address);
-            // An accept that waits while the meetings run, so that the grant `awaited`'s sandbox
-            // presents must reach its own accept, of two waiting.
             let (meanwhile_grant, meanwhile) = issue(&listener, address);
             let waiting = thread::spawn(|| accept_and_freeze(meanwhile, hung()));
             let mut lines = refusals(&listener, address);
@@ -1860,6 +1723,7 @@ fn dials() {
                 .unwrap()
                 .port();
             let (_, unreached) = issue();
+            // Under the first wait between dials, so that the accept gives up after one.
             let at = Deadline::after(Duration::from_millis(300));
             let session = accepted(unreached.at(endpoint(closed)), at, false);
             let session = session.map_err(|error| error.replace(&closed.to_string(), "$PORT"));
@@ -1884,10 +1748,6 @@ fn dials() {
     );
 }
 
-/// How a dialer that trusts Web PKI's roots fares, dialing the stand-in edge, whose certificate
-/// is from a root of its own: what the accept returns, within a deadline that a dial refused at
-/// once keeps far from, and a second dial would not, as it waits a second first; then what the
-/// edge's TLS returns.
 fn untrusted() -> String {
     let (_, unreached) = Dialer::new(tls::Client::web_pki()).issue().unwrap();
     let edge = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1911,9 +1771,6 @@ fn endpoint(port: u16) -> Endpoint {
     Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap()
 }
 
-/// A fake sandbox that listens behind the stand-in edge, at the port it returns: it closes the
-/// first connection it takes at once if `closes_first`, then over the next says `hello`, and
-/// hears the gateway's answer, which its thread returns.
 fn listening(closes_first: bool, hello: Value) -> (u16, JoinHandle<Option<HelloReply>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

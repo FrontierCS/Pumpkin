@@ -1,23 +1,15 @@
-//! Parsing a sandbox's model request into one that keeps the route closed.
+//! The rules of a route: which model requests it admits, and the form in which it sends them on.
 //!
-//! An entry of the Responses API admits a request that:
-//!
-//! - is `POST /responses`, the one endpoint through which a harness samples its model;
-//! - passes on only the API's own headers (`RESPONSES_HEADERS`) and those its entry lists, each
-//!   with a value that holds no control character but tab, and leaves every other behind;
-//! - holds a JSON object that sets `store` to `false` and refers to no state kept on the
-//!   provider's side, such as by `previous_response_id` or `file_id`;
-//! - names a model the route allows, and no `access_programs` but `null`;
-//! - declares and chooses client-side tools only, in every list of tools anywhere in the body;
-//! - holds no URL but inline data (`URL_FIELDS`).
-//!
-//! The Chat Completions API's entry admits what `CHAT`'s doc says, and the Messages API's what
-//! `MESSAGES`' doc says.
+//! An entry admits a request only if it is a `POST` to its API's endpoint, passes on only the
+//! headers of its API's own and those the entry lists, and holds a JSON object that names a model
+//! the route allows. Nowhere in that object may it keep state on the provider's side, run a tool
+//! there or have the provider fetch a URL that isn't inline data, nor pick a feature of the
+//! provider's beyond the models and tools: `RESPONSES`, `CHAT` and `MESSAGES` name the fields.
+//! Any other request is answered with a [`Refusal`] that says what to send instead.
 //!
 //! The rules refuse the forms they name and pass every other field. They read the body's JSON
 //! fields, never the text of its context, and the body that goes upstream is the one they read,
-//! its model named as the upstream takes it. A refusal's status is 404 if the target is no
-//! entry's endpoint, 405 if the method is not `POST`, and 400 for any other rule broken.
+//! its model named as the upstream takes it.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -41,11 +33,11 @@ use crate::Apart;
 // sharing a prefix with one.
 const RESPONSES_HEADERS: [&str; 2] = ["content-type", "accept"];
 
-// Those by which a client names itself further, such as an SDK's `x-stainless-*`, the provider
-// needs none of.
+// `user-agent` is the one by which a client names itself that the provider takes; it needs none
+// of the further, such as an SDK's `x-stainless-*`.
 const CHAT_HEADERS: [&str; 3] = ["content-type", "accept", "user-agent"];
 
-// The version of the API that the client writes in.
+// `anthropic-version` is the version of the API that the client writes in.
 const MESSAGES_HEADERS: [&str; 3] = ["content-type", "accept", "anthropic-version"];
 
 // The response headers of each API's own: the form of the body, the provider's id for the
@@ -57,7 +49,7 @@ const RESPONSE_HEADERS: [&str; 3] = ["content-type", "x-request-id", "retry-afte
 
 const MESSAGES_RESPONSE_HEADERS: [&str; 3] = ["content-type", "request-id", "retry-after"];
 
-/// The fields that refer to state kept on the provider's side.
+/// The fields of the Responses API that refer to state kept on the provider's side.
 const STATE_FIELDS: [&str; 4] = [
     "previous_response_id",
     "conversation",
@@ -65,50 +57,43 @@ const STATE_FIELDS: [&str; 4] = [
     "background",
 ];
 
-/// The fields whose URL the provider would fetch.
+/// The fields that hold a URL, which the provider fetches unless it is a `data:` URL.
 const URL_FIELDS: [&str; 4] = ["url", "image_url", "file_url", "audio_url"];
 
-/// The most names of request headers left behind that [`Keep::dropped_headers`](crate::Keep) is
-/// given for a request, and that a run's readout holds for all of them.
+/// The most names of left-behind request headers that [`Keep::dropped_headers`] is given for a
+/// request.
+///
+/// [`Keep::dropped_headers`]: crate::Keep::dropped_headers
 // A client sends a few dozen headers at most; the names are for a person to read.
 pub const MAX_DROPPED_HEADERS: usize = 32;
 
-/// The most bytes of a value the client chose, such as a path or a model's name, that
-/// [`shown`] keeps.
+/// The most bytes of a value the client chose, such as a path or a model's name, that [`shown`]
+/// keeps.
+// A refusal repeats what the client chose only to point at it, so it needs no more, and each
+// refusal stays small however large the request.
 const MAX_SHOWN_BYTES: usize = 256;
 
-/// What an entry of one API admits, besides what every entry's rules keep alike.
+/// What differs between the APIs: the endpoints, headers and checks of each.
 #[derive(Debug)]
 struct Rules {
     /// The targets of the API's endpoint: the first is its own, and any other is it with a query
     /// that goes upstream with it.
     targets: &'static [&'static str],
-    /// The request headers of the API's own.
     headers: &'static [&'static str],
-    /// The response headers of the API's own.
     response_headers: &'static [&'static str],
-    /// The fields of a request's body that a record may keep apart.
     apart: Apart,
-    /// How a response reports its usage.
     usage: usage::Reported,
-    /// The field of a failure's error that gives its code.
     failure_code: &'static str,
-    /// The API, whose reader says which events of a response's stream are the model's output.
     api: Api,
-    /// Refuses a body that keeps state on the provider's side, or refers to state kept there.
     stored: fn(&Map<String, Value>) -> Result<(), Refusal>,
-    /// Refuses a body that picks a feature of the provider's beyond its models and tools.
     feature: fn(&Map<String, Value>) -> Result<(), Refusal>,
-    /// Refuses a tool, in any list of tools in the body, that the provider would run.
     tool: Tool,
-    /// Refuses a tool choice that would have the provider run a tool.
     choice: fn(&Map<String, Value>) -> Result<(), Refusal>,
     /// Refuses an object, anywhere in the body, that has the provider fetch its content, and else
     /// gives its field, if any, that holds the client's own data, which no rule reads.
     object: Object,
 }
 
-/// A check of one tool that a list of tools declares.
 type Tool = fn(&Value) -> Result<(), Refusal>;
 
 type Object = fn(&Map<String, Value>) -> Result<Option<&'static str>, Refusal>;
@@ -131,12 +116,6 @@ const RESPONSES: Rules = Rules {
     object: |_| Ok(None),
 };
 
-/// An entry of the Chat Completions API admits a request that is `POST /v1/chat/completions`,
-/// passes on only `CHAT_HEADERS` and those its entry lists, stores nothing on the provider's side
-/// (no `store` but `false` or `null`), names a model the route allows and no
-/// `web_search_options` but `null`, declares and chooses only `function` and `custom` tools, and
-/// holds no URL but inline data and no `file_id`, `container_id` or `comparison_response_id`
-/// anywhere.
 const CHAT: Rules = Rules {
     targets: &["/v1/chat/completions"],
     headers: &CHAT_HEADERS,
@@ -155,12 +134,6 @@ const CHAT: Rules = Rules {
     object: |_| Ok(None),
 };
 
-/// An entry of the Messages API admits a request that is `POST /v1/messages`, or
-/// `POST /v1/messages?beta=true`, passes on only `MESSAGES_HEADERS` and those its entry lists,
-/// sets no `container`, no `thread`, no `mcp_servers` and no `fallbacks` but `null`, names a
-/// model the route allows, declares only custom tools (no `type`, or `custom`) and chooses among
-/// them, holds no content block whose `source` is a URL or a file, and no `container_upload`, and
-/// holds no URL but inline data and no `file_id` anywhere but in a tool call's `input`.
 const MESSAGES: Rules = Rules {
     // With the API's beta namespace, to which Anthropic's SDKs send a request through their beta
     // client: the features a beta turns on, the rules refuse by their fields.
@@ -181,15 +154,13 @@ const MESSAGES: Rules = Rules {
     object: fetches_nothing,
 };
 
-/// A model route's entry for one API.
+/// The entry of one API: it admits requests for the models that its workflow allows.
 #[derive(Debug)]
 pub struct Route {
     rules: &'static Rules,
     /// Each model that requests may name, with the name that its upstream takes for it.
     models: BTreeMap<ModelName, ModelName>,
-    /// The request headers that pass upstream: the API's own and the entry's.
     request_headers: Vec<HeaderName>,
-    /// The response headers that reach the client, in lowercase: the API's own and the entry's.
     response_headers: Vec<String>,
 }
 
@@ -197,9 +168,7 @@ pub struct Route {
 /// sent, as the entry of the IR lists them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Headers {
-    /// The request headers that go upstream.
     pub request: Vec<schema::ir::HeaderName>,
-    /// The response headers that reach the client.
     pub response: Vec<schema::ir::HeaderName>,
 }
 
@@ -207,10 +176,8 @@ pub struct Headers {
 /// makes one.
 #[derive(Debug)]
 pub(crate) struct Closed<'r> {
-    /// The query that the request's target carried, which goes upstream with it.
     query: Option<&'static str>,
     headers: Vec<(HeaderName, HeaderValue)>,
-    /// The names of the headers left behind that an entry could list.
     dropped_headers: Vec<String>,
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
@@ -227,18 +194,15 @@ pub(crate) struct Refusal {
     message: String,
 }
 
+/// The status of a refusal: 404 for a target that is no entry's endpoint, 405 for a method that is
+/// not `POST`, 502 and 504 for an upstream that gave no answer, or none in time, and 400 for any
+/// other.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Status {
-    /// The request breaks a rule of the closure's, the model provider refused it or the route's
-    /// key, or the route has ended before it was answered.
     BadRequest,
-    /// Its target is no entry's endpoint.
     NotFound,
-    /// Its target is, but its method is not `POST`.
     MethodNotAllowed,
-    /// The upstream gave no answer.
     BadGateway,
-    /// The upstream gave no answer in time.
     GatewayTimeout,
 }
 
@@ -271,7 +235,6 @@ impl Route {
         }
     }
 
-    /// The API whose requests it takes.
     pub(crate) fn api(&self) -> Api {
         self.rules.api
     }
@@ -281,21 +244,19 @@ impl Route {
         self.response_headers.iter().any(|listed| listed == name)
     }
 
-    /// Whether `request` is to its API's endpoint, which [`Route::close`] then takes.
+    /// Whether `request` is addressed to one of this route's endpoints, whatever else it holds.
     pub(crate) fn takes(&self, request: &ModelRequest) -> bool {
         self.target(&request.path).is_some()
     }
 
-    /// The target of its API's endpoint that `path` is, if it is one.
     fn target(&self, path: &str) -> Option<&'static str> {
         (self.rules.targets.iter())
             .find(|&&target| target == path)
             .copied()
     }
 
-    /// Parses `request`, which [`Route::takes`], into one that keeps the route closed, naming its
-    /// model as its upstream takes it. Refuses a request that breaks a rule of
-    /// [the route's docs](crate).
+    /// The form of `request` that goes upstream, with its model named as its upstream takes it, or
+    /// the refusal that answers it.
     pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed<'_>, Refusal> {
         let ModelRequest {
             method,
@@ -327,8 +288,8 @@ impl Route {
         closed_fields(rules, &body)?;
         let named = Value::String(upstream_name.as_str().to_owned());
         body.insert("model".to_owned(), named);
-        // What goes upstream is the body as parsed here, not as sent, so that no other parser
-        // can read it otherwise: one that keeps the first of a field sent twice, say, where this
+        // What goes upstream is the body as parsed here, not as sent, so that no other parser can
+        // read it otherwise: one that keeps the first of a field sent twice, say, where this
         // keeps the last.
         let body = Value::Object(body).to_string().into_bytes();
         let model = (model.clone(), upstream_name.clone());
@@ -342,8 +303,6 @@ impl Route {
         })
     }
 
-    /// The names of `headers` that the entry leaves behind, as [`Closed::dropped_headers`] has
-    /// them.
     fn dropped(&self, headers: &[(String, String)]) -> Vec<String> {
         let mut dropped: Vec<String> = (headers.iter())
             .map(|(name, _)| name)
@@ -363,8 +322,6 @@ impl Route {
         dropped
     }
 
-    /// The model that `body` names, with the name that the upstream takes for it, refusing a
-    /// request that names no model the route allows.
     fn allows(&self, body: &Map<String, Value>) -> Result<(&ModelName, &ModelName), Refusal> {
         let named = body.get("model").and_then(Value::as_str);
         let allowed =
@@ -386,7 +343,6 @@ impl Route {
 }
 
 impl Closed<'_> {
-    /// The route's entry that closed it.
     pub(crate) fn route(&self) -> &Route {
         self.route
     }
@@ -406,7 +362,6 @@ impl Closed<'_> {
         &self.headers
     }
 
-    /// The model that the request named, as the route allows it.
     pub(crate) fn model(&self) -> &ModelName {
         &self.model.0
     }
@@ -416,21 +371,18 @@ impl Closed<'_> {
         &self.body
     }
 
-    /// The fields of its body that its API's client sends again on each request.
     pub(crate) fn apart(&self) -> Apart {
         self.route.rules.apart
     }
 
-    /// A scan of its response's body, whose `content-type` is `content_type`, as its API reads
-    /// one.
     pub(crate) fn scan(&self, content_type: Option<&str>) -> usage::Scan {
         let rules = self.route.rules;
         let output = read::dialect(rules.api).output;
         usage::Scan::new(content_type, rules.usage, rules.failure_code, output)
     }
 
-    /// `answered`, the model that a response says answered the request, as the request named
-    /// it, if it is the name that the upstream takes for it, and else as it is.
+    /// `answered`, the model that a response says answered the request, as the request named it,
+    /// if it is the name that the upstream takes for it, and else as it is.
     pub(super) fn named<'a>(&'a self, answered: &'a str) -> &'a str {
         let (model, upstream_name) = &self.model;
         // A harness compares the model that answered with the one it asked for, ASCII case
@@ -504,8 +456,8 @@ impl Refusal {
         }
     }
 
-    /// Answers `request`, of `api`, with the refusal: its status, with `allow: POST` for a 405,
-    /// and its [`body`](Refusal::body). Fails if `by` passes first.
+    /// Answers `request`, of `api`, with the refusal: its status, with `allow: POST` for a 405, and
+    /// its [`body`](Refusal::body). Fails if `by` passes first.
     pub(crate) fn answer(
         self,
         api: Api,
@@ -513,8 +465,8 @@ impl Refusal {
         by: Deadline,
     ) -> io::Result<()> {
         let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
-        // HTTP requires a 405 to name the methods its target allows.
         if let Status::MethodNotAllowed = self.status {
+            // HTTP requires a 405 to name the methods its target allows.
             headers.push(("allow".to_owned(), "POST".to_owned()));
         }
         let body = self.body(api);
@@ -524,12 +476,6 @@ impl Refusal {
     }
 
     /// The body that answers its client, of `api`: its message in a JSON error of `api`'s form.
-    ///
-    /// Of an API of OpenAI's, it is `{"error": {"message", "type", "param", "code"}}`, whose
-    /// `type` is `invalid_request_error` for a 4xx and `server_error` for a 5xx, and whose `param`
-    /// and `code` are `null`. Of the Messages API, it is `{"type": "error", "error": {"type",
-    /// "message"}}`, whose `type` is `not_found_error` for a 404, `invalid_request_error` for
-    /// another 4xx, `api_error` for a 502 and `timeout_error` for a 504.
     pub(crate) fn body(&self, api: Api) -> String {
         if api == Api::Messages {
             // As the Messages API's own errors are, of the types its documentation gives for
@@ -584,12 +530,6 @@ fn bad(message: impl Into<String>) -> Refusal {
     refusal(Status::BadRequest, message.into())
 }
 
-/// `text`, which the client chose, as a refusal shows it.
-///
-/// It is whole if it is at most 256 bytes long, and otherwise cut to its first 256 bytes, or
-/// fewer on a character's boundary, and `…`.
-// A refusal repeats what the client chose only to point at it, so it needs no more, and each
-// refusal stays small however large the request.
 fn shown(text: &str) -> Cow<'_, str> {
     if text.len() <= MAX_SHOWN_BYTES {
         Cow::Borrowed(text)
@@ -705,7 +645,7 @@ fn picks_no_feature(body: &Map<String, Value>) -> Result<(), Refusal> {
 
 fn chooses_client_tool(body: &Map<String, Value>) -> Result<(), Refusal> {
     // A choice that is an object names a kind of tool. The allowed tools are a list of tools,
-    // which [`closed_fields`] checks as it checks any other.
+    // which `closed_fields` checks as it checks any other.
     let Some(Value::Object(choice)) = body.get("tool_choice") else {
         return Ok(());
     };
@@ -780,7 +720,7 @@ fn closed_field(tool: Tool, field: &str, value: &Value) -> Result<(), Refusal> {
 }
 
 /// Refuses a tool the provider would run. A namespace's own tools are a list of tools of
-/// their own, which [`closed_fields`] finds.
+/// their own, which `closed_fields` finds.
 // A tool the provider runs works beyond the route: one searches the web, another runs code with
 // its own network, another reads stored files. A client-side tool's calls come back to the
 // client, which runs them in its sandbox.
@@ -822,8 +762,6 @@ fn keeps_no_state(body: &Map<String, Value>) -> Result<(), Refusal> {
              leave it out, and run code through a custom tool",
         ));
     }
-    // A conversation the provider holds under a response's `id`, which `create` starts and
-    // `continue` resumes, so that a request sends only its new turn.
     if set("thread") {
         return Err(kept_state("thread"));
     }

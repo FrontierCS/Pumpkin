@@ -1,13 +1,13 @@
-//! Building an image from its context and recipe, tagged by the digest of the build's inputs,
-//! as [`Engine::build`] says.
+//! Building an image from its context and recipe, tagged by the digest of the build's inputs, as
+//! [`Engine::build`] says.
 //!
-//! A build that finds no image by its tag reads its context from a stage, a copy of it that is
-//! the build's alone, and tags its image by the stage's digest: the SHA-256 of a text of a line
-//! for the text's form, [`FORM`], and [`OPTIONS`]; one for the recipe, `file` and its path or
-//! `text` and its SHA-256; one for each of what the build is [`Given`], a named context by its
-//! image's tag ([`Built::tag`]); and one for each directory and regular file of the context or
-//! its stage, the root first, as `./`, then the rest by their paths' bytes, a directory's
-//! without its `/`, so `bin/` comes before `bin-x`:
+//! A build that finds no image by its tag reads its context from a stage, a copy of it that is the
+//! build's alone, and tags its image by the stage's digest: the SHA-256 of a text of a line for the
+//! text's form, `FORM`, and `OPTIONS`; one for the recipe, `file` and its path or `text` and its
+//! SHA-256; one for each of what the build is [`Given`], a named context by its image's tag
+//! ([`Built::tag`]); and one for each directory and regular file of the context or its stage, the
+//! root first, as `./`, then the rest by their paths' bytes, a directory's without its `/`, so
+//! `bin/` comes before `bin-x`:
 //!
 //! ```text
 //! pumpkin-build/4 <option>...
@@ -42,67 +42,63 @@ use tempfile::TempDir;
 
 use crate::{ContextName, Engine, docker, docker_command, fix_reported, image_id};
 
-/// The permission bits of each directory of a stage.
 // Git's two modes for a regular file, as a checkout under a 022 umask gives them, so that one
-// commit has one tag whatever the umask of its checkout. The build reads the staged bits that
-// the digest covers, so the tag still names what is built.
+// commit has one tag whatever the umask of its checkout. The build reads the staged bits that the
+// digest covers, so the tag still names what is built.
 const DIR_MODE: u32 = 0o755;
 
-/// The permission bits of each file of a stage that its owner may execute.
 const EXECUTABLE_MODE: u32 = 0o755;
 
-/// The permission bits of each other file of a stage.
 const FILE_MODE: u32 = 0o644;
 
 const OWNER_EXECUTE: u32 = 0o100;
 
-/// The time of every build, since the Unix epoch, 1980-01-01T00:00:00Z: when each file and
-/// directory of its stage was last modified, and, as `SOURCE_DATE_EPOCH`, when its image and each
-/// step its recipe adds to the image's history were created.
+// The time of every build, since the Unix epoch, 1980-01-01T00:00:00Z: when each file and
+// directory of its stage was last modified, and, as `SOURCE_DATE_EPOCH`, when its image and each
+// step its recipe adds to the image's history were created.
+//
 // One time for every build, so that a layer that holds only staged files and directories, as a
 // `COPY` of them into `/` does, is the same bytes from any engine that compresses it alike, and
 // after the build cache is lost, and so is an image whose every layer is: a registry, and a
 // provider that imports images by their digests, then has it already. BuildKit gives the build's
-// own time to what a `RUN` writes, and to each directory above what a copy copies, made or changed,
-// such as a directory of the base it copies into, so such a layer differs still. Not the epoch
-// itself: the ZIP format, which Python's wheels and Java's archives use, holds no time before 1980,
-// and Python's `zipfile` refuses to write one, so a recipe that zips staged files would fail. The
-// layers' own times are left as BuildKit gives them, not clamped to this one (its
+// own time to what a `RUN` writes, and to each directory above what a copy copies, made or
+// changed, such as a directory of the base it copies into, so such a layer differs still. Not the
+// epoch itself: the ZIP format, which Python's wheels and Java's archives use, holds no time before
+// 1980, and Python's `zipfile` refuses to write one, so a recipe that zips staged files would
+// fail. The layers' own times are left as BuildKit gives them, not clamped to this one (its
 // `rewrite-timestamp`): that would change what a `RUN` installs, such as a Python module whose
-// compiled form records the module's time, so that it would be compiled again at each import.
-// The days from 1970 to 1980, two of whose years are leap years.
+// compiled form records the module's time, so that it would be compiled again at each import. The
+// days from 1970 to 1980, two of whose years are leap years.
 const BUILD_TIME: Duration = Duration::from_hours(3_652 * 24);
 
-/// The name and number of the inputs' text's form, the first word of its first line.
-// The number changes with what the text holds, how it is written, or how a build reads what it
-// names, such as its stage's times, so that the texts of two forms never coincide, and no tag of
-// one names an image of another. The lines of what a build is given share it with a build given
-// nothing: each starts with a word, `target`, `arg` or `context`, where a text without them has
-// `./ `, so no text with them is one without.
+// The name and number of the inputs' text's form, the first word of its first line. The number
+// changes with what the text holds, how it is written, or how a build reads what it names, such as
+// its stage's times, so that the texts of two forms never coincide, and no tag of one names an
+// image of another. The lines of what a build is given share it with a build given nothing: each
+// starts with a word, `target`, `arg` or `context`, where a text without them has `./ `, so no
+// text with them is one without.
 const FORM: &str = "pumpkin-build/4";
 
-/// The options every build gives `docker build`, beside those that name its recipe, its context
-/// and the file it writes the image's ID to: these, and [`BUILD_TIME`] as `SOURCE_DATE_EPOCH`
-/// ([`options`]).
-// They are in the inputs' text, so that a change to them is a change of every tag, rather than
-// one that a found image hides until a task's files change.
+// The options every build gives `docker build`, beside those that name its recipe, its context
+// and the file it writes the image's ID to: these, and `BUILD_TIME` as `SOURCE_DATE_EPOCH`
+// ([`options`]). They are in the inputs' text, so that a change to them is a change of every tag,
+// rather than one that a found image hides until a task's files change.
 //
-// A provenance attestation records each build's own ID and times, so a build with one would
-// make an image of its own even from the cache. `--provenance` is Buildx's, from its version
-// 0.10. Docker 23.0 ships Buildx 0.10.2 as a plugin, which `docker build` runs when it is
-// installed; without it, `docker build` falls back to the classic builder, which has no such
-// option. And a recipe that fetches a file pins it with `ADD --checksum`, as `recipe::check`
-// requires, which BuildKit's Dockerfile frontend takes outside its labs channel only
-// from BuildKit 0.12, which Docker 25.0 is the first to ship. So builds need Docker 25.0 or later
-// with its Buildx plugin, which the engine's own floor, Docker 28.0, as the crate's doc says,
-// meets.
+// A provenance attestation records each build's own ID and times, so a build with one would make
+// an image of its own even from the cache. `--provenance` is Buildx's, from its version 0.10.
+// Docker 23.0 ships Buildx 0.10.2 as a plugin, which `docker build` runs when it is installed;
+// without it, `docker build` falls back to the classic builder, which has no such option. And a
+// recipe that fetches a file pins it with `ADD --checksum`, as `recipe::check` requires, which
+// BuildKit's Dockerfile frontend takes outside its labs channel only from BuildKit 0.12, which
+// Docker 25.0 is the first to ship. So builds need Docker 25.0 or later with its Buildx plugin,
+// which the engine's own floor, Docker 28.0, meets.
 //
 // The image's layers are zstd's, in an OCI manifest, which a zstd layer needs: BuildKit compresses
-// with zstd several times faster than with gzip, its default, and engines unpack it faster too.
+// with zstd faster than with gzip, its default, and engines unpack it faster too.
 // `force-compression` gives the base's layers zstd too, so that every layer of an image unpacks as
 // fast, wherever it runs: Modal imports such an image, and Docker pulls one from its 23.0, which a
-// provider that pulls images onto a Docker of its own requires, as the EC2 provider's boot does. So
-// a base's layers are no longer its registry's: the engine compresses them again, once per base
+// provider that pulls images onto a Docker of its own requires, as the EC2 provider's boot does.
+// So a base's layers are not its registry's: the engine compresses them again, once per base
 // until its build cache is pruned, and their digests follow the version of its zstd encoder. The
 // image exporter, given no name, keeps the image in the engine untagged, as `docker build` does
 // without `--output`.
@@ -130,32 +126,30 @@ impl Built {
         &self.image
     }
 
-    /// The tag `build` found the image by or gave it, `<repository>:<hex>`, by which, with its
-    /// ID, a build on it names it to the engine, until another build of the same inputs moves it
-    /// to its own image.
-    /// Its digest names the build's inputs, not the image: a key that finds what they built
-    /// before, as two builds of the same inputs may make different images.
+    /// The tag `build` found the image by or gave it, `<repository>:<hex>`, by which, with its ID,
+    /// a build on it names it to the engine, until another build of the same inputs moves it to its
+    /// own image. Its digest names the build's inputs, not the image: a key that finds what they
+    /// built before, as two builds of the same inputs may make different images.
     pub fn tag(&self) -> &str {
         &self.tag
     }
 }
 
 impl AsRef<Image> for Built {
-    /// [`Built::image`].
     fn as_ref(&self) -> &Image {
         &self.image
     }
 }
 
-/// A build's context, which [`Engine::build`] copies to a stage of the build's own if it finds
-/// no image by its tag.
+/// A build's context, which [`Engine::build`] copies to a stage of the build's own if it finds no
+/// image by its tag.
 ///
-/// It holds what `dir` holds, or nothing without one, and each directory of `mounts` at its
-/// path, which must name nothing that `dir` or an earlier mount holds, in a directory that one
-/// of them holds. It holds only directories and regular files, named in UTF-8 without
-/// whitespace or a control character. Its stage gives each directory mode 0755, and each file
-/// 0755 if its owner may execute it, else 0644, and each of them one time, the build's, as the
-/// time it was last modified.
+/// It holds what `dir` holds, or nothing without one, and each directory of `mounts` at its path,
+/// which must name nothing that `dir` or an earlier mount holds, in a directory that one of them
+/// holds. It holds only directories and regular files, named in UTF-8 without whitespace or a
+/// control character. Its stage gives each directory mode 0755, and each file 0755 if its owner may
+/// execute it, else 0644, and each of them one time, the build's, as the time it was last
+/// modified.
 #[derive(Debug, Default)]
 pub struct BuildContext {
     pub dir: Option<PathBuf>,
@@ -165,9 +159,9 @@ pub struct BuildContext {
 /// The mount of `mounts`, a [`BuildContext`]'s, that holds what is at `path` in the context.
 ///
 /// It is the deepest of the mounts whose paths `path` is below, given with the rest of `path`
-/// below it; or `None` if there is none, as the context's own directory then holds it. This is
-/// how [`Engine::build`] lays the context out (`read_context`): its own directory, each mount
-/// laid over it, and a mount below another laid over what that one holds.
+/// below it; or `None` if there is none, as the context's own directory then holds it. This is how
+/// [`Engine::build`] lays the context out: its own directory, each mount laid over it, and a mount
+/// below another laid over what that one holds.
 pub fn mounted<'m, 'p, D>(
     mounts: &'m BTreeMap<RelativePath, D>,
     path: &'p str,
@@ -203,7 +197,6 @@ pub trait Admit {
     fn admit(&mut self, engine: &Engine) -> Result<(), String>;
 }
 
-/// Holds nothing, and admits every build at once.
 impl Admit for () {
     fn hold(&mut self, _: &str) -> Result<(), String> {
         Ok(())
@@ -235,9 +228,8 @@ impl Engine {
     /// `admit` holds the tag, the engine's image under it, or, once `admit` admits the build, a
     /// `docker build` of a stage of the context, to be tagged once it has ended ([`finish`]).
     ///
-    /// Refuses a recipe that [`recipe::check`] refuses, a `context` that isn't as
-    /// [`BuildContext`] says, and a [`Recipe::File`] that is no regular file of it; and fails if
-    /// `admit` does.
+    /// Refuses a recipe that [`recipe::check`] refuses, a `context` that isn't as [`BuildContext`]
+    /// says, and a [`Recipe::File`] that is no regular file of it; and fails if `admit` does.
     pub fn start(
         &self,
         context: &BuildContext,
@@ -246,8 +238,8 @@ impl Engine {
         repository: &str,
         admit: &mut dyn Admit,
     ) -> Result<Started, String> {
-        // An image found by the tag was built from a stage whose inputs are those the context's
-        // own files give now, so only a build needs a stage.
+        // An image found by the tag was built from a stage whose inputs are those the context's own
+        // files give now, so only a build needs a stage.
         let inputs = Inputs::checked(read_context(context)?, None, recipe, given)?;
         let tag = format!("{repository}:{}", inputs.digest());
         // Before the look, so that a prune that would remove what it finds spares it.
@@ -288,10 +280,6 @@ impl Engine {
         }))
     }
 
-    /// Starts the `docker build` of [`Engine::start`] that `recipe` builds from a stage of
-    /// `inputs`, in `scratch`, an empty directory of the build's own, which also holds a text
-    /// recipe, the file the build writes the image's ID to, and the build's `output`; and gives
-    /// it with the recipe, as a failure names it, and the tag of the stage's inputs.
     fn start_in(
         &self,
         scratch: &Path,
@@ -301,16 +289,16 @@ impl Engine {
         repository: &str,
     ) -> Result<(Child, String, String), String> {
         let staging = scratch.join("context");
-        // The stage is this build's alone, so the bytes the check reads there are those the
-        // digest covers and the build reads, which may differ from those `inputs` read.
+        // The stage is this build's alone, so the bytes the check reads there are those the digest
+        // covers and the build reads, which may differ from those `inputs` read.
         let staged = Inputs::checked(inputs.stage(&staging)?, Some(&staging), recipe, given)?;
         let digest = staged.digest();
         // Named by its digest: Buildx keys what it sends of a build's directories, its context's
         // and its recipe's, by the name of the context's directory alone, and the machine, and
         // BuildKit skips each file it sent under that key before whose size, mode and time are as
-        // they were.
-        // Every staged file has the same time, so no two stages of other files may share that
-        // name, as `reproducible`, a test of a file changed to another of the same size, checks.
+        // they were. Every staged file has the same time, so no two stages of other files may share
+        // that name, as `reproducible`, a test of a file changed to another of the same size,
+        // checks.
         let stage = scratch.join(&digest);
         fs::rename(&staging, &stage).context(format!(
             "{} to {}",
@@ -345,10 +333,7 @@ pub enum Started {
 #[derive(Debug)]
 pub struct Building {
     child: Child,
-    /// The build's directory of its own, removed once it has ended, which holds its `output`,
-    /// its standard output and error.
     scratch: TempDir,
-    /// The recipe, as a failure names it.
     recipe: String,
     tag: String,
     context: ContextName,
@@ -356,8 +341,8 @@ pub struct Building {
 
 /// Waits until one of `building` has ended, takes it out, and gives its key with its image.
 ///
-/// The image is tagged as [`Engine::start`] says, once its directory is removed. A failed
-/// `docker build` has all it wrote put on standard error at once, as `make --output-sync` does.
+/// The image is tagged as [`Engine::start`] says, once its directory is removed. A failed `docker
+/// build` has all it wrote put on standard error at once, as `make --output-sync` does.
 ///
 /// # Panics
 ///
@@ -367,8 +352,8 @@ pub fn finish<K>(building: &mut Vec<(K, Building)>) -> (K, Result<Built, String>
     let (index, status) = stdx::process::wait_any(&mut children);
     let (key, mut ended) = building.remove(index);
     let built = match status {
-        // A build that succeeds says nothing that its image doesn't: only a failure's output
-        // tells the operator something to act on.
+        // A build that succeeds says nothing that its image doesn't: only a failure's output tells
+        // the operator something to act on.
         Ok(status) if status.success() => ended.built(),
         Ok(status) => ended.shown().and_then(|()| {
             Err(format!(
@@ -390,7 +375,6 @@ pub fn finish<K>(building: &mut Vec<(K, Building)>) -> (K, Result<Built, String>
 }
 
 impl Building {
-    /// Writes all of the build's output to this process's standard error, whole.
     fn shown(&self) -> Result<(), String> {
         let output = self.scratch.path().join("output");
         let mut output = File::open(&output).context(output.display())?;
@@ -401,7 +385,6 @@ impl Building {
         Ok(())
     }
 
-    /// The image of this build, which has succeeded, tagged.
     fn built(&self) -> Result<Built, String> {
         let id_file = self.scratch.path().join("id");
         let id = fs::read_to_string(&id_file).map_err(|error| {
@@ -411,16 +394,16 @@ impl Building {
                 id_file.display()
             )
         })?;
-        // In the containerd image store, which `Engine::connect` requires, the ID of an image
-        // built for the engine's platform alone, with no attestation (`OPTIONS`), is its
-        // manifest's digest.
+        // In the containerd image store, which `Engine::connect` requires, the ID of an image built
+        // for the engine's platform alone, with no attestation (`OPTIONS`), is its manifest's
+        // digest.
         let image = Image::try_from(id.trim().to_owned())?;
         let tag = &self.tag;
-        // The tag moves only if an image of the same inputs has it: one that another build
-        // tagged since the lookup, or one of what the context's files changed to since they were
-        // read. And it is `docker tag`'s, not the build's: in the containerd image store,
-        // a tag that a build moves to its image drops the image the tag named, which a run may
-        // still be using, whereas one that `docker tag` moves leaves that image, untagged.
+        // The tag moves only if an image of the same inputs has it: one that another build tagged
+        // since the lookup, or one of what the context's files changed to since they were read. And
+        // it is `docker tag`'s, not the build's: in the containerd image store, a tag that a build
+        // moves to its image drops the image the tag named, which a run may still be using, whereas
+        // one that `docker tag` moves leaves that image, untagged.
         let tagged = docker(&self.context, ["tag", "--", image.as_str(), tag]);
         tagged.map_err(|error| {
             format!("{image} can't be tagged `{tag}`: {}", fix_reported(&error))
@@ -432,8 +415,6 @@ impl Building {
     }
 }
 
-/// What `run` returns, given a directory of its own in `dir`, the engine's, made with bits 0700
-/// for one `task`, such as `build`, and removed once `run` returns ([`make_scratch`]).
 pub(crate) fn in_scratch<T>(
     dir: &Path,
     task: &str,
@@ -444,11 +425,8 @@ pub(crate) fn in_scratch<T>(
     removed(scratch, task, done)
 }
 
-/// A directory of its own in `dir` for one `task`, made with bits 0700, making `dir` if it is
-/// missing: named by `task`, this process and a random word, so that each that a process that
-/// has ended made is removed then ([`sweep`]).
-// A process killed during its task leaves this directory, with what the task put there, such as
-// a build's stage, a copy of the whole context, behind, until another process makes one.
+// A process killed during its task leaves this directory, with what the task put there, such as a
+// build's stage, a copy of the whole context, behind, until another process makes one.
 fn make_scratch(dir: &Path, task: &str) -> Result<TempDir, String> {
     fs::create_dir_all(dir).context(dir.display())?;
     let scratch = tempfile::Builder::new()
@@ -466,9 +444,6 @@ fn make_scratch(dir: &Path, task: &str) -> Result<TempDir, String> {
     Ok(scratch)
 }
 
-/// Removes each directory beside `ours`, one that [`make_scratch`] has just made, that it made
-/// for a process that has ended, as this process's user: one that a process killed during its
-/// task left behind.
 fn sweep(ours: &Path) {
     let (Some(dir), Ok(made)) = (ours.parent(), fs::symlink_metadata(ours)) else {
         return;
@@ -482,8 +457,8 @@ fn sweep(ours: &Path) {
         let Some(pid) = entry.file_name().to_str().and_then(scratch_pid) else {
             continue;
         };
-        // A process that has ended has no directory in `/proc`, of the PID namespace this
-        // process is in, which every `pumpkin` that shares this directory is in too.
+        // A process that has ended has no directory in `/proc`, of the PID namespace this process
+        // is in, which every `pumpkin` that shares this directory is in too.
         let ended = !Path::new("/proc").join(pid.to_string()).exists();
         let path = entry.path();
         let theirs = fs::symlink_metadata(&path)
@@ -494,8 +469,6 @@ fn sweep(ours: &Path) {
     }
 }
 
-/// The ID of the process that [`make_scratch`] made the directory named `name` for, if it made
-/// it: `pumpkin-<task>-<pid>-<word>`.
 fn scratch_pid(name: &str) -> Option<u32> {
     let mut words = name.rsplitn(3, '-');
     let (word, pid, task) = (words.next()?, words.next()?, words.next()?);
@@ -505,7 +478,6 @@ fn scratch_pid(name: &str) -> Option<u32> {
     (named && digits && !word.is_empty()).then(|| pid.parse().ok())?
 }
 
-/// `done`, what `task` gave in `scratch`, once `scratch` is removed.
 fn removed<T>(scratch: TempDir, task: &str, done: Result<T, String>) -> Result<T, String> {
     let path = scratch.path().to_owned();
     let left = |removing: io::Error| {
@@ -521,9 +493,6 @@ fn removed<T>(scratch: TempDir, task: &str, done: Result<T, String>) -> Result<T
     }
 }
 
-/// Starts `docker build` of `recipe`, a file, with `stage` as its context, given `given`, on
-/// `engine`, to name the image it builds with no tag, and to write its ID to `id` in `scratch`,
-/// and what it outputs to `output` there.
 fn start_untagged(
     engine: &Engine,
     stage: &Path,
@@ -543,8 +512,8 @@ fn start_untagged(
     for (name, value) in args {
         flags.extend(["--build-arg".to_owned(), format!("{name}={value}")]);
     }
-    // Each an image's named context, which BuildKit resolves on the engine as it does a `FROM`.
-    // By its digest as well as its tag, so that the engine finds that image even if the tag has
+    // Each an image's named context, which BuildKit resolves on the engine as it does a `FROM`. By
+    // its digest as well as its tag, so that the engine finds that image even if the tag has
     // moved, and anything else it fetches, as from Docker Hub, is the same image.
     for (name, built) in contexts {
         let named = format!(
@@ -554,11 +523,11 @@ fn start_untagged(
         );
         flags.extend(["--build-context".to_owned(), named]);
     }
-    // `docker build` has no `--pull=never`: it pulls a base the engine lacks, by the reference
-    // its recipe names, which pins it by digest.
+    // `docker build` has no `--pull=never`: it pulls a base the engine lacks, by the reference its
+    // recipe names, which pins it by digest.
     let id_file = scratch.join("id");
-    // BuildKit's plain progress, as it writes it to a file, and not to a terminal, either way;
-    // it shapes the output alone, not the image, so it is not among the inputs' `OPTIONS`.
+    // BuildKit's plain progress, as it writes it to a file, and not to a terminal, either way; it
+    // shapes the output alone, not the image, so it is not among the inputs' `OPTIONS`.
     let options: Vec<String> = options().collect();
     let build = (["build", "--progress=plain"].into_iter().map(OsStr::new))
         .chain(options.iter().map(OsStr::new))
@@ -586,19 +555,12 @@ fn start_untagged(
     })
 }
 
-/// A build's inputs, as the [module](self)'s doc lists them.
 struct Inputs {
-    /// The recipe's line.
     recipe: String,
-    /// The lines of what the build is given.
     given: Vec<String>,
-    /// Each directory and regular file below the context's root, by its path.
     entries: BTreeMap<String, Entry>,
 }
 
-/// A directory or a regular file below the context's root, with, for a file, the mode a stage
-/// gives it, its SHA-256, in hexadecimal, and the path it was read from, for a stage to copy
-/// and the recipe's check to name.
 enum Entry {
     Dir,
     File {
@@ -609,9 +571,9 @@ enum Entry {
 }
 
 impl Inputs {
-    /// Copies these inputs' entries to `stage`, which names nothing yet, each file from the path
-    /// it was read from, with its mode, and each entry below `stage` last modified at
-    /// [`BUILD_TIME`]; and returns the entries that the stage holds.
+    // Copies these inputs' entries to `stage`, which names nothing yet, each file from the path it
+    // was read from, with its mode, and each entry below `stage` last modified at `BUILD_TIME`; and
+    // returns the entries that the stage holds.
     fn stage(&self, stage: &Path) -> Result<BTreeMap<String, Entry>, String> {
         make_dir(stage)?;
         let mut entries = BTreeMap::new();
@@ -652,9 +614,6 @@ impl Inputs {
         Ok(entries)
     }
 
-    /// The inputs with `entries`, given `given`, once [`recipe::check`] has passed them and
-    /// `recipe`'s bytes: a [`Recipe::File`]'s as read from `stage`, if given, or else from the
-    /// path it was found at, and then named by its entry.
     fn checked(
         mut entries: BTreeMap<String, Entry>,
         stage: Option<&Path>,
@@ -673,8 +632,8 @@ impl Inputs {
                 let file = stage.map_or_else(|| from.clone(), |stage| stage.join(path.as_str()));
                 let text = fs::read(&file).context(file.display())?;
                 recipe::check(&from.display().to_string(), &text, given)?;
-                // The digest covers the bytes the check passed, even if the file has changed
-                // since it was hashed.
+                // The digest covers the bytes the check passed, even if the file has changed since
+                // it was hashed.
                 *sha256 = hex(Sha256::digest(&text).into());
                 format!("file {path}")
             }
@@ -689,9 +648,8 @@ impl Inputs {
             args,
             contexts,
         } = given;
-        // No line holds a line feed: the check passes only a target that names a stage, and
-        // build arguments and named contexts with names of the characters it says; and a tag
-        // holds none.
+        // No line holds a line feed: the check passes only a target that names a stage, and build
+        // arguments and named contexts with names of the characters it says; and a tag holds none.
         let target = target.iter().map(|target| format!("target {target}"));
         let args = (args.iter())
             .map(|(name, value)| format!("arg {name} {}", hex(Sha256::digest(value).into())));
@@ -711,7 +669,6 @@ impl Inputs {
 }
 
 impl fmt::Display for Inputs {
-    /// The text whose lines the module doc gives, each ending in a line feed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{FORM} {}", options().collect::<Vec<_>>().join(" "))?;
         writeln!(f, "{}", self.recipe)?;
@@ -733,8 +690,6 @@ impl fmt::Display for Inputs {
     }
 }
 
-/// Each directory and regular file below `context`'s root, by its path: what its directory
-/// holds, then each of its mounts, each file hashed as it is now.
 fn read_context(context: &BuildContext) -> Result<BTreeMap<String, Entry>, String> {
     let mut entries = BTreeMap::new();
     if let Some(dir) = &context.dir {
@@ -771,7 +726,6 @@ fn read_context(context: &BuildContext) -> Result<BTreeMap<String, Entry>, Strin
     Ok(entries)
 }
 
-/// Makes the directory `dir`, which names nothing yet, with bits [`DIR_MODE`].
 fn make_dir(dir: &Path) -> Result<(), String> {
     (fs::create_dir(dir))
         .and_then(|()| fs::set_permissions(dir, Permissions::from_mode(DIR_MODE)))
@@ -784,8 +738,6 @@ fn set_build_time(path: &Path) -> Result<(), String> {
         .context(path.display())
 }
 
-/// Adds each directory and regular file below `dir` to `entries`, by its path in the context:
-/// `prefix`, which is empty or ends in `/`, then its path below `dir`.
 fn read_dir(dir: &Path, prefix: &str, entries: &mut BTreeMap<String, Entry>) -> Result<(), String> {
     for entry in fs::read_dir(dir).context(dir.display())? {
         let entry = entry.context(dir.display())?;
@@ -832,8 +784,6 @@ fn read_dir(dir: &Path, prefix: &str, entries: &mut BTreeMap<String, Entry>) -> 
     Ok(())
 }
 
-/// Whether `name` holds whitespace or a control character, which would make its line of the
-/// inputs' text ambiguous.
 fn ambiguous(name: &str) -> bool {
     name.contains(|char: char| char.is_whitespace() || char.is_control())
 }
@@ -845,7 +795,6 @@ fn file_sha256(path: &Path) -> io::Result<String> {
     Ok(hex(sha256.finalize().into()))
 }
 
-/// A writer that hashes what is written to it, so that [`io::copy`] can read a file into it.
 struct Hasher(Sha256);
 
 impl io::Write for Hasher {
