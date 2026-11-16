@@ -115,6 +115,13 @@ impl Listed {
         }
     }
 
+    pub(crate) fn has_result(&self) -> bool {
+        match self {
+            Self::Run(run) => matches!(run.ending, Some(Ending::Judged { .. })),
+            Self::Building { .. } | Self::Waiting { .. } | Self::Unstarted => false,
+        }
+    }
+
     pub(crate) fn state(&self) -> State {
         match self {
             Self::Waiting { .. } => State::Waiting,
@@ -122,7 +129,7 @@ impl Listed {
             Self::Unstarted => State::Unstarted,
             Self::Run(run) => match &run.ending {
                 None => State::Running,
-                Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => {
+                Some(Ending::Judged { .. } | Ending::Unjudged(_) | Ending::NoResult { .. }) => {
                     State::Finished
                 }
                 Some(Ending::Failed(_)) => State::Failed,
@@ -226,7 +233,7 @@ pub(crate) fn unread(unread: &[Unread]) -> Option<String> {
 #[derive(Default)]
 struct Totals {
     states: BTreeMap<State, usize>,
-    unscored: usize,
+    without_result: usize,
     ends: Option<UnixTime>,
     usd: Option<f64>,
     unpriced: bool,
@@ -239,8 +246,8 @@ impl Totals {
         let Listed::Run(run) = listed else {
             return;
         };
-        if let Some(Ending::Unscored(_) | Ending::NoResult { .. }) = run.ending {
-            self.unscored += 1;
+        if let Some(Ending::Unjudged(_) | Ending::NoResult { .. }) = run.ending {
+            self.without_result += 1;
         }
         let Some(progress) = &run.progress else {
             return;
@@ -264,8 +271,8 @@ impl Totals {
         let mut states = Vec::new();
         for (state, count) in &self.states {
             let mut shown = format!("{count} {}", state.name());
-            if *state == State::Finished && self.unscored > 0 {
-                let _ = write!(shown, " ({} without a score)", self.unscored);
+            if *state == State::Finished && self.without_result > 0 {
+                let _ = write!(shown, " ({} without a result)", self.without_result);
             }
             states.push(shown);
         }
@@ -363,8 +370,12 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
 
 fn score(ending: &Ending) -> String {
     match ending {
-        Ending::Scored { score, after: _ } => shown_score(score),
-        Ending::Unscored(_)
+        Ending::Judged {
+            score: Some(score),
+            after: _,
+        } => shown_score(score),
+        Ending::Judged { score: None, .. }
+        | Ending::Unjudged(_)
         | Ending::NoResult { .. }
         | Ending::Failed(_)
         | Ending::Interrupted(_)

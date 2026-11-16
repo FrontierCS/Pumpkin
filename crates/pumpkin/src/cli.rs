@@ -715,7 +715,7 @@ Examples:
   pumpkin wait runs/20261108-000905-126a21e9
 
 Exit status:
-  0  The run finished with a score.
+  0  The run finished with a result.
   3  The run finished without one.
   1  The run failed, was interrupted, or was lost as its driver ended without
      an outcome.json, which `pumpkin cancel` then records; or another error.

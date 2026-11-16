@@ -408,7 +408,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 self.serve(Caller::Job(job), judge);
             }
             // The keys' refusals are read as the core locks the selection, before the record of it
-            // is written, so that a refusal heard after the lock leaves the run to be scored.
+            // is written, so that a refusal heard after the lock leaves the run to be judged.
             if finalizes(&actions) {
                 let held = self
                     .served

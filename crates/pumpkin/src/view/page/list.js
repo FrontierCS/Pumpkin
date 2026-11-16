@@ -10,7 +10,7 @@ import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, 
  * @property {string} id
  * @property {boolean} live
  * @property {string} state
- * @property {boolean} scored
+ * @property {boolean} has_result
  * @property {string} time
  * @property {string} bound
  * @property {string} usd

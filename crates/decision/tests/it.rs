@@ -535,7 +535,7 @@ fn whole_run() {
             9500 judge_exited 0
             9600 collected 0 {"raw_score": 0, "metrics": {"solved": 0}, "summary": "for the operator"}
             10000 status 0
-              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"scored":true,"remaining":{"calls":99,"seconds":11993}}
+              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11993}}
             11000 submit submit 10240
               reply to op 6: {"kind":"submit","state":"stored","remaining_seconds":17989}
             12000 submit submit 10240 final
@@ -604,7 +604,7 @@ fn quotas() {
             6000 judge_exited 0
             6100 collected 0 {"raw_score": null, "failure": {"code": "wrong_answer"}, "summary": "for the operator"}
             6200 status 0
-              reply to op 7: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"scored":false,"remaining":{"calls":99,"seconds":6}}
+              reply to op 7: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":6}}
             7000 judge train 10
               reply to op 8: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":6}}
               start job 1 of train on op 8's payload of 10 bytes, with a timeout of 6s
@@ -659,7 +659,7 @@ fn one_call_at_a_time() {
               refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             3200 collected 0 {}
             3300 status 0
-              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"scored":false,"remaining":{"calls":1,"seconds":11999}}
+              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11999}}
             3400 judge train 10
               reply to op 6: {"kind":"judge","job":1,"remaining":{"calls":0,"seconds":11999}}
               start job 1 of train on op 6's payload of 10 bytes, with a timeout of 11999s
@@ -953,7 +953,7 @@ fn deep_results() {
             3000 judge_exited 0
             3100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
             3200 status 0
-              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":3},"scored":true,"remaining":{"calls":99,"seconds":11998}}
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":3},"remaining":{"calls":99,"seconds":11998}}
             3300 submit submit 10
               reply to op 3: {"kind":"submit","state":"stored","remaining_seconds":17996}
             3400 agent_exited 0
@@ -1247,7 +1247,7 @@ fn reports_for_the_log() {
             3000 judge_exited 0 1
             3100 collected 0 {"raw_score": 1}
             3200 status 0
-              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"scored":true,"remaining":{"calls":99,"seconds":11998}}
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
         "#]],
     );
 }
@@ -1282,7 +1282,7 @@ fn exact_scores() {
             2000 judge_exited 0
             2100 collected 0 {"raw_score": 22.833062975103598}
             2200 status 0
-              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"scored":true,"remaining":{"calls":99,"seconds":11999}}
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
             3000 submit submit 10 final
               reply to op 3: {"kind":"submit","state":"accepted","remaining_seconds":60}
               (tick due at 63000)
@@ -2584,7 +2584,7 @@ fn call_leases() {
               refuse op 10: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             5000 lease_ended 0
             5100 status 0
-              reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"scored":true,"remaining":{"calls":99,"seconds":11998}}
+              reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
             5200 judge train 10
               reply to op 12: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11998}}
               start job 1 of train on op 12's payload of 10 bytes, with a timeout of 50s

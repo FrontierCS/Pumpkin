@@ -61,10 +61,9 @@ impl JudgeResult {
     }
 
     pub(super) fn job_state(&self) -> JobState {
-        let Self { score, returned } = self;
+        let Self { score: _, returned } = self;
         JobState::Completed {
             returned: returned.clone(),
-            scored: score.is_some(),
         }
     }
 }

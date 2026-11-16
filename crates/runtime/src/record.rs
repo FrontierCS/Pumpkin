@@ -297,18 +297,21 @@ pub struct Record {
 }
 
 /// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id and
-/// says how in words, but a score, which the reader words as it shows any score.
+/// says how in words, but a result's score, which the reader words as it shows any score.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// It finished with a score, a JSON number, after its work phase ended as `after` says: `after
-    /// the work phase ended <how>`.
-    Scored { score: String, after: String },
-    /// It finished without a score, as the agent submitted nothing or the verdict has none:
-    /// `finished without a score: <why>`.
-    Unscored(String),
-    /// It finished without a score as its final judge returned no result: `finished without a
-    /// score: <why>`. `judge_stderr` is where the record holds that judge's standard error, which
-    /// may not have been collected, or why the run log doesn't say.
+    /// It finished with a result, whose score, a JSON number, is `score` if it has one, after its
+    /// work phase ended as `after` says: `after the work phase ended <how>`.
+    Judged {
+        score: Option<String>,
+        after: String,
+    },
+    /// It finished without a result, as the agent submitted nothing or its verdict is of a kind
+    /// this pumpkin doesn't know: `finished without a result: <why>`.
+    Unjudged(String),
+    /// It finished without a result as its final judge gave none: `finished without a result:
+    /// <why>`. `judge_stderr` is where the record holds that judge's standard error, which may not
+    /// have been collected, or why the run log doesn't say.
     NoResult {
         why: String,
         judge_stderr: Result<PathBuf, String>,
@@ -680,7 +683,7 @@ impl Record {
     /// which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
     pub fn ended_clean(&self) -> Result<bool, String> {
         let finished = match self.ended()? {
-            Some(Ending::Scored { .. } | Ending::Unscored(_) | Ending::NoResult { .. }) => true,
+            Some(Ending::Judged { .. } | Ending::Unjudged(_) | Ending::NoResult { .. }) => true,
             Some(Ending::Failed(_) | Ending::Interrupted(_) | Ending::Lost) | None => false,
         };
         Ok(finished && self.undeleted()?.is_empty())
@@ -957,16 +960,13 @@ fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
         }
         Some(_) | None => "in a way this pumpkin doesn't know".to_owned(),
     };
-    let score = &outcome["score"];
-    if !score.is_null() {
-        return Ending::Scored {
-            score: score.to_string(),
-            after: format!("after the work phase ended {ended}"),
-        };
-    }
-    let unscored = |why: String| format!("finished without a score: {why}");
+    let without = |why: String| format!("finished without a result: {why}");
     match outcome["verdict"]["kind"].as_str() {
-        Some("no_submission") => Ending::Unscored(unscored(format!(
+        Some("judged") => Ending::Judged {
+            score: outcome["score"].as_number().map(ToString::to_string),
+            after: format!("after the work phase ended {ended}"),
+        },
+        Some("no_submission") => Ending::Unjudged(without(format!(
             "the agent submitted nothing, and the work phase ended {ended}"
         ))),
         Some("no_result") => {
@@ -976,15 +976,15 @@ fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
                 .as_str()
                 .map_or_else(String::new, |r| format!(": {r}"));
             Ending::NoResult {
-                why: unscored(format!(
-                    "the final judge returned no result ({kind}{detail}), after the work phase \
-                     ended {ended}"
+                why: without(format!(
+                    "the final judge gave none ({kind}{detail}), after the work phase ended \
+                     {ended}"
                 )),
                 judge_stderr: final_judge_stderr(dir),
             }
         }
-        Some(_) | None => Ending::Unscored(unscored(format!(
-            "the verdict has no score, after the work phase ended {ended}"
+        Some(_) | None => Ending::Unjudged(without(format!(
+            "its verdict is of a kind this pumpkin doesn't know, after the work phase ended {ended}"
         ))),
     }
 }

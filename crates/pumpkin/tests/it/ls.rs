@@ -78,14 +78,14 @@ fn runs_a_task() {
             pumpkin: run <first> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
               sandboxes: 1 on local/container, <t> in all, none created
-            pumpkin: run <first> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<first>
+            pumpkin: run <first> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<first>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
               <first> finished         0s  -               -  example/task
-              1 run: 1 finished (1 without a score)
+              1 run: 1 finished (1 without a result)
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -95,7 +95,7 @@ fn runs_a_task() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
               sandboxes: 1 on local/container, <t> in all, none created
-            pumpkin: run <id> finished without a score: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
             outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
@@ -116,12 +116,12 @@ fn lists() {
     ended(
         "20261107-120000-1b8a6389",
         "examples/hello",
-        json!({ "state": "finished", "score": 7.5 }),
+        json!({ "state": "finished", "score": 7.5, "verdict": { "kind": "judged" } }),
     );
     ended(
         "20261107-120100-2c9b0001",
         "examples/hello",
-        json!({ "state": "finished", "score": null }),
+        json!({ "state": "finished", "score": null, "verdict": { "kind": "judged" } }),
     );
     ended(
         "20261107-120200-3d0c0002",
@@ -169,7 +169,7 @@ fn lists() {
               20261107-120300-4e1d0003 interrupted       -  -               -  examples/codex
               20261107-120400-5f2e0004 publishing      <t>                  -  examples/hello
               20261107-120500-602f0005 lost              -  -               -  -
-              6 runs: 1 running, 2 finished (1 without a score), 1 failed, 1 interrupted, 1 lost
+              6 runs: 1 running, 2 finished, 1 failed, 1 interrupted, 1 lost
             $ pumpkin ls --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
@@ -369,7 +369,7 @@ fn lists_phases() {
               20261110-120000-0000000c finished     18m20s  49.36      $0.66+  example/lease
               20261110-120000-0000000d finished     18m20s  49.36      $0.44+  example/lease
               20261110-120000-0000000e finished     18m20s  49.36           -  example/lease
-              5 runs: 5 finished (1 without a score); $2.20 so far, and more without a price, and for 2 responses' unreported tokens
+              5 runs: 5 finished (1 without a result); $2.20 so far, and more without a price, and for 2 responses' unreported tokens
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
@@ -524,7 +524,7 @@ fn says_unread_lines() {
             printed:
               20261110-110000-0000000b finished        40s  -               -  example/lease
               20261110-110000-0000000c failed            -  -               -  example/lease
-              2 runs: 1 finished (1 without a score), 1 failed
+              2 runs: 1 finished (1 without a result), 1 failed
             $ pumpkin wait --runs runs 20261110-110000-0000000b
             exit status: Some(3)
             pumpkin: run 20261110-110000-0000000b started <t> after it was asked for, and ran <t>:
@@ -532,7 +532,7 @@ fn says_unread_lines() {
               model: 0 requests
               sandboxes: 1 on aws/judge, <t> in all, 1 created, all deleted
               4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
-            pumpkin: run 20261110-110000-0000000b finished without a score: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
+            pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait --runs runs 20261110-110000-0000000c
