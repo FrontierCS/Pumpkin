@@ -9,7 +9,7 @@ be: 5 for each sandbox, so 15 without a GPU runner, and 20 with one.
 DEADLINE = arg("deadline_seconds", int, default = 600)
 GPU_MODEL = arg("gpu_model", str, default = "")
 
-# With `hold`, the agent opens a lease of each grant and holds them, and probes nothing, until its
+# With `hold`, the agent opens a lease of each session and holds them, and probes nothing, until its
 # deadline: a run that `cargo xtask live --lost` loses once they are ready.
 HOLD = arg("hold", bool, default = False)
 
@@ -17,8 +17,8 @@ IMAGE = image("Dockerfile")
 JUDGE_IMAGE = image("judge/Dockerfile")
 USER = {"uid": 1000, "gid": 1000}
 
-CPU_LEASE = {"lease": {"name": "cpu", "role": "cpu_runner", "instances": 1, "instance_seconds": 300, "commands": 4, "transfer_bytes": 1 * KiB}}
-GPU_LEASE = {"lease": {"name": "gpu", "role": "gpu_runner", "instances": 1, "instance_seconds": 300, "commands": 4, "transfer_bytes": 1 * KiB}}
+CPU_SESSION = {"name": "cpu", "session": {"runner": "cpu_runner", "instances": 1, "instance_seconds": 300, "commands": 4, "transfer_bytes": 1 * KiB}}
+GPU_SESSION = {"name": "gpu", "session": {"runner": "gpu_runner", "instances": 1, "instance_seconds": 300, "commands": 4, "transfer_bytes": 1 * KiB}}
 RUNNER = {"runner": {"cwd": "/workspace"}}
 GPU = {"count": 1, "model": GPU_MODEL}
 GPU_RUNNER = {
@@ -41,7 +41,7 @@ workflow(
                 "command": {"argv": ["python3", "-u", "/opt/smoke/agent.py"] + (["hold"] if HOLD else []), "cwd": "/workspace"},
                 "deadline_seconds": DEADLINE,
                 "finalize_grace_seconds": 0,
-                "grants": [CPU_LEASE] + ([GPU_LEASE] if GPU_MODEL else []) + [{"submit": {"name": "final"}}],
+                "grants": [CPU_LEASE] + ([GPU_LEASE] if GPU_MODEL else []) + [{"name": "final", "submit": {}}],
             }},
         },
         {

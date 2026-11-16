@@ -41,15 +41,14 @@ joined\n',
                 "finalize_grace_seconds": 60,
                 "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
                 "grants": [
-                    {"judge": {
-                        "name": "train",
+                    {"name": "train", "judge": {
                         "role": "train_judge",
                         "slot": "payload",
                         "calls": 100,
                         "cumulative_seconds": None,
                         "call_timeout_seconds": 10 * 60,
                     }},
-                    {"submit": {"name": "final"}},
+                    {"name": "final", "submit": {}},
                 ],
             }},
         },

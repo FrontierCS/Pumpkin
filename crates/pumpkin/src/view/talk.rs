@@ -67,17 +67,17 @@ impl Talk {
         let score = ir.score.role.as_str();
         let mut granted = BTreeMap::new();
         for role in roles {
-            // Each grant that names a role: a judge grant its judge, a lease grant its runner.
+            // Each grant that names a role: a judge grant its judge, a session its runner.
             let named: Vec<(&Name, &Name)> = match &role.runtime {
                 ir::Runtime::Agent(agent) => (agent.grants.iter())
-                    .filter_map(|grant| match grant {
-                        ir::Grant::Judge(judge) => Some((&judge.name, &judge.role)),
-                        ir::Grant::Lease(lease) => Some((&lease.name, &lease.role)),
-                        ir::Grant::Submit(_) => None,
+                    .filter_map(|grant| match &grant.function {
+                        ir::Function::Judge(judge) => Some((&grant.name, &judge.role)),
+                        ir::Function::Session(session) => Some((&grant.name, &session.runner)),
+                        ir::Function::Submit(_) => None,
                     })
                     .collect(),
-                ir::Runtime::Judge(judge) => (judge.lease_grants.iter())
-                    .map(|lease| (&lease.name, &lease.role))
+                ir::Runtime::Judge(judge) => (judge.sessions.iter())
+                    .map(|named| (&named.name, &named.session.runner))
                     .collect(),
                 ir::Runtime::Runner(_) => Vec::new(),
             };

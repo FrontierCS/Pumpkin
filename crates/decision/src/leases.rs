@@ -15,7 +15,7 @@ use core::ops::{Index, IndexMut};
 use core::time::Duration;
 
 use schema::sandbox::op::{CommandEnd, TransferEnd};
-use schema::workflow::LeaseGrantId;
+use schema::workflow::SessionId;
 
 use super::{Action, Caller, Core, LeaseId};
 
@@ -26,7 +26,7 @@ pub(super) struct Leases(Vec<Lease>);
 pub(super) struct Lease {
     /// Who opened it, and alone may use it.
     pub(super) holder: Caller,
-    pub(super) grant: LeaseGrantId,
+    pub(super) grant: SessionId,
     /// Since the run started.
     pub(super) opened: Duration,
     /// How long it lasts from when its runner is ready.
@@ -223,7 +223,7 @@ impl Leases {
     /// the grant that has not ended: the instance is then below the grant's `instances`.
     pub(super) fn open(
         &mut self,
-        (holder, grant): (Caller, LeaseGrantId),
+        (holder, grant): (Caller, SessionId),
         life: Duration,
         now: Duration,
     ) -> LeaseId {
@@ -283,7 +283,7 @@ impl Leases {
             .any(|lease| lease.holder == holder && !matches!(lease.state, State::Ended { .. }))
     }
 
-    pub(super) fn usage(&self, grant: LeaseGrantId, holder: Caller, now: Duration) -> Usage {
+    pub(super) fn usage(&self, grant: SessionId, holder: Caller, now: Duration) -> Usage {
         let mut usage = Usage::default();
         let held = |lease: &&Lease| lease.grant == grant && lease.holder == holder;
         for lease in self.0.iter().filter(held) {
@@ -333,7 +333,7 @@ impl Core<'_> {
     /// among the holder's ready leases of the grant, so the end moves as leases come and go.
     pub(super) fn ready_end(&self, lease: &Lease, since: Duration) -> Duration {
         let own = since.saturating_add(lease.life);
-        let Some(total) = self.workflow.lease_grant(lease.grant).cumulative() else {
+        let Some(total) = self.workflow.session(lease.grant).cumulative() else {
             return own;
         };
         let usage = self.leases.usage(lease.grant, lease.holder, self.now);

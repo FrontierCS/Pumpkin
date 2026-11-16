@@ -45,7 +45,7 @@ pub const MAX_OP_PAYLOAD_BYTES: u64 = 64 << 20;
 
 /// The most bytes of files a transfer of a tree between two sandboxes may move, which bounds
 /// what the host holds of it on its disk
-/// ([`transfer_bytes`](crate::ir::LeaseGrant::transfer_bytes)).
+/// ([`transfer_bytes`](crate::ir::Session::transfer_bytes)).
 // As much as a sandbox's `/pumpkin` holds, which bounds every tree the host collects into a run's
 // record.
 pub const MAX_TRANSFER_BYTES: u64 = PUMPKIN_BYTES;

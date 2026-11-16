@@ -609,7 +609,7 @@ judged_task(
                    |                                   ^
                 the left operand, `"SEED="`, is made at lib/judged.star:27:25
                 the right operand, `7`, is made at bad/operand/task.star:7:20
-                in `_judge()`, called at lib/judged.star:88:13
+                in `_judge()`, called at lib/judged.star:87:13
                 in `judged_task()`, called at bad/operand/task.star:3:1"#]],
     );
     check(
@@ -3657,15 +3657,14 @@ fn plans() {
                           "judge": {
                             "call_timeout_seconds": 600,
                             "calls": 10,
-                            "name": "train",
                             "role": "train_judge",
                             "slot": "payload"
-                          }
+                          },
+                          "name": "train"
                         },
                         {
-                          "submit": {
-                            "name": "final"
-                          }
+                          "name": "final",
+                          "submit": {}
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
@@ -4904,9 +4903,8 @@ NAME = "one"
                       "finalize_grace_seconds": 0,
                       "grants": [
                         {
-                          "submit": {
-                            "name": "final"
-                          }
+                          "name": "final",
+                          "submit": {}
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md.\n"

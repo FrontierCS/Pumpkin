@@ -36,7 +36,7 @@ use gateway::RefusedOp;
 use provider::UnixTime;
 use route::{Answer, Usage};
 use schema::ir::{Api, GpuModel, Name};
-use schema::sandbox::op::OpReply;
+use schema::sandbox::op::{OpReply, SessionOp};
 use schema::workflow::{JudgeCall, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -474,44 +474,55 @@ fn request_json(request: &Request) -> Value {
         }),
         // A decimal string, as a time is, since the agent may give any number, past 2^53 too.
         Request::Status { job } => json!({ "kind": "status", "job": job.to_string() }),
-        Request::LeaseOpen {
-            grant,
-            instance_seconds,
-        } => json!({
+        Request::Session { grant, op } => session_json(grant, op),
+    }
+}
+
+fn session_json(grant: &Name, op: &SessionOp) -> Value {
+    let grant = grant.as_str();
+    match op {
+        SessionOp::Open { instance_seconds } => json!({
             "kind": "lease_open",
-            "grant": grant.as_str(),
+            "grant": grant,
             "instance_seconds": instance_seconds,
         }),
-        Request::LeaseRun {
+        SessionOp::Run {
             lease,
             argv,
             timeout_seconds,
         } => json!({
             "kind": "lease_run",
+            "grant": grant,
             "lease": lease,
             "argv": argv,
             "timeout_seconds": timeout_seconds,
         }),
-        Request::LeasePut {
+        SessionOp::Put {
             lease,
             tree,
             to,
             replace,
         } => json!({
             "kind": "lease_put",
+            "grant": grant,
             "lease": lease,
             "tree": tree,
             "to": to,
             "replace": replace,
         }),
-        Request::LeaseGet { lease, from, to } => json!({
+        SessionOp::Get { lease, from, to } => json!({
             "kind": "lease_get",
+            "grant": grant,
             "lease": lease,
             "from": from,
             "to": to,
         }),
-        Request::LeaseStatus { lease } => json!({ "kind": "lease_status", "lease": lease }),
-        Request::LeaseClose { lease } => json!({ "kind": "lease_close", "lease": lease }),
+        SessionOp::Status { lease } => {
+            json!({ "kind": "lease_status", "grant": grant, "lease": lease })
+        }
+        SessionOp::Close { lease } => {
+            json!({ "kind": "lease_close", "grant": grant, "lease": lease })
+        }
     }
 }
 
@@ -559,7 +570,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             "kind": "start_lease",
             "lease": lease.0,
             "holder": logged::Caller::from(*holder),
-            "grant": workflow.lease_grant(*grant).name.as_str(),
+            "grant": workflow.session(*grant).name.as_str(),
             "instance": instance,
             "start_by_ns": nanos(*start_by),
         }),

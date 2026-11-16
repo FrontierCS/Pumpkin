@@ -14,7 +14,7 @@ what the workflow grants it and nothing more, to bound what a run spends in time
 keep a record of the run that no sandbox can alter.
 
 A workflow is data, the workflow IR. It names its roles, one agent, its judges and the runners
-they lease; the grants each role holds, such as the agent's judge calls, its leases and its
+they lease; the grants each role holds, such as the agent's judge calls, its sessions and its
 submission; each role's model route; and the score, the judge whose verdict on the selected
 submission ends the run. A task's source, in Pumpkin's workflow language, a subset of Starlark,
 evaluates to that IR and to the images its roles run. The IR is the only input the runtime reads,
@@ -106,8 +106,8 @@ such as none or no limit, and whatever writes the IR picks the defaults. Review 
 check does: the IR's types default only an `Option` or an empty collection.
 
 **Architecture Invariant:** the agent never reaches the judge that scores it, nor what a judge
-runs. A judge's runtime holds lease grants alone, and parsing refuses a score whose judge one of
-the agent's grants names and an agent's lease of a runner whose image is a judge's.
+runs. A judge's runtime holds sessions alone, and parsing refuses a score whose judge one of the
+agent's grants names and an agent's session of a runner whose image is a judge's.
 
 ### `crates/decision`
 
@@ -539,7 +539,7 @@ files to a controller have no bound on their whole time, as their inputs' size s
 gives up only once it stalls.
 
 A run's bounds are the workflow's: the agent's deadline and finalize grace, each judge grant's
-calls and judge seconds, each lease grant's instances, seconds, commands and transfer bytes, each
+calls and judge seconds, each session's instances, seconds, commands and transfer bytes, each
 slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
 refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's hard
 end, by which the core abandons the run if nothing has ended it. The model budgets of the

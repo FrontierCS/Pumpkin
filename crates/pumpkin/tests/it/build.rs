@@ -369,8 +369,8 @@ fn builds_on_docker() {
                         },
                         "grants": [
                           {
+                            "name": "train",
                             "judge": {
-                              "name": "train",
                               "role": "train_judge",
                               "slot": "payload",
                               "calls": 100,
@@ -379,9 +379,8 @@ fn builds_on_docker() {
                             }
                           },
                           {
-                            "submit": {
-                              "name": "final"
-                            }
+                            "name": "final",
+                            "submit": {}
                           }
                         ]
                       }

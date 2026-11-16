@@ -98,38 +98,36 @@ pub(super) struct Grant {
     pub(super) ready_for: Option<Duration>,
 }
 
-/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's lease grants.
+/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's sessions.
 fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
-    let lease = |grant: &ir::LeaseGrant| Grant {
-        role: Some(grant.role.to_string()),
-        ready_for: Some(Duration::from_secs(grant.instance_seconds.get())),
+    let session = |session: &ir::Session| Grant {
+        role: Some(session.runner.to_string()),
+        ready_for: Some(Duration::from_secs(session.instance_seconds.get())),
     };
     let (agent, judge) = match runtime {
         ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
-        ir::Runtime::Judge(judge) => (&[][..], judge.lease_grants.as_slice()),
+        ir::Runtime::Judge(judge) => (&[][..], judge.sessions.as_slice()),
         ir::Runtime::Runner(_) => (&[][..], &[][..]),
     };
-    let agent = agent.iter().map(move |grant| match grant {
-        ir::Grant::Judge(judge) => {
-            let role = Some(judge.role.to_string());
-            (
-                &judge.name,
-                Grant {
-                    role,
-                    ready_for: None,
-                },
-            )
-        }
-        ir::Grant::Lease(grant) => (&grant.name, lease(grant)),
-        ir::Grant::Submit(submit) => (
-            &submit.name,
-            Grant {
+    let agent = agent.iter().map(move |grant| {
+        let held = match &grant.function {
+            ir::Function::Judge(judge) => Grant {
+                role: Some(judge.role.to_string()),
+                ready_for: None,
+            },
+            ir::Function::Session(held) => session(held),
+            ir::Function::Submit(_) => Grant {
                 role: None,
                 ready_for: None,
             },
-        ),
+        };
+        (&grant.name, held)
     });
-    agent.chain(judge.iter().map(move |grant| (&grant.name, lease(grant))))
+    agent.chain(
+        judge
+            .iter()
+            .map(move |named| (&named.name, session(&named.session))),
+    )
 }
 
 /// The IR in record `dir`'s `ir.json`, or `None` if it isn't written.

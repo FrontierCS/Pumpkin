@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
 use schema::sandbox::op::OpReply;
-use schema::workflow::{JudgeCall, LeaseGrantId};
+use schema::workflow::{JudgeCall, SessionId};
 use stdx::Context;
 
 use crate::child::{Child, Deadlines, Message, Report};
@@ -52,9 +52,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         (lease, instance, start_by): (LeaseId, u32, Duration),
-        (holder, grant): (Caller, LeaseGrantId),
+        (holder, grant): (Caller, SessionId),
     ) -> Result<(), String> {
-        let runner_id = self.workflow().lease_grant(grant).runner;
+        let runner_id = self.workflow().session(grant).runner;
         let runner = self.workflow().runner(runner_id);
         let (start, collect) = match holder {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of

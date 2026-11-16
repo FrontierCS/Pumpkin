@@ -35,7 +35,7 @@ pub struct Workflow {
     judges: BTreeMap<RoleId, Judge>,
     runners: BTreeMap<RoleId, Runner>,
     judge_grants: Vec<JudgeGrant>,
-    lease_grants: Vec<LeaseGrant>,
+    sessions: Vec<Session>,
     submit_grant: SubmitGrant,
     score: Score,
 }
@@ -107,13 +107,13 @@ impl Workflow {
         &self.judge_grants[id.0]
     }
 
-    /// Every role's lease grants: the agent's, then each judge's, each in the IR's order.
-    pub fn lease_grants(&self) -> impl Iterator<Item = (LeaseGrantId, &LeaseGrant)> {
-        (self.lease_grants.iter().enumerate()).map(|(index, grant)| (LeaseGrantId(index), grant))
+    /// Every role's sessions: the agent's, then each judge's, each in the IR's order.
+    pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> {
+        (self.sessions.iter().enumerate()).map(|(index, grant)| (SessionId(index), grant))
     }
 
-    pub fn lease_grant(&self, id: LeaseGrantId) -> &LeaseGrant {
-        &self.lease_grants[id.0]
+    pub fn session(&self, id: SessionId) -> &Session {
+        &self.sessions[id.0]
     }
 
     /// The agent's one submit grant.
@@ -320,7 +320,7 @@ impl SlotId {
 pub struct JudgeGrantId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LeaseGrantId(usize);
+pub struct SessionId(usize);
 
 /// What a judge call is made under: one of the agent's judge grants, or the workflow's
 /// [`Score`].
@@ -435,13 +435,13 @@ pub struct Runner {
     pub env: Env,
 }
 
-/// A lease grant; see [`ir::LeaseGrant`](crate::ir::LeaseGrant).
+/// A session; see [`ir::Session`](crate::ir::Session).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LeaseGrant {
+pub struct Session {
     pub name: Name,
-    pub holder: RoleId,
-    /// The runner, which no other lease grant names, and whose image, if the agent holds the
-    /// grant, is no judge's ([`ir::LeaseGrant::role`](crate::ir::LeaseGrant::role)).
+    pub holder: Holder,
+    /// The runner, which no other session names, and whose image, if the agent holds the
+    /// session, is no judge's ([`ir::Session::runner`](crate::ir::Session::runner)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -450,14 +450,31 @@ pub struct LeaseGrant {
     pub transfer_bytes: NonZeroU64,
 }
 
-impl LeaseGrant {
-    /// [`ir::LeaseGrant::instance_seconds`](crate::ir::LeaseGrant::instance_seconds), as a
+/// The role that holds a [`Session`]: the agent, or a judge, each of whose calls uses it afresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holder {
+    Agent,
+    Judge(JudgeId),
+}
+
+impl Holder {
+    /// The holder's role in `workflow`, the workflow that holds the session.
+    pub fn role(self, workflow: &Workflow) -> RoleId {
+        match self {
+            Self::Agent => workflow.agent().role,
+            Self::Judge(judge) => judge.role(),
+        }
+    }
+}
+
+impl Session {
+    /// [`ir::Session::instance_seconds`](crate::ir::Session::instance_seconds), as a
     /// [`Duration`].
     pub fn instance(&self) -> Duration {
         Duration::from_secs(self.instance_seconds.get())
     }
 
-    /// [`ir::LeaseGrant::cumulative_seconds`](crate::ir::LeaseGrant::cumulative_seconds), as a
+    /// [`ir::Session::cumulative_seconds`](crate::ir::Session::cumulative_seconds), as a
     /// [`Duration`].
     pub fn cumulative(&self) -> Option<Duration> {
         (self.cumulative_seconds).map(|seconds| Duration::from_secs(seconds.get()))
