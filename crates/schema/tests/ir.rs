@@ -57,7 +57,14 @@ trait Case {
 /// in the IR's JSON.
 impl Case for Value {
     fn outcome(self) -> String {
-        match serde_json::from_value::<ir::Workflow>(self) {
+        serde_json::from_value::<ir::Workflow>(self).outcome()
+    }
+}
+
+/// An IR as read, from a `Value` or from text.
+impl Case for Result<ir::Workflow, serde_json::Error> {
+    fn outcome(self) -> String {
+        match self {
             Err(error) => error.to_string(),
             Ok(ir) => match Workflow::parse(&ir) {
                 Ok(_) => "parsed".to_owned(),
@@ -465,7 +472,7 @@ fn op_replies() {
                 r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"invalid_result","message":"the score at `/raw_score` is not a number: write a number there, or null"},"remaining":{"calls":96,"seconds":0}}"#,
+                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"invalid_result","message":"result.json nests arrays and objects more than 120 deep: nest them at most that deep"},"remaining":{"calls":96,"seconds":0}}"#,
             ),
             Reply(r#"{"kind":"submit","state":"stored","remaining_seconds":120}"#),
             Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
@@ -512,7 +519,7 @@ fn op_replies() {
             Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
             Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
             Status(StatusReply { job: 3, state: Errored { failure: Failure { code: JudgeTimeout, message: "the judge ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
-            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: InvalidResult, message: "the score at `/raw_score` is not a number: write a number there, or null" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
+            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: InvalidResult, message: "result.json nests arrays and objects more than 120 deep: nest them at most that deep" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
             Submit(SubmitReply { state: Stored, remaining_seconds: 120 })
             Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
             Refused { message: "`train` has no calls left: it allows 100" }
@@ -734,14 +741,37 @@ fn parsed() {
     let route = workflow.sandbox(workflow.agent().role).model_route.as_ref();
     let apis: Vec<ir::Api> = route.unwrap().as_slice().iter().map(|e| e.api).collect();
     assert_eq!(apis, [ir::Api::Responses], "the agent's route");
+    let ir::Runtime::Judge(judge) = &ir.roles[2].runtime else {
+        panic!("the final judge's runtime is a judge's");
+    };
+    let shows: Vec<&str> = judge
+        .result
+        .shows
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        shows,
+        ["score", "metrics"],
+        "the final judge's values, in the IR's order"
+    );
+    let written = serde_json::to_string(&judge.result.shows).unwrap();
+    assert_eq!(written, r#"{"score":"/raw_score","metrics":"/metrics"}"#);
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
     let result = "/roles/1/runtime/judge/result";
     let entry = &fixture()["roles"][0]["egress"]["model"][0];
+    // A `Value` holds a key once, so the IR repeats a name as text.
+    let shows = r#""metrics": "/metrics" }"#;
+    let repeated = WORKFLOW.replacen(shows, r#""metrics": "/metrics", "score": "/x" }"#, 1);
     check(
         [
             fixture_with("/name", json!("example task")),
@@ -770,8 +800,12 @@ fn checked_values() {
             ),
             fixture_with(&format!("{agent}/egress/model"), json!([])),
             fixture_with(&format!("{agent}/egress/model"), json!([entry, entry])),
-            fixture_with(&format!("{result}/score"), json!("raw_score")),
-            fixture_with(&format!("{result}/score"), json!("/raw~2score")),
+            fixture_with(&format!("{result}/shows"), json!({ "Score": "/raw_score" })),
+            fixture_with(&format!("{result}/shows"), json!({ "score": "raw_score" })),
+            fixture_with(
+                &format!("{result}/shows"),
+                json!({ "score": "/raw~2score" }),
+            ),
             fixture_with(&format!("{result}/returns"), json!(["/metrics", ""])),
             fixture_with(&format!("{result}/returns"), json!(["/metrics/"])),
             fixture_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
@@ -779,7 +813,10 @@ fn checked_values() {
                 "/roles/2/runtime/judge/slots/0/max_bytes",
                 json!(MAX_OP_PAYLOAD_BYTES + 1),
             ),
-        ],
+        ]
+        .into_iter()
+        .map(serde_json::from_value)
+        .chain([serde_json::from_str(&repeated)]),
         &expect![[r#"
             `example task` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
             `Agent` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
@@ -798,12 +835,14 @@ fn checked_values() {
             `gpt-6-astra` is listed more than once: list each model once
             no APIs: a model route has an entry for one at least
             the API `responses` has more than one entry: give each API one, which lists every model its requests may name
+            `Score` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
             `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
             the empty pointer names the whole result, with no key: point to a field
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
-            /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that"#]],
+            /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+            `score` is shown more than once: show each name once at line 72 column 84"#]],
     );
     assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }

@@ -43,7 +43,7 @@ workflow(
                     "cwd": "/pumpkin/home",
                 },
                 "slots": [{"name": "payload", "max_bytes": 1 * KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
+                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
             }},
         },
     ],

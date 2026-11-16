@@ -12,11 +12,12 @@
 use std::time::Duration;
 
 use provider::UnixTime;
+use schema::ir::Name;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde::de::{DeserializeOwned, Deserializer, Error as _};
 use serde::{Deserialize, Serialize, Serializer, de};
-use serde_json::{Number, Value};
+use serde_json::Value;
 
 use super::{Part, Unread};
 use crate::sandbox::SandboxName;
@@ -264,8 +265,15 @@ pub(super) enum Collected {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct JudgeResult {
-    pub(super) score: Option<Number>,
-    pub(super) returned: Value,
+    // A result that shows nothing has no `values`.
+    #[serde(default)]
+    pub(super) values: Vec<Shown>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct Shown {
+    pub(super) name: Name,
+    pub(super) value: Value,
 }
 
 #[derive(Debug, Deserialize)]

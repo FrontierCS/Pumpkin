@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::nanos;
+use crate::progress;
 
 #[derive(Default)]
 pub(in crate::view) struct Ops {
@@ -48,14 +49,13 @@ impl Ops {
         let (work, result, failed) = match event["kind"].as_str() {
             Some("op_arrived") => return self.arrived(event, &record["actions"], ns),
             Some("judge_collected") => {
-                let score = &event["result"]["score"];
-                let invalid = event["invalid"].as_str();
-                let code = event["result"]["returned"]["failure"]["code"].as_str();
-                let (result, failed) = match (invalid, code) {
-                    (Some(why), _) => (format!("invalid: {why}"), true),
-                    (None, _) if score.is_number() => (format!("score {score}"), false),
-                    (None, Some(code)) => (format!("no score: {code}"), true),
-                    (None, None) => ("no score".to_owned(), true),
+                let Ok(values) = runtime::result_values(&event["result"]) else {
+                    return;
+                };
+                let (result, failed) = match event["invalid"].as_str() {
+                    Some(why) => (format!("invalid: {why}"), true),
+                    None if values.is_empty() => ("result".to_owned(), false),
+                    None => (format!("result {}", progress::shown_values(&values)), false),
                 };
                 (number("job").map(Work::Judge), result, failed)
             }

@@ -59,7 +59,7 @@ def _judge(name, mode, *, recipe, needs, max_bytes, metrics):
             },
             "slots": [{"name": "payload", "max_bytes": max_bytes}],
             "result": {
-                "score": "/score",
+                "shows": {"score": "/score"},
                 "returns": ["/score"] + [
                     "/metrics/" + metric
                     for metric in metrics + JUDGE_METRICS

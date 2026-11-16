@@ -852,7 +852,7 @@ impl Record {
             .as_str()
             .unwrap_or("no reason is recorded");
         match outcome["state"].as_str() {
-            Some("finished") => Ok(Some(finished(&outcome, &self.dir))),
+            Some("finished") => Ok(Some(finished(&outcome, &self.dir)?)),
             Some("failed") => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
             Some("interrupted") => {
                 let signal = outcome["signal"].as_str().and_then(Signal::named);
@@ -1126,11 +1126,11 @@ pub(super) fn provided(
 /// The workflow's IR as a run's `ir.json` holds it: the IR's one encoding as text, so an IR printed
 /// elsewhere is byte for byte what a run of it records.
 pub fn ir_json(workflow: &Workflow) -> String {
-    json_text(&json!(workflow.ir()))
-}
-
-fn json_text(value: &Value) -> String {
-    format!("{value:#}\n")
+    // Not through a `Value`, which sorts an object's keys and so a judge's `shows`.
+    let Ok(ir) = serde_json::to_string_pretty(workflow.ir()) else {
+        unreachable!("the IR's maps are keyed by strings, which JSON can hold");
+    };
+    format!("{ir}\n")
 }
 
 pub(super) fn write_json(
@@ -1139,7 +1139,7 @@ pub(super) fn write_json(
     name: &str,
     value: &Value,
 ) -> Result<(), String> {
-    replace(host, dir, name, json_text(value).as_bytes())
+    replace(host, dir, name, format!("{value:#}\n").as_bytes())
 }
 
 pub(super) fn write_ir(host: &impl Host, dir: &Path, workflow: &Workflow) -> Result<(), String> {

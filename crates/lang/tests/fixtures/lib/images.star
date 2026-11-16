@@ -25,7 +25,7 @@ def _judge(name, stage):
         "runtime": {"judge": {
             "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
             "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-            "result": {"score": "/score", "returns": ["/score"]},
+            "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
         }},
     }
 

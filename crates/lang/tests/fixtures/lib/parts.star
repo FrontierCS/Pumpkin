@@ -20,7 +20,7 @@ JUDGE_IMAGE = "sha256:2222222222222222222222222222222222222222222222222222222222
 JUDGE_USER = {"uid": 65532, "gid": 65532}
 
 # What every judge returns of its result.
-RESULT = {"score": "/score", "returns": ["/score", "/failure"]}
+RESULT = {"shows": {"score": "/score"}, "returns": ["/score", "/failure"]}
 
 JUDGE_RUNTIME = {"judge": {
     "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},

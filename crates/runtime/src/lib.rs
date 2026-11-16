@@ -50,7 +50,7 @@ pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Cost, Direction, LeaseSpan, LogFold, ModelUse,
     Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens,
-    TokensCost, Unread, Used, Work,
+    TokensCost, Unread, Used, Work, result_values,
 };
 use log::{Entry, Log};
 use model::Served;

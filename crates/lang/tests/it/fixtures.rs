@@ -185,7 +185,9 @@ fn tasks() {
                           "/metrics/rejected",
                           "/failure"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -228,7 +230,9 @@ fn tasks() {
                           "/score",
                           "/failure"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -251,7 +255,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 571 prefixes evaluate
+            == tasks/literal/task.star: 2 of 572 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -355,7 +359,9 @@ fn tasks() {
                           "/metrics",
                           "/failure"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -392,7 +398,9 @@ fn tasks() {
                         "returns": [
                           "/score"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -472,7 +480,9 @@ fn tasks() {
                           "/score",
                           "/failure"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -576,10 +586,10 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 493 prefixes evaluate
+            == lib/images.star: 0 of 498 prefixes evaluate
 
-            == lib/judged.star: 0 of 563 prefixes evaluate
+            == lib/judged.star: 0 of 562 prefixes evaluate
 
-            == lib/parts.star: 0 of 219 prefixes evaluate"#]],
+            == lib/parts.star: 0 of 221 prefixes evaluate"#]],
     );
 }

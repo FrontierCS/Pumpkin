@@ -20,19 +20,25 @@ use super::{
 )]
 fn waits() {
     let scratch = Scratch::new("waits");
-    let finished = |score: Value, status: Value| {
+    let finished = |result: Value, status: Value| {
         let work_end = json!({ "kind": "agent_exited", "status": status });
-        let verdict = json!({ "kind": "judged" });
-        json!({ "state": "finished", "score": score, "verdict": verdict, "work_end": work_end })
+        let verdict = json!({ "kind": "judged", "result": result });
+        json!({ "state": "finished", "verdict": verdict, "work_end": work_end })
     };
     let ended = |id, outcome| write_record(&scratch, id, true, Some(outcome));
     ended(
         "20261107-120000-1b8a6389",
-        finished(json!(7.5), json!({ "code": 1 })),
+        finished(
+            json!({ "values": [
+                { "name": "score", "value": 7.5 },
+                { "name": "status", "value": "passed" },
+            ] }),
+            json!({ "code": 1 }),
+        ),
     );
     ended(
         "20261107-120100-2c9b0001",
-        finished(json!(null), json!({ "signal": 9 })),
+        finished(json!({}), json!({ "signal": 9 })),
     );
     ended(
         "20261107-120200-2c9b0002",
@@ -40,7 +46,7 @@ fn waits() {
     );
     ended(
         "20261107-120300-3d0c0003",
-        json!({ "state": "finished", "score": null, "verdict": { "kind": "graded" } }),
+        json!({ "state": "finished", "verdict": { "kind": "graded" } }),
     );
     // Made by another build.
     let made = scratch.0.join("runs/20261107-120200-2c9b0002/record.json");
@@ -93,19 +99,19 @@ fn waits() {
         &expect![[r#"
             $ pumpkin wait 20261107-120000-1b8a6389 --runs runs
             exit status: Some(0)
-            pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":7.5,"state":"finished","verdict":{"kind":"judged"},"work_end":{"kind":"agent_exited","status":{"code":1}}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged","result":{"values":[{"name":"score","value":7.5},{"name":"status","value":"passed"}]}},"work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 1b8a --runs runs
             exit status: Some(0)
-            pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":7.5,"state":"finished","verdict":{"kind":"judged"},"work_end":{"kind":"agent_exited","status":{"code":1}}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged","result":{"values":[{"name":"score","value":7.5},{"name":"status","value":"passed"}]}},"work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 20261107-1201 --runs runs
             exit status: Some(0)
             pumpkin: run 20261107-120100-2c9b0001 finished with a result, after the work phase ended when signal 9 killed the agent; its record is <scratch>/runs/20261107-120100-2c9b0001
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"judged"},"work_end":{"kind":"agent_exited","status":{"signal":9}}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged","result":{}},"work_end":{"kind":"agent_exited","status":{"signal":9}}}
             $ pumpkin wait runs/20261107-120200-2c9b0002
             exit status: Some(1)
             pumpkin: run 20261107-120200-2c9b0002 failed: r; its record is <scratch>/runs/20261107-120200-2c9b0002
@@ -121,7 +127,7 @@ fn waits() {
             exit status: Some(3)
             pumpkin: run 20261107-120300-3d0c0003 finished without a result: its verdict is of a kind this pumpkin doesn't know, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/20261107-120300-3d0c0003
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"graded"}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"graded"}}
             $ pumpkin wait 20261107 --runs runs
             exit status: Some(1)
             pumpkin: `20261107` matches 4 runs: name one by more of its id
@@ -146,9 +152,9 @@ fn waits() {
             pumpkin: nowhere/x is not a directory: expected the directory of a run's record
             $ env --unset=HOME pumpkin wait runs/20261107-120000-1b8a6389
             exit status: Some(0)
-            pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7.5, after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":7.5,"state":"finished","verdict":{"kind":"judged"},"work_end":{"kind":"agent_exited","status":{"code":1}}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged","result":{"values":[{"name":"score","value":7.5},{"name":"status","value":"passed"}]}},"work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 6a --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
@@ -176,7 +182,7 @@ fn follows() {
     let mut said = String::new();
     stderr.read_line(&mut said).unwrap();
     // After `wait`'s line that it follows the run, which comes before it blocks.
-    let outcome = json!({ "state": "finished", "score": 7, "verdict": { "kind": "judged" } });
+    let outcome = json!({ "state": "finished", "verdict": { "kind": "judged" } });
     scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
     drop(driver);
     stderr.read_to_string(&mut said).unwrap();
@@ -192,9 +198,9 @@ fn follows() {
             $ pumpkin wait 1b8a --runs runs
             exit status: Some(0)
             pumpkin: following run 20261107-120000-1b8a6389, recorded in <scratch>/runs/20261107-120000-1b8a6389: ending `pumpkin wait` does not stop it
-            pumpkin: run 20261107-120000-1b8a6389 finished with a score of 7, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/20261107-120000-1b8a6389
+            pumpkin: run 20261107-120000-1b8a6389 finished with a result, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":7,"state":"finished","verdict":{"kind":"judged"}}"#]],
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged"}}"#]],
     );
 }
 
@@ -207,7 +213,6 @@ fn judge_stderr() {
     let scratch = Scratch::new("judge-stderr");
     let no_result = json!({
         "state": "finished",
-        "score": null,
         "verdict": { "kind": "no_result", "failure": { "kind": "error", "reason": "r" } },
         "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
     });
@@ -270,30 +275,30 @@ fn judge_stderr() {
               �
             pumpkin: run 20261108-120000-0000000a finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000b --runs runs
             exit status: Some(3)
             pumpkin: the final judge's standard error, <scratch>/runs/20261108-120000-0000000b/jobs/0/log/command.stderr, holds 1048577 bytes, more than the 1048576 shown here: read it there
             pumpkin: run 20261108-120000-0000000b finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000c --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000c finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000c
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000d --runs runs
             exit status: Some(3)
             pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000d/log.jsonl doesn't exist: expected a run's log
             pumpkin: run 20261108-120000-0000000d finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000d
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000e --runs runs
             exit status: Some(3)
             pumpkin: the final judge's standard error can't be found: <scratch>/runs/20261108-120000-0000000e/log.jsonl names no final judge: expected a `start_judge` without a grant
             pumpkin: run 20261108-120000-0000000e finished without a result: the final judge gave none (error: r), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261108-120000-0000000e
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result"},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
     );
 }
 
@@ -304,14 +309,15 @@ fn judge_stderr() {
 )]
 fn states() {
     let scratch = Scratch::new("states");
-    let unscored = r#"{"state":"finished","score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}"#;
+    let unjudged =
+        r#"{"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}"#;
     let outcomes = [
         ("no outcome", None),
         (
-            "scored",
-            Some(r#"{"state":"finished","score":3,"verdict":{"kind":"judged"}}"#),
+            "judged",
+            Some(r#"{"state":"finished","verdict":{"kind":"judged"}}"#),
         ),
-        ("unscored", Some(unscored)),
+        ("unjudged", Some(unjudged)),
         ("failed", Some(r#"{"state":"failed","reason":"r"}"#)),
         (
             "interrupted",
@@ -396,68 +402,68 @@ fn states() {
             $ pumpkin wait <no outcome, locked, no record.json> --runs runs
             exit status: Some(1)
             pumpkin: runs/<no outcome, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <scored, no driver.pid, v0> --runs runs
+            $ pumpkin wait <judged, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<scored, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
-            $ pumpkin wait <scored, no driver.pid, v9> --runs runs
+            pumpkin: <scratch>/runs/<judged, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            $ pumpkin wait <judged, no driver.pid, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <scored, no driver.pid, no record.json> --runs runs
+            pumpkin: runs/<judged, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <judged, no driver.pid, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <scored, free, v0> --runs runs
+            pumpkin: runs/<judged, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <judged, free, v0> --runs runs
             exit status: Some(0)
-            pumpkin: run <scored, free, v0> finished with a score of 3, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<scored, free, v0>
+            pumpkin: run <judged, free, v0> finished with a result, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<judged, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged"}}
-            $ pumpkin wait <scored, free, v9> --runs runs
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged"}}
+            $ pumpkin wait <judged, free, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <scored, free, no record.json> --runs runs
+            pumpkin: runs/<judged, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <judged, free, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <scored, locked, v0> --runs runs
+            pumpkin: runs/<judged, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <judged, locked, v0> --runs runs
             exit status: Some(0)
-            pumpkin: run <scored, locked, v0> finished with a score of 3, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<scored, locked, v0>
+            pumpkin: run <judged, locked, v0> finished with a result, after the work phase ended in a way this pumpkin doesn't know; its record is <scratch>/runs/<judged, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"score":3,"state":"finished","verdict":{"kind":"judged"}}
-            $ pumpkin wait <scored, locked, v9> --runs runs
+            printed outcome.json: {"state":"finished","verdict":{"kind":"judged"}}
+            $ pumpkin wait <judged, locked, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <scored, locked, no record.json> --runs runs
+            pumpkin: runs/<judged, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <judged, locked, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<scored, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <unscored, no driver.pid, v0> --runs runs
+            pumpkin: runs/<judged, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unjudged, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unscored, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
-            $ pumpkin wait <unscored, no driver.pid, v9> --runs runs
+            pumpkin: <scratch>/runs/<unjudged, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            $ pumpkin wait <unjudged, no driver.pid, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <unscored, no driver.pid, no record.json> --runs runs
+            pumpkin: runs/<unjudged, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unjudged, no driver.pid, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <unscored, free, v0> --runs runs
+            pumpkin: runs/<unjudged, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unjudged, free, v0> --runs runs
             exit status: Some(3)
-            pumpkin: run <unscored, free, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unscored, free, v0>
+            pumpkin: run <unjudged, free, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unjudged, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
-            $ pumpkin wait <unscored, free, v9> --runs runs
+            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            $ pumpkin wait <unjudged, free, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <unscored, free, no record.json> --runs runs
+            pumpkin: runs/<unjudged, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unjudged, free, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
-            $ pumpkin wait <unscored, locked, v0> --runs runs
+            pumpkin: runs/<unjudged, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            $ pumpkin wait <unjudged, locked, v0> --runs runs
             exit status: Some(3)
-            pumpkin: run <unscored, locked, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unscored, locked, v0>
+            pumpkin: run <unjudged, locked, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unjudged, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
-            $ pumpkin wait <unscored, locked, v9> --runs runs
+            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            $ pumpkin wait <unjudged, locked, v9> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
-            $ pumpkin wait <unscored, locked, no record.json> --runs runs
+            pumpkin: runs/<unjudged, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
+            $ pumpkin wait <unjudged, locked, no record.json> --runs runs
             exit status: Some(1)
-            pumpkin: runs/<unscored, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
+            pumpkin: runs/<unjudged, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <failed, no driver.pid, v0> --runs runs
             exit status: Some(1)
             pumpkin: <scratch>/runs/<failed, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
@@ -674,8 +680,8 @@ fn summarizes() {
             json!([{ "kind": "finish" }]),
         ),
     ]);
-    let unscored = json!({
-        "state": "finished", "score": null,
+    let unjudged = json!({
+        "state": "finished",
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
     let unpriced = lease_places(Prices::Nothing);
@@ -684,7 +690,7 @@ fn summarizes() {
         late,
         asked(late, 90),
         &log,
-        Some(unscored),
+        Some(unjudged),
         &unpriced,
     );
     // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
@@ -735,20 +741,20 @@ fn summarizes() {
             exit status: Some(0)
             pumpkin: run 20261110-100000-0000000a started 30s after it was asked for, and ran 18m20s:
                  0:00 agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40
-                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53
+                 0:40 train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53
                  0:50   box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; closed as its call ended
                  2:00 gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
                  2:00 cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended
                  3:20 train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
                  5:00 train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); its standard error jobs/2/log/command.stderr
-                 6:40 train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {"exit_status":1,"stderr_tail":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)
+                 6:40 train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)
                  8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
-                16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36
+                16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
               sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
               cost: $1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
-            pumpkin: run 20261110-100000-0000000a finished with a score of 49.36, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
+            pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-110000-0000000b
             exit status: Some(3)
@@ -822,7 +828,7 @@ fn follows_milestones() {
         pumpkin:    0:46 train judge job 0 started with unknown GPUs
         pumpkin:    0:50 box lease 0 of job 0 asked on aws/box
         pumpkin:    0:55 box lease 0 of job 0 ready
-        pumpkin:    1:40 train judge job 0 ended: 49.53
+        pumpkin:    1:40 train judge job 0 ended: score=49.53
         pumpkin:    1:42 box lease 0 of job 0 ended: closed as its call ended
         pumpkin:    2:00 gpu lease 1 asked on modal/a100_80
         pumpkin:    2:00 cpu lease 2 asked on aws/judge
@@ -836,7 +842,7 @@ fn follows_milestones() {
         pumpkin:    5:30 train judge job 2 ended: failed: the call was stopped
         pumpkin:    6:40 train judge job 3 asked on modal/a100_80
         pumpkin:    6:45 train judge job 3 started with unknown GPUs
-        pumpkin:    6:55 train judge job 3 ended: no score
+        pumpkin:    6:55 train judge job 3 ended: a result
         pumpkin:    8:20 gpu lease 3 asked on modal/a100_80
         pumpkin:    8:25 gpu lease 3 ready with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)
         pumpkin:    9:30 gpu lease 3 ended: expired
@@ -844,7 +850,7 @@ fn follows_milestones() {
         pumpkin:   16:45 cpu lease 2 ended: closed as the work phase ended
         pumpkin:   16:46 final judge job 4 asked on modal/a100_80
         pumpkin:   16:50 final judge job 4 started with NVIDIA A100-SXM4-80GB
-        pumpkin:   18:20 final judge job 4 ended: 49.36
+        pumpkin:   18:20 final judge job 4 ended: score=49.36 metrics={"solved":3}
           1 part of its log can't be read by this pumpkin, the first at line 57, its action 1: missing field `lease`"#]],
     );
 }
@@ -905,8 +911,8 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
     let (id, depth) = ("20261113-123335-0000000a", RESULT_MAX_DEPTH);
     let whole = (1..depth).fold(json!({ "raw_score": 6 }), |inner, _| json!({ "d": inner }));
     let returned = json!({ "raw_score": 6, "whole": whole });
-    let result = json!({ "score": 6, "returned": returned });
-    let collected = json!({ "kind": "judge_collected", "job": 0, "result": result });
+    let shows_none = json!({ "returned": returned });
+    let collected = json!({ "kind": "judge_collected", "job": 0, "result": shows_none });
     let finish = json!([{ "kind": "finish" }]);
     let final_judge = json!([{
         "kind": "start_judge", "job": 0, "grant": null, "timeout_ns": "60000000000",
@@ -919,7 +925,9 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
         logged(1, json!({ "kind": "judge_started", "job": 0 }), json!([])),
         logged(2, collected, finish),
     ];
-    let outcome = Some(judged(6.0, returned));
+    let mut outcome = judged(6.0, returned);
+    outcome["verdict"]["result"] = shows_none;
+    let outcome = Some(outcome);
     let dir = write_run(
         &scratch,
         id,
@@ -954,16 +962,16 @@ fn reads_the_deepest_result_and_a_log_cut_short() {
             $ pumpkin ls --runs runs 20261113-123335-0000000a
             exit status: Some(0)
             printed:
-              20261113-123335-0000000a finished         2s  6               -  example/lease
+              20261113-123335-0000000a finished         2s  -               -  example/lease
               1 run: 1 finished
             $ pumpkin wait --runs runs 20261113-123335-0000000a
             exit status: Some(0)
             pumpkin: run 20261113-123335-0000000a started 0s after it was asked for, and ran 2s:
                  0:00 agent on aws/judge, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
-                 0:01 final judge job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: 6
+                 0:01 final judge job 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: a result
               model: 0 requests
               sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 1 on modal/a100_80, 1s in all, 1 created, all deleted
-            pumpkin: run 20261113-123335-0000000a finished with a score of 6, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
+            pumpkin: run 20261113-123335-0000000a finished with a result, after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261113-123335-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }

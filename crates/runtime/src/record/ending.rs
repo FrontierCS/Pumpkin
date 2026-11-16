@@ -2,18 +2,20 @@
 
 use std::path::{Path, PathBuf};
 
+use schema::ir::Name;
 use schema::sandbox::command_stderr;
+use serde_json::Value;
 
 use crate::log;
 
-/// How a run ended, as its `outcome.json` says, each with a sentence that follows the run's id and
-/// says how in words, but a result's score, which the reader words as it shows any score.
+/// How a run ended, as its record says. A variant's sentence reads after the run's id, as in
+/// `<id> failed: <reason>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// It finished with a result, whose score, a JSON number, is `score` if it has one, after its
-    /// work phase ended as `after` says: `after the work phase ended <how>`.
+    /// It finished with a result. `values` are the values the result shows, each by its name, in
+    /// their order; `after` says how the work phase ended: `after the work phase ended <how>`.
     Judged {
-        score: Option<String>,
+        values: Vec<(Name, Value)>,
         after: String,
     },
     /// It finished without a result, as the agent submitted nothing or its verdict is of a kind
@@ -34,7 +36,7 @@ pub enum Ending {
     Lost,
 }
 
-pub(super) fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
+pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, String> {
     let work_end = &outcome["work_end"];
     let status = &work_end["status"];
     let ended = match work_end["kind"].as_str() {
@@ -55,30 +57,36 @@ pub(super) fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     };
     let without = |why: String| format!("finished without a result: {why}");
     match outcome["verdict"]["kind"].as_str() {
-        Some("judged") => Ending::Judged {
-            score: outcome["score"].as_number().map(ToString::to_string),
-            after: format!("after the work phase ended {ended}"),
-        },
-        Some("no_submission") => Ending::Unjudged(without(format!(
+        Some("judged") => {
+            let values = log::result_values(&outcome["verdict"]["result"]).map_err(|error| {
+                let path = dir.join("outcome.json");
+                format!("{}'s values don't read: {error}", path.display())
+            })?;
+            Ok(Ending::Judged {
+                values,
+                after: format!("after the work phase ended {ended}"),
+            })
+        }
+        Some("no_submission") => Ok(Ending::Unjudged(without(format!(
             "the agent submitted nothing, and the work phase ended {ended}"
-        ))),
+        )))),
         Some("no_result") => {
             let failure = &outcome["verdict"]["failure"];
             let kind = failure["kind"].as_str().unwrap_or("of an unknown kind");
             let detail = failure["reason"]
                 .as_str()
                 .map_or_else(String::new, |r| format!(": {r}"));
-            Ending::NoResult {
+            Ok(Ending::NoResult {
                 why: without(format!(
                     "the final judge gave none ({kind}{detail}), after the work phase ended \
                      {ended}"
                 )),
                 judge_stderr: final_judge_stderr(dir),
-            }
+            })
         }
-        Some(_) | None => Ending::Unjudged(without(format!(
+        Some(_) | None => Ok(Ending::Unjudged(without(format!(
             "its verdict is of a kind this pumpkin doesn't know, after the work phase ended {ended}"
-        ))),
+        )))),
     }
 }
 

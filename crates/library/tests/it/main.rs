@@ -151,7 +151,7 @@ workflow(
             "runtime": {"judge": {
                 "command": {"argv": ["true"], "cwd": "/pumpkin/home"},
                 "slots": [{"name": "payload", "max_bytes": KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
+                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
             }},
         },
     ],

@@ -38,6 +38,7 @@ use route::{Answer, Usage};
 use schema::ir::{Api, GpuModel, Name};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{JudgeCall, Workflow};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
 
@@ -594,11 +595,12 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
     }
 }
 
-/// How a run finished, for `outcome.json`: `score`, null if it has none; `work_end`, which is
-/// `deadline`, `finalized`, `agent_exited` with its `status`, or `agent_failed` with its `reason`;
-/// and `verdict`, which is `no_submission`, `judged` or `no_result`, the last two with the
-/// `submission` (`payload`, `finalized`) and the `result` (`score`, `returned`) or `failure`
-/// (`timeout`, `error` or `invalid_result`) that judging gave. Each of them is named by its `kind`.
+/// How a run finished, for `outcome.json`: `work_end`, which is `deadline`, `finalized`,
+/// `agent_exited` with its `status`, or `agent_failed` with its `reason`; and `verdict`, which is
+/// `no_submission`, `judged` or `no_result`, the last two with the `submission` (`payload`,
+/// `finalized`) and the `result` (`values`, present when it shows any: an array of `name` and
+/// `value` in the order the spec shows them; and `returned`) or `failure` (`timeout`, `error` or
+/// `invalid_result`) that judging gave. Each of them is named by its `kind`.
 pub(super) fn outcome_json(outcome: &Outcome) -> Value {
     let Outcome { work_end, verdict } = outcome;
     let work_end = match work_end {
@@ -623,7 +625,7 @@ pub(super) fn outcome_json(outcome: &Outcome) -> Value {
             "failure": failure_json(failure),
         }),
     };
-    json!({ "score": outcome.score(), "work_end": work_end, "verdict": verdict })
+    json!({ "work_end": work_end, "verdict": verdict })
 }
 
 fn submission_json(submission: &Submission) -> Value {
@@ -632,10 +634,33 @@ fn submission_json(submission: &Submission) -> Value {
 }
 
 fn result_json(result: &JudgeResult) -> Value {
-    json!({
-        "score": result.score(),
-        "returned": result.returned(),
-    })
+    let mut json = json!({ "returned": result.returned() });
+    if !result.values().is_empty() {
+        let values = result.values().iter();
+        let values: Vec<Value> = values
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect();
+        json["values"] = json!(values);
+    }
+    json
+}
+
+/// The values that `result`, a judge's result as the log's `judge_collected` and `outcome.json`'s
+/// `verdict` hold it, shows, each by its name, in order: none if it has no `values`.
+///
+/// # Errors
+///
+/// Fails if `values` is not an array of objects that each hold a `name`, a [`Name`], and a
+/// `value`.
+pub fn result_values(result: &Value) -> Result<Vec<(Name, Value)>, serde_json::Error> {
+    let Some(values) = result.get("values") else {
+        return Ok(Vec::new());
+    };
+    let values = Vec::<logged::Shown>::deserialize(values)?;
+    Ok(values
+        .into_iter()
+        .map(|shown| (shown.name, shown.value))
+        .collect())
 }
 
 fn failure_json(failure: &Failure) -> Value {

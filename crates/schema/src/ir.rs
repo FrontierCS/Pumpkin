@@ -22,7 +22,7 @@ pub(crate) mod values;
 
 pub use values::{
     AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
-    Mode, ModelName, Models, Name, Returns, RolePath, Sha256Digest, WorkflowName,
+    Mode, ModelName, Models, Name, Returns, RolePath, Sha256Digest, Shows, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
@@ -233,17 +233,19 @@ pub struct RunnerRuntime {
 }
 
 /// What a judge call writes as its result: the JSON file at
-/// [`result_file()`](crate::sandbox::result_file), of which its caller sees whether it has a
-/// score, and the fields [`returns`](Self::returns) names.
+/// [`result_file()`](crate::sandbox::result_file), of which its run shows the values
+/// [`shows`](Self::shows) names, and its caller's reply returns the fields
+/// [`returns`](Self::returns) names.
 ///
 /// Once the judge's command exits, the result alone says how the call went, whatever the exit
 /// status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultSpec {
-    /// Points to the call's score in the result: a number. The result is scored exactly when
-    /// it does; `null` or nothing there means no score, and any other value is invalid.
-    pub score: JsonPointer,
+    /// The values of the result that the run shows, of any JSON type. A value the result lacks
+    /// is left out; none is shown if this is absent.
+    #[serde(default, skip_serializing_if = "Shows::is_empty")]
+    pub shows: Shows,
     /// The fields of the result that the caller's reply returns. A field the result lacks is
     /// left out.
     pub returns: Returns,

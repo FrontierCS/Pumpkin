@@ -74,7 +74,7 @@ without a prefix, those that are live or ended within the last day, and the
 line of totals says how many others there are, and how to list them. A live
 run's line gives its phase, how long it has been in it, the bound at which
 Pumpkin ends the phase, its task, and what it does; an ended run's, its state,
-how long it ran, its score if it has one, and its task.")]
+how long it ran, its task, and the values its result shows.")]
     #[command(after_help = LS_NOTES)]
     Ls(Ls),
     #[command(about = "Stop a run, and remove what it left")]

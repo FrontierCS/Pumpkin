@@ -12,6 +12,8 @@ use provider::UnixTime;
 use runtime::{
     CallEnd, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
 };
+use schema::ir::Name;
+use serde_json::Value;
 use stdx::Utc;
 
 use crate::next;
@@ -359,28 +361,18 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
     };
     let ran =
         (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
-    column(
-        state,
-        ran.as_deref().unwrap_or("-"),
-        &score(ending),
-        &usd,
-        task,
-    )
-}
-
-fn score(ending: &Ending) -> String {
-    match ending {
-        Ending::Judged {
-            score: Some(score),
-            after: _,
-        } => shown_score(score),
-        Ending::Judged { score: None, .. }
+    let rest = match ending {
+        Ending::Judged { values, after: _ } if !values.is_empty() => {
+            format!("{task}: {}", shown_values(values))
+        }
+        Ending::Judged { .. }
         | Ending::Unjudged(_)
         | Ending::NoResult { .. }
         | Ending::Failed(_)
         | Ending::Interrupted(_)
-        | Ending::Lost => "-".to_owned(),
-    }
+        | Ending::Lost => task.to_owned(),
+    };
+    column(state, ran.as_deref().unwrap_or("-"), "-", &usd, &rest)
 }
 
 fn under(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
@@ -664,16 +656,28 @@ fn models(models: &[&str]) -> String {
     counted.collect::<Vec<_>>().join(", ")
 }
 
-/// `score` with two decimals, four if it is below one, and no trailing zero; text that isn't a
-/// number is kept as it is.
-pub(crate) fn shown_score(score: &str) -> String {
-    let Ok(value) = score.parse::<f64>() else {
-        return score.to_owned();
-    };
-    let decimals = if value.abs() >= 1.0 { 2 } else { 4 };
-    let shown = format!("{value:.decimals$}");
-    let shown = shown.trim_end_matches('0').trim_end_matches('.');
-    if shown == "-0" { "0" } else { shown }.to_owned()
+/// `values` as `name=value`, separated by spaces: a number with two decimals, four if it is below
+/// one, and no trailing zero; any other value as compact JSON.
+pub(crate) fn shown_values(values: &[(Name, Value)]) -> String {
+    let shown = values.iter().map(|(name, value)| match value.as_f64() {
+        Some(number) => {
+            let decimals = if number.abs() >= 1.0 { 2 } else { 4 };
+            let shown = format!("{number:.decimals$}");
+            let shown = shown.trim_end_matches('0').trim_end_matches('.');
+            format!("{name}={}", if shown == "-0" { "0" } else { shown })
+        }
+        None => format!("{name}={value}"),
+    });
+    shown.collect::<Vec<_>>().join(" ")
+}
+
+/// What a judge call's result shows, or `a result` if it shows nothing.
+fn result(values: &[(Name, Value)]) -> String {
+    if values.is_empty() {
+        "a result".to_owned()
+    } else {
+        shown_values(values)
+    }
 }
 
 /// [`column_span`] without a trailing `00s` or `00m`, such as `3m` or `2h`.
@@ -863,8 +867,7 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
         }
         if let Some(at) = call.sandbox.gone {
             let ended = match &call.end {
-                Some(CallEnd::Scored(score)) => shown_score(score),
-                Some(CallEnd::Unscored(_)) => "no score".to_owned(),
+                Some(CallEnd::Result(values)) => result(values),
                 Some(CallEnd::Invalid(_)) => "an invalid result".to_owned(),
                 Some(CallEnd::Failed(reason)) => format!("failed: {}", crate::escaped(reason)),
                 None => STOPPED.to_owned(),

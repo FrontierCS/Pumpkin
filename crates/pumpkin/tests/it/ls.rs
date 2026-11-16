@@ -80,7 +80,7 @@ fn runs_a_task() {
               sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <first> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<first>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
+            printed outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
@@ -98,7 +98,7 @@ fn runs_a_task() {
             pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-            outcome.json: {"score":null,"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
+            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             printed outcome.json: true"#]],
     );
 }
@@ -116,12 +116,12 @@ fn lists() {
     ended(
         "20261107-120000-1b8a6389",
         "examples/hello",
-        json!({ "state": "finished", "score": 7.5, "verdict": { "kind": "judged" } }),
+        judged(7.0, json!({})),
     );
     ended(
         "20261107-120100-2c9b0001",
         "examples/hello",
-        json!({ "state": "finished", "score": null, "verdict": { "kind": "judged" } }),
+        json!({ "state": "finished", "verdict": { "kind": "judged" } }),
     );
     ended(
         "20261107-120200-3d0c0002",
@@ -163,7 +163,7 @@ fn lists() {
             pumpkin: <scratch>/runs/20261107-120600-7130006/driver.pid: No such file or directory (os error 2)
             pumpkin: 1 run can't be listed, as said above
             printed:
-              20261107-120000-1b8a6389 finished          -  7.5             -  examples/hello
+              20261107-120000-1b8a6389 finished          -  -               -  examples/hello: score=7 metrics={"solved":3}
               20261107-120100-2c9b0001 finished          -  -               -  examples/hello
               20261107-120200-3d0c0002 failed            -  -               -  examples/codex
               20261107-120300-4e1d0003 interrupted       -  -               -  examples/codex
@@ -250,8 +250,8 @@ fn lists_phases() {
         &priced,
     );
     let late = "20261110-110000-0000000b";
-    let unscored = json!({
-        "state": "finished", "score": null,
+    let unjudged = json!({
+        "state": "finished",
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
     let late_log = [
@@ -273,7 +273,7 @@ fn lists_phases() {
         late,
         asked(late, 90),
         &late_log,
-        Some(unscored),
+        Some(unjudged),
         &unpriced,
     );
     // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
@@ -364,16 +364,16 @@ fn lists_phases() {
             $ pumpkin ls --runs runs 20261110
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  49.36      $1.10+  example/lease
+              20261110-100000-0000000a finished     18m20s  -          $1.10+  example/lease: score=49.36 metrics={"solved":3}
               20261110-110000-0000000b finished     30m06s  -               -  example/lease
-              20261110-120000-0000000c finished     18m20s  49.36      $0.66+  example/lease
-              20261110-120000-0000000d finished     18m20s  49.36      $0.44+  example/lease
-              20261110-120000-0000000e finished     18m20s  49.36           -  example/lease
+              20261110-120000-0000000c finished     18m20s  -          $0.66+  example/lease: score=49.36 metrics={"solved":3}
+              20261110-120000-0000000d finished     18m20s  -          $0.44+  example/lease: score=49.36 metrics={"solved":3}
+              20261110-120000-0000000e finished     18m20s  -               -  example/lease: score=49.36 metrics={"solved":3}
               5 runs: 5 finished (1 without a result); $2.20 so far, and more without a price, and for 2 responses' unreported tokens
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  49.36      $1.10+  example/lease
+              20261110-100000-0000000a finished     18m20s  -          $1.10+  example/lease: score=49.36 metrics={"solved":3}
               20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: the agent on aws/judge
               20261111-090000-0000000b agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>
               20261111-090000-0000000c agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
@@ -478,8 +478,8 @@ fn says_unread_lines() {
             json!([{ "kind": "tear_down_agent" }, { "kind": "close_lease" }, { "kind": "finish" }]),
         ),
     ];
-    let unscored = json!({
-        "state": "finished", "score": null,
+    let unjudged = json!({
+        "state": "finished",
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
     let dir = write_run(
@@ -487,7 +487,7 @@ fn says_unread_lines() {
         id,
         asked(id, 90),
         &log,
-        Some(unscored),
+        Some(unjudged),
         &lease_places(Prices::Nothing),
     );
     let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
@@ -534,7 +534,7 @@ fn says_unread_lines() {
               4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
             pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"score":null,"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait --runs runs 20261110-110000-0000000c
             exit status: Some(1)
             pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`

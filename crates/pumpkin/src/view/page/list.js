@@ -26,7 +26,7 @@ const COLUMNS = [
   ["State", ""],
   ["Run", ""],
   ["Time", "num"],
-  ["Bound or score", ""],
+  ["Bound", ""],
   ["Cost", "num"],
   ["Requests", "num"],
   ["Tokens in", "num"],

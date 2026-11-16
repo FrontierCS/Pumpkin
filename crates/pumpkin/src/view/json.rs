@@ -124,7 +124,7 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
 
 fn how(ending: &Ending) -> String {
     match ending {
-        Ending::Judged { score, after } => crate::ending::judged(score.as_deref(), after),
+        Ending::Judged { values, after } => crate::ending::judged(values, after),
         Ending::Unjudged(why) | Ending::NoResult { why, .. } => why.clone(),
         Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),

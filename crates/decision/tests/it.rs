@@ -56,9 +56,14 @@ const SLOW_STARTUP: Duration = Duration::from_secs(30);
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     edit(&mut ir);
-    let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
+    // A `Value` sorts an object's keys, so a judge's `shows` comes here in the order of its names.
+    check_ir(&serde_json::from_value(ir).unwrap(), script, expect);
+}
+
+/// Runs `script` on `ir`, and compares what the core did with `expect`.
+fn check_ir(ir: &ir::Workflow, script: &str, expect: &Expect) {
     let offered = offered();
-    let (placed, _) = Workflow::parse(&ir)
+    let (placed, _) = Workflow::parse(ir)
         .unwrap()
         .place(&offered, |classes| classes)
         .unwrap();
@@ -462,17 +467,18 @@ fn outcome_text(outcome: &Outcome) -> String {
         WorkEnd::AgentExited(status) => format!("the agent's exit, {status:?}"),
         WorkEnd::AgentFailed(reason) => format!("the agent's failure, {reason}"),
     };
-    let score = match outcome.score() {
-        Some(score) => format!("score {score}"),
-        None => "no score".to_owned(),
-    };
     let verdict = match &outcome.verdict {
         Verdict::NoSubmission => "no submission".to_owned(),
         Verdict::Judged { submission, result } => {
+            let values = result.values().iter();
+            let values: Vec<String> = values
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect();
             let returned = json!(result.returned());
             format!(
-                "{} judged, returning {returned}",
-                submission_text(submission)
+                "{} judged, showing [{}], returning {returned}",
+                submission_text(submission),
+                values.join(" ")
             )
         }
         Verdict::NoResult {
@@ -480,7 +486,7 @@ fn outcome_text(outcome: &Outcome) -> String {
             failure,
         } => format!("{} got no result, {failure:?}", submission_text(submission)),
     };
-    format!("{score}; work ended at {work_end}; {verdict}")
+    format!("work ended at {work_end}; {verdict}")
 }
 
 fn submission_text(submission: &Submission) -> String {
@@ -497,8 +503,9 @@ fn submission_text(submission: &Submission) -> String {
 
 #[test]
 fn whole_run() {
-    check(
-        |_| {},
+    // Read from its text, the IR keeps the order in which the final judge declares its values.
+    check_ir(
+        &serde_json::from_str(WORKFLOW).unwrap(),
         r#"
         0 agent_started
         1000 ops
@@ -548,7 +555,7 @@ fn whole_run() {
             13500 judge_started 1
             20000 judge_exited 1
             20100 collected 1 {"raw_score": 0, "metrics": {"solved": 0}}
-              finish: score 0; work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, judged, returning {"metrics":{"solved":0},"raw_score":0}
+              finish: work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, judged, showing [score=0 metrics={"solved":0}], returning {"metrics":{"solved":0},"raw_score":0}
         "#]],
     );
 }
@@ -726,7 +733,7 @@ fn deadline() {
             60500 judge_started 1
             180500 judge_timed_out 1
             180600 collected 1 {"raw_score": 7}
-              finish: no score; work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
+              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
         "#]],
     );
     check(
@@ -782,7 +789,7 @@ fn deadline_from_the_agent_start() {
             67999 tick
             68000 tick
               tear down the agent
-              finish: no score; work ended at the deadline; no submission
+              finish: work ended at the deadline; no submission
               (tick due at 270000)
         "#]],
     );
@@ -802,7 +809,7 @@ fn deadline_from_the_agent_start() {
               reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             70000 tick
               tear down the agent
-              finish: no score; work ended at the deadline; no submission
+              finish: work ended at the deadline; no submission
               (tick due at 270000)
         "#]],
     );
@@ -817,7 +824,7 @@ fn deadline_from_the_agent_start() {
               (tick due at 70000)
             70000 tick
               tear down the agent
-              finish: no score; work ended at the deadline; no submission
+              finish: work ended at the deadline; no submission
               (tick due at 270000)
         "#]],
     );
@@ -851,7 +858,7 @@ fn hard_end_covers_the_run() {
             150000 judge_started 0
             269999 judge_exited 0
             269999 collected 0 {"raw_score": 7}
-              finish: score 7; work ended at the deadline; the stored submission, op 1's payload of 10 bytes, judged, returning {"raw_score":7}
+              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, judged, showing [score=7], returning {"raw_score":7}
         "#]],
     );
 }
@@ -895,7 +902,7 @@ fn agent_ends() {
             4000 judge_failed 0 its report came again
             5000 judge_exited 1
             5100 collected 1 {"raw_score": "high"}
-              finish: no score; work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, got no result, InvalidResult("the score at `/raw_score` is not a number: write a number there, or null")
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, judged, showing [score="high"], returning {"raw_score":"high"}
         "#]],
     );
     check(
@@ -909,7 +916,7 @@ fn agent_ends() {
               (tick due at 18010000)
             30000 agent_failed the agent's sandbox did not connect
               tear down the agent
-              finish: no score; work ended at the agent's failure, the agent's sandbox did not connect; no submission
+              finish: work ended at the agent's failure, the agent's sandbox did not connect; no submission
               (tick due at 18210000)
         "#]],
     );
@@ -963,7 +970,7 @@ fn deep_results() {
             3500 judge_started 1
             4000 judge_exited 1
             4100 collected 1 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
-              finish: no score; work ended at the agent's exit, Code(0); the stored submission, op 3's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 3's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
         "#]],
     );
 }
@@ -1104,7 +1111,7 @@ fn hard_end_bounds() {
               (tick due at 60000)
             1000 agent_exited 0
               tear down the agent
-              finish: no score; work ended at the agent's exit, Code(0); no submission
+              finish: work ended at the agent's exit, Code(0); no submission
               (tick due at 270000)
             270000 tick
         "#]],
@@ -1293,7 +1300,7 @@ fn exact_scores() {
             3500 judge_started 1
             4000 judge_exited 1
             4100 collected 1 {"raw_score": 22.830584316865718}
-              finish: score 22.830584316865718; work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, judged, returning {"raw_score":22.830584316865718}
+              finish: work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, judged, showing [score=22.830584316865718], returning {"raw_score":22.830584316865718}
         "#]],
     );
 }
@@ -1441,7 +1448,7 @@ fn finalize_near_deadline() {
             30200 judge_started 0
             30300 judge_exited 0
             30400 collected 0 {"raw_score": 1}
-              finish: score 1; work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, judged, returning {"raw_score":1}
+              finish: work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, judged, showing [score=1], returning {"raw_score":1}
         "#]],
     );
     check(
@@ -2035,7 +2042,7 @@ fn lease_start_bounds() {
               tear down the agent
               (tick due at 18210000)
             18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
-              finish: no score; work ended at the deadline; no submission
+              finish: work ended at the deadline; no submission
         "#]],
     );
 }
@@ -2681,7 +2688,7 @@ fn score_leases() {
               close lease 1
             35100 collected 0 {"raw_score": 7}
             36000 lease_ended 1
-              finish: score 7; work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, returning {"raw_score":7}
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=7], returning {"raw_score":7}
         "#]],
     );
 }

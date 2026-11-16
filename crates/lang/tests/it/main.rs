@@ -3679,7 +3679,9 @@ fn plans() {
                         "returns": [
                           "/score"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -3713,7 +3715,9 @@ fn plans() {
                         "returns": [
                           "/score"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
@@ -4917,7 +4921,9 @@ NAME = "one"
                           "/score",
                           "/failure"
                         ],
-                        "score": "/score"
+                        "shows": {
+                          "score": "/score"
+                        }
                       },
                       "slots": [
                         {
