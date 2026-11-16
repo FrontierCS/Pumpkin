@@ -24,7 +24,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::num::NonZeroU64;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +34,8 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 pub use meeting::{Dialer, GatewayAddress, GrantListener, Registration, Sockets, Unreached};
-use schema::ir::{AbsolutePath, Argv, GpuModel, Mode, Name};
+pub use op::Op;
+use schema::ir::{AbsolutePath, GpuModel, Mode};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -46,6 +46,7 @@ use schema::sandbox::{
 use stdx::Deadline;
 
 mod meeting;
+mod op;
 mod trees;
 
 // Tells one session's handles from another's: `kill`, `reply` and `refuse` check it. Every
@@ -180,52 +181,6 @@ pub struct IncomingOp {
     session: u64,
     number: u32,
     pub op: Op,
-}
-
-/// What an op asks of the session's owner: an [`OpCall`], with the payload that a judge call or a
-/// submission takes, of at most the session's limit.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Op {
-    /// See [`OpCall::Ops`].
-    Ops,
-    /// See [`OpCall::Judge`], whose payload is `payload`.
-    Judge { grant: Name, payload: Vec<u8> },
-    /// See [`OpCall::Submit`], whose payload is `payload`.
-    Submit {
-        grant: Name,
-        finalize: bool,
-        payload: Vec<u8>,
-    },
-    /// See [`OpCall::Status`].
-    Status { job: u64 },
-    /// See [`OpCall::LeaseOpen`].
-    LeaseOpen {
-        grant: Name,
-        instance_seconds: Option<NonZeroU64>,
-    },
-    /// See [`OpCall::LeaseRun`].
-    LeaseRun {
-        lease: u64,
-        argv: Argv,
-        timeout_seconds: Option<NonZeroU64>,
-    },
-    /// See [`OpCall::LeasePut`].
-    LeasePut {
-        lease: u64,
-        tree: AbsolutePath,
-        to: AbsolutePath,
-        replace: bool,
-    },
-    /// See [`OpCall::LeaseGet`].
-    LeaseGet {
-        lease: u64,
-        from: AbsolutePath,
-        to: AbsolutePath,
-    },
-    /// See [`OpCall::LeaseStatus`].
-    LeaseStatus { lease: u64 },
-    /// See [`OpCall::LeaseClose`].
-    LeaseClose { lease: u64 },
 }
 
 /// What the session's reader hands its owner ([`Registration::accept`]), in the order the sandbox
@@ -1169,7 +1124,7 @@ impl Assembler {
             Payload::Kept(payload) => Arrival::Op(IncomingOp {
                 session,
                 number,
-                op: whole(call, payload),
+                op: op::whole(call, payload),
             }),
             Payload::Dropped { size, limit } => Arrival::Refused(RefusedOp {
                 session,
@@ -1300,49 +1255,6 @@ fn payload(
         )
     };
     Ok(Payload::Kept(Vec::with_capacity(capacity)))
-}
-
-fn whole(call: OpCall, payload: Vec<u8>) -> Op {
-    match call {
-        OpCall::Ops => Op::Ops,
-        OpCall::Judge { grant } => Op::Judge { grant, payload },
-        OpCall::Submit { grant, finalize } => Op::Submit {
-            grant,
-            finalize,
-            payload,
-        },
-        OpCall::Status { job } => Op::Status { job },
-        OpCall::LeaseOpen {
-            grant,
-            instance_seconds,
-        } => Op::LeaseOpen {
-            grant,
-            instance_seconds,
-        },
-        OpCall::LeaseRun {
-            lease,
-            argv,
-            timeout_seconds,
-        } => Op::LeaseRun {
-            lease,
-            argv,
-            timeout_seconds,
-        },
-        OpCall::LeasePut {
-            lease,
-            tree,
-            to,
-            replace,
-        } => Op::LeasePut {
-            lease,
-            tree,
-            to,
-            replace,
-        },
-        OpCall::LeaseGet { lease, from, to } => Op::LeaseGet { lease, from, to },
-        OpCall::LeaseStatus { lease } => Op::LeaseStatus { lease },
-        OpCall::LeaseClose { lease } => Op::LeaseClose { lease },
-    }
 }
 
 const SANDBOX_ENDED: &str = "the sandbox ended the session";
