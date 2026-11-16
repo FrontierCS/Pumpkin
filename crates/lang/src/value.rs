@@ -26,6 +26,10 @@ use crate::problem::{Fault, refusal};
 use crate::pumpkin::Pumpkin;
 use crate::syntax::Def;
 
+mod number;
+
+pub(crate) use number::{Number, float_of, float_text, floor, modulo, truncated};
+
 /// A file an evaluation reads, by the order in which it read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileId(pub(crate) usize);
@@ -64,6 +68,7 @@ pub(crate) enum Kind {
     Bool(bool),
     /// 64 bits, where the specification's ints are unbounded.
     Int(i64),
+    Float(f64),
     Str(Text),
     List(Nested<Value>),
     Tuple(Nested<Value>),
@@ -198,6 +203,7 @@ impl Element for Value {
             Kind::None
             | Kind::Bool(_)
             | Kind::Int(_)
+            | Kind::Float(_)
             | Kind::Str(_)
             | Kind::Builtin(_)
             | Kind::Image(_)
@@ -235,7 +241,7 @@ pub(crate) struct Dict {
 }
 
 impl Dict {
-    /// A key that repeats keeps its first place and its last value.
+    /// A key that repeats keeps its first form and place, and its last value.
     pub(crate) fn new(entries: Vec<Entry>, at: Span, budget: &Budget) -> Result<Self, Fault> {
         let (entries, index) = merged(entries);
         let entries = Nested::new(entries, at, budget)?;
@@ -256,11 +262,11 @@ impl Dict {
 }
 
 fn merged(entries: Vec<Entry>) -> (Vec<Entry>, BTreeMap<Key, usize>) {
-    let mut index = BTreeMap::new();
+    let mut index: BTreeMap<Key, usize> = BTreeMap::new();
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());
     for entry in entries {
         if let Some(&place) = index.get(&entry.key) {
-            merged[place] = entry;
+            merged[place].value = entry.value;
         } else {
             index.insert(entry.key.clone(), merged.len());
             merged.push(entry);
@@ -287,7 +293,7 @@ pub(crate) struct Entry {
 impl Entry {
     pub(crate) fn key_value(&self) -> Value {
         let kind = match &self.key {
-            Key::Int(int) => Kind::Int(*int),
+            Key::Number(number) => number.kind(),
             Key::Str(text) => Kind::Str(text.clone()),
         };
         Value {
@@ -297,11 +303,11 @@ impl Entry {
     }
 }
 
-/// A dict's key, which the subset holds to a string or an int, where the specification takes any
-/// hashable value (spec.md, "Dictionaries").
+/// A dict's key, which the subset holds to a string or a number, where the specification takes
+/// any hashable value (spec.md, "Dictionaries"). Equal numbers are one key, so `1` finds `1.0`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Key {
-    Int(i64),
+    Number(Number),
     Str(Text),
 }
 
@@ -312,6 +318,7 @@ fn hashable(value: &Value) -> bool {
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_) => true,
@@ -321,9 +328,10 @@ fn hashable(value: &Value) -> bool {
 impl Key {
     pub(crate) fn of(value: &Value) -> Result<Self, String> {
         let what = value.kind.describe();
-        let instead = "key a dict with strings or ints";
+        let instead = "key a dict with strings or numbers";
         match &value.kind {
-            Kind::Int(int) => Ok(Self::Int(*int)),
+            Kind::Int(int) => Ok(Self::Number(Number::Int(*int))),
+            Kind::Float(float) => Ok(Self::Number(Number::Float(*float))),
             Kind::Str(text) => Ok(Self::Str(text.clone())),
             Kind::Tuple(items) if !items.iter().all(hashable) => Err(format!(
                 "a tuple that holds an unhashable value can't be a dict's key: {instead}"
@@ -339,7 +347,7 @@ impl Key {
 
     pub(crate) fn literal(&self) -> String {
         match self {
-            Self::Int(int) => format!("{int}"),
+            Self::Number(number) => number.literal(),
             Self::Str(text) => quote(text),
         }
     }
@@ -390,6 +398,7 @@ impl Value {
             Kind::None => false,
             Kind::Bool(bool) => *bool,
             Kind::Int(int) => *int != 0,
+            Kind::Float(float) => *float != 0.0,
             Kind::Str(text) => !text.is_empty(),
             Kind::List(items) | Kind::Tuple(items) => !items.is_empty(),
             Kind::Dict(dict) => !dict.is_empty(),
@@ -398,10 +407,12 @@ impl Value {
     }
 
     pub(crate) fn equals(&self, other: &Self) -> bool {
+        if let (Some(left), Some(right)) = (Number::of(&self.kind), Number::of(&other.kind)) {
+            return left == right;
+        }
         match (&self.kind, &other.kind) {
             (Kind::None, Kind::None) => true,
             (Kind::Bool(left), Kind::Bool(right)) => left == right,
-            (Kind::Int(left), Kind::Int(right)) => left == right,
             (Kind::Str(left), Kind::Str(right)) => left == right,
             (Kind::List(left), Kind::List(right)) | (Kind::Tuple(left), Kind::Tuple(right)) => {
                 left.len() == right.len()
@@ -423,6 +434,7 @@ impl Value {
                 Kind::None
                 | Kind::Bool(_)
                 | Kind::Int(_)
+                | Kind::Float(_)
                 | Kind::Str(_)
                 | Kind::List(_)
                 | Kind::Tuple(_)
@@ -436,7 +448,7 @@ impl Value {
         }
     }
 
-    /// How a message names this value: `None`, a bool, an int or a string by its literal, any
+    /// How a message names this value: `None`, a bool, a number or a string by its literal, any
     /// other by its type.
     pub(crate) fn shown(&self) -> String {
         match &self.kind {
@@ -444,6 +456,7 @@ impl Value {
             Kind::Bool(true) => String::from("`True`"),
             Kind::Bool(false) => String::from("`False`"),
             Kind::Int(int) => format!("`{int}`"),
+            Kind::Float(float) => format!("`{}`", float_text(*float)),
             Kind::Str(text) => format!("`{}`", quote(text)),
             Kind::List(_)
             | Kind::Tuple(_)
@@ -462,6 +475,7 @@ impl Kind {
             Self::None => "`None`",
             Self::Bool(_) => "a bool",
             Self::Int(_) => "an int",
+            Self::Float(_) => "a float",
             Self::Str(_) => "a string",
             Self::List(_) => "a list",
             Self::Tuple(_) => "a tuple",

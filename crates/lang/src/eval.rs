@@ -347,6 +347,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         let kind = match &expr.kind {
             ExprKind::Name(name) => return self.lookup(scope, name, span),
             ExprKind::Int(int) => Kind::Int(*int),
+            ExprKind::Float(float) => Kind::Float(*float),
             ExprKind::Str(text) => Kind::Str(Text::literal(text)),
             ExprKind::List(items) => Kind::List(self.elements(scope, items, span)?),
             ExprKind::Tuple(items) => Kind::Tuple(self.elements(scope, items, span)?),
@@ -584,6 +585,7 @@ impl<'l, L: Loader> Evaluation<'l, L> {
             other @ (Kind::None
             | Kind::Bool(_)
             | Kind::Int(_)
+            | Kind::Float(_)
             | Kind::Str(_)
             | Kind::List(_)
             | Kind::Tuple(_)
@@ -702,6 +704,7 @@ fn assign<'t>(
         other @ (Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
@@ -782,6 +785,7 @@ impl<'e> Suffix<'e> {
             ExprKind::Index { object, index } => (Self::Index(index), &**object),
             ExprKind::Name(_)
             | ExprKind::Int(_)
+            | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::List(_)
             | ExprKind::Tuple(_)

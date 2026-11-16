@@ -407,8 +407,8 @@ fn suites() {
             the canary `assert.eq(1, 2)`: WRONG
 
             spec: 99 run, 242 err as expected, 89 refused or err, 0 WRONG
-            starlark-go: 8 run, 330 err as expected, 44 refused or err, 0 WRONG
-            starlark-go resolve: 1 run, 29 err as expected, 14 refused or err, 0 WRONG
+            starlark-go: 9 run, 330 err as expected, 43 refused or err, 0 WRONG
+            starlark-go resolve: 2 run, 29 err as expected, 13 refused or err, 0 WRONG
             starlark-go syntax: 3 run, 39 err as expected, 10 refused or err, 0 WRONG
             bazel: 7 run, 318 err as expected, 45 refused or err, 0 WRONG
 
@@ -416,15 +416,14 @@ fn suites() {
             none
 
             the problems runs end with, by how many:
-             189 `lambda` is not in Pumpkin's Starlark: write a `def` at a library's top level, and pass its name
+             193 `lambda` is not in Pumpkin's Starlark: write a `def` at a library's top level, and pass its name
              134 a slice is not in Pumpkin's Starlark: index the elements one by one
-              93 `0.0`, a float, is not in Pumpkin's Starlark: write an int
+              90 `1229999999999999973814869011019624571608236031`, an int over 2^63 - 1, is not in Pumpkin's Starlark: write a smaller one, since ints are 64-bit
               71 assigning to an element, which would change a value, is not in Pumpkin's Starlark: make a new value, as `d | {k: v}` makes a dict
+              54 `<<`, a bitwise operator, is not in Pumpkin's Starlark: write the int it gives
               42 `&`, a bitwise operator, is not in Pumpkin's Starlark: write the int it gives
-              36 unary `+` is not in Pumpkin's Starlark: write the int alone
-              30 `<<`, a bitwise operator, is not in Pumpkin's Starlark: write the int it gives
+              36 unary `+` is not in Pumpkin's Starlark: write the number alone
               30 `int` with 2 arguments is not in Pumpkin's Starlark: give it 1 argument
-              26 `2.0`, a float, is not in Pumpkin's Starlark: write an int
               22 a `for` statement is not in Pumpkin's Starlark: build the list with a comprehension, as `[f(x) for x in xs]`
               15 a `def` inside a function is not in Pumpkin's Starlark: write it at the top level, passing it what it uses
               14 `\x`, an escape that some Starlark implementations lack, is not in Pumpkin's Starlark: write the character itself, or an ASCII one in octal, as `\101` for `A`
@@ -438,17 +437,17 @@ fn suites() {
                7 this `format` string has a `}` that closes no field: write `}}` for a `}`
                6 `%` of a string, which formats it, is not in Pumpkin's Starlark: format it with `format`, or join strings with `+`
                6 `M` is not defined: bind it in this file, or load it
-               6 `all`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
-               6 `min`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               6 `all`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
+               6 `min`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                6 `range`, a builtin of Starlark's, is not in Pumpkin's Starlark: write the value out, or build it with a comprehension
-               6 `type`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               6 `type`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                5 `*` before an argument, which passes a sequence's elements, is not in Pumpkin's Starlark: pass each argument by itself
                5 `endswith` of a tuple is not in Pumpkin's Starlark: give it a string
                5 `index` of a list is not in Pumpkin's Starlark: give it to a function, as `len`
                5 `pop`, which would change the list, is not in Pumpkin's Starlark: make a new list with `+`, as values never change
                5 `splitlines` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                5 `startswith` of a tuple is not in Pumpkin's Starlark: give it a string
-               5 a list can't be a dict's key: key a dict with strings or ints
+               5 a list can't be a dict's key: key a dict with strings or numbers
                5 a tab in indentation is not in Pumpkin's Starlark: indent with spaces only
                5 a tuple of 2 values can't be unpacked into 3 names: give a list or a tuple of 3
                5 a tuple of 3 values can't be unpacked into 2 names: give a list or a tuple of 2
@@ -464,7 +463,7 @@ fn suites() {
                4 an int can't be unpacked into names: give a list or a tuple of 2
                3 `*` of a sequence and an int, which would let an expression make a value of any size, is not in Pumpkin's Starlark: write the elements out, or join with `+`
                3 `1 // 0` divides by zero: divide by another int
-               3 `any`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               3 `any`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                3 `assert.star` is no label: start it with `//`, the root
                3 `tuple`, a builtin of Starlark's, is not in Pumpkin's Starlark: write the value out, or build it with a comprehension
                3 `{ {}` is no field of a `format` string: write `{}`, `{0}` or `{name}`
@@ -483,23 +482,23 @@ fn suites() {
                2 `3` indexes no element of a list of 3: index from -3 to 2
                2 `M` is bound already: bind each global once
                2 `` is no label: start it with `//`, the root
-               2 `dir`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               2 `dir`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                2 `enumerate`, a builtin of Starlark's, is not in Pumpkin's Starlark: write the value out, or build it with a comprehension
                2 `find` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
-               2 `format` of a bool is not in Pumpkin's Starlark: give it an int or a string
+               2 `format` of a bool is not in Pumpkin's Starlark: give it a number or a string
                2 `g` is used before it is bound: bind it above this use
-               2 `getattr`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               2 `getattr`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                2 `in` can't find an int in a string: look for a string in it
                2 `int` can't read `"1.5"`: give it decimal digits, after `-` or `+` or neither
                2 `int` can't read `"ab"`: give it decimal digits, after `-` or `+` or neither
-               2 `int` can't take `None`: give it an int, a bool or a string of digits
+               2 `int` can't take `None`: give it a number, a bool or a string of digits
                2 `int`'s `base` is not in Pumpkin's Starlark: give `int` 1 argument, by position
                2 `isalnum` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                2 `lower` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
-               2 `max`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               2 `max`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                2 `remove`, which would change the list, is not in Pumpkin's Starlark: make a new list with `+`, as values never change
                2 `rpartition` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
-               2 `sorted` of a list of mixed or other values than ints or strings is not in Pumpkin's Starlark: give it only ints, or only strings
+               2 `sorted` of a list of mixed or other values than numbers or strings is not in Pumpkin's Starlark: give it only numbers, or only strings
                2 `split` with 2 arguments is not in Pumpkin's Starlark: give it 1 argument
                2 `x` is bound already: bind each global once
                2 `x` is not defined: bind it in this file, or load it
@@ -523,29 +522,28 @@ fn suites() {
                2 unexpected end of line: expected an expression
                1 `"a"` is no key of this dict: index it with one of its keys, or give a default with `get`
                1 `"one"` is a key of this dict already: give each key once
-               1 `*` can't take a string and a bool: give it two ints
-               1 `+` can't take a bool and an int: give it two ints, two strings, two lists or two tuples
-               1 `+` can't take a list and a tuple: give it two ints, two strings, two lists or two tuples
-               1 `+` can't take a list and an int: give it two ints, two strings, two lists or two tuples
-               1 `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
-               1 `+` can't take a tuple and a list: give it two ints, two strings, two lists or two tuples
-               1 `+` can't take a tuple and an int: give it two ints, two strings, two lists or two tuples
+               1 `*` can't take a string and a bool: give it two numbers
+               1 `+` can't take a bool and an int: give it two numbers, two strings, two lists or two tuples
+               1 `+` can't take a list and a tuple: give it two numbers, two strings, two lists or two tuples
+               1 `+` can't take a list and an int: give it two numbers, two strings, two lists or two tuples
+               1 `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
+               1 `+` can't take a tuple and a list: give it two numbers, two strings, two lists or two tuples
+               1 `+` can't take a tuple and an int: give it two numbers, two strings, two lists or two tuples
                1 `-2` indexes no element of a list of 1: index from -1 to 0
                1 `-4` indexes no element of a list of 3: index from -3 to 2
-               1 `/`, which divides into a float, is not in Pumpkin's Starlark: divide with `//`
                1 `0in`, a number and then `in`, is not in Pumpkin's Starlark: put a space between them
                1 `1 % 0` divides by zero: divide by another int
                1 `1` indexes no element of a list of 1: index from -1 to 0
                1 `1` indexes no element of a list that is empty: index one that has some
                1 `6burgle` is no number: write digits of its base only, and a space between a number and a name
-               1 `<` can't take `None` and a bool: give it two ints or two strings
-               1 `<` can't take `None` and an int: give it two ints or two strings
-               1 `<` can't take a dict and `None`: give it two ints or two strings
-               1 `<` can't take a list and a string: give it two ints or two strings
-               1 `<` can't take a string and a tuple: give it two ints or two strings
-               1 `<` can't take an int and a list: give it two ints or two strings
-               1 `<` of two bools is not in Pumpkin's Starlark: order two ints or two strings
-               1 `<` of two lists is not in Pumpkin's Starlark: order two ints or two strings
+               1 `<` can't take `None` and a bool: give it two numbers or two strings
+               1 `<` can't take `None` and an int: give it two numbers or two strings
+               1 `<` can't take a dict and `None`: give it two numbers or two strings
+               1 `<` can't take a list and a string: give it two numbers or two strings
+               1 `<` can't take a string and a tuple: give it two numbers or two strings
+               1 `<` can't take an int and a list: give it two numbers or two strings
+               1 `<` of two bools is not in Pumpkin's Starlark: order two numbers or two strings
+               1 `<` of two lists is not in Pumpkin's Starlark: order two numbers or two strings
                1 `StartsWith` is no method of a string: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                1 `U` is not defined: bind it in this file, or load it
                1 `U` is used before it is bound: bind it above this use
@@ -561,7 +559,7 @@ fn suites() {
                1 `fail`'s `sep` is not in Pumpkin's Starlark: give `fail` 1 argument, by position
                1 `fin` is no method of a string: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                1 `get`'s `default` by name is not in Pumpkin's Starlark: give it by position, after the key
-               1 `hash`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+               1 `hash`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                1 `in` can't look in an int: give it a list, a tuple, a dict or a string to look in
                1 `index` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                1 `insert`, which would change the list, is not in Pumpkin's Starlark: make a new list with `+`, as values never change
@@ -586,8 +584,8 @@ fn suites() {
                1 `sorted`'s `reverse` is not in Pumpkin's Starlark: give `sorted` 1 argument, by position
                1 `starts_with` is no method of a string: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
                1 `startswith`'s argument can't be `1`: give a string
-               1 `str` of a function is not in Pumpkin's Starlark: give it an int or a string
-               1 `str` of a list is not in Pumpkin's Starlark: give it an int or a string
+               1 `str` of a function is not in Pumpkin's Starlark: give it a number or a string
+               1 `str` of a list is not in Pumpkin's Starlark: give it a number or a string
                1 `update`, which would change the dict, is not in Pumpkin's Starlark: make a new dict with `|`, as values never change
                1 `z` is not defined: bind it in this file, or load it
                1 `{+0}` is no field of a `format` string: write `{}`, `{0}` or `{name}`
@@ -598,7 +596,7 @@ fn suites() {
                1 `{a.b}` is no field of a `format` string: write `{}`, `{0}` or `{name}`
                1 `{a[0]}` is no field of a `format` string: write `{}`, `{0}` or `{name}`
                1 `{z}` names no keyword argument of this `format` call: give it `z = …`
-               1 a bool as a dict's key is not in Pumpkin's Starlark: key a dict with strings or ints
+               1 a bool as a dict's key is not in Pumpkin's Starlark: key a dict with strings or numbers
                1 a list of 0 values can't be unpacked into 2 names: give a list or a tuple of 2
                1 a list of 1 value can't be unpacked into 0 names: give a list or a tuple of 0
                1 a list of 1 value can't be unpacked into 2 names: give a list or a tuple of 2

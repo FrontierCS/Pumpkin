@@ -3,7 +3,7 @@
 //! - a name is ASCII letters, digits and `_`, not starting with a digit, since some
 //!   implementations take any Unicode letter;
 //! - an int is decimal, `0x` or `0o`, and at most 2^63 - 1, since ints are 64-bit;
-//! - floats, bytes literals and f-strings, which have no value in the subset;
+//! - bytes literals and f-strings, which have no value in the subset;
 //! - a `\` before a quote in a raw string, which implementations read differently;
 //! - a `\x`, `\u` or `\U` escape, which some lack, and an octal one over 127, which they read
 //!   differently;
@@ -19,7 +19,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::problem::refusal;
-use crate::value::{FileId, Span};
+use crate::value::{FileId, Span, float_text};
 
 pub(crate) struct Token {
     pub(crate) kind: TokenKind,
@@ -29,6 +29,7 @@ pub(crate) struct Token {
 pub(crate) enum TokenKind {
     Name(String),
     Int(i64),
+    Float(f64),
     Str(Rc<str>),
     Keyword(Keyword),
     Punct(Punct),
@@ -172,7 +173,7 @@ impl Lexer<'_> {
             } else if char == '.'
                 && self.text[start + 1..].starts_with(|c: char| c.is_ascii_digit())
             {
-                return Err(self.float(start));
+                self.float(start)?;
             } else {
                 self.punctuation(start, char)?;
             }
@@ -335,27 +336,9 @@ impl Lexer<'_> {
         self.digits(radix);
         let digits = &self.text[digits_start..self.pos];
         if radix == 10 && matches!(self.peek(), Some('.' | 'e' | 'E')) {
-            return Err(self.float(start));
+            return self.float(start);
         }
-        if self.peek().is_some_and(in_name) {
-            let number_end = self.pos;
-            self.skip(in_name);
-            let literal = &self.text[start..self.pos];
-            let word = &self.text[number_end..self.pos];
-            // Starlark reads a keyword right after a number as a token of its own.
-            let message = if Keyword::ALL.iter().any(|keyword| keyword.text() == word) {
-                refusal(
-                    format_args!("`{literal}`, a number and then `{word}`,"),
-                    "put a space between them",
-                )
-            } else {
-                format!(
-                    "`{literal}` is no number: write digits of its base only, and a space \
-                     between a number and a name"
-                )
-            };
-            return Err((start, message));
-        }
+        self.spaced(start)?;
         let literal = &self.text[start..self.pos];
         if digits.is_empty() {
             let message = format!("`{literal}` has no digits: write some after it, as `0x1f`");
@@ -378,6 +361,32 @@ impl Lexer<'_> {
         Ok(())
     }
 
+    // Refuses a name or a keyword right after the number that starts at `start`.
+    fn spaced(&mut self, start: usize) -> Result<(), LexError> {
+        if !self.peek().is_some_and(in_name) {
+            return Ok(());
+        }
+        let number_end = self.pos;
+        self.skip(in_name);
+        let literal = &self.text[start..self.pos];
+        let word = &self.text[number_end..self.pos];
+        // Starlark reads a keyword right after a number as a token of its own, as starlark-rust's
+        // lexer reads any name there:
+        // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark_syntax/src/lexer.rs#L1352-L1372
+        let message = if Keyword::ALL.iter().any(|keyword| keyword.text() == word) {
+            refusal(
+                format_args!("`{literal}`, a number and then `{word}`,"),
+                "put a space between them",
+            )
+        } else {
+            format!(
+                "`{literal}` is no number: write digits of its base only, and a space between a \
+                 number and a name"
+            )
+        };
+        Err((start, message))
+    }
+
     fn skip(&mut self, skipped: impl Fn(char) -> bool) {
         let rest = &self.text[self.pos..];
         self.pos += rest.find(|char| !skipped(char)).unwrap_or(rest.len());
@@ -387,8 +396,11 @@ impl Lexer<'_> {
         self.skip(|char| char.is_digit(radix));
     }
 
-    // The refusal of the float that starts at `start`, after reading the rest of it.
-    fn float(&mut self, start: usize) -> LexError {
+    // Reads the float that starts at `start`, as starlark-rust's lexer does, but that a literal too
+    // large for a float is an error, as the specification has it ("Lexical elements"), not an
+    // infinity:
+    // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark_syntax/src/lexer.rs#L1368-L1372
+    fn float(&mut self, start: usize) -> Result<(), LexError> {
         if self.peek() == Some('.') {
             self.pos += 1;
             self.digits(10);
@@ -398,11 +410,33 @@ impl Lexer<'_> {
             if matches!(self.peek(), Some('+' | '-')) {
                 self.pos += 1;
             }
+            let digits_start = self.pos;
             self.digits(10);
+            if self.pos == digits_start {
+                let literal = &self.text[start..self.pos];
+                let message = format!(
+                    "`{literal}` has no digits in its exponent: write some after its `e`, as `1e3`"
+                );
+                return Err((start, message));
+            }
         }
+        self.spaced(start)?;
         let literal = &self.text[start..self.pos];
-        let message = refusal(format_args!("`{literal}`, a float,"), "write an int");
-        (start, message)
+        let Ok(value) = literal.parse::<f64>() else {
+            unreachable!(
+                "`{literal}`, digits with a `.` or an exponent of digits, is a float `f64::from_str` \
+                 reads"
+            )
+        };
+        if value.is_infinite() {
+            let message = format!(
+                "`{literal}` is too large for a float: write one of at most {}",
+                float_text(f64::MAX)
+            );
+            return Err((start, message));
+        }
+        self.push(TokenKind::Float(value), start);
+        Ok(())
     }
 
     // Reads the string whose opening quote, `quote`, is next, and gives its value.

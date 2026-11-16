@@ -228,18 +228,18 @@ fn refusals() {
                 14 |     None,
                    |     ^^^^
                 in `claude_code()`, called at task.star:13:9
-            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two ints, two strings, two lists or two tuples
+            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two numbers, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
                 the right operand, `None`, is made at task.star:15:13
                 in `claude_code()`, called at task.star:13:9
-            @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it an int or a string
+            @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it a number or a string
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |                                                                     ^^^^^^
                 the argument, `None`, is made at task.star:16:14
                 in `claude_code()`, called at task.star:13:9
-            @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two ints, two strings, two lists or two tuples
+            @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two numbers, two strings, two lists or two tuples
                 85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |                                                    ^
                 the left operand, `None`, is made at task.star:17:17
@@ -257,13 +257,13 @@ fn refusals() {
                 20 |     finalize_grace_seconds = None,
                    |                              ^^^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds
-            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two ints or two strings
+            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two numbers or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
                 the left operand, `None`, is made at task.star:21:25
                 the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
                 in `claude_code()`, called at task.star:13:9
-            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
+            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
@@ -277,7 +277,7 @@ fn refusals() {
                 19 |     deadline_seconds = "60",
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
-            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two ints or two strings
+            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two numbers or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
                 the left operand, `"128000"`, is made at task.star:21:25

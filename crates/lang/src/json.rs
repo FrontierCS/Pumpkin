@@ -1,8 +1,8 @@
 //! The `json` module's `encode` and `decode`, between the language's values and the text of RFC
 //! 8259's JSON, as the module of Bazel's and starlark-go's Starlark has them
-//! (<https://bazel.build/rules/lib/core/json>), but for what the subset refuses: a float, which
-//! it lacks, an int past 64 bits, an object that gives a key twice, and a string with a lone
-//! surrogate, which a Rust string can't hold.
+//! (<https://bazel.build/rules/lib/core/json>), but for what the subset refuses: an int past 64
+//! bits, an object that gives a key twice, and a string with a lone surrogate, which a Rust
+//! string can't hold.
 //!
 //! Both keep to the evaluation's bounds, and ask the byte budget for what they will hold before
 //! they make it: `encode`'s text as it grows, `decode`'s values and the elements of the arrays
@@ -18,11 +18,13 @@ use core::fmt::Write;
 use crate::MAX_NESTING;
 use crate::builtins::{Call, origin};
 use crate::problem::{Fault, refusal};
-use crate::value::{Budget, Dict, Element, Entry, Key, Kind, Nested, Span, Text, Value, escape};
+use crate::value::{
+    Budget, Dict, Element, Entry, Key, Kind, Nested, Span, Text, Value, escape, float_text,
+};
 
 /// The compact JSON text of `argument`'s value, whose dicts' keys are in sorted order, so that
-/// equal values give equal text. A value with no JSON form, and a dict with a key but a string,
-/// are refused.
+/// equal values give equal text. A value with no JSON form, NaN and the infinities among them,
+/// and a dict with a key but a string, are refused.
 // Keys sort by their bytes, as starlark-go's `json.encode` sorts them. Bazel's sorts by UTF-16
 // code units, which orders a key's character from U+10000 before one from U+E000 to U+FFFF,
 // where bytes order it after, so the two implementations differ there:
@@ -40,6 +42,20 @@ fn write(text: &mut String, value: &Value, at: Span, budget: &Budget) -> Result<
         Kind::Bool(true) => push(text, "true", at, budget)?,
         Kind::Bool(false) => push(text, "false", at, budget)?,
         Kind::Int(int) => push(text, &format!("{int}"), at, budget)?,
+        // A float as starlark-rust's `json.encode` writes it, through `serde_json`, but that NaN
+        // and the infinities are refused, as Bazel's and starlark-go's refuse them, not `null`:
+        // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/lib/json/Json.java#L141-L146
+        Kind::Float(float) => {
+            let Some(number) = serde_json::Number::from_f64(*float) else {
+                let message = format!(
+                    "`json.encode` can't encode {}, as JSON has no NaN or infinity: give it \
+                     finite floats",
+                    value.shown()
+                );
+                return Err(origin(Fault::new(at, message), "the value", value));
+            };
+            push(text, &format!("{number}"), at, budget)?;
+        }
         Kind::Str(string) => quote(text, string, at, budget)?,
         Kind::List(items) | Kind::Tuple(items) => {
             push(text, "[", at, budget)?;
@@ -83,7 +99,7 @@ fn write(text: &mut String, value: &Value, at: Span, budget: &Budget) -> Result<
         }
         Kind::Function(_) | Kind::Builtin(_) | Kind::Image(_) | Kind::Module(_) => {
             let message = format!(
-                "`json.encode` can't encode {}: give it `None`, bools, ints and strings, and \
+                "`json.encode` can't encode {}: give it `None`, bools, numbers and strings, and \
                  lists, tuples and dicts of them",
                 value.kind.describe()
             );
@@ -139,8 +155,8 @@ fn quote(text: &mut String, string: &str, at: Span, budget: &Budget) -> Result<(
 }
 
 /// The value that the JSON `text` holds, each of whose parts has the span of the call. `text` is
-/// the call's `argument`, which a message names. An int outside 64 bits, a float and an object
-/// that repeats a key are refused.
+/// the call's `argument`, which a message names. An int outside 64 bits and an object that
+/// repeats a key are refused.
 // After starlark-go's `decode`, which reads the text as this does, byte by byte:
 // https://github.com/google/starlark-go/blob/4f4267fb140d1e8b91c9bce55cee2f809e8840dd/lib/json/json.go#L316-L556
 pub(crate) fn decode(
@@ -197,7 +213,7 @@ impl Decoder<'_> {
             Some('"') => Kind::Str(self.string()?),
             Some('[') => self.array()?,
             Some('{') => self.object()?,
-            Some('-' | '0'..='9') => Kind::Int(self.int()?),
+            Some('-' | '0'..='9') => self.number()?,
             Some(_) => {
                 let words = [
                     ("null", Kind::None),
@@ -439,11 +455,13 @@ impl Decoder<'_> {
         self.fault(message)
     }
 
-    fn int(&mut self) -> Result<i64, Fault> {
+    // A float where the text is no int, as starlark-rust's `json.decode` reads one:
+    // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/stdlib/json.rs#L252-L265
+    fn number(&mut self) -> Result<Kind, Fault> {
         let start = self.offset;
         let rest = &self.text[start..];
-        // As starlark-go's `decode` scans a number before it checks it, so that a float is named
-        // as one.
+        // As starlark-go's `decode` scans a number before it checks it, so that a message shows
+        // all of it.
         let number = rest
             .find(|char: char| !matches!(char, '0'..='9' | '-' | '+' | '.' | 'e' | 'E'))
             .map_or(rest, |end| &rest[..end]);
@@ -453,7 +471,11 @@ impl Decoder<'_> {
             && !(digits.starts_with('0') && digits.len() > 1);
         if integer && let Ok(int) = number.parse::<i64>() {
             self.offset += number.len();
-            return Ok(int);
+            return Ok(Kind::Int(int));
+        }
+        if !integer && let Ok(float) = serde_json::from_str::<f64>(number) {
+            self.offset += number.len();
+            return Ok(Kind::Float(float));
         }
         let shown = escape(number);
         let message = if integer {
@@ -463,15 +485,11 @@ impl Decoder<'_> {
                 ),
                 "give smaller ints, since ints are 64-bit",
             )
-        } else if serde_json::from_str::<serde_json::Number>(number).is_ok() {
-            refusal(
-                format_args!("`json.decode` of `{shown}`, at offset {start}, a float,"),
-                "give ints",
-            )
         } else {
             format!(
                 "`json.decode` reads `{shown}` at offset {start} of its text, which is no JSON \
-                 number: write an int as decimal digits, after `-` or none, with no leading `0`"
+                 number a float holds: write a number as JSON does, of at most {}",
+                float_text(f64::MAX)
             )
         };
         Err(self.fault(message))

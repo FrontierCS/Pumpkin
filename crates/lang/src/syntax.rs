@@ -8,10 +8,11 @@
 //!   `else`;
 //! - parameters: positional ones, then those after a bare `*`, which are keyword-only, each with
 //!   a default or without, but no positional one without a default after one with;
-//! - expressions: names, ints, strings, lists, tuples, dicts, list and dict comprehensions,
+//! - expressions: names, ints, floats, strings, lists, tuples, dicts, list and dict comprehensions,
 //!   parentheses, calls with positional then keyword arguments, then a `**` dict of keyword ones,
 //!   methods called where they are named, indexing, `a if c else b`, `or`, `and`, `not`,
-//!   comparisons, which don't chain, `in`, `not in`, `|`, `+`, `-`, `*`, `//`, `%` and unary `-`.
+//!   comparisons, which don't chain, `in`, `not in`, `|`, `+`, `-`, `*`, `/`, `//`, `%` and unary
+//!   `-`.
 //!
 //! Each place where the subset is narrower than the specification is refused at its token, and
 //! the rule of the refusal is written where it is checked: the lexical ones in `lex`, the
@@ -186,6 +187,7 @@ pub(crate) struct Expr {
 pub(crate) enum ExprKind {
     Name(String),
     Int(i64),
+    Float(f64),
     Str(Rc<str>),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
@@ -313,6 +315,7 @@ pub(crate) enum Arithmetic {
     Add,
     Subtract,
     Multiply,
+    Divide,
     FloorDivide,
     Modulo,
 }
@@ -341,6 +344,7 @@ impl Arithmetic {
             Self::Add => Punct::Plus,
             Self::Subtract => Punct::Minus,
             Self::Multiply => Punct::Star,
+            Self::Divide => Punct::Slash,
             Self::FloorDivide => Punct::SlashSlash,
             Self::Modulo => Punct::Percent,
         };
