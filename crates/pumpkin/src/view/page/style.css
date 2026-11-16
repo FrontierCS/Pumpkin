@@ -57,10 +57,13 @@ h3 { font-size: var(--fs-title); font-weight: 600; margin: 0; }
 p { margin: 0; }
 .empty { color: var(--dim); }
 .error { color: var(--fail); }
-button { font: inherit; background: var(--bg); color: var(--text-2); border: 1px solid var(--line); border-radius: var(--r-box); padding: 0 var(--s2); height: var(--control); cursor: pointer; }
-button:hover { color: var(--accent-hover); border-color: var(--accent-hover); }
-button.danger { color: var(--fail); }
-button.danger:hover { color: var(--fail); border-color: var(--fail); }
+/* Buttons are quiet, as GitHub's Primer draws an invisible button
+   (https://primer.style/product/components/button/): no frame, a tint on hover. A button that ends
+   something keeps a frame, so that it stands apart from the quiet ones. */
+button { font: inherit; background: none; color: var(--text-2); border: 1px solid transparent; border-radius: var(--r-box); padding: 0 var(--s2); height: var(--control); cursor: pointer; }
+button:hover { color: var(--text); background: var(--hover); }
+button.danger { color: var(--fail); border-color: var(--line); }
+button.danger:hover { color: var(--fail); border-color: var(--fail); background: none; }
 input, select { font: inherit; height: var(--field); padding: 0 var(--s2); border: 1px solid var(--line); border-radius: var(--r-box); background: var(--bg); color: var(--text); }
 input:hover, select:hover { border-color: var(--edge); }
 
@@ -221,14 +224,17 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .inspector dl { display: grid; grid-template-columns: max-content 1fr; gap: 0 var(--s3); margin: 0 0 var(--s2); line-height: calc(var(--lh) + 2px); }
 .inspector dt { color: var(--dim); }
 .inspector dd { margin: 0; font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); word-break: break-word; }
-.inspector .links { display: flex; flex-wrap: wrap; gap: var(--s1); margin-bottom: var(--s2); }
+.inspector .links { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) 0; margin-bottom: var(--s2); }
+/* The inspector's ways to other records and lanes read as links, a dot between each. */
+.inspector .links button { height: auto; padding: 0; color: var(--accent); background: none; }
+.inspector .links button:hover { color: var(--accent-hover); text-decoration: underline; }
+.inspector .links button + button::before { content: "·"; display: inline-block; margin: 0 var(--s2); color: var(--dim); }
 .inspector pre { margin: 0; padding: var(--s2) 0 0; border-top: 1px solid var(--line-soft); white-space: pre-wrap; word-break: break-word; color: var(--text); line-height: var(--lh); }
 .inspector .summary { margin-top: var(--s2); }
 .inspector ul { list-style: none; margin: 0; padding: 0; }
 .inspector .route + .route { margin-top: var(--s1); }
 .inspector .route .name { color: var(--dim); }
-.inspector li button { text-align: left; border-color: transparent; background: none; padding: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inspector li button:hover { background: var(--hover); }
+.inspector li button { text-align: left; padding: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The links from a run to its callers' traces. */
 .traces { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); }
