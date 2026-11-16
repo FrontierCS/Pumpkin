@@ -318,18 +318,18 @@ impl Sweep for Reached {
             .collect();
         for found in &found {
             let id = &found.instance_id;
-            if !found.is_of(run) {
-                failures.push(format!(
-                    "instance `{id}` is no sandbox of run `{}`, so it was left: name only the \
-                     run's own, which its list finds",
-                    run.as_str()
-                ));
-                continue;
-            }
             match found.state.name {
+                // Ahead of the tag's check, as EC2 takes a terminated instance's tags off some
+                // while after, and one terminated is freed, whichever run's it was:
+                // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html
                 State::Terminated => {
                     ended.insert(id);
                 }
+                _ if !found.is_of(run) => failures.push(format!(
+                    "instance `{id}` is no sandbox of run `{}`, so it was left: name only the \
+                     run's own, which its list finds",
+                    run.as_str()
+                )),
                 State::ShuttingDown => {
                     ending.insert(id);
                 }
