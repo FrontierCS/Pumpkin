@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, iter};
 
-use decision::lasts;
+use decision::{Outcome, Verdict, lasts};
 use expect_test::{Expect, expect};
 use gateway::{Dialer, GatewayAddress, GrantListener};
 use provider::{
@@ -203,7 +203,7 @@ fn interrupted_at(
         )
     });
     let mut lines = vec![match executed {
-        Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
+        Ok(outcome) => finished(&outcome),
         Err(stopped) => stopped.to_string(),
     }];
     if at.is_some_and(|at| at != At::SwapPayloads) {
@@ -294,14 +294,25 @@ fn executed<H: Shown>(
     sandboxd: &str,
     also: &[Also],
 ) -> String {
+    let ir = serde_json::from_value(ir.clone()).unwrap();
+    executed_ir(host, name, providers, &ir, sandboxd, also)
+}
+
+fn executed_ir<H: Shown>(
+    host: &H,
+    name: &str,
+    providers: &[(&'static str, &Sim)],
+    ir: &ir::Workflow,
+    sandboxd: &str,
+    also: &[Also],
+) -> String {
     let at = interruption(also);
     let runs = Runs::new(name);
-    let ir: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let routed = ir.roles.iter().any(|role| role.egress.model.is_some());
     let stand_in = routed.then(StandIn::start);
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
-    let placed = placed_on(&ir, &ready).unwrap();
+    let placed = placed_on(ir, &ready).unwrap();
     let servings = StandIn::servings(stand_in.as_ref(), placed.workflow(), &runs.dir);
     let hard_end = lasts(&placed);
     let id = new_id(SystemTime::now()).unwrap();
@@ -562,9 +573,20 @@ fn outcome_holds(
             .any(|action| action["kind"] == "finish");
         assert!(finished, "{name}: the log records no finish");
         assert_eq!(fields.remove("state"), Some(json!("finished")), "{name}");
-        let score = Some(&outcome["score"]).filter(|score| !score.is_null());
-        let shown = format!("finished, with score {score:?}");
-        assert_eq!(returned, shown, "{name}: `execute` returned another score");
+        let verdict = &outcome["verdict"];
+        let shown = if verdict["kind"] == "judged" {
+            let values = verdict["result"]["values"].as_array().unwrap().iter();
+            let values: Vec<String> = values
+                .map(|shown| format!("{}={}", shown["name"].as_str().unwrap(), shown["value"]))
+                .collect();
+            format!("finished, showing [{}]", values.join(" "))
+        } else {
+            "finished without a result".to_owned()
+        };
+        assert_eq!(
+            returned, shown,
+            "{name}: `execute` returned another verdict"
+        );
         return (usage, Some(outcome));
     };
     assert_eq!(outcome, ended, "{name}: outcome.json holds another outcome");
@@ -1250,8 +1272,8 @@ fn exits() {
         &[Also::Usage],
     );
     expect![[r#"
-        finished, with score None
-        outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
+        finished without a result
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
         outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"simulated","usd":"<usd>","usd_per_hour":0.25}],"tokens":{"input":0,"output":0,"responses":0},"usd":"<usd>"}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -1276,8 +1298,8 @@ fn crashes() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1304,8 +1326,8 @@ fn stalls() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"124000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1349,8 +1371,8 @@ fn unstarted() {
         "left out of the list, against listed as ended"
     );
     expect![[r#"
-        finished, with score None
-        outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"}}
+        finished without a result
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: it ended before it met the gateway: expected its `sandboxd` to run until it connects; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":1}
@@ -1527,11 +1549,11 @@ fn interrupted_last_batch() {
         SANDBOXD,
         At::Delete,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             it started: true
             it returned within 60 s: true
             it published: ["sandboxd /sim/sandboxd", "image sha256:1111111111111111111111111111111111111111111111111111111111111111", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":3}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1555,8 +1577,8 @@ fn unlistable() {
         &ir,
         UNLISTABLE,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"184000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: no sandbox connected to <sockets>/agent/s by the deadline: expected its sandbox to connect while the deadline lasts; the last list of its provider failed: the simulated list failed while sim-1 lasts: delete it, or create one with another `sandboxd`; its console ends: sandboxd: a simulated one, which never dials"},"observed_ns":"<ns>","seq":1}
@@ -1576,8 +1598,8 @@ fn mismatched() {
         &workflow(&["exit", "0"]),
         LATER,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: sandbox sim-1: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"},"observed_ns":"<ns>","seq":1}
@@ -1598,9 +1620,9 @@ fn lost() {
         &[Also::Listing],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json
-        outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"18270000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create failed, and can't name what it made: expected the run's list to find it"},"observed_ns":"<ns>","seq":1}
@@ -1692,11 +1714,11 @@ fn ops() {
         &ops_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             a poll, {"job":"0","kind":"status"}, is answered {"kind":"status"}
             a poll, {"job":"1","kind":"status"}, is answered {"kind":"status"}
             payloads hold: ["slow", "xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1709,7 +1731,7 @@ fn ops() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":11}
             {"actions":[{"kind":"reply","reply":{"job":1,"kind":"judge","remaining":{"calls":98,"seconds":null}}},{"grant":"train","job":1,"kind":"start_judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"grant":"train","kind":"judge","payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_timed_out"},"observed_ns":"<ns>","seq":14}
@@ -1722,7 +1744,7 @@ fn ops() {
             {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_started"},"observed_ns":"<ns>","seq":21}
             {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":22}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":23}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":24}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":24}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -1739,9 +1761,9 @@ fn swapped_payload() {
         &[Also::Interrupted(At::SwapPayloads)],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         payloads hold: ["yyyyyyyyy"]
-        outcome.json: {"score":null,"verdict":{"failure":{"kind":"error","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"failure":{"kind":"error","reason":"<record>/payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd holds 9 bytes of digest sha256:cf0da94d4b6a0de4d83a79dfe964489ba50a38aef90bc406aed5558fee383781: expected the payload's 6 bytes of digest sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1766,10 +1788,10 @@ fn result_over_the_limit() {
         &[Also::Listing],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9, provider.json, record.json
         payloads hold: ["large"]
-        outcome.json: {"score":null,"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"failure":{"kind":"invalid_result","reason":"result.json is 1048577 bytes, over the limit of 1048576: write a smaller one"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:d35c416a85b807e9b5384915d6ebb4a9f7352713efd89857b45a242f473728a9","size":5}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1801,9 +1823,9 @@ fn crashes_with_an_op_in_flight() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxxxxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1835,9 +1857,9 @@ fn judge_starts_past_the_deadline() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"272000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1865,9 +1887,9 @@ fn judge_placed_apart() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -1912,10 +1934,10 @@ fn spans_providers() {
             &[Also::Usage],
         );
         expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"train_judge":{"class":"brief","provider":"there"}}
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             outcome.json's usage: {"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"here"},{"class":"brief","count":1,"lasted_ns":"<ns>","provider":"there"},{"class":"sim","count":1,"lasted_ns":"<ns>","provider":"there"}],"tokens":{"input":0,"output":0,"responses":0}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -1924,7 +1946,7 @@ fn spans_providers() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"there","sandbox":"job-0"},"seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":6}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":6}
             {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":7}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":8}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":9}
@@ -1932,7 +1954,7 @@ fn spans_providers() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"there","sandbox":"job-1"},"seq":13}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":14}
             its last record came before the agent's teardown was to end
             here published: ["sandboxd /sim/sandboxd", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
             here: the class at each create: ["sim"]
@@ -2018,10 +2040,10 @@ fn watches_each_provider() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
             provider.json places the roles: {"agent":{"class":"sim","provider":"here"},"final_judge":{"class":"sim","provider":"there"},"near_judge":{"class":"sim","provider":"here"},"train_judge":{"class":"brief","provider":"there"}}
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"248000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2138,9 +2160,9 @@ fn deleted_while_torn_down() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["slow"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"34000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2178,9 +2200,9 @@ fn reported_before_the_hard_end() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2212,9 +2234,9 @@ fn reported_past_the_deadline() {
         &short_workflow(&["ops", "judge train 6"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2310,8 +2332,8 @@ fn late_ops() {
         &ops_workflow(&argv, 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2342,9 +2364,9 @@ fn taken_past_the_deadline() {
         &short_workflow(&["ops", "judge train 6", "close"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2376,8 +2398,8 @@ fn held_by_a_slow_sync() {
         &short_workflow(&["ops", "ops", "close"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2414,8 +2436,8 @@ fn started_late() {
         &short_workflow(&["ops", "ops"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"25000000000","event":{"kind":"agent_started"},"observed_ns":"25000000000","seq":1}
@@ -2438,8 +2460,8 @@ fn started_late() {
         &short_workflow(&["ops", "ops"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[{"kind":"tear_down_agent"},{"kind":"finish"}],"at_ns":"35000000000","event":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it"},"observed_ns":"35000000000","seq":1}
@@ -2482,8 +2504,8 @@ fn refusal_held_by_a_slow_sync() {
         &short_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2509,8 +2531,8 @@ fn syncs() {
         &ops_workflow(&["ops", "ops", "judge train 17", "exit"], 30),
         SANDBOXD,
         &expect![[r#"
-            finished, with score None
-            outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            finished without a result
+            outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
@@ -2575,10 +2597,10 @@ fn model_requests() {
         &[Also::Usage, Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         payloads hold: ["xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"model_requests":6,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cached":8,"input":12,"output":5,"reasoning":3,"responses":1}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -2601,7 +2623,7 @@ fn model_requests() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":17}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":18}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":19}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":20}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":20}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"},{"content":[{"text":"\"quoted\"\\back\nline\u0001\ttab/é→😀","type":"input_text"}],"role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
@@ -2659,10 +2681,10 @@ fn model_requests_kept_whole() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         payloads hold: ["xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"},{"api":"chat","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2689,7 +2711,7 @@ fn model_requests_kept_whole() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":22}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":23}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":24}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":25}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":25}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"instructions":"Be\nbriefé","model":"vendor/m-large","store":false,"tools":[{"name":"exec","parameters":{"type":"object"},"type":"function"}]}\n\n
@@ -2775,7 +2797,7 @@ fn model_upstream_refusals() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":15}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":16}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":16}
         {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended the agent's model route: give it a key that it takes, and run again","seq":17}
         its last record came before the agent's teardown was to end
         the agent's standard output:
@@ -2860,9 +2882,9 @@ fn model_barred_is_no_failure() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2895,9 +2917,9 @@ fn model_provider_recovers() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":null,"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2936,10 +2958,10 @@ fn model_provider_down_at_the_deadline() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         payloads hold: ["xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"deadline"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"93000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -2954,7 +2976,7 @@ fn model_provider_down_at_the_deadline() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":13}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":13}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 502 [("content-type", "text/plain"), ("x-request-id", "req-502")] refused
@@ -2979,10 +3001,10 @@ fn model_stream_cut() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score None
+        finished without a result
         payloads hold: ["slow"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":null,"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
+        outcome.json: {"verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":false,"payload":{"digest":"sha256:5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6","size":4}}},"work_end":{"kind":"deadline"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"92000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3022,10 +3044,10 @@ fn model_grace_cut() {
         &[Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         payloads hold: ["xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}]}
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"finalized"}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"241000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3038,7 +3060,7 @@ fn model_grace_cut() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":11}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":11}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream")] event: response.created\n\n
@@ -3061,24 +3083,30 @@ fn judge_routed(mut ir: Value, judge: usize, steps: &[&str]) -> Value {
 #[test]
 fn judge_model() {
     let argv = ["ops", "model m-large stream", "finalize submit 6"];
-    let ir = judge_routed(
+    let mut ir = judge_routed(
         routed(ops_workflow(&argv, 30)),
         2,
         &["model m-small 7", "result"],
     );
-    let shown = executed(
+    // A `Value` sorts an object's keys, so the final judge's declared order is set in the text.
+    let result = &mut ir["roles"][2]["runtime"]["judge"]["result"];
+    result["shows"] = json!({ "score": "/raw_score", "raw": "/raw_score" });
+    let sorted = r#"{"raw":"/raw_score","score":"/raw_score"}"#;
+    let declared = r#"{"score":"/raw_score","raw":"/raw_score"}"#;
+    let text = ir.to_string().replacen(sorted, declared, 1);
+    let shown = executed_ir(
         &System,
         "judge-model",
         &[(PROVIDER, &Sim::new())],
-        &ir,
+        &serde_json::from_str(&text).unwrap(),
         SANDBOXD,
         &[Also::Usage, Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(7))
+        finished, showing [score=7 raw=7]
         payloads hold: ["xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
-        outcome.json: {"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7},{"name":"raw","value":7}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -3094,7 +3122,7 @@ fn judge_model() {
         {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":169,"body_sha256":"c538063991a5eaec390bb3b71b775b030d5b5fa2cafef2f66f043eedfdc8297f","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":1}},"kind":"model_answered","model":"m-small","request":1,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":13}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7},{"name":"raw","value":7}]}},"observed_ns":"<ns>","seq":13}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream")] data: POST /v1/responses HTTP/1.1 Some(("authorization", "Bearer sk-test")) {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"stream","role":"user","type":"message"}],"model":"vendor/m-large","store":false}\n\n
@@ -3130,10 +3158,10 @@ fn judge_and_agent_model() {
         &[Also::Usage, Also::Exchanges],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         payloads hold: ["xxx", "xxxxxx"]
         provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"train_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
@@ -3147,7 +3175,7 @@ fn judge_and_agent_model() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"cut"},"api":"responses","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":173,"body_sha256":"ec0d3ba6df672edb7aa80d93ee65128ce79f7ebf9cd6691b1adefef48fed5c2b","bytes":198,"dropped_headers":["user-agent"],"items":{"count":2,"field":"input"}},"response":{"bytes":25}},"kind":"model_answered","model":"m-small","request":2,"upstream":"stand-in","upstream_status":200},"observed_ns":"<ns>","seq":9}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":10}
-        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"score":5}},"observed_ns":"<ns>","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":5},"values":[{"name":"score","value":5}]}},"observed_ns":"<ns>","seq":11}
         {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":12}
         {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
         {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 2 files of 97 bytes","seq":14}
@@ -3156,7 +3184,7 @@ fn judge_and_agent_model() {
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":17}
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":18}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":19}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":20}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":20}
         its last record came before the agent's teardown was to end
         the agent's standard output:
         model request 0: 200 [("content-type", "text/event-stream")] event: response.created\n\n
@@ -3214,7 +3242,7 @@ fn judge_key_refused() {
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
         {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":15}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":16}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":16}
         {"at_ns":"<ns>","note":"the run failed: the upstream `stand-in` refused its key, with a 401, which ended job 0's model route: give it a key that it takes, and run again","seq":17}
         its last record came before the agent's teardown was to end
         job 0's standard output:
@@ -3268,7 +3296,7 @@ fn holds_until_its_end() {
             || Ok(()),
         );
         match executed {
-            Ok(outcome) => format!("finished, with score {:?}", outcome.score()),
+            Ok(outcome) => finished(&outcome),
             Err(stopped) => stopped.to_string(),
         }
     };
@@ -3286,7 +3314,7 @@ fn holds_until_its_end() {
     lines.push(format!("then a third: {}", prepared(&prepare("third"))));
     expect![[r#"
         a second, beside it: refused: reserving on provider `simulated`: the run needs 16 simulated CPUs, and 16 of the 16 are held: run it once others end
-        the first: finished, with score None
+        the first: finished without a result
         then the second: prepared
         the second: was interrupted by SIGTERM
         then a third: prepared"#]].assert_eq(&lines.join("\n"));
@@ -3342,10 +3370,10 @@ fn leases() {
         &lease_workflow(&argv, 30, RUNNER),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             a poll, {"kind":"lease_status","lease":0}, is answered {"kind":"lease_status"}
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3370,7 +3398,7 @@ fn leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":22}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":23}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -3398,9 +3426,9 @@ fn lease_ends() {
         &lease_workflow(&argv, 30, RUNNER),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3422,7 +3450,7 @@ fn lease_ends() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":17}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":18}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":19}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":20}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":20}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -3448,9 +3476,9 @@ fn lease_unstarted() {
         &lease_workflow(&argv, 30, image.as_str()),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3465,7 +3493,7 @@ fn lease_unstarted() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":12}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":13}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":14}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":15}
             its last record came before the agent's teardown was to end"#]],
@@ -3522,10 +3550,10 @@ fn lease_transfers() {
         &[Also::Listing],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         record: agent/log/collected, agent/out/back/collected, agent/out/back/config.toml, agent/out/back/ro, agent/out/back/shared, agent/out/back/shut/key, agent/out/back/tool*, agent/out/collected, agent/out/got/collected, agent/out/got/command.stdout, agent/out/replaced/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/1/collected, leases/0/log/1/command.stdout, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
         payloads hold: ["xxxxxx"]
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3556,7 +3584,7 @@ fn lease_transfers() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":26}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":27}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":28}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":29}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":29}
         its last record came before the agent's teardown was to end"#]]
     .assert_eq(&shown);
 }
@@ -3592,10 +3620,10 @@ fn transfer_cut() {
         &[Also::Listing],
     );
     expect![[r#"
-        finished, with score Some(Number(6))
+        finished, showing [score=6]
         record: agent/log/collected, agent/out/collected, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/collected, jobs/0/out/collected, jobs/0/out/evidence/, jobs/0/out/result.json, jobs/0/sandbox.json, leases/0/log/, leases/0/out/collected, leases/0/sandbox.json, log.jsonl, outcome.json, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json
         payloads hold: ["xxxxxx"]
-        outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         log.jsonl:
         {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3614,7 +3642,7 @@ fn transfer_cut() {
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":14}
         {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
-        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":17}
+        {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":17}
         its last record came before the agent's teardown was to end"#]]
     .assert_eq(&shown);
 }
@@ -3663,9 +3691,9 @@ fn judge_leases() {
         &judge_lease_workflow(&argv, 1, &LEASING_JUDGE),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3679,7 +3707,7 @@ fn judge_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":9}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7}]}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":14}
             {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"you have no lease 0: name one that `lease open` returned"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":15}
@@ -3690,7 +3718,7 @@ fn judge_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":20}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":23}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":23}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -3704,9 +3732,9 @@ fn score_leases() {
         &judge_lease_workflow(&["ops", "finalize submit 6"], 2, &LEASING_JUDGE),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(7))
+            finished, showing [score=7]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":7,"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"score":7},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3723,7 +3751,7 @@ fn score_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":12}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"score":7}},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7}]}},"observed_ns":"<ns>","seq":15}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":16}
             {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":17}
             its last record came before the agent's teardown was to end"#]],
@@ -3751,9 +3779,9 @@ fn lease_starts_by_its_holders_end() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3771,7 +3799,7 @@ fn lease_starts_by_its_holders_end() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":14}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":15}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":16}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":16}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":17}
             its last record came before the agent's teardown was to end"#]],
     );
@@ -3798,9 +3826,9 @@ fn judge_exits_leasing() {
         &judge_lease_workflow(&argv, 1, &judge),
         SANDBOXD,
         &expect![[r#"
-            finished, with score Some(Number(6))
+            finished, showing [score=6]
             payloads hold: ["xxxxxx"]
-            outcome.json: {"score":6,"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"score":6},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3821,7 +3849,20 @@ fn judge_exits_leasing() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_started"},"observed_ns":"<ns>","seq":16}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":18}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"score":6}},"observed_ns":"<ns>","seq":19}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"judge_collected","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]}},"observed_ns":"<ns>","seq":19}
             its last record came before the agent's teardown was to end"#]],
     );
+}
+
+fn finished(outcome: &Outcome) -> String {
+    match &outcome.verdict {
+        Verdict::Judged { result, .. } => {
+            let values = result.values().iter();
+            let values: Vec<String> = values
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect();
+            format!("finished, showing [{}]", values.join(" "))
+        }
+        Verdict::NoSubmission | Verdict::NoResult { .. } => "finished without a result".to_owned(),
+    }
 }

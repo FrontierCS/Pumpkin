@@ -357,33 +357,33 @@ fn serves_runs() {
               {"bound":"-","has_result":false,"id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","state":"lost","time":"-","tokens":null,"usd":"-"}
               {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
-              {"bound":"49.36","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
+              {"bound":"-","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
               {"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"}
               {"bound":"-","has_result":false,"id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"}
               {"bound":"-","has_result":false,"id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"}
-              {"bound":"49.36","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"}
-              {"bound":"49.36","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"}
-              {"bound":"49.36","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}
+              {"bound":"-","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"}
+              {"bound":"-","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"}
+              {"bound":"-","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}
 
             GET /api/runs?before=<live>
-            {"next":null,"runs":[{"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"49.36","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"},{"bound":"-","has_result":false,"id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","has_result":false,"id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"49.36","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"49.36","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"},{"bound":"49.36","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
+            {"next":null,"runs":[{"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"},{"bound":"-","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"},{"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"},{"bound":"-","has_result":false,"id":"20261110-080000-00000009","live":false,"requests":3,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":null,"output":null},"usd":"-"},{"bound":"-","has_result":false,"id":"20261110-070000-00000008","live":false,"requests":0,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":0,"output":0},"usd":"-"},{"bound":"-","has_result":true,"id":"20261110-060000-00000005","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.66+"},{"bound":"-","has_result":true,"id":"20261110-050000-00000006","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"$0.44+"},{"bound":"-","has_result":true,"id":"20261110-040000-00000007","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3500,"output":350},"usd":"-"}]}
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
-            end: 8432
+            end: 8311
             has_result: true
             id: "<ended>"
             lanes:
               {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"grant":"train","kind":"judge","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: 49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"grant":"train","kind":"judge","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
               {"grant":"box","holder":"job 0","kind":"runner","lane":"lease 0","role":"box","said":"box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\\nprint 7` exited 0; closed as its call ended","sandbox":{"asked":50.0,"deleted":true,"gone":102.0,"place":"aws/box","started":55.0},"work":[{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
               {"grant":"cpu","holder":"agent","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"grant":"train","kind":"judge","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"grant":"train","kind":"judge","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"grant":"train","kind":"judge","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: no score, returned {\"exit_status\":1,\"stderr_tail\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx… (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"grant":"train","kind":"judge","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train judge job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
-              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: 49.36","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
+              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={\"solved\":3}","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
             live: false
             log_epoch: 0
             model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3500,"output":350},"took":{"count":3,"median":5.0}}
@@ -394,17 +394,17 @@ fn serves_runs() {
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
-            verdict: "Run <ended> finished with a score of 49.36, after the work phase ended when the agent exited with status 0"
+            verdict: "Run <ended> finished with a result (score=49.36 metrics={\"solved\":3}), after the work phase ended when the agent exited with status 0"
 
             GET /api/runs/20261110-060000-00000005: its cost: {"said":"$0.66 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens","shown":"$0.66+"}
             GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
             GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8432,"live":false}
+            {"end":8311,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8432, live false, next 8432, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7415
-            next 8432, end 8432, bytes [Number(7415), Number(7558), Number(7689), Number(7778), Number(7896), Number(8268)], the last's event "judge_collected"
+            end 8311, live false, next 8311, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7226
+            next 8311, end 8311, bytes [Number(7226), Number(7369), Number(7500), Number(7589), Number(7707), Number(8079)], the last's event "judge_collected"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -422,7 +422,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8432: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8311: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -904,16 +904,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8432, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3192&log_epoch=0
+            GET /api/runs/<id>: end 8311, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3220&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3192: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3192&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3220: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3220&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3192: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4552, log_epoch 1
-            GET /api/runs/<id>/since?log=3192&log_epoch=1
-            end 4552, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3220: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4580, log_epoch 1
+            GET /api/runs/<id>/since?log=3220&log_epoch=1
+            end 4580, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -961,7 +961,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10055 records, next 2486157"#]],
+            from byte 1757701: 10055 records, next 2486036"#]],
     );
 }
 
@@ -1183,10 +1183,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8432 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8432 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8432 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8432 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=8311 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8311 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8311 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8311 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
@@ -2698,7 +2698,10 @@ fn times_a_callers_ops() {
         ),
         ended(
             11,
-            json!({ "kind": "judge_collected", "job": 0, "result": { "score": 14 } }),
+            json!({
+                "kind": "judge_collected", "job": 0,
+                "result": { "values": [{ "name": "score", "value": 14 }] },
+            }),
         ),
         ended(
             12,
@@ -2749,7 +2752,7 @@ fn times_a_callers_ops() {
         &[],
         &expect![[r#"
             agent:
-            end_ns="11000000000" failed=false kind="judge" name="train" op=1 result="score 14" start_ns="2000000000"
+            end_ns="11000000000" failed=false kind="judge" name="train" op=1 result="result score=14" start_ns="2000000000"
             end_ns="4000000000" failed=true kind="judge" name="train" op=2 result="refused: one call at a time" start_ns="4000000000"
             end_ns="5000000000" failed=false kind="submit" name="final" op=3 result="stored" start_ns="5000000000"
             end_ns="8000000000" failed=false kind="lease_put" name="lease 2" op=5 result="moved 840 bytes, 3 entries" start_ns="7000000000"

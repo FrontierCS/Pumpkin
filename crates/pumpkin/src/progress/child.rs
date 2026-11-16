@@ -8,7 +8,7 @@ use runtime::{CallEnd, CallSpan, Closed, Direction, LeaseSpan, Work};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 
-use super::{placed, shown_score, span};
+use super::{placed, result, span};
 
 pub(super) fn judge(call: &CallSpan) -> String {
     let which = call.grant.as_deref().unwrap_or("final");
@@ -41,18 +41,10 @@ pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
         line.push_str(STOPPED);
         return line;
     };
-    let scored = match end {
-        CallEnd::Scored(score) => {
-            line.push_str(&shown_score(score));
+    let gave = match end {
+        CallEnd::Result(values) => {
+            line.push_str(&result(values));
             true
-        }
-        CallEnd::Unscored(returned) => {
-            let _ = write!(
-                line,
-                "no score, returned {}",
-                clipped(returned, RETURNED_SHOWN_CHARS)
-            );
-            false
         }
         CallEnd::Invalid(reason) => {
             let _ = write!(line, "an invalid result: {}", crate::escaped(reason));
@@ -73,10 +65,10 @@ pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
         path.display().to_string()
     };
     let mut kept = Vec::new();
-    if let Some(stderr) = call.stderr.as_deref().filter(|_| !scored) {
+    if let Some(stderr) = call.stderr.as_deref().filter(|_| !gave) {
         kept.push(format!("standard error {}", below(stderr)));
     }
-    if let Some(evidence) = call.evidence.as_deref().filter(|_| !scored) {
+    if let Some(evidence) = call.evidence.as_deref().filter(|_| !gave) {
         kept.push(format!("evidence {}", below(evidence)));
     }
     if !kept.is_empty() {
@@ -167,9 +159,6 @@ pub(super) fn command(work: &Work) -> String {
     };
     format!("{what} {}", ended.as_deref().unwrap_or("running"))
 }
-
-/// The most characters of what a judge returned that a summary shows.
-const RETURNED_SHOWN_CHARS: usize = 160;
 
 /// The most characters of a lease's command that `ls` and a summary show.
 const COMMAND_SHOWN_CHARS: usize = 60;

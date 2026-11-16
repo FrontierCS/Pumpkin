@@ -67,7 +67,7 @@ joined\n',
                 # A hex int's digits may start with `0`, as a decimal int's can't.
                 "slots": [{"name": "payload", "max_bytes": 0x010 * KiB}],
                 # A list joined to another.
-                "result": {"score": "/score", "returns": ["/score"] + ["/metrics", "/failure"]},
+                "result": {"shows": {"score": "/score"}, "returns": ["/score"] + ["/metrics", "/failure"]},
             }},
         },
         {
@@ -78,7 +78,7 @@ joined\n',
             "runtime": {"judge": {
                 "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home", "env": ["MODE=eval"]},
                 "slots": [{"name": "payload", "max_bytes": 0o20 * KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
+                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
             }},
         },
     ],

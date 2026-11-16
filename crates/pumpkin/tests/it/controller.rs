@@ -1335,7 +1335,7 @@ fn keys_on_standard_input() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 5 of the task's files and Pumpkin's bundle: sending 1.9 KiB
+            pumpkin: controller `alice` lacks all 5 of the task's files and Pumpkin's bundle: sending 2.0 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1727,8 +1727,8 @@ fn send_by_content() {
           stand-in/run.sh: 444, 1 link
           stand-in/task.star: 444, 1 link
           stand-in/with space.txt: 444, 1 link
-          a manifest: the task's tree
           a manifest: a tree of no files
+          a manifest: the task's tree
           incoming/: none
         the job's tree:
           .pumpkin: a symbolic link to <scratch>/home/.pumpkin
@@ -1790,7 +1790,7 @@ fn send_refused_piece() {
         $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
         exit status: Some(1)
         pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks 5 of the task's 6 files and Pumpkin's bundle: sending 1.9 KiB
+        pumpkin: controller `alice` lacks 5 of the task's 6 files and Pumpkin's bundle: sending 2.0 KiB
         pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
         the calls: query, query, receive, start
         the store holds it: false; a piece of it: false
@@ -1880,7 +1880,7 @@ fn send_carries_on() {
               <id>
             the calls: query, query, receive, receive, query, receive, start
             over 0, 16777216 bytes: stand-in/big.bin 00000 (16777216)
-            over 1, 1050617 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1806), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 1050685 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1874), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
               stand-in/big.bin: 444, 1 link
               incoming/: none"#]],
     );
@@ -1924,7 +1924,7 @@ fn send_over_streams() {
           <id>
         the calls: query, query, receive, receive, receive, start
         over 0, 16777216 bytes: stand-in/a.bin 00000 (16777216)
-        over 1, 8390649 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1806), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+        over 1, 8390717 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1874), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
         over 2, 9437184 bytes: stand-in/c.bin 00000 (5242880), stand-in/a.bin 00001 (4194304)
         the store:
           .pumpkinversion: 444, 2 links
@@ -2099,7 +2099,7 @@ fn send_changed_file() {
         $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
         exit status: Some(1)
         pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 1.9 KiB
+        pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 2.0 KiB
         pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
         the calls: query, query, receive
         $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
@@ -3309,14 +3309,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308432, end: 308432
+            next: 308311, end: 308311
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "agent"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 308432"#]],
+            state: "finished", end: 308311"#]],
     );
 }
 
@@ -3346,7 +3346,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308432, end: 308432"#]],
+            next: 308311, end: 308311"#]],
     );
 }
 

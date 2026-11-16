@@ -31,7 +31,7 @@ def _judge(name, metrics, *, needs, env, max_bytes = 64 * KiB):
             },
             "slots": [{"name": "payload", "max_bytes": max_bytes}],
             "result": {
-                "score": "/score",
+                "shows": {"score": "/score"},
                 "returns": ["/score"] + [
                     "/metrics/" + metric
                     for metric in metrics

@@ -275,6 +275,55 @@ fn builds_on_docker() {
                 "name": "neutral/bench",
                 "roles": [
                   {
+                    "name": "agent",
+                    "image": "<pumpkin-library/harness/codex/layer>",
+                    "user": {
+                      "uid": 1000,
+                      "gid": 1000
+                    },
+                    "needs": {
+                      "cpu_millis": 8000,
+                      "memory_bytes": 34359738368
+                    },
+                    "runtime": {
+                      "agent": {
+                        "command": {
+                          "argv": [
+                            "/harness/codex-0.167.0/bin/codex",
+                            "exec",
+                            "--ephemeral",
+                            "--ignore-rules",
+                            "--skip-git-repo-check",
+                            "-"
+                          ],
+                          "env": [
+                            "CODEX_HOME=/workspace/.codex",
+                            "TMPDIR=/workspace/.tmp"
+                          ],
+                          "cwd": "/workspace"
+                        },
+                        "dirs": [
+                          {
+                            "path": "/workspace/.codex",
+                            "mode": "0700"
+                          },
+                          {
+                            "path": "/workspace/.tmp",
+                            "mode": "0700"
+                          }
+                        ],
+                        "files": [
+                          {
+                            "path": "/workspace/.codex/config.toml",
+                            "mode": "0600",
+                            "content": "model = \"model-a\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"pumpkin\"\n# Nobody is there to approve a command, and the agent's sandbox confines Codex, whose own\n# sandbox needs `bwrap`, which its pin leaves out.\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n# A tool's shell reads no login profile, which could change the environment the command sets.\nallow_login_shell = false\n# Nothing reaches past the model route, the only way out of the sandbox.\nweb_search = \"disabled\"\n\n# No reasoning summary in the progress on the standard error: the model's answers hold them.\nhide_agent_reasoning = true\n\n# The databases Codex makes in its home as it starts stay there, uncollected: `exec` writes them\n# no log, and its session, ephemeral, keeps nothing in them.\n\n# The model endpoint `sandboxd` serves, which needs no credential.\n[model_providers.pumpkin]\n# Any name but `OpenAI` keeps off the features Codex keeps for the provider of that name.\nname = \"Pumpkin\"\nbase_url = \"http://127.0.0.1:11235\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n# A run of hours meets transient failures.\nrequest_max_retries = 100\nstream_max_retries = 100\n\n# The lead agent and as many spawned ones at most, each with one model request in flight at a\n# time: as many requests as the model route takes from a sandbox at once.\n[agents]\nmax_concurrent_threads_per_session = 6\n\n[analytics]\nenabled = false\n\n[features]\nplugins = false\napps = false\nimage_generation = false\n\n[plugins._default]\nenabled = false\n"
+                          }
+                        ],
+                        "stdin": "Solve the task in /task/README.md, working in /workspace.\n\nSubmit a tar for a train call with `sandboxctl`, read its score and the calls left, and go on\nwhile it helps. Submit the final tar with `sandboxctl submit final <tar> --finalize` once, as\nyour last step, then exit.\n",
+                        "deadline_seconds": 18000,
+                        "finalize_grace_seconds": 60
+                      }
+                    },
                     "egress": {
                       "model": [
                         {
@@ -323,12 +372,12 @@ fn builds_on_docker() {
                     "grants": [
                       {
                         "judge": {
-                          "call_timeout_seconds": 600,
-                          "calls": 100,
-                          "cumulative_seconds": 12000,
                           "name": "train",
                           "role": "train_judge",
-                          "slot": "payload"
+                          "slot": "payload",
+                          "calls": 100,
+                          "cumulative_seconds": 12000,
+                          "call_timeout_seconds": 600
                         }
                       },
                       {
@@ -336,66 +385,21 @@ fn builds_on_docker() {
                           "name": "final"
                         }
                       }
-                    ],
-                    "image": "<pumpkin-library/harness/codex/layer>",
-                    "name": "agent",
-                    "needs": {
-                      "cpu_millis": 8000,
-                      "memory_bytes": 34359738368
-                    },
-                    "runtime": {
-                      "agent": {
-                        "command": {
-                          "argv": [
-                            "/harness/codex-0.167.0/bin/codex",
-                            "exec",
-                            "--ephemeral",
-                            "--ignore-rules",
-                            "--skip-git-repo-check",
-                            "-"
-                          ],
-                          "cwd": "/workspace",
-                          "env": [
-                            "CODEX_HOME=/workspace/.codex",
-                            "TMPDIR=/workspace/.tmp"
-                          ]
-                        },
-                        "deadline_seconds": 18000,
-                        "dirs": [
-                          {
-                            "mode": "0700",
-                            "path": "/workspace/.codex"
-                          },
-                          {
-                            "mode": "0700",
-                            "path": "/workspace/.tmp"
-                          }
-                        ],
-                        "files": [
-                          {
-                            "content": "model = \"model-a\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"pumpkin\"\n# Nobody is there to approve a command, and the agent's sandbox confines Codex, whose own\n# sandbox needs `bwrap`, which its pin leaves out.\napproval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n# A tool's shell reads no login profile, which could change the environment the command sets.\nallow_login_shell = false\n# Nothing reaches past the model route, the only way out of the sandbox.\nweb_search = \"disabled\"\n\n# No reasoning summary in the progress on the standard error: the model's answers hold them.\nhide_agent_reasoning = true\n\n# The databases Codex makes in its home as it starts stay there, uncollected: `exec` writes them\n# no log, and its session, ephemeral, keeps nothing in them.\n\n# The model endpoint `sandboxd` serves, which needs no credential.\n[model_providers.pumpkin]\n# Any name but `OpenAI` keeps off the features Codex keeps for the provider of that name.\nname = \"Pumpkin\"\nbase_url = \"http://127.0.0.1:11235\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n# A run of hours meets transient failures.\nrequest_max_retries = 100\nstream_max_retries = 100\n\n# The lead agent and as many spawned ones at most, each with one model request in flight at a\n# time: as many requests as the model route takes from a sandbox at once.\n[agents]\nmax_concurrent_threads_per_session = 6\n\n[analytics]\nenabled = false\n\n[features]\nplugins = false\napps = false\nimage_generation = false\n\n[plugins._default]\nenabled = false\n",
-                            "mode": "0600",
-                            "path": "/workspace/.codex/config.toml"
-                          }
-                        ],
-                        "finalize_grace_seconds": 60,
-                        "stdin": "Solve the task in /task/README.md, working in /workspace.\n\nSubmit a tar for a train call with `sandboxctl`, read its score and the calls left, and go on\nwhile it helps. Submit the final tar with `sandboxctl submit final <tar> --finalize` once, as\nyour last step, then exit.\n"
-                      }
-                    },
-                    "user": {
-                      "gid": 1000,
-                      "uid": 1000
-                    }
+                    ]
                   },
                   {
-                    "image": "<pumpkin/tasks/bench/judge>",
                     "name": "train_judge",
+                    "image": "<pumpkin/tasks/bench/judge>",
+                    "user": {
+                      "uid": 65532,
+                      "gid": 65532
+                    },
                     "needs": {
+                      "cpu_millis": 8000,
+                      "memory_bytes": 2147483648,
                       "cpu_features": [
                         "avx2"
-                      ],
-                      "cpu_millis": 8000,
-                      "memory_bytes": 2147483648
+                      ]
                     },
                     "runtime": {
                       "judge": {
@@ -403,13 +407,22 @@ fn builds_on_docker() {
                           "argv": [
                             "/opt/judge/run"
                           ],
-                          "cwd": "/pumpkin/home",
                           "env": [
                             "JUDGE_MODE=train",
                             "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
-                          ]
+                          ],
+                          "cwd": "/pumpkin/home"
                         },
+                        "slots": [
+                          {
+                            "name": "payload",
+                            "max_bytes": 4194304
+                          }
+                        ],
                         "result": {
+                          "shows": {
+                            "score": "/score"
+                          },
                           "returns": [
                             "/score",
                             "/metrics/instances",
@@ -420,31 +433,24 @@ fn builds_on_docker() {
                             "/metrics/unbounded",
                             "/metrics/rejected",
                             "/failure"
-                          ],
-                          "score": "/score"
-                        },
-                        "slots": [
-                          {
-                            "max_bytes": 4194304,
-                            "name": "payload"
-                          }
-                        ]
+                          ]
+                        }
                       }
-                    },
-                    "user": {
-                      "gid": 65532,
-                      "uid": 65532
                     }
                   },
                   {
-                    "image": "<pumpkin/tasks/bench/judge>",
                     "name": "final_judge",
+                    "image": "<pumpkin/tasks/bench/judge>",
+                    "user": {
+                      "uid": 65532,
+                      "gid": 65532
+                    },
                     "needs": {
+                      "cpu_millis": 8000,
+                      "memory_bytes": 2147483648,
                       "cpu_features": [
                         "avx2"
-                      ],
-                      "cpu_millis": 8000,
-                      "memory_bytes": 2147483648
+                      ]
                     },
                     "runtime": {
                       "judge": {
@@ -452,13 +458,22 @@ fn builds_on_docker() {
                           "argv": [
                             "/opt/judge/run"
                           ],
-                          "cwd": "/pumpkin/home",
                           "env": [
                             "JUDGE_MODE=final",
                             "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
-                          ]
+                          ],
+                          "cwd": "/pumpkin/home"
                         },
+                        "slots": [
+                          {
+                            "name": "payload",
+                            "max_bytes": 4194304
+                          }
+                        ],
                         "result": {
+                          "shows": {
+                            "score": "/score"
+                          },
                           "returns": [
                             "/score",
                             "/metrics/instances",
@@ -469,20 +484,9 @@ fn builds_on_docker() {
                             "/metrics/unbounded",
                             "/metrics/rejected",
                             "/failure"
-                          ],
-                          "score": "/score"
-                        },
-                        "slots": [
-                          {
-                            "max_bytes": 4194304,
-                            "name": "payload"
-                          }
-                        ]
+                          ]
+                        }
                       }
-                    },
-                    "user": {
-                      "gid": 65532,
-                      "uid": 65532
                     }
                   }
                 ],

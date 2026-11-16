@@ -860,3 +860,58 @@ impl From<Returns> for Vec<JsonPointer> {
         returns.0.into_iter().map(|(_, pointer)| pointer).collect()
     }
 }
+
+/// The values of a judge's result that its run shows, each named, in the order the IR lists
+/// them: a JSON object from each name to a JSON pointer into the result. No two share a name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shows(Vec<(Name, JsonPointer)>);
+
+impl Shows {
+    /// Each value's name, with the pointer to it, in the IR's order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Name, &JsonPointer)> {
+        self.0.iter().map(|(name, pointer)| (name, pointer))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for Shows {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter())
+    }
+}
+
+// A map visitor, as a map type would sort the entries or keep only the last of a repeated name.
+impl<'de> Deserialize<'de> for Shows {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Shows;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an object from each value's name to a JSON pointer")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Shows, A::Error> {
+                let mut shows: Vec<(Name, JsonPointer)> = Vec::new();
+                while let Some((name, pointer)) = map.next_entry::<Name, JsonPointer>()? {
+                    if shows.iter().any(|(seen, _)| *seen == name) {
+                        return Err(serde::de::Error::custom(format!(
+                            "`{name}` is shown more than once: show each name once"
+                        )));
+                    }
+                    shows.push((name, pointer));
+                }
+                Ok(Shows(shows))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}

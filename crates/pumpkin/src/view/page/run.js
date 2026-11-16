@@ -838,7 +838,7 @@ function inspectRole(name, inspector, data) {
       {},
       h("dt", {}, "Place"),
       h("dd", {}, role.place || "-"),
-      role.score ? [h("dt", {}, "Score"), h("dd", {}, "The final judge, whose score is the run's")] : null,
+      role.score ? [h("dt", {}, "Score"), h("dd", {}, "The final judge, whose result is the run's")] : null,
       h("dt", {}, "Model route"),
       routes(role),
     ),

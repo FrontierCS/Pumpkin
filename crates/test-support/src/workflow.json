@@ -69,7 +69,7 @@
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],
           "result": {
-            "score": "/raw_score",
+            "shows": { "score": "/raw_score", "metrics": "/metrics" },
             "returns": ["/raw_score", "/metrics", "/failure"]
           }
         }
@@ -95,7 +95,7 @@
           },
           "slots": [{ "name": "payload", "max_bytes": 4194304 }],
           "result": {
-            "score": "/raw_score",
+            "shows": { "score": "/raw_score", "metrics": "/metrics" },
             "returns": ["/raw_score", "/metrics", "/failure"]
           }
         }

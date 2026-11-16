@@ -1,4 +1,4 @@
-"""A workflow that needs no model: the agent submits a greeting, and the judge scores its size."""
+"""A workflow that needs no model: the agent submits a greeting, and the judge scores its size and counts its lines."""
 
 IMAGE = image("Dockerfile")
 SANDBOXCTL = "/.pumpkin/bin/sandboxctl"
@@ -28,11 +28,11 @@ workflow(
             "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
             "runtime": {"judge": {
                 "command": {
-                    "argv": ["sh", "-c", "printf '{\"score\": %s}' $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"],
+                    "argv": ["sh", "-c", "printf '{\"score\": %s, \"lines\": %s}' $(wc -c < /pumpkin/in/payload/raw) $(wc -l < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"],
                     "cwd": "/pumpkin/home",
                 },
                 "slots": [{"name": "payload", "max_bytes": 1 * KiB}],
-                "result": {"score": "/score", "returns": ["/score"]},
+                "result": {"shows": {"score": "/score", "lines": "/lines"}, "returns": ["/score"]},
             }},
         },
     ],

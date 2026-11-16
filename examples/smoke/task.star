@@ -60,7 +60,7 @@ workflow(
             "runtime": {"judge": {
                 "command": {"argv": ["python3", "-u", "/opt/smoke/judge.py"], "cwd": "/pumpkin/home"},
                 "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-                "result": {"score": "/score", "returns": ["/score", "/detail"]},
+                "result": {"shows": {"score": "/score"}, "returns": ["/score", "/detail"]},
             }},
         },
     ],

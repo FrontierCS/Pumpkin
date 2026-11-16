@@ -588,10 +588,13 @@ fn logged(seconds: u64, event: Value, actions: Value) -> Value {
 }
 
 fn judged(score: f64, returned: Value) -> Value {
+    let values = json!([
+        { "name": "score", "value": score },
+        { "name": "metrics", "value": { "solved": 3 } },
+    ]);
     let mut outcome = json!({
         "state": "finished",
-        "score": score,
-        "verdict": { "kind": "judged", "result": { "score": score } },
+        "verdict": { "kind": "judged", "result": { "values": values } },
         "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
     });
     outcome["verdict"]["result"]["returned"] = returned;
@@ -677,12 +680,15 @@ fn judged_log() -> Vec<Value> {
     let unstarted = "the judge's sandbox didn't start: Modal refused the helper's `create`: \
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
-    let long = "x".repeat(200);
-    let unscored = json!({ "returned": { "exit_status": 1, "stderr_tail": long } });
+    let shows_none = json!({ "returned": { "exit_status": 1 } });
     let final_judge = json!([{
         "kind": "start_judge", "job": 4, "grant": null, "timeout_ns": "900000000000",
     }]);
     let returned = json!({ "raw_score": 49.36 });
+    let values = json!([
+        { "name": "score", "value": 49.36 },
+        { "name": "metrics", "value": { "solved": 3 } },
+    ]);
     let finish = json!([{ "kind": "finish" }]);
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
     let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
@@ -715,7 +721,10 @@ fn judged_log() -> Vec<Value> {
         logged(62, ended(0, exited()), none()),
         logged(
             100,
-            collected(0, json!({ "score": 49.53, "returned": {} })),
+            collected(
+                0,
+                json!({ "values": [{ "name": "score", "value": 49.53 }], "returned": {} }),
+            ),
             json!([close(0)]),
         ),
         logged(102, of_lease("lease_ended", 0), none()),
@@ -740,7 +749,7 @@ fn judged_log() -> Vec<Value> {
         logged(400, asked_3, start_3),
         logged(405, of_job("judge_started", 3), none()),
         logged(410, of_job("judge_timed_out", 3), none()),
-        logged(415, collected(3, unscored), none()),
+        logged(415, collected(3, shows_none), none()),
         logged(500, opened_3, start_3_lease),
         logged(505, saw("lease-3", "NVIDIA A100 80GB PCIe"), none()),
         logged(505, of_lease("lease_ready", 3), none()),
@@ -758,7 +767,7 @@ fn judged_log() -> Vec<Value> {
         logged(1020, judge_answered, none()),
         logged(
             1100,
-            collected(4, json!({ "score": 49.36, "returned": returned })),
+            collected(4, json!({ "values": values, "returned": returned })),
             finish,
         ),
     ]

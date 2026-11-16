@@ -8,6 +8,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use runtime::{BUILD, Ending, Record};
+use schema::ir::Name;
+use serde_json::Value;
 use stdx::Context;
 
 use crate::{Reader, advise, escaped, next, print_outcome, progress, say, tell, to_stderr};
@@ -101,9 +103,7 @@ pub(crate) fn end(
 ) -> Result<ExitCode, String> {
     let id = record.id();
     let (exit, how, judge_stderr) = match ending {
-        Ending::Judged { score, after } => {
-            (ExitCode::SUCCESS, judged(score.as_deref(), after), None)
-        }
+        Ending::Judged { values, after } => (ExitCode::SUCCESS, judged(values, after), None),
         Ending::Unjudged(why) => (ExitCode::from(3), why.clone(), None),
         Ending::NoResult { why, judge_stderr } => {
             (ExitCode::from(3), why.clone(), Some(judge_stderr))
@@ -161,13 +161,12 @@ fn again(record: &Record, args: &[String]) {
     advise("run it again", &next::run_again(args));
 }
 
-pub(crate) fn judged(score: Option<&str>, after: &str) -> String {
-    match score {
-        Some(score) => format!(
-            "finished with a score of {}, {after}",
-            progress::shown_score(score)
-        ),
-        None => format!("finished with a result, {after}"),
+pub(crate) fn judged(values: &[(Name, Value)], after: &str) -> String {
+    if values.is_empty() {
+        format!("finished with a result, {after}")
+    } else {
+        let shown = progress::shown_values(values);
+        format!("finished with a result ({shown}), {after}")
     }
 }
 

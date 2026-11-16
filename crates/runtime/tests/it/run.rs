@@ -638,7 +638,7 @@ fn reads_core_times() {
 {"seq":9,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
 {"seq":10,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
 {"seq":11,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
-{"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"score":1,"returned":{}}},"actions":[]}
+{"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"returned":{}}},"actions":[]}
 {"seq":13,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
 "#;
     fs::write(record.join("log.jsonl"), log).unwrap();

@@ -27,7 +27,6 @@ use schema::ir::{AbsolutePath, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, TransferEnd};
 use schema::workflow::{JudgeCall, LeaseGrantId, Placed, Workflow};
-use serde_json::Number;
 
 mod jobs;
 mod leases;
@@ -300,16 +299,6 @@ pub struct Submission {
 pub struct Outcome {
     pub work_end: WorkEnd,
     pub verdict: Verdict,
-}
-
-impl Outcome {
-    /// The score of the selected submission, if the final judge scored it.
-    pub fn score(&self) -> Option<&Number> {
-        match &self.verdict {
-            Verdict::Judged { result, .. } => result.score(),
-            Verdict::NoSubmission | Verdict::NoResult { .. } => None,
-        }
-    }
 }
 
 /// What the final judge made of the selected submission.

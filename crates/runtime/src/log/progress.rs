@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use provider::UnixTime;
-use schema::ir::Gpu;
+use schema::ir::{Gpu, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde::Deserialize;
@@ -310,10 +310,9 @@ impl LeaseSpan {
 /// How a judge call ended.
 #[derive(Clone, Debug)]
 pub enum CallEnd {
-    /// The judge returned a score, as JSON.
-    Scored(String),
-    /// The judge returned a result without one, which is this, as JSON.
-    Unscored(String),
+    /// The judge gave a result, which shows these values, each by its name, in the order its
+    /// judge's spec names them.
+    Result(Vec<(Name, Value)>),
     /// The judge's output was no result its spec reads, for this reason.
     Invalid(String),
     /// The run couldn't start the call or keep its sandbox, for this reason.
@@ -661,10 +660,11 @@ impl Reading {
             }
             logged::Event::JudgeCollected { job, collected } => {
                 let end = match collected {
-                    Collected::Result(result) => match &result.score {
-                        Some(score) => CallEnd::Scored(score.to_string()),
-                        None => CallEnd::Unscored(result.returned.to_string()),
-                    },
+                    Collected::Result(result) => CallEnd::Result(
+                        (result.values.iter())
+                            .map(|shown| (shown.name.clone(), shown.value.clone()))
+                            .collect(),
+                    ),
                     Collected::Invalid(invalid) => CallEnd::Invalid(invalid.clone()),
                 };
                 if let Some(call) = self.call(*job) {

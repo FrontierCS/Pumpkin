@@ -1,17 +1,18 @@
 use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
-use schema::ir::ResultSpec;
+use schema::ir::{Name, ResultSpec};
 use schema::sandbox::RESULT_MAX_DEPTH;
 use schema::sandbox::op::{JobState, Returned};
-use serde_json::{Number, Value};
+use serde_json::Value;
 
-/// A judge call's result, parsed from its `result.json` per its judge's [`ResultSpec`]: a score,
-/// if it has one, and the fields its caller's reply returns.
+/// A judge call's result, parsed from its `result.json` per its judge's [`ResultSpec`]: the
+/// values its run shows, and the fields its caller's reply returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JudgeResult {
-    score: Option<Number>,
+    values: Vec<(Name, Value)>,
     returned: Returned,
 }
 
@@ -20,10 +21,10 @@ impl JudgeResult {
     ///
     /// # Errors
     ///
-    /// Fails, with the reason, if the file is not JSON, nests deeper than [`RESULT_MAX_DEPTH`],
-    /// or if its score breaks the rule of [`ResultSpec::score`].
+    /// Fails, with the reason, if the file is not JSON or nests deeper than
+    /// [`RESULT_MAX_DEPTH`].
     pub fn parse(spec: &ResultSpec, json: &[u8]) -> Result<Self, String> {
-        let ResultSpec { score, returns } = spec;
+        let ResultSpec { shows, returns } = spec;
         let document: Value = serde_json::from_slice(json)
             .map_err(|error| format!("result.json is not JSON: {error}"))?;
         if depth(&document) > RESULT_MAX_DEPTH {
@@ -32,26 +33,23 @@ impl JudgeResult {
                  them at most that deep"
             ));
         }
-        let score = match score.resolve(&document) {
-            None | Some(Value::Null) => None,
-            Some(Value::Number(number)) => Some(number.clone()),
-            Some(_) => {
-                return Err(format!(
-                    "the score at `{score}` is not a number: write a number there, or null"
-                ));
-            }
-        };
+        let values = shows
+            .iter()
+            .filter_map(|(name, pointer)| Some((name.clone(), pointer.resolve(&document)?.clone())))
+            .collect();
         let returned = returns
             .iter()
             .filter_map(|(key, pointer)| {
                 Some((key.to_owned(), pointer.resolve(&document)?.clone()))
             })
             .collect();
-        Ok(Self { score, returned })
+        Ok(Self { values, returned })
     }
 
-    pub fn score(&self) -> Option<&Number> {
-        self.score.as_ref()
+    /// The values the run shows, each by its name, in the order of the judge's
+    /// [`ResultSpec::shows`]: those it names and the result has.
+    pub fn values(&self) -> &[(Name, Value)] {
+        &self.values
     }
 
     /// The fields the caller's reply returns, by key: those the judge's
@@ -61,7 +59,10 @@ impl JudgeResult {
     }
 
     pub(super) fn job_state(&self) -> JobState {
-        let Self { score: _, returned } = self;
+        let Self {
+            values: _,
+            returned,
+        } = self;
         JobState::Completed {
             returned: returned.clone(),
         }
