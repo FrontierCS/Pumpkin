@@ -1436,14 +1436,13 @@ fn state_name(reply: &OpReply) -> String {
     }
 }
 
-// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `call
-// <function> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
-// submission, where a payload that is a number is that many bytes of `x`, and any other is its
-// own bytes; `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, without
-// a timeout for `-`, `<session>.status <lease>` or `<session>.close <lease>`; `<session>.put
-// <lease> <tree> <to> [replace]` or `<session>.get <lease> <from> <to>`. An op is made once the one
-// before it is answered. `ops at least <seconds> less` exits 1 unless the reply's remaining seconds
-// fell by `seconds` since an earlier ops reply.
+// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>` or `call
+// <function> <payload> [<name>=<value>]...`, where a payload that is a number is that many bytes
+// of `x`, and any other is its own bytes; `<session>.open [<seconds>]`, `<session>.run <lease>
+// <seconds>|- <argv>...`, without a timeout for `-`, `<session>.status <lease>` or
+// `<session>.close <lease>`; `<session>.put <lease> <tree> <to> [replace]` or `<session>.get
+// <lease> <from> <to>`. An op is made once the one before it is answered. `ops at least <seconds>
+// less` exits 1 unless the reply's remaining seconds fell by `seconds` since an earlier ops reply.
 //
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
 // <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
@@ -1479,11 +1478,13 @@ fn step(arg: &str) -> Step {
             let job = job.parse().unwrap();
             (OpCall::Status { job }, Vec::new(), None)
         }
-        ["call", _, _] => (OpCall::Call { grant: grant() }, payload(), None),
-        [kind @ ("submit" | "finalize"), _, _] => {
-            let finalize = kind == "finalize";
-            let grant = grant();
-            (OpCall::Submit { grant, finalize }, payload(), None)
+        ["call", _, _, ref given @ ..] => {
+            let arguments = arguments(given);
+            let call = OpCall::Call {
+                grant: grant(),
+                arguments,
+            };
+            (call, payload(), None)
         }
         ["await", job, state] => {
             let (call, state) = (
@@ -1524,6 +1525,16 @@ fn step(arg: &str) -> Step {
         payload,
         less,
     }
+}
+
+// The caller's arguments that `given` writes, each `<name>=<value>`.
+fn arguments(given: &[&str]) -> BTreeMap<Name, String> {
+    (given.iter())
+        .map(|text| {
+            let (name, value) = text.split_once('=').unwrap();
+            (Name::try_from(name.to_owned()).unwrap(), value.to_owned())
+        })
+        .collect()
 }
 
 fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {

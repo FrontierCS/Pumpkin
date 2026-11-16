@@ -86,7 +86,7 @@ def main():
         print(each, flush=True)
     with open("probes", "w") as file:
         file.write("\n".join(lines) + "\n")
-    print(json.dumps(ctl("submit", "final", "probes", "--finalize")), flush=True)
+    print(json.dumps(ctl("call", "final", "probes", "--arg", "finalize=true")), flush=True)
 
 
 if __name__ == "__main__":

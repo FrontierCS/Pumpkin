@@ -2687,8 +2687,13 @@ fn times_a_callers_ops() {
             5,
             "agent",
             3,
-            json!({ "kind": "submit", "grant": "final" }),
-            json!([reply(3, json!({ "kind": "submit", "state": "stored" }))]),
+            json!({ "kind": "now", "grant": "final", "evaluated": {
+                "effects": ["select"], "returned": [{ "name": "state", "value": "stored" }],
+            } }),
+            json!([reply(
+                3,
+                json!({ "kind": "call", "returned": { "state": "stored" } })
+            )]),
         ),
         arrived(
             6,
@@ -2764,6 +2769,14 @@ fn times_a_callers_ops() {
             17,
             json!({ "kind": "transfer_ended", "lease": 2, "transfer": 1, "end": { "moved": { "bytes": 96, "entries": 2 } } }),
         ),
+        // A now function's body that returned nothing.
+        arrived(
+            18,
+            "agent",
+            10,
+            json!({ "kind": "now", "grant": "final", "evaluated": { "effects": [], "returned": [] } }),
+            json!([reply(10, json!({ "kind": "call", "returned": {} }))]),
+        ),
     ];
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(&scratch, id, since, &log, None, &lease_places(Prices::Both));
@@ -2781,12 +2794,13 @@ fn times_a_callers_ops() {
             agent:
             end_ns="11000000000" failed=false kind="call" name="train" op=1 result="returned score=14" start_ns="2000000000"
             end_ns="4000000000" failed=true kind="call" name="train" op=2 result="refused: one call at a time" start_ns="4000000000"
-            end_ns="5000000000" failed=false kind="submit" name="final" op=3 result="stored" start_ns="5000000000"
+            end_ns="5000000000" failed=false kind="now" name="final" op=3 result="returned state=\"stored\"" start_ns="5000000000"
             end_ns="8000000000" failed=false kind="lease_put" name="lease 2" op=5 result="moved 840 bytes, 3 entries" start_ns="7000000000"
             end_ns="12000000000" failed=true kind="lease_run" name="lease 2" op=6 result="timed_out" start_ns="9000000000"
             failed=false kind="call" name="train" op=7 start_ns="13000000000"
             end_ns="15000000000" failed=true kind="call" name="train" op=8 result="failed: the sandbox was lost" start_ns="14000000000"
             end_ns="17000000000" failed=false kind="lease_get" name="lease 2" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
+            end_ns="18000000000" failed=false kind="now" name="final" op=10 result="returned" start_ns="18000000000"
             caller: "agent"
 
             job-1:

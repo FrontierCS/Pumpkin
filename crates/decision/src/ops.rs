@@ -3,12 +3,13 @@
 //! The core authorizes every op from the raw request ([`Request`]), and refuses it, with a
 //! reason that says what to do instead, if it fails any of these:
 //!
-//! - The agent's ops are taken only during the work phase, and not once a finalize is accepted;
-//!   a call's, only while its body drives its target.
+//! - The agent's ops are taken only during the work phase, and not once its work is ended; a
+//!   call's, only while its body drives its target.
 //! - An op names a grant its caller's role holds: a call one of the agent's job functions, a
-//!   session's function one of its role's sessions, and a submission the agent's submit grant.
-//! - Its payload isn't empty, and fits its function's `payload_max_bytes`, the score slot's
-//!   `max_bytes` for a submission.
+//!   session's function one of its role's sessions, and a now function's call one of the agent's
+//!   now functions.
+//! - Its payload isn't empty, and fits its function's `payload_max_bytes`; a job function's
+//!   caller's arguments read as its body's parameters are typed.
 //! - A job function has calls left, none of its calls queued or running, and call time left. A
 //!   refused call is not charged.
 //! - A session has fewer leases open than its `instances`, and time left, for its caller, and a
@@ -33,23 +34,29 @@ use core::time::Duration;
 use schema::ir::{Argv, Name};
 use schema::sandbox::op::{
     self, CommandStatus, Grant, JobState, Last, LeaseRemaining, LeaseReply, LeaseState,
-    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, SubmitReply,
-    SubmitState, TransferEnd, TransferStatus,
+    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd,
+    TransferStatus,
 };
-use schema::workflow::{JobFunctionId, JobOf, RoleId, Session, SessionId};
+use schema::workflow::{JobFunctionId, JobOf, NowFunctionId, RoleId, Session, SessionId};
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
 use super::{
-    Action, Caller, Core, Direction, JobId, LeaseId, OpId, PayloadRef, Phase, Request, WorkEnd,
+    Action, Caller, Core, Direction, JobId, LeaseId, OpId, Outcome, PayloadRef, Phase, Request,
+    WorkEnd,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 /// A caller whose ops the run takes now, with the role whose grants it holds, and when its work
 /// ends, unless it ends it first, as a time since the run started.
 pub(super) enum Working {
-    /// The agent, in the work phase, which ends at the deadline.
-    Agent { role: RoleId, deadline: Duration },
+    /// The agent, in the work phase, which ends at the deadline, with the payload it selected
+    /// last, if any.
+    Agent {
+        role: RoleId,
+        deadline: Duration,
+        latest: Option<PayloadRef>,
+    },
     /// A call, while its command runs, which its timeout ends at `end`.
     Job {
         job: JobId,
@@ -59,31 +66,33 @@ pub(super) enum Working {
 }
 
 impl Working {
-    fn caller(self) -> Caller {
+    pub(super) fn caller(&self) -> Caller {
         match self {
             Self::Agent { .. } => Caller::Agent,
-            Self::Job { job, .. } => Caller::Job(job),
+            Self::Job { job, .. } => Caller::Job(*job),
         }
     }
 
-    fn role(self) -> RoleId {
+    fn role(&self) -> RoleId {
         match self {
-            Self::Agent { role, .. } | Self::Job { role, .. } => role,
+            Self::Agent { role, .. } | Self::Job { role, .. } => *role,
         }
     }
 
-    pub(super) fn end(self) -> Duration {
+    pub(super) fn end(&self) -> Duration {
         match self {
-            Self::Agent { deadline, .. } => deadline,
-            Self::Job { end, .. } => end,
+            Self::Agent { deadline, .. } => *deadline,
+            Self::Job { end, .. } => *end,
         }
     }
 }
 
+/// A grant of the caller's; a job function or a now function carries the work phase's deadline,
+/// and a now function the agent's selection so far.
 pub(super) enum Held {
     Job(JobFunctionId, Duration),
     Session(SessionId),
-    Submit(Duration),
+    Now(NowFunctionId, Duration, Option<PayloadRef>),
 }
 
 impl Core<'_> {
@@ -96,7 +105,7 @@ impl Core<'_> {
     ) {
         let mut then = Vec::new();
         let reply =
-            (self.working(caller)).and_then(|working| self.take(working, request, &mut then));
+            (self.working(caller)).and_then(|working| self.take(&working, request, &mut then));
         let reply = reply.unwrap_or_else(|message| OpReply::Refused { message });
         actions.push(Action::Reply { op, reply });
         actions.append(&mut then);
@@ -132,24 +141,23 @@ impl Core<'_> {
                     | None => Err("the call has ended: make no more ops".to_owned()),
                 };
             }
-            (Phase::Work { deadline, .. }, Caller::Agent) => {
+            (Phase::Work { deadline, latest }, Caller::Agent) => {
                 return Ok(Working::Agent {
                     role: self.workflow.agent().role,
                     deadline: *deadline,
+                    latest: latest.clone(),
                 });
             }
             (Phase::Finalized { .. }, Caller::Agent) => &WorkEnd::Finalized,
             (
                 Phase::Teardown { work_end, .. }
                 | Phase::Final { work_end, .. }
-                | Phase::Finished { work_end },
+                | Phase::Finished(Outcome { work_end, .. }),
                 Caller::Agent,
             ) => work_end,
         };
         match work_end {
-            WorkEnd::Finalized => {
-                Err("a final submission was accepted: make no more ops".to_owned())
-            }
+            WorkEnd::Finalized => Err("the work was ended: make no more ops".to_owned()),
             WorkEnd::Deadline | WorkEnd::AgentExited(_) | WorkEnd::AgentFailed(_) => {
                 Err("the work phase has ended: make no more ops".to_owned())
             }
@@ -158,7 +166,7 @@ impl Core<'_> {
 
     fn take(
         &mut self,
-        working: Working,
+        working: &Working,
         request: Request,
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
@@ -166,17 +174,16 @@ impl Core<'_> {
         match request {
             Request::Ops => Ok(OpReply::Ops(self.ops(working))),
             Request::Status { job } => self.own_job(caller, job).map(OpReply::Status),
-            Request::Call { function, payload } => self.call(working, &function, payload, then),
-            Request::Submit {
-                grant,
-                finalize,
+            Request::Call {
+                function,
                 payload,
-            } => match self.held(working, &grant)? {
-                Held::Submit(deadline) => self
-                    .submit(finalize, payload, deadline, then)
-                    .map(OpReply::Submit),
-                other => Err(other.misnamed(&grant, "a submit grant")),
-            },
+                arguments,
+            } => self.call(working, &function, payload, &arguments, then),
+            Request::Now {
+                function,
+                payload,
+                evaluated,
+            } => self.now(working, &function, &payload, evaluated, then),
             Request::Session { grant, op } => self.session(working, &grant, op, then),
         }
     }
@@ -185,14 +192,14 @@ impl Core<'_> {
     /// takes.
     fn session(
         &mut self,
-        working: Working,
+        working: &Working,
         grant: &Name,
         op: SessionOp,
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
         let id = match self.held(working, grant)? {
             Held::Session(id) => id,
-            held @ (Held::Job(..) | Held::Submit(_)) => {
+            held @ (Held::Job(..) | Held::Now(..)) => {
                 return Err(held.misnamed(grant, "a session"));
             }
         };
@@ -280,19 +287,21 @@ impl Core<'_> {
 
     /// The time from now until `end`, as a reply gives the time left: in whole seconds rounded
     /// down, and 0 once it has passed.
-    fn seconds_left(&self, end: Duration) -> u64 {
+    pub(super) fn seconds_left(&self, end: Duration) -> u64 {
         end.saturating_sub(self.now).as_secs()
     }
 
-    pub(super) fn held(&self, working: Working, name: &Name) -> Result<Held, String> {
+    pub(super) fn held(&self, working: &Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
         // A job's role, a judge or a target, holds sessions alone (`ir::JudgeRuntime`,
         // `ir::TargetRuntime`).
-        let deadline = match working {
-            Working::Agent { deadline, .. } => Some(deadline),
+        let agent = match working {
+            Working::Agent {
+                deadline, latest, ..
+            } => Some((*deadline, latest)),
             Working::Job { .. } => None,
         };
-        let job = deadline.and_then(|deadline| {
+        let job = agent.and_then(|(deadline, _)| {
             (self.workflow.job_functions())
                 .find(|(_, function)| function.name == *name)
                 .map(|(id, _)| Held::Job(id, deadline))
@@ -300,8 +309,12 @@ impl Core<'_> {
         let lease = (self.workflow.sessions())
             .find(|(_, grant)| grant.holder.role(self.workflow) == role && grant.name == *name)
             .map(|(id, _)| Held::Session(id));
-        let submit = deadline.filter(|_| self.workflow.submit_grant().name == *name);
-        let held = (job.or(lease)).or(submit.map(Held::Submit));
+        let now = agent.and_then(|(deadline, latest)| {
+            (self.workflow.now_functions())
+                .find(|(_, now)| now.name == *name)
+                .map(|(id, _)| Held::Now(id, deadline, latest.clone()))
+        });
+        let held = (job.or(lease)).or(now);
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
 
@@ -469,61 +482,10 @@ impl Core<'_> {
         Ok(self.lease_reply(id))
     }
 
-    fn submit(
-        &mut self,
-        finalize: bool,
-        payload: PayloadRef,
-        deadline: Duration,
-        then: &mut Vec<Action>,
-    ) -> Result<SubmitReply, String> {
-        fits(
-            &self.workflow.submit_grant().name,
-            &payload,
-            self.submission_max_bytes(),
-        )?;
-        // Ops are taken only while the agent works (`working`): the phase goes on with the latest
-        // submission, or a finalize locks it.
-        if !finalize {
-            self.phase = Phase::Work {
-                latest: Some(payload),
-                deadline,
-            };
-            return Ok(SubmitReply {
-                state: SubmitState::Stored,
-                remaining_seconds: self.seconds_left(deadline),
-            });
-        }
-        let grace = self.workflow.agent().finalize_grace;
-        let grace_end = self.now.saturating_add(grace);
-        // A tie goes to the deadline, which names the end.
-        let (end, work_end) = if grace_end < deadline {
-            (grace_end, WorkEnd::Finalized)
-        } else {
-            (deadline, WorkEnd::Deadline)
-        };
-        self.phase = Phase::Finalized {
-            payload,
-            end,
-            work_end,
-        };
-        if grace.is_zero() {
-            self.end_work(WorkEnd::Finalized, then);
-        }
-        Ok(SubmitReply {
-            state: SubmitState::Accepted,
-            remaining_seconds: self.seconds_left(end),
-        })
-    }
-
-    // The score slot's, so that whatever is selected fits it.
-    fn submission_max_bytes(&self) -> NonZeroU64 {
-        self.workflow.slot(self.workflow.score().slot).max_bytes()
-    }
-
-    fn ops(&self, working: Working) -> OpsReply {
+    fn ops(&self, working: &Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
         let agent = matches!(working, Working::Agent { .. });
-        // A call holds no job function or submit grant.
+        // A call holds no job function or now function.
         let jobs = (self.workflow.job_functions()).filter(|_| agent);
         let jobs = jobs.map(|(_, function)| {
             Grant::Job(op::JobFunction {
@@ -532,6 +494,7 @@ impl Core<'_> {
                 calls: function.calls,
                 cumulative_seconds: function.cumulative_seconds,
                 call_timeout_seconds: function.call_timeout_seconds,
+                arguments: function.body.arguments.clone(),
             })
         });
         let leases = (self.workflow.sessions())
@@ -557,16 +520,18 @@ impl Core<'_> {
                 remaining: self.grant_remaining((id, caller), grant.instance()),
             })
         });
-        let submit = agent.then(|| {
-            Grant::Submit(op::SubmitGrant {
-                name: self.workflow.submit_grant().name.clone(),
-                max_bytes: self.submission_max_bytes(),
+        let now = (self.workflow.now_functions()).filter(|_| agent);
+        let now = now.map(|(_, now)| {
+            Grant::Now(op::NowFunction {
+                name: now.name.clone(),
+                payload_max_bytes: now.payload_max_bytes,
+                arguments: now.body.arguments.clone(),
             })
         });
         OpsReply {
             remaining_seconds: self.seconds_left(end),
             resources: (self.workflow.sandbox(role).needs).resources(),
-            grants: (jobs.chain(leases)).chain(submit).collect(),
+            grants: (jobs.chain(leases)).chain(now).collect(),
         }
     }
 
@@ -683,11 +648,11 @@ impl Held {
     pub(super) fn misnamed(&self, name: &Name, kind: &str) -> String {
         let (is, instead) = match self {
             Self::Job(..) => ("a job function", "call it".to_owned()),
+            Self::Now(..) => ("a now function", "call it".to_owned()),
             Self::Session(_) => (
                 "a session",
                 format!("call its functions, as `{name}.open`,"),
             ),
-            Self::Submit(_) => ("a submit grant", "submit to it".to_owned()),
         };
         format!("`{name}` is {is}, not {kind}: {instead} instead")
     }

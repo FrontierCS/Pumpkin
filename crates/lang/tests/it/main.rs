@@ -608,13 +608,13 @@ judged_task(
 )
 "#,
         &expect![[r#"
-            lib/judged.star:13:23: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
-                13 |     return [key + "=" + value for key, value in env.items()] + [
+            lib/judged.star:15:23: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
+                15 |     return [key + "=" + value for key, value in env.items()] + [
                    |                       ^
-                the left operand, `"SEED="`, is made at lib/judged.star:13:13
+                the left operand, `"SEED="`, is made at lib/judged.star:15:13
                 the right operand, `7`, is made at bad/operand/task.star:7:20
-                in `_env()`, called at lib/judged.star:25:63
-                in `_trainer()`, called at lib/judged.star:110:13
+                in `_env()`, called at lib/judged.star:27:63
+                in `_trainer()`, called at lib/judged.star:112:13
                 in `judged_task()`, called at bad/operand/task.star:3:1"#]],
     );
     check(
@@ -3673,7 +3673,19 @@ fn plans() {
                         },
                         {
                           "name": "final",
-                          "submit": {}
+                          "now": {
+                            "body": {
+                              "arguments": {
+                                "finalize": {
+                                  "default": false,
+                                  "type": "bool"
+                                }
+                              },
+                              "def": "submit",
+                              "file": "//lib/submit.star"
+                            },
+                            "payload_max_bytes": 65536
+                          }
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
@@ -3753,8 +3765,8 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:7:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
-                7 | DEADLINE = arg("deadline", int, default = 5 * 3600)
+            lib/images.star:9:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
+                9 | DEADLINE = arg("deadline", int, default = 5 * 3600)
                   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 `--arg mdoel` is given, and no `arg()` call before this one declares it"#]],
     );
@@ -3765,9 +3777,9 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:8:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
-                8 | STRICT = arg("strict", bool, default = False)
-                  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            lib/images.star:10:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
+                10 | STRICT = arg("strict", bool, default = False)
+                   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         &format!(
@@ -3813,41 +3825,41 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:54:13: the stand-in check refuses `tools/Dockerfile`
-                54 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:56:13: the stand-in check refuses `tools/Dockerfile`
+                56 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:55:17: the stand-in check refuses `toolchain/Dockerfile`
-                55 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:57:17: the stand-in check refuses `toolchain/Dockerfile`
+                57 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:57:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
-                57 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:59:19: the stand-in check refuses `agent/Dockerfile`, given build-tools, given toolchain
+                59 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:57:19: the stand-in check refuses the mount at `shared`
-                57 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
+            lib/images.star:59:19: the stand-in check refuses the mount at `shared`
+                59 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:29:18: the stand-in check refuses `judge/Dockerfile`
-                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:31:18: the stand-in check refuses `judge/Dockerfile`
+                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_role()`, called at lib/images.star:61:9
+                in `_role()`, called at lib/images.star:63:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:29:18: the stand-in check refuses the mount at `shared`
-                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:31:18: the stand-in check refuses the mount at `shared`
+                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_role()`, called at lib/images.star:61:9
+                in `_role()`, called at lib/images.star:63:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:29:18: the stand-in check refuses `judge/Dockerfile`
-                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:31:18: the stand-in check refuses `judge/Dockerfile`
+                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_role()`, called at lib/images.star:62:9
+                in `_role()`, called at lib/images.star:64:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:29:18: the stand-in check refuses the mount at `shared`
-                29 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:31:18: the stand-in check refuses the mount at `shared`
+                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_role()`, called at lib/images.star:62:9
+                in `_role()`, called at lib/images.star:64:9
                 in `images_task()`, called at bad/refused/task.star:5:1
             bad/refused/task.star:5:36: `cpu_millis` can't be `0`: expected a positive int
                 5 | images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
@@ -3864,12 +3876,12 @@ load("//lib/images.star", "images_task")
 images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
 "#,
         &expect![[r#"
-            lib/images.star:54:13: building the image failed: the stand-in build fails `tools/Dockerfile`
-                54 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
+            lib/images.star:56:13: building the image failed: the stand-in build fails `tools/Dockerfile`
+                56 |     tools = image("tools/Dockerfile", args = BASE_ARGS)
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1
-            lib/images.star:55:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
-                55 |     toolchain = image("toolchain/Dockerfile", target = "Go")
+            lib/images.star:57:17: building the image failed: the stand-in build fails `toolchain/Dockerfile`
+                57 |     toolchain = image("toolchain/Dockerfile", target = "Go")
                    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/broken/task.star:5:1"#]],
     );
@@ -4894,7 +4906,19 @@ NAME = "one"
                       "grants": [
                         {
                           "name": "final",
-                          "submit": {}
+                          "now": {
+                            "body": {
+                              "arguments": {
+                                "finalize": {
+                                  "default": false,
+                                  "type": "bool"
+                                }
+                              },
+                              "def": "submit",
+                              "file": "//lib/submit.star"
+                            },
+                            "payload_max_bytes": 65536
+                          }
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md.\n"

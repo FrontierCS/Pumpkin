@@ -153,7 +153,19 @@ fn tasks() {
                         },
                         {
                           "name": "final",
-                          "submit": {}
+                          "now": {
+                            "body": {
+                              "arguments": {
+                                "finalize": {
+                                  "default": false,
+                                  "type": "bool"
+                                }
+                              },
+                              "def": "submit",
+                              "file": "//lib/submit.star"
+                            },
+                            "payload_max_bytes": 1048576
+                          }
                         }
                       ],
                       "stdin": "Solve judged_neutral, scored by 3 metrics: solved, _internal, rejected.\n"
@@ -240,7 +252,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 655 prefixes evaluate
+            == tasks/literal/task.star: 2 of 660 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -335,7 +347,19 @@ fn tasks() {
                         },
                         {
                           "name": "final",
-                          "submit": {}
+                          "now": {
+                            "body": {
+                              "arguments": {
+                                "finalize": {
+                                  "default": false,
+                                  "type": "bool"
+                                }
+                              },
+                              "def": "submit",
+                              "file": "//lib/submit.star"
+                            },
+                            "payload_max_bytes": 16384
+                          }
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
@@ -456,7 +480,19 @@ fn tasks() {
                       "grants": [
                         {
                           "name": "final",
-                          "submit": {}
+                          "now": {
+                            "body": {
+                              "arguments": {
+                                "finalize": {
+                                  "default": false,
+                                  "type": "bool"
+                                }
+                              },
+                              "def": "submit",
+                              "file": "//lib/submit.star"
+                            },
+                            "payload_max_bytes": 65536
+                          }
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md.\n"
@@ -593,11 +629,13 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 593 prefixes evaluate
+            == lib/images.star: 0 of 608 prefixes evaluate
 
-            == lib/judged.star: 0 of 703 prefixes evaluate
+            == lib/judged.star: 0 of 716 prefixes evaluate
 
-            == lib/parts.star: 0 of 226 prefixes evaluate
+            == lib/parts.star: 0 of 230 prefixes evaluate
+
+            == lib/submit.star: 0 of 57 prefixes evaluate
 
             == lib/verify.star: 0 of 91 prefixes evaluate"#]],
     );

@@ -7,7 +7,6 @@
 //! | --- | --- | --- |
 //! | `sandboxctl ops` | [`OpCall::Ops`] | [`OpsReply`] |
 //! | `sandboxctl call <function> <file>` | [`OpCall::Call`] | [`CallReply`] |
-//! | `sandboxctl submit <grant> <file> [--finalize]` | [`OpCall::Submit`] | [`SubmitReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
 //! | `sandboxctl call <session>.run <lease> [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
@@ -23,13 +22,14 @@
 //! fields are its type's, under the same names; a limit or a quota that doesn't exist is `null`. A
 //! status has `returned` once its job has given a result, and `failure` only if it gave none.
 
+use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{ExitStatus, frame};
-use crate::ir::{AbsolutePath, Argv, Name, Resources};
+use crate::ir::{AbsolutePath, Argument, Argv, Name, Resources};
 
 /// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status
 /// gives ([`LeaseStatusReply`]).
@@ -76,11 +76,12 @@ pub enum OpCall {
     /// Asks for the caller's limits: the time left to work, its resources and the grants it holds.
     Ops,
     /// Calls the function of the grant named `grant` that the caller's role holds, with the op's
-    /// payload.
-    Call { grant: Name },
-    /// Submits the op's payload to the submit grant named `grant`. `finalize` marks it as the final
-    /// submission.
-    Submit { grant: Name, finalize: bool },
+    /// payload, and `arguments`, the texts of its caller's arguments by name.
+    Call {
+        grant: Name,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        arguments: BTreeMap<Name, String>,
+    },
     /// Asks how job `job`, which an earlier call of a job function started, is doing.
     Status { job: u64 },
     /// Calls `op`, one of the functions of the session named `grant` that the caller's role holds.
@@ -129,10 +130,10 @@ pub enum SessionOp {
 
 impl OpCall {
     /// Whether the call takes a payload ([`FromSandbox::Op`](super::FromSandbox::Op)): a function's
-    /// call or a submission does, and no other call.
+    /// call does, and no other call.
     pub fn takes_payload(&self) -> bool {
         match self {
-            Self::Call { .. } | Self::Submit { .. } => true,
+            Self::Call { .. } => true,
             Self::Ops | Self::Status { .. } | Self::Session { .. } => false,
         }
     }
@@ -144,7 +145,6 @@ impl OpCall {
 pub enum OpReply {
     Ops(OpsReply),
     Call(CallReply),
-    Submit(SubmitReply),
     Status(StatusReply),
     Lease(LeaseReply),
     LeaseStatus(LeaseStatusReply),
@@ -174,6 +174,19 @@ pub enum CallReply {
     /// A job function's: the job that runs the call, which `status` follows, and what the
     /// function has left of its quotas.
     Job(JobReply),
+    /// A now function's.
+    Now(NowReply),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// The reply to a now function's call: what its body returned, once its effects are applied.
+pub struct NowReply {
+    pub returned: Returned,
+    /// The time left to work, in whole seconds rounded down: from when the op reached its owner, or
+    /// later, until the deadline, or, once the call has ended the work, until the end of the grace
+    /// to wind down, if that comes first.
+    pub remaining_seconds: u64,
 }
 
 /// A grant that a caller holds, and its limits. Its `kind` says which call takes it.
@@ -182,7 +195,7 @@ pub enum CallReply {
 pub enum Grant {
     Job(JobFunction),
     Session(SessionGrant),
-    Submit(SubmitGrant),
+    Now(NowFunction),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +208,9 @@ pub struct JobFunction {
     pub calls: Option<NonZeroU64>,
     pub cumulative_seconds: Option<NonZeroU64>,
     pub call_timeout_seconds: NonZeroU64,
+    /// The parameters that the caller gives, by name, each as `--arg <name>=<value>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<Name, Argument>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,11 +230,14 @@ pub struct SessionGrant {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// A grant that [`OpCall::Submit`] submits to.
-pub struct SubmitGrant {
+/// A now function that [`OpCall::Call`] calls; see [`ir::NowFunction`](crate::ir::NowFunction).
+pub struct NowFunction {
     pub name: Name,
-    /// The most bytes a payload may hold: the slot's of the judge that scores the selection.
-    pub max_bytes: NonZeroU64,
+    /// The most bytes a payload may hold.
+    pub payload_max_bytes: NonZeroU64,
+    /// The parameters that the caller gives, by name, each as `--arg <name>=<value>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<Name, Argument>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,26 +258,6 @@ pub struct Remaining {
     /// The call time left, in whole seconds rounded down, or `None` if the function doesn't limit
     /// it.
     pub seconds: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-/// The reply to [`OpCall::Submit`].
-pub struct SubmitReply {
-    pub state: SubmitState,
-    /// The time left to work, in whole seconds rounded down: from when the op reached its owner, or
-    /// later, until the deadline, or, once a final submission is accepted, until the end of the
-    /// grace to wind down, if that comes first.
-    pub remaining_seconds: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmitState {
-    /// Stored, as the latest submission.
-    Stored,
-    /// Accepted as the final submission.
-    Accepted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,7 +285,7 @@ pub enum JobState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-/// What a job's body returned, by name, each with its value.
+/// What a body returned, by name, each with its value.
 pub struct Returned(Map<String, Value>);
 
 impl FromIterator<(String, Value)> for Returned {

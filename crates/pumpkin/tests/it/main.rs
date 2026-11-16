@@ -59,6 +59,17 @@ const SCORE: &str = r#"printf '{"raw_score": %s}' \
 /// is.
 struct Scratch(PathBuf, TempDir);
 
+/// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
+const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
+    run.select(payload)
+    if finalize:
+        run.end_work()
+    return {}
+";
+
+/// What [`Scratch::write_task_in`] writes in place of each now function's body, then replaces.
+const SUBMIT_BODY: &str = "<the body of submit.star>";
+
 impl Scratch {
     fn new(name: &str) -> Self {
         let dir = tempfile::Builder::new()
@@ -113,10 +124,22 @@ impl Scratch {
             )
             .unwrap();
         }
+        // Each now function's body is `submit` of a library beside the task, which an entry can't
+        // define.
+        let mut roles = ir["roles"].clone();
+        let grants = roles.as_array_mut().unwrap().iter_mut();
+        let grants = grants
+            .filter_map(|role| role.pointer_mut("/runtime/agent/grants")?.as_array_mut())
+            .flatten();
+        for now in grants.filter_map(|grant| grant.get_mut("now")) {
+            now["body"] = json!(SUBMIT_BODY);
+        }
+        self.write(&at("submit.star"), SUBMIT);
+        let roles = starlark(&roles).replace(&starlark(&json!(SUBMIT_BODY)), "submit");
         let task = format!(
-            "{loads}{images}\nworkflow(\n    name = {},\n    roles = {},\n    score = {},\n)\n",
+            "{loads}load(\"//{name}/submit.star\", \"submit\")\n\n{images}\nworkflow(\n    name = {},\n    \
+             roles = {roles},\n    score = {},\n)\n",
             starlark(&ir["name"]),
-            starlark(&ir["roles"]),
             starlark(&ir["score"]),
         );
         self.write(&at("task.star"), &task);
@@ -599,7 +622,6 @@ fn lease_task() -> Value {
                     } },
                     lease("gpu", 60),
                     lease("cpu", 1800),
-                    { "name": "final", "submit": {} },
                 ],
             } })),
             role("trainer", true, json!({ "target": {

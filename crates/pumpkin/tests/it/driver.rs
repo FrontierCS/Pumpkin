@@ -121,7 +121,7 @@ fn lacks_its_image() {
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/task.star, sources/task/lib/train.star
+            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
             outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
             printed outcome.json: true"#]],
     );
@@ -135,7 +135,7 @@ fn loses_its_log() {
         pumpkin: run <id> records into <scratch>/runs/<id>
         pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-        record: driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/task.star
+        record: driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
         outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}
         printed outcome.json: true"#]].assert_eq(&unlogged("unlogged"));
 }
@@ -148,8 +148,8 @@ fn fails_its_build() {
         pumpkin: building an image in pumpkin/unbuilt
         the stand-in creates nothing
         pumpkin: the build of an image in pumpkin/unbuilt failed
-        unbuilt/task.star:2:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-            2 | IMAGE = image("Dockerfile")
+        unbuilt/task.star:4:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+            4 | IMAGE = image("Dockerfile")
               |         ^^^^^^^^^^^^^^^^^^^
         pumpkin: unbuilt/task.star: the task has 1 problem
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
@@ -183,7 +183,7 @@ fn refuses_an_undescribed_image() {
         pumpkin: run <id> records into <scratch>/runs/<id>
         pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one; its record is <scratch>/runs/<id>
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/task.star
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
         outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` doesn't say what sha256:0000000000000000000000000000000000000000000000000000000000000000 is the digest of, as `docker image inspect` gives it no `Descriptor`: use Docker 28.0 or later, whose engine and command line give one","state":"failed"}
         printed outcome.json: true"#]].assert_eq(&shown);
 }
@@ -306,7 +306,7 @@ fn unstarted_image_driver_term_released() {
         pumpkin: run <id> records into <scratch>/runs/<id>
         pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/task.star
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
         outcome.json: {"signal":"SIGTERM","state":"interrupted"}
         printed outcome.json: true
         $ pumpkin wait <id> --runs runs

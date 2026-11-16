@@ -39,8 +39,6 @@ mod syntax;
 mod value;
 
 use alloc::collections::BTreeMap;
-use alloc::collections::btree_map::Entry as Slot;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -121,8 +119,8 @@ pub fn evaluate(
 ///
 /// A problem of the evaluation; no function `body.def` in the file; or, in source order, each
 /// parameter that doesn't fit: the handle or the payload, first, with a default or another type;
-/// one after them without a default, or not annotated `str`, `int` or `bool`; a keyword-only one
-/// without a default that `body.keywords` misses; and each keyword that names none, or doesn't fit.
+/// one after them not annotated `str`, `int` or `bool`; a keyword-only one without a default that
+/// `body.keywords` misses; and each keyword that names none, or doesn't fit.
 pub fn check(
     body: &Body<'_>,
     kind: BodyKind,
@@ -142,16 +140,17 @@ pub fn check(
 
 /// Calls the body that `body` names, on an evaluation of its file as [`check`] has it.
 ///
-/// It passes the handle on `host`, the payload, then `body.keywords` by name, and gives each name
-/// of the dict the body returns with its value's JSON, as `json.encode` writes it, in order.
+/// It passes the handle on `host`, the payload, then `body.keywords` and the caller's `arguments`
+/// (none: an empty map) by name; it gives each name of the returned dict with its value's JSON.
 ///
 /// # Errors
 ///
-/// What [`check`] refuses for `host`'s kind; else the body's first error, or a return that is no
-/// dict, has a key that is no [`schema::ir::Name`], or has a value with no JSON.
+/// What [`check`] refuses; an argument that names no parameter after the payload, or one without a
+/// default not given; the body's first error; a return that is no dict of names to JSON values.
 pub fn call(
     body: &Body<'_>,
     host: Host<'_>,
+    arguments: &BTreeMap<schema::ir::Name, schema::ir::ArgumentValue>,
     loader: &mut impl Loader,
     args: &Args,
     bounds: Bounds,
@@ -162,7 +161,7 @@ pub fn call(
     let purpose = Purpose::Call(host);
     let mut evaluation = eval::Evaluation::new(loader, purpose, planned, bounds.steps, &budget);
     let returned = match evaluation.body(body, kind) {
-        Ok(read) => evaluation.returned(&read).map_err(Vec::from),
+        Ok(read) => (evaluation.returned(&read, arguments)).map_err(Vec::from),
         Err(problems) => Err(problems),
     };
     returned.map_err(|problems| Problems::new(evaluation.sources, problems))
@@ -181,34 +180,13 @@ pub trait Loader {
 pub struct Args(BTreeMap<String, String>);
 
 impl Args {
-    /// The `--arg`s that `given` writes, each as `<name>=<value>`: its name is its text before its
-    /// first `=`, and its value the rest, whatever it holds.
+    /// The `--arg`s that `given` writes, as [`schema::ir::argument::texts`] reads them.
     ///
     /// # Errors
     ///
-    /// What is wrong with each one that has no `=`, has no name, or names an arg given before it.
+    /// What [`schema::ir::argument::texts`] refuses.
     pub fn parse<'g>(given: impl IntoIterator<Item = &'g str>) -> Result<Self, Vec<String>> {
-        let mut args = BTreeMap::new();
-        let mut problems = Vec::new();
-        for text in given {
-            let problem = match text.split_once('=') {
-                None => "has no `=`: give it as `--arg <name>=<value>`",
-                Some(("", _)) => "names no arg before its `=`: give it as `--arg <name>=<value>`",
-                Some((name, value)) => match args.entry(String::from(name)) {
-                    Slot::Vacant(slot) => {
-                        slot.insert(String::from(value));
-                        continue;
-                    }
-                    Slot::Occupied(_) => "names an arg given already: give each arg once",
-                },
-            };
-            problems.push(format!("`--arg {}` {problem}", text.escape_debug()));
-        }
-        if problems.is_empty() {
-            Ok(Self(args))
-        } else {
-            Err(problems)
-        }
+        schema::ir::argument::texts(given).map(Self)
     }
 
     /// Each arg's name and value, sorted by name.

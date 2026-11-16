@@ -16,6 +16,7 @@
 //! missing field, at the dict. Its note is the place in the IR, as a JSON Pointer.
 
 use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -23,17 +24,15 @@ use core::fmt;
 
 use schema::ir::{self, JsonPointer};
 use schema::workflow::ParseError;
-use serde::de::value::{MapDeserializer, StrDeserializer};
+use serde::de::value::StrDeserializer;
 use serde::de::{
     self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor,
 };
 use serde::{Deserialize, forward_to_deserialize_any};
 
 use crate::problem::{Fault, Sources, list};
+use crate::syntax::Type;
 use crate::value::{Entry, Function, Key, Kind, Span, Value, escape, quote};
-
-// A body's fields, as a function gives them.
-type BodyFields = core::array::IntoIter<(&'static str, String), 2>;
 
 /// The IR's workflow that `fields`, the dict of the keyword arguments of `workflow()`, gives. An
 /// image in it is the ID at its place in `images`. A fault is at the value that is wrong, and
@@ -330,11 +329,36 @@ impl<'v> De<'v> {
         Self { value, ..self }
     }
 
-    // The body that `function` is: its file's label and its name, as strings.
-    fn body<'de>(&self, function: &Function) -> MapDeserializer<'de, BodyFields, Error> {
+    // The body that `function` is, `visitor`'s map: its file's label, its name, and the
+    // arguments its caller gives, each positional parameter after the handle and the payload that
+    // is annotated `str`, `int` or `bool` (`crate::check` refuses any other).
+    fn body<'de, V: Visitor<'de>>(
+        &self,
+        function: &Function,
+        visitor: V,
+    ) -> Result<V::Value, Error> {
+        let def = &*function.def;
+        let mut body = serde_json::Map::new();
         let file = self.sources.label(function.module).to_string();
-        let def = function.def.name.text.clone();
-        MapDeserializer::new([("file", file), ("def", def)].into_iter())
+        body.insert(String::from("file"), serde_json::Value::String(file));
+        let name = def.name.text.clone();
+        body.insert(String::from("def"), serde_json::Value::String(name));
+        let caller = (def.params.iter().zip(&function.defaults))
+            .take(def.positional)
+            .skip(2);
+        let mut arguments = BTreeMap::new();
+        for (param, default) in caller {
+            let Some(argument) = argument(param.annotation.as_ref(), default.as_ref()) else {
+                continue;
+            };
+            arguments.insert(param.name.text.clone(), argument);
+        }
+        if !arguments.is_empty() {
+            let arguments = serde_json::to_value(arguments).map_err(de::Error::custom)?;
+            body.insert(String::from("arguments"), arguments);
+        }
+        let body = serde_json::Value::Object(body);
+        de::Deserializer::deserialize_map(body, visitor).map_err(de::Error::custom)
     }
 
     fn mismatch(&self, expected: &str) -> Error {
@@ -367,7 +391,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
             Kind::Image(image) => visitor.visit_str(self.images[image.0].as_str()),
             Kind::List(items) | Kind::Tuple(items) => seq(self, items, visitor),
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(function) => visitor.visit_map(self.body(function)),
+            Kind::Function(function) => self.body(function, visitor),
             Kind::Builtin(_) | Kind::Module(_) | Kind::Hosted(_) => Err(self.mismatch("data")),
         }
     }
@@ -464,7 +488,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         match &self.value.kind {
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(function) => visitor.visit_map(self.body(function)),
+            Kind::Function(function) => self.body(function, visitor),
             _ => Err(self.mismatch("a dict")),
         }
     }
@@ -709,4 +733,31 @@ impl<'de> VariantAccess<'de> for Variant<'_> {
     ) -> Result<V::Value, Error> {
         de::Deserializer::deserialize_map(self.value(), visitor).map_err(|error| self.below(error))
     }
+}
+
+// A caller's parameter annotated `annotation`, with `default`: none for an annotation that
+// `--arg` can't read.
+fn argument(annotation: Option<&Type>, default: Option<&Value>) -> Option<ir::Argument> {
+    let argument = match (annotation?, default.map(|default| &default.kind)) {
+        (Type::Str, None) => ir::Argument::Str { default: None },
+        (Type::Str, Some(Kind::Str(text))) => ir::Argument::Str {
+            default: Some(String::from(&**text)),
+        },
+        (Type::Int, None) => ir::Argument::Int { default: None },
+        (Type::Int, Some(Kind::Int(int))) => ir::Argument::Int {
+            default: Some(*int),
+        },
+        (Type::Bool, None) => ir::Argument::Bool { default: None },
+        (Type::Bool, Some(Kind::Bool(bool))) => ir::Argument::Bool {
+            default: Some(*bool),
+        },
+        (Type::None | Type::Float | Type::List(_) | Type::Dict(..) | Type::Hosted(_), _) => {
+            return None;
+        }
+        (Type::Str | Type::Int | Type::Bool, Some(_)) => unreachable!(
+            "a parameter's default misfits its annotation, though `define` refuses a default that \
+             doesn't fit its annotation"
+        ),
+    };
+    Some(argument)
 }

@@ -1,9 +1,9 @@
 //! Small extensions to the standard library that Pumpkin's crates share.
 
 use std::fmt::Display;
-use std::panic;
 use std::sync::LockResult;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{io, panic, thread};
 
 pub mod net;
 pub mod process;
@@ -41,6 +41,31 @@ pub fn abort_on_panic() {
         report(info);
         std::process::abort();
     }));
+}
+
+/// What `run` returns, run at the top of a stack of `stack_bytes` on a thread named `name`.
+///
+/// This waits for the thread, to which `run` may lend borrows: an evaluator's bound on nesting
+/// holds only on a stack of the size it was made for, which the calling thread's may not be. A
+/// panic of `run`'s passes on to the caller.
+///
+/// # Errors
+///
+/// Fails if the thread doesn't start.
+pub fn on_stack<T: Send>(
+    name: &str,
+    stack_bytes: usize,
+    run: impl FnOnce() -> T + Send,
+) -> io::Result<T> {
+    thread::scope(|scope| {
+        let thread = (thread::Builder::new())
+            .name(name.to_owned())
+            .stack_size(stack_bytes);
+        let running = thread.spawn_scoped(scope, run)?;
+        Ok(running
+            .join()
+            .unwrap_or_else(|panic| panic::resume_unwind(panic)))
+    })
 }
 
 /// The guard from locking a mutex, or from waiting on a condition variable with one, in a

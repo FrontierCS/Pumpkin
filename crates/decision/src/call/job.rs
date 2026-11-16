@@ -1,11 +1,13 @@
 //! A job function's call: a job, which runs the function's body on its target, and which the
 //! caller follows with `status`.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use schema::ir::{Name, argument};
 use schema::sandbox::op::{CallReply, JobReply, OpReply, Remaining};
 use schema::workflow::{JobFunctionId, JobOf};
 
@@ -13,18 +15,21 @@ use crate::ops::fits;
 use crate::{Action, Caller, Core, PayloadRef};
 
 impl Core<'_> {
-    /// The reply to a call of job function `id` with `payload`, by the agent, whose work ends at
-    /// `deadline`: a job, if the function's limits let it start.
+    /// The reply to a call of job function `id` with `payload` and its caller's `arguments`, as
+    /// text, by the agent, whose work ends at `deadline`: a job, if the function's limits let it
+    /// start.
     pub(super) fn job(
         &mut self,
         id: JobFunctionId,
         payload: PayloadRef,
+        arguments: &BTreeMap<Name, String>,
         deadline: Duration,
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
         let function = self.workflow.job_function(id);
         let name = &function.name;
         fits(name, &payload, function.payload_max_bytes())?;
+        let arguments = argument::read(name, &function.body.arguments, arguments)?;
         let usage = self.jobs.usage(JobOf::Function(id));
         if let Some(calls) = function.calls
             && usage.calls >= calls.get()
@@ -64,6 +69,7 @@ impl Core<'_> {
             job,
             function: id,
             payload,
+            arguments,
             timeout,
         });
         let remaining = self.remaining(id);

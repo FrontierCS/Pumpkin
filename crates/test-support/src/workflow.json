@@ -45,7 +45,17 @@
                 "call_timeout_seconds": 12000
               }
             },
-            { "name": "submit", "submit": {} }
+            {
+              "name": "submit",
+              "now": {
+                "body": {
+                  "file": "//task.star",
+                  "def": "submit",
+                  "arguments": { "finalize": { "type": "bool", "default": false } }
+                },
+                "payload_max_bytes": 4194304
+              }
+            }
           ]
         }
       }

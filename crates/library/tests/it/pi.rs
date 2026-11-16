@@ -73,7 +73,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             gemini-4-argon high /workspace 1048576 65536:
-            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
+            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.pi-home TMPDIR=/workspace/.pi-home/tmp PI_TELEMETRY=0
             cwd: /workspace
             dir 0700 /workspace/.pi-home
@@ -166,11 +166,11 @@ fn refusals() {
             @pumpkin//harness/pi/pi.star:60:9: fail: `max` is not a thinking level of Pi's: use one of low, medium, high
                 60 |         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:60:9: fail: `High` is not a thinking level of Pi's: use one of low, medium, high
                 60 |         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:75:13: `/pumpkin/home/.pi-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 75 |     home = ("" if workspace == "/" else workspace) + "/.pi-home"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -178,34 +178,34 @@ fn refusals() {
             @pumpkin//harness/pi/pi.star:62:9: fail: Pi runs only on a prompt: give a string that is not empty
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:66:9: fail: Pi reads a prompt that begins with `@` as a file's path: begin it with another character
                 66 |         fail("Pi reads a prompt that begins with `@` as a file's path: begin it with another character")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:68:9: fail: `0` is not a number of tokens: give a positive int
                 68 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:70:9: fail: `0` is not a number of tokens: give a positive int
                 70 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:62:9: fail: Pi runs only on a prompt: give a string that is not empty
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:67:23: `<` can't take `None` and an int: give it two numbers or two strings
                 67 |     if context_tokens < 1:
                    |                       ^
-                the left operand, `None`, is made at task.star:22:22
+                the left operand, `None`, is made at task.star:23:22
                 the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:67:25
-                in `pi()`, called at task.star:14:9
+                in `pi()`, called at task.star:15:9
             @pumpkin//harness/pi/pi.star:69:26: `<` can't take `None` and an int: give it two numbers or two strings
                 69 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:23:25
+                the left operand, `None`, is made at task.star:24:25
                 the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:69:28
-                in `pi()`, called at task.star:14:9"#]],
+                in `pi()`, called at task.star:15:9"#]],
     );
 }

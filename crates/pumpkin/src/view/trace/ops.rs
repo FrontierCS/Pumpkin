@@ -1,11 +1,11 @@
-//! The ops that a run brokered for each caller, as its log says of them: each call, lease command,
-//! transfer and submission, from when it arrived to when the work it started ended. An
-//! op that starts no work, a submission or one refused, ends as it arrives; one whose work hasn't
-//! ended has no end. The ops that only ask how things stand, or open and close a lease, are left
-//! out.
+//! The ops that a run brokered for each caller, as its log says of them: each call, lease command
+//! and transfer, from when it arrived to when the work it started ended. An op that starts no
+//! work, a now function's call or one refused, ends as it arrives; one whose work hasn't ended has
+//! no end. The ops that only ask how things stand, or open and close a lease, are left out.
 
 use std::collections::BTreeMap;
 
+use schema::ir::Name;
 use serde_json::{Value, json};
 
 use super::nanos;
@@ -22,7 +22,7 @@ struct Op {
     caller: String,
     number: u64,
     kind: &'static str,
-    /// Its grant, or its lease as `lease <n>`.
+    /// Its grant or function, or its lease as `lease <n>`.
     name: Option<String>,
     start_ns: Option<u64>,
     end_ns: Option<u64>,
@@ -38,7 +38,7 @@ enum Work {
     Transfer(u64, u64),
 }
 
-const KINDS: [&str; 5] = ["call", "submit", "lease_run", "lease_put", "lease_get"];
+const KINDS: [&str; 5] = ["call", "now", "lease_run", "lease_put", "lease_get"];
 
 impl Ops {
     pub(in crate::view) fn take(&mut self, record: &Value) {
@@ -52,8 +52,7 @@ impl Ops {
                 let Ok(values) = runtime::returned_values(&event["returned"]) else {
                     return;
                 };
-                let result = format!("returned {}", progress::shown_values(&values));
-                (number("job").map(Work::Call), result, false)
+                (number("job").map(Work::Call), returned_text(&values), false)
             }
             Some("call_failed") => {
                 let why = event["reason"].as_str().unwrap_or_default();
@@ -138,7 +137,14 @@ impl Ops {
                 let why = reply["message"].as_str().unwrap_or_default();
                 (ns, Some(format!("refused: {why}")), true)
             }
-            (None, _) => (ns, reply["state"].as_str().map(str::to_owned), false),
+            // A now function's call, which gives what its body returned.
+            (None, _) => {
+                let returned = runtime::returned_values(&request["evaluated"]["returned"]);
+                let Ok(values) = returned else {
+                    return;
+                };
+                (ns, Some(returned_text(&values)), false)
+            }
         };
         if let Some(work) = work {
             self.by_work.insert(work, self.ops.len());
@@ -171,6 +177,14 @@ impl Ops {
                 "failed": ops.iter().map(|op| op.failed).collect::<Vec<_>>(),
             },
         })
+    }
+}
+
+/// What a body returned, in words: `returned`, then each value by its name.
+fn returned_text(values: &[(Name, Value)]) -> String {
+    match progress::shown_values(values) {
+        shown if shown.is_empty() => "returned".to_owned(),
+        shown => format!("returned {shown}"),
     }
 }
 

@@ -758,8 +758,8 @@ fn job_admission() {
             exit status: Some(1)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:2:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
-                2 | IMAGE = image("Dockerfile")
+            built/task.star:4:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
+                4 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: built/task.star: the task has 1 problem
             printed the IR of the image built: false
@@ -1335,7 +1335,7 @@ fn keys_on_standard_input() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 6 of the task's files and Pumpkin's bundle: sending 2.4 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 2.6 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1423,11 +1423,12 @@ fn target_refusals() {
         scratch.0.join("PUMPKIN.star"),
     );
     fs::rename(&marker, &above).unwrap();
-    // The body's file where the task's labels now find it, so that the root is what is refused.
-    scratch.write(
-        "lib/train.star",
-        &fs::read_to_string(scratch.0.join("repo/lib/train.star")).unwrap(),
-    );
+    // The bodies' files where the task's labels now find them, so that the root is what is
+    // refused.
+    for file in ["lib/train.star", "stand-in/submit.star"] {
+        let text = fs::read_to_string(scratch.0.join("repo").join(file)).unwrap();
+        scratch.write(file, &text);
+    }
     let mut outside = on_client(&scratch, &client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&outside);
     lines.push(report(
@@ -1469,22 +1470,22 @@ fn target_refusals() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../both.toml
-        exit status: Some(1)
-        pumpkin: ../both.toml: it names `[controller]` beside `[providers]`: a machine's runs go either to its controller or to its own providers, so keep `[controller]`, beside `[upstreams]`, or remove it
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
-        exit status: Some(1)
-        pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(1)
-        pumpkin: stand-in/task.star: the task's root, <scratch>, is above its git repository, <scratch>/repo, which is all that a run on the controller is sent: put the root's `PUMPKIN.star` in the repository
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(1)
-        pumpkin: <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8/pumpkin.bundle isn't there, which the controller builds Pumpkin 1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 from: build it here with `./pumpkin --version`, after removing <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 if it was built without one
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin ls
-        exit status: Some(1)
-        pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
-        calls of aws and ssh: 0"#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../both.toml
+            exit status: Some(1)
+            pumpkin: ../both.toml: it names `[controller]` beside `[providers]`: a machine's runs go either to its controller or to its own providers, so keep `[controller]`, beside `[upstreams]`, or remove it
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
+            exit status: Some(1)
+            pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(1)
+            pumpkin: stand-in/task.star: the task's root, <scratch>, is above its git repository, <scratch>/repo, which is all that a run on the controller is sent: put the root's `PUMPKIN.star` in the repository
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(1)
+            pumpkin: <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8/pumpkin.bundle isn't there, which the controller builds Pumpkin 1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 from: build it here with `./pumpkin --version`, after removing <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 if it was built without one
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin ls
+            exit status: Some(1)
+            pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
+            calls of aws and ssh: 0"#]],
     );
 }
 
@@ -1713,7 +1714,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 10 of the task's files and Pumpkin's bundle: sending 2.4 KiB
+            pumpkin: controller `alice` lacks all 11 of the task's files and Pumpkin's bundle: sending 2.6 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1731,6 +1732,7 @@ fn send_by_content() {
               stand-in/Dockerfile: 444, 1 link
               stand-in/empty: 444, 1 link
               stand-in/run.sh: 444, 1 link
+              stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               stand-in/with space.txt: 444, 1 link
               a manifest: the task's tree
@@ -1746,12 +1748,13 @@ fn send_by_content() {
               stand-in/Dockerfile: a link of its blob, 444
               stand-in/empty: a link of its blob, 444
               stand-in/run.sh: a link of its blob's copy to run, 555
+              stand-in/submit.star: a link of its blob, 444
               stand-in/task.star: a link of its blob, 444
               stand-in/with space.txt: a link of its blob, 444
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` holds all 10 of the task's files
+            pumpkin: controller `alice` holds all 11 of the task's files
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1761,7 +1764,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 10 files: sending 13 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 11 files: sending 13 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1797,14 +1800,14 @@ fn send_refused_piece() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 6 of the task's 7 files and Pumpkin's bundle: sending 2.4 KiB
+            pumpkin: controller `alice` lacks 7 of the task's 8 files and Pumpkin's bundle: sending 2.6 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
             the calls: query, query, receive, start
             the store holds it: false; a piece of it: false
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 7 files: sending 6 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 6 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1874,12 +1877,12 @@ fn send_carries_on() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             tar: Unexpected EOF in archive
             tar: Unexpected EOF in archive
             tar: Error is not recoverable: exiting now
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: asking again what it lacks, now, attempt 2 of 7
-            pumpkin: controller `alice` lacks 1 of the task's 7 files: sending 16.0 MiB
+            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 16.0 MiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1887,7 +1890,7 @@ fn send_carries_on() {
               <id>
             the calls: query, query, receive, receive, query, receive, start
             over 0, 16777216 bytes: stand-in/big.bin 00000 (16777216)
-            over 1, 1051088 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1705), lib/train.star 00000 (572), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 1051299 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1788), lib/train.star 00000 (572), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
               stand-in/big.bin: 444, 1 link
               incoming/: none"#]],
     );
@@ -1923,7 +1926,7 @@ fn send_over_streams() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 33.0 MiB over 3 connections
+            pumpkin: controller `alice` lacks all 10 of the task's files and Pumpkin's bundle: sending 33.0 MiB over 3 connections
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1931,7 +1934,7 @@ fn send_over_streams() {
               <id>
             the calls: query, query, receive, receive, receive, start
             over 0, 16777216 bytes: stand-in/a.bin 00000 (16777216)
-            over 1, 8391120 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1705), lib/train.star 00000 (572), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 8391331 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1788), lib/train.star 00000 (572), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
             over 2, 9437184 bytes: stand-in/c.bin 00000 (5242880), stand-in/a.bin 00001 (4194304)
             the store:
               .pumpkinversion: 444, 2 links
@@ -1944,6 +1947,7 @@ fn send_over_streams() {
               stand-in/a.bin: 444, 1 link
               stand-in/b.bin: 444, 1 link
               stand-in/c.bin: 444, 1 link
+              stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
@@ -1988,7 +1992,7 @@ fn send_over_one_connection() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2004,6 +2008,7 @@ fn send_over_one_connection() {
               pumpkin: 444, 1 link
               stand-in/Dockerfile: 444, 1 link
               stand-in/big.bin: 444, 1 link
+              stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
@@ -2034,7 +2039,7 @@ fn send_over_the_connection_held() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             pumpkin: connection 1 to controller `alice` can't be opened, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/1.log: this goes on over those it holds
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
@@ -2051,6 +2056,7 @@ fn send_over_the_connection_held() {
               pumpkin: 444, 1 link
               stand-in/Dockerfile: 444, 1 link
               stand-in/big.bin: 444, 1 link
+              stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
@@ -2120,13 +2126,13 @@ fn send_changed_file() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 2.4 KiB
+            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 2.6 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
             the calls: query, query, receive
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 7 files: sending 2 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 2 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2176,7 +2182,7 @@ fn send_bundle_and_gone() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` holds all 7 of the task's files
+            pumpkin: controller `alice` holds all 8 of the task's files
             pumpkin: 1 of the task's files and Pumpkin's bundle are no longer whole on the controller: run it again
             the calls: query, start"#]],
     );
@@ -2294,6 +2300,7 @@ fn store_collection() {
               stand-in/Dockerfile: 444, 4 links
               stand-in/notes, as the first sent it: 444, 2 links
               stand-in/notes, as the third sent it: 444, 3 links
+              stand-in/submit.star: 444, 4 links
               stand-in/task.star: 444, 4 links
               a manifest: the tree that the third sent
               a manifest: a tree of no files

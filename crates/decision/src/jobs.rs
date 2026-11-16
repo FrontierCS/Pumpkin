@@ -41,16 +41,17 @@ pub enum Failure {
     InvalidResult(String),
 }
 
+/// What the caller of a function whose body failed hears: a fixed sentence, as the record says
+/// why.
+pub(crate) const BODY_FAILED: &str = "the call's body failed: the run's record says why";
+
 impl Failure {
     /// The failure as the caller of a job function hears of it in a status reply: a fixed
     /// sentence, as the record says why.
     pub(super) fn reply(&self) -> op::Failure {
         let (code, message) = match self {
             Self::Timeout => (FailureCode::CallTimeout, "the call ran past its timeout"),
-            Self::Error(_) => (
-                FailureCode::CallError,
-                "the call's body failed: the run's record says why",
-            ),
+            Self::Error(_) => (FailureCode::CallError, BODY_FAILED),
             // A type of its own for a function's failures would split the jobs' states by kind.
             Self::InvalidResult(_) => unreachable!(
                 "a job function's call gave an invalid result, though only the score's judge \

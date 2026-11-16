@@ -1,11 +1,12 @@
 //! Bodies, through `lang::check` and `lang::call`, with a host written here: what a body's
 //! handle does, what it returns, and what a check of it refuses, which a call refuses alike.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use expect_test::{Expect, expect};
 use lang::{Args, Body, BodyKind, Bounds, Host, Label};
-use schema::ir::{AbsolutePath, Argv};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name};
 use serde_json::{Value, json};
 
 use crate::{Case, Sources, files, on_stack};
@@ -57,26 +58,50 @@ impl lang::Run for Logged {
 
 #[track_caller]
 fn check(def: &str, kind: BodyKind, keywords: Value, fixture: &str, expect: &Expect) {
-    check_within(Bounds::WORKFLOW, def, kind, keywords, fixture, expect);
+    let given = json!({});
+    check_within(
+        Bounds::WORKFLOW,
+        def,
+        kind,
+        keywords,
+        given,
+        fixture,
+        expect,
+    );
 }
 
 /// Checks, against `expect`, what a call of `def`, a body of `kind`, gives with `keywords`, a JSON
-/// object, within `bounds`: each method its handle calls, then each name and value it returns, in
-/// order; or else the problems. `fixture` is a case as `Case::parse` reads it, whose first file
-/// is the body's.
-/// Asserts that `lang::check` refuses as the call does, or accepts the body.
+/// object, and the caller's arguments that `given`, an object of strings, ints and bools, holds,
+/// within `bounds`: each method its handle calls, then each name and value it returns, in order;
+/// or else the problems. `fixture` is a case as `Case::parse` reads it, whose first file is the
+/// body's. Asserts that `lang::check` refuses as the call does, or accepts the body.
 #[track_caller]
 fn check_within(
     bounds: Bounds,
     def: &str,
     kind: BodyKind,
     keywords: Value,
+    given: Value,
     fixture: &str,
     expect: &Expect,
 ) {
     let Value::Object(keywords) = keywords else {
         panic!("the keywords are {keywords}: give an object")
     };
+    let Value::Object(given) = given else {
+        panic!("the arguments are {given}: give an object")
+    };
+    let arguments: BTreeMap<Name, ArgumentValue> = (given.into_iter())
+        .map(|(name, value)| {
+            let value = match value {
+                Value::String(text) => ArgumentValue::Str(text),
+                Value::Bool(bool) => ArgumentValue::Bool(bool),
+                Value::Number(int) => ArgumentValue::Int(int.as_i64().unwrap()),
+                other => panic!("an argument can't be {other}"),
+            };
+            (Name::try_from(name).unwrap(), value)
+        })
+        .collect();
     let files = files();
     let shown = on_stack(|| {
         let (args, case) = Case::parse(fixture, &files, bounds);
@@ -97,7 +122,7 @@ fn check_within(
             BodyKind::Job => Host::Job(&mut host),
             BodyKind::Now => Host::Now(&mut host),
         };
-        let called = lang::call(&body, host_of_kind, &mut sources, &args, bounds);
+        let called = lang::call(&body, host_of_kind, &arguments, &mut sources, &args, bounds);
         match (checked, called) {
             (Ok(()), called) => {
                 let logged: String = host.0.iter().flat_map(|line| [line, "\n"]).collect();
@@ -157,6 +182,70 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
             run /opt/frontier/verifier ["--fast"]
             get /pumpkin/out/result.json
             returns raw_score=43.12 failure="slow" passed=7"#]],
+    );
+}
+
+#[test]
+fn arguments() {
+    let submit = r#"
+#- //lib/submit.star
+def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
+    run.select(payload)
+    if finalize:
+        run.end_work()
+    return {"note": note}
+"#;
+    let check = |given, expect| {
+        let (keywords, bounds) = (json!({}), Bounds::WORKFLOW);
+        check_within(
+            bounds,
+            "submit",
+            BodyKind::Now,
+            keywords,
+            given,
+            submit,
+            expect,
+        );
+    };
+    check(
+        json!({"finalize": true, "note": "last"}),
+        &expect![[r#"
+            select the payload
+            end the work
+            returns note="last""#]],
+    );
+    check(
+        json!({"note": "last"}),
+        &expect![[r#"
+        lib/submit.star:1:5: `submit` lacks `finalize`: give it
+            1 | def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
+              |     ^^^^^^"#]],
+    );
+    check(
+        json!({"finalize": false, "mode": 1}),
+        &expect![[r#"
+        lib/submit.star:1:5: `submit` takes no `mode` after the payload, which its caller gives: give only those it takes
+            1 | def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
+              |     ^^^^^^"#]],
+    );
+    // A job's body takes its caller's arguments as a now function's does.
+    let train = r#"
+#- //lib/verify.star
+def train(target: Target, payload: Payload, runs: int, *, metric: str):
+    target.run(["/opt/verify", str(runs), metric])
+    return {"runs": runs}
+"#;
+    let (keywords, given) = (json!({"metric": "time"}), json!({"runs": 3}));
+    check_within(
+        Bounds::WORKFLOW,
+        "train",
+        BodyKind::Job,
+        keywords,
+        given,
+        train,
+        &expect![[r#"
+            run /opt/verify ["3", "time"]
+            returns runs=3"#]],
     );
 }
 
@@ -339,20 +428,6 @@ def train_call(target, payload, *, deep):
                 1 | def train_call(target, payload, *, deep):
                   |     ^^^^^^^^^^
                 it is the grant's keyword `deep`"#]],
-    );
-    check(
-        "submit",
-        BodyKind::Now,
-        json!({}),
-        r#"
-#- //lib/submit.star
-def submit(run, payload, finalize: bool):
-    pass
-"#,
-        &expect![[r#"
-            lib/submit.star:1:26: `submit`'s `finalize` follows the payload, and a call gives a now function's body only its `Run` and the payload: give it a default
-                1 | def submit(run, payload, finalize: bool):
-                  |                          ^^^^^^^^"#]],
     );
 }
 
@@ -581,6 +656,7 @@ fn bounds() {
         "train_call",
         BodyKind::Job,
         json!({}),
+        json!({}),
         r#"
 #- //lib/verify.star
 def train_call(target, payload):
@@ -600,6 +676,7 @@ def train_call(target, payload):
         bounds,
         "train_call",
         BodyKind::Job,
+        json!({}),
         json!({}),
         r#"
 #- //lib/verify.star

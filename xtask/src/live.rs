@@ -376,8 +376,9 @@ fn head(cargo: &Cargo) -> Result<(String, String)> {
 }
 
 /// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
-/// keeps its `.pumpkin` from one live run to the next: `examples/smoke`,
-/// the `PUMPKIN.star` marker and the `pumpkin` entry, with Pumpkin pinned at `commit` of `branch`.
+/// keeps its `.git` and `.pumpkin` from one live run to the next: `examples` whole, whose
+/// `PUMPKIN.star` roots the examples' `//` labels, and the `pumpkin` entry, with Pumpkin pinned at
+/// `commit` of `branch`.
 fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf> {
     let metadata = cargo
         .cmd(&["metadata", "--format-version=1", "--no-deps"])
@@ -398,14 +399,22 @@ fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf>
             .arg(&repo)
             .run()?;
     }
-    let smoke = repo.join("smoke");
-    if smoke.exists() {
-        fs::remove_dir_all(&smoke).map_err(|error| made(&smoke, error))?;
+    // The last run's copy goes, so that no file that `examples` has since lost is left behind.
+    let read = |error: std::io::Error| format!("reading {} failed: {error}", repo.display());
+    for entry in fs::read_dir(&repo).map_err(read)? {
+        let entry = entry.map_err(read)?;
+        if entry.file_name() == ".git" || entry.file_name() == ".pumpkin" {
+            continue;
+        }
+        let path = entry.path();
+        let removed = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        removed.map_err(|error| format!("removing {} failed: {error}", path.display()))?;
     }
-    copy_tree(&root().join("examples/smoke"), &smoke)?;
-    let marker = repo.join("PUMPKIN.star");
-    fs::copy(root().join("examples/PUMPKIN.star"), &marker)
-        .map_err(|error| made(&marker, error))?;
+    copy_tree(&root().join("examples"), &repo)?;
     let entry = repo.join("pumpkin");
     fs::copy(root().join("deploy/pumpkin"), &entry).map_err(|error| made(&entry, error))?;
     fs::set_permissions(&entry, Permissions::from_mode(0o755))

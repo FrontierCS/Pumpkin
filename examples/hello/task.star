@@ -2,6 +2,7 @@
 job function `count`, then submits the greeting, and the judge scores its size and counts its lines."""
 
 load("//hello/count.star", "count")
+load("//submit.star", "submit")
 
 IMAGE = image("Dockerfile")
 SANDBOXCTL = "/.pumpkin/bin/sandboxctl"
@@ -12,7 +13,7 @@ echo hello > greeting
 SANDBOXCTL call count greeting
 while SANDBOXCTL status 0 | grep -q -E '"state":"(queued|running)"'; do sleep 1; done
 SANDBOXCTL status 0
-SANDBOXCTL submit final greeting --finalize
+SANDBOXCTL call final greeting --arg finalize=true
 """.replace("SANDBOXCTL", SANDBOXCTL)
 
 workflow(
@@ -37,7 +38,7 @@ workflow(
                         "payload_max_bytes": 1 * KiB,
                         "call_timeout_seconds": 60,
                     }},
-                    {"name": "final", "submit": {}},
+                    {"name": "final", "now": {"body": submit, "payload_max_bytes": 1 * KiB}},
                 ],
             }},
         },

@@ -113,6 +113,7 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
         entry,
         r#"load("@pumpkin//harness/{function}/{function}.star", "{function}")"#
     );
+    let _ = writeln!(entry, r#"load("//submit.star", "submit")"#);
     let _ = writeln!(entry);
     for (keyword, value) in &arguments {
         let _ = writeln!(entry, "{} = {value}", keyword.to_uppercase());
@@ -130,6 +131,13 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
     entry
 }
 
+/// The task's library of its now function, which the entry's workflow grants the agent.
+const SUBMIT: &str = r#"
+def submit(run: Run, payload: Payload):
+    run.select(payload)
+    return {}
+"#;
+
 const WORKFLOW: &str = r#"
 workflow(
     name = "harness",
@@ -139,7 +147,7 @@ workflow(
             "image": agent["image"],
             "user": {"uid": 1000, "gid": 1000},
             "needs": {"cpu_millis": 1000, "memory_bytes": GiB},
-            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"name": "final", "submit": {}}]}},
+            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"name": "final", "now": {"body": submit, "payload_max_bytes": KiB}}]}},
         },
         {
             "name": "judge",
@@ -173,7 +181,7 @@ fn args(own: &[(&str, &str)], case: &[&str]) -> Args {
 /// A prompt of the task repository's form, shortened.
 const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
 
-When the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.
+When the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.
 ";
 
 /// The agent's role of `workflow`, the first, and its runtime, whose deadline and grace are
@@ -371,6 +379,7 @@ impl Loader for Bundled<'_> {
     fn load(&mut self, label: &Label) -> Result<String, String> {
         match label.root() {
             Root::Task if label.path() == "task.star" => Ok(self.0.to_owned()),
+            Root::Task if label.path() == "submit.star" => Ok(SUBMIT.to_owned()),
             Root::Task => Err(format!("the test holds no `{label}`")),
             Root::Library => Ok(file(label.path())),
         }

@@ -463,7 +463,7 @@ export class Timeline {
       for (let n = 0; n < o.op.length; n++) {
         const [start, end] = this.opSpan(o, n);
         if (end < a || start > b) continue;
-        g.fillStyle = o.failed[n] ? k["--fail-bar"] : o.kind[n] === "call" ? k["--judge"] : o.kind[n] === "submit" ? k["--agent"] : k["--runner"];
+        g.fillStyle = o.failed[n] ? k["--fail-bar"] : o.kind[n] === "call" ? k["--judge"] : o.kind[n] === "now" ? k["--agent"] : k["--runner"];
         g.fillRect(x(start), ops.top + inset, Math.max(2, x(end) - x(start)), ops.height - 2 * inset);
       }
     }

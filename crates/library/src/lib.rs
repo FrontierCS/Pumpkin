@@ -15,7 +15,7 @@
 //! - `workspace`: the absolute path the harness works in, which holds its home.
 //! - `prompt`: the task the harness works on, a string.
 //! - `deadline_seconds`: how long the work phase may last, a positive int.
-//! - `finalize_grace_seconds`: how long the harness may keep running after a final submission.
+//! - `finalize_grace_seconds`: how long the harness may keep running after a call ends its work.
 //! - `max_output_tokens`: how many tokens one of the model's answers may hold, a positive int.
 //! - `context_tokens`: how many tokens the model's context window holds, a positive int.
 //!

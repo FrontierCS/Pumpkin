@@ -1,6 +1,8 @@
 """The parts of a neutral workflow that the fixtures' workflows share: `AGENT`, `JUDGE` and
 `SCORE` make a whole one, which a case changes a field of, as `JUDGE | {"status": "ready"}`."""
 
+load("//lib/submit.star", "submit")
+
 AGENT = {
     "name": "agent",
     "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -11,7 +13,7 @@ AGENT = {
         "stdin": "Solve the task in /task/README.md.\n",
         "deadline_seconds": 3600,
         "finalize_grace_seconds": 0,
-        "grants": [{"name": "final", "submit": {}}],
+        "grants": [{"name": "final", "now": {"body": submit, "payload_max_bytes": 64 * KiB}}],
     }},
 }
 

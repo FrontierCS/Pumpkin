@@ -1,11 +1,13 @@
 //! The start of a run's children, each on a thread of its own: a call, and a lease of a runner.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
+use schema::ir::{ArgumentValue, Name};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{JobFunctionId, RoleId, SessionId};
 use stdx::Context;
@@ -54,7 +56,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         core: &Core<'_>,
         job: JobId,
         function: JobFunctionId,
-        payload: &PayloadRef,
+        (payload, arguments): (&PayloadRef, BTreeMap<Name, ArgumentValue>),
         timeout: Duration,
     ) -> Result<(), String> {
         let function = self.workflow().job_function(function);
@@ -73,6 +75,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             job,
             function,
             payload: self.payloads.stored(payload),
+            arguments,
             timeout,
         };
         let bodies = self.bodies;

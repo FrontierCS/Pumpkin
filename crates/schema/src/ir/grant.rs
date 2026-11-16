@@ -1,12 +1,13 @@
 //! How a grant is written: its name, and one key, its function's kind, that holds the function,
 //! as `{"name": "train", "job": {…}}`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::{self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, VariantAccess};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{JobFunction, Label, Name, Session, SubmitGrant};
+use super::{Argument, JobFunction, Label, Name, NowFunction, Session};
 
 /// A function that the role holding it calls by `name` while it works, or, for a session, the
 /// session's functions, each called by `name` and its own.
@@ -24,7 +25,8 @@ pub struct Grant {
 pub enum Function {
     Job(JobFunction),
     Session(Session),
-    Submit(SubmitGrant),
+    /// A body with no sandbox, on the run's state, answered in the call's reply.
+    Now(NowFunction),
 }
 
 /// A `def` of a file of the workflow's, which a host calls by its file and name.
@@ -33,6 +35,9 @@ pub enum Function {
 pub struct Body {
     pub file: Label,
     pub def: Name,
+    /// The parameters that the caller gives, by name: the positional ones after the payload.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<Name, Argument>,
 }
 
 impl<'de> Deserialize<'de> for Grant {
