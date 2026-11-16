@@ -172,9 +172,9 @@ def zcode(
             "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
         }},
-        "egress": {"model": {"route": [{
+        "egress": {"model": [{
             "api": "chat",
             "models": [model],
             "request_headers": ["user-agent"],
-        }]}},
+        }]},
     }

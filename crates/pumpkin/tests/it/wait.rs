@@ -636,7 +636,7 @@ fn summarizes() {
     );
     // With a model budget for the agent, spent.
     let mut budgeted = lease_task();
-    budgeted["roles"][0]["egress"]["model"]["budget"] = json!({ "microusd": 500_000 });
+    budgeted["roles"][0]["egress"]["model"][0]["budget"] = json!({ "microusd": 500_000 });
     scratch.write(&format!("runs/{whole}/ir.json"), &budgeted);
     // And one that ended at its deadline with nothing submitted, unpriced, whose route refused a
     // request of its agent's, and whose upstream answered others with a 200 whose stream states
@@ -697,27 +697,54 @@ fn summarizes() {
         Some(unjudged),
         &unpriced,
     );
-    // And the first priced otherwise: its tokens alone, under a budget for the agent that it
-    // hasn't spent, its sandboxes alone, and nothing.
+    // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing. The
+    // first has a budget on its agent's entry for `model-a` through the Responses API, which
+    // counts neither a priced answer for `model-b` nor one for `model-a` through Chat Completions.
     let others = [
         ("20261110-120000-0000000c", Prices::Tokens),
         ("20261110-120000-0000000d", Prices::Sandboxes),
         ("20261110-120000-0000000e", Prices::Nothing),
     ];
-    for (id, prices) in others {
+    let mut logs = others.map(|_| judged_log());
+    let mut places = others.map(|(_, prices)| lease_places(prices));
+    let usd_per_mtok =
+        json!({ "input": 300.0, "cached": 30.0, "cache_write": 375.0, "output": 1500.0 });
+    places[0]["routes"]["scorer"][0]["models"]["model-b"]["usd_per_mtok"] = usd_per_mtok;
+    let outside = |request: u64, model: &str, api: &str| {
+        let started =
+            json!({ "kind": "model_request_started", "caller": "agent", "request": request });
+        let answered = json!({
+            "kind": "model_answered", "caller": "agent", "request": request, "model": model,
+            "api": api, "answer": { "kind": "forwarded" }, "upstream_status": 200,
+            "usage": { "input_tokens": 1000, "output_tokens": 100 },
+        });
+        [started, answered]
+    };
+    // Before the first judge call, as the agent's.
+    let at = (logs[0].iter())
+        .position(|line| line["event"]["kind"] == "op_arrived")
+        .unwrap();
+    let [started_b, answered_b] = outside(9, "model-b", "responses");
+    let [started_a, answered_a] = outside(10, "model-a", "chat");
+    logs[0].splice(
+        at..at,
+        [
+            logged(32, started_b, json!([])),
+            logged(34, answered_b, json!([])),
+            logged(35, started_a, json!([])),
+            logged(37, answered_a, json!([])),
+        ],
+    );
+    for (((id, _), log), places) in others.iter().zip(logs).zip(places) {
         let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
-        let places = lease_places(prices);
-        write_run(
-            &scratch,
-            id,
-            asked(id, 30),
-            &judged_log(),
-            Some(outcome),
-            &places,
-        );
+        write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
     }
     let mut budgeted = lease_task();
-    budgeted["roles"][0]["egress"]["model"]["budget"] = json!({ "microusd": 1_000_000 });
+    budgeted["roles"][0]["egress"]["model"] = json!([
+        { "api": "responses", "models": ["model-a"], "budget": { "microusd": 1_000_000 } },
+        { "api": "responses", "models": ["model-b"] },
+        { "api": "chat", "models": ["model-a"] },
+    ]);
     scratch.write(&format!("runs/{}/ir.json", others[0].0), &budgeted);
     // What it said, as these runs' times are their records'.
     let wait = |id: &str| {
@@ -762,7 +789,7 @@ fn summarizes() {
                 16:46 final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-              budget solver: at least $0.66 of $0.50, exhausted
+              budget solver (model-a, model-b): at least $0.66 of $0.50, exhausted
               sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
               cost: $1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
             pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
@@ -776,10 +803,10 @@ fn summarizes() {
             pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-120000-0000000c
-                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
-              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-              budget solver: at least $0.66 of $1.00
-              cost: $0.66 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; $0.23 at the models' prices
+              model: 6 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 5500 in (2600 cached, 150 written to the cache), 550 out (40 reasoning), as 5 responses reported them; $1.78 at the models' prices, but for 1 response's unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
+              budget solver (model-a): at least $0.66 of $1.00
+              cost: $1.78 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens
             $ pumpkin wait --runs runs 20261110-120000-0000000d
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
               model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; model-a's and model-b's tokens lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end

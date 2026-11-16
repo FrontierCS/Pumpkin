@@ -206,6 +206,7 @@ impl Upstreams {
             models,
             request_headers,
             response_headers,
+            budget: _,
         } = entry;
         let serves = |upstream: &Upstream| {
             let served =

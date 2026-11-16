@@ -281,7 +281,7 @@ fn prepared<'e>(
     let servings = task
         .workflow()
         .by_role(|(_, sandbox)| match &sandbox.model {
-            Some(model) => upstreams.serving(&model.route).context(config.display()),
+            Some(route) => upstreams.serving(route).context(config.display()),
             None => Ok(Vec::new()),
         })?;
     let prices = upstreams.prices();

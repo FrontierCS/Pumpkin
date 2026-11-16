@@ -21,7 +21,7 @@ use std::time::Duration;
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
-use schema::ir::{Api, ApiRoute, Model, Name, Sha256Digest};
+use schema::ir::{Api, ApiRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
@@ -59,18 +59,20 @@ pub(super) fn routes(
 }
 
 fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String> {
-    let Some(Model { route, budget: _ }) = &sandbox.model else {
+    let Some(route) = &sandbox.model else {
         return Ok(Vec::new());
     };
     let role = &sandbox.name;
-    let served = |entry: &ApiRoute| {
+    let served = |(index, entry): (usize, &ApiRoute)| {
         let ApiRoute {
             api,
             models,
             request_headers,
             response_headers,
+            budget: _,
         } = entry;
-        let Some(serving) = servings.iter().find(|serving| serving.api == *api) else {
+        let serving = servings.get(index).filter(|serving| serving.api == *api);
+        let Some(serving) = serving else {
             return Err(format!(
                 "`{role}` has a model route, but no upstream serves its `{api}` entry: give one, \
                  or remove the role's `egress.model` to run without one"
@@ -97,7 +99,7 @@ fn route(sandbox: &Sandbox, servings: &[Serving]) -> Result<Vec<Serving>, String
             },
         })
     };
-    route.as_slice().iter().map(served).collect()
+    route.as_slice().iter().enumerate().map(served).collect()
 }
 
 impl Served {
@@ -118,14 +120,15 @@ impl Served {
         })
     }
 
-    /// Serves one model request, number `number`, with its `exchange` keeping it: `forwarding` is
-    /// called once if the request goes upstream, and `answered` once, with the name and API of the
-    /// entry that took it, if one did, and the answer.
-    pub(super) fn serve(
+    /// Serves one model request, number `number`, with its `exchange` keeping it, as `admission` of
+    /// the index of the entry that takes it admits it: `forwarding` is called once if the request
+    /// goes upstream, and `answered` once, with the name and API of the entry that took it, if one
+    /// did, and the answer.
+    pub(super) fn serve<'b>(
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
         incoming: IncomingModelRequest,
-        admission: Admission<'_>,
+        admission: impl FnOnce(usize) -> Admission<'b>,
         by: Deadline,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Option<&(Name, Api)>, Answer),

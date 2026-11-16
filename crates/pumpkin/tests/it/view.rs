@@ -370,7 +370,7 @@ fn serves_runs() {
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
-            end: 8311
+            end: 8383
             has_result: true
             id: "<ended>"
             lanes:
@@ -400,11 +400,11 @@ fn serves_runs() {
             GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
             GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8311,"live":false}
+            {"end":8383,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8311, live false, next 8311, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7226
-            next 8311, end 8311, bytes [Number(7226), Number(7369), Number(7500), Number(7589), Number(7707), Number(8079)], the last's event "judge_collected"
+            end 8383, live false, next 8383, run "<ended>", 56 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7280
+            next 8383, end 8383, bytes [Number(7280), Number(7423), Number(7554), Number(7643), Number(7761), Number(8151)], the last's event "judge_collected"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -422,7 +422,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8311: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8383: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -904,16 +904,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8311, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3220&log_epoch=0
+            GET /api/runs/<id>: end 8383, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3274&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3220: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3220&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3274: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3274&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3220: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4580, log_epoch 1
-            GET /api/runs/<id>/since?log=3220&log_epoch=1
-            end 4580, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3274: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4634, log_epoch 1
+            GET /api/runs/<id>/since?log=3274&log_epoch=1
+            end 4634, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -961,7 +961,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10055 records, next 2486036"#]],
+            from byte 1757701: 10055 records, next 2486108"#]],
     );
 }
 
@@ -1183,10 +1183,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8311 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8311 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8311 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8311 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=8383 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8383 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8383 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=8383 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 

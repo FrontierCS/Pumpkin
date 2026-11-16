@@ -35,9 +35,12 @@ mod upstream;
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
 
 /// Each of `names`, which goes upstream under its own name.
-fn models<const N: usize>(names: [&str; N]) -> BTreeMap<ModelName, ModelName> {
+fn models(names: &[&str]) -> BTreeMap<ModelName, ModelName> {
     let model = |name: &str| ModelName::try_from(name.to_owned()).unwrap();
-    names.map(|name| (model(name), model(name))).into()
+    names
+        .iter()
+        .map(|&name| (model(name), model(name)))
+        .collect()
 }
 
 /// The headers that the Responses API's entry lists, as Codex's library lists them; the Chat
@@ -95,19 +98,26 @@ fn listed(api: Api) -> Headers {
 }
 
 /// Sends each case's request over a session, as a sandbox whose route allows `m-large` and
-/// `m-small` through the Responses API and through Chat Completions, and serves it as the
-/// session's owner: it shows what the stand-in model provider received of each that the route
-/// admitted, or the refusal that the sandbox heard, and checks them against `expect`.
+/// `m-small` through the Responses API and through Chat Completions, there each in an entry of
+/// its own, and serves it as the session's owner: it shows what the stand-in model provider
+/// received of each that the route admitted, or the refusal that the sandbox heard, and checks
+/// them against `expect`.
 fn check(cases: &[(&str, Request)], expect: &Expect) {
-    check_apis(&[Api::Responses, Api::Chat], cases, expect);
+    let entries = [
+        (Api::Responses, &["m-large", "m-small"][..]),
+        (Api::Chat, &["m-large"]),
+        (Api::Chat, &["m-small"]),
+    ];
+    check_apis(&entries, cases, expect);
 }
 
-/// [`check`]s each case through a route with an entry for each of `apis`.
+/// [`check`]s each case through a route with an entry for each of `entries`, an API and the
+/// models it allows.
 #[expect(
     clippy::too_many_lines,
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
-fn check_apis(apis: &[Api], cases: &[(&str, Request)], expect: &Expect) {
+fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Expect) {
     // Kept if the test fails.
     let dir = tempfile::Builder::new()
         .prefix(&format!("route-{}-", thread::current().name().unwrap()))
@@ -129,17 +139,17 @@ fn check_apis(apis: &[Api], cases: &[(&str, Request)], expect: &Expect) {
     });
     let key = dir.join("key");
     fs::write(&key, "sk-test-0123\n").unwrap();
-    let entry = |&api| {
+    let entry = |&(api, allowed): &(Api, &[&str])| {
         let path = match api {
             Api::Responses => "responses",
             Api::Chat => "chat/completions",
             Api::Messages => "messages",
         };
         let url = UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
-        let route = Route::new(api, models(["m-large", "m-small"]), &listed(api));
+        let route = Route::new(api, models(allowed), &listed(api));
         (route, Upstream::new(api, &url, &Key::read(&key).unwrap()))
     };
-    let entries: Vec<(Route, Upstream)> = apis.iter().map(entry).collect();
+    let entries: Vec<(Route, Upstream)> = entries.iter().map(entry).collect();
     // Its sockets fit in a socket's address by this path to their directory.
     let (_sockets, registration, socket) = meeting(&dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
@@ -159,7 +169,7 @@ fn check_apis(apis: &[Api], cases: &[(&str, Request)], expect: &Expect) {
             route::serve(
                 &entries,
                 incoming,
-                Admission::Open,
+                |_| Admission::Open,
                 by,
                 &dropped,
                 || forwarded = true,
@@ -773,7 +783,7 @@ fn messages_closure() {
         (method, path.to_owned(), headers, body)
     };
     check_apis(
-        &[Api::Messages],
+        &[(Api::Messages, &["m-large", "m-small"])],
         &[
             ("the client's", messages(|_| {})),
             (

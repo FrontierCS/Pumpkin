@@ -513,9 +513,7 @@ fn lease_task() -> Value {
             {
                 "name": "solver",
                 "runtime": { "agent": { "deadline_seconds": 1800 } },
-                "egress": { "model": {
-                    "route": [{ "api": "responses", "models": ["model-a", "model-b"] }],
-                } },
+                "egress": { "model": [{ "api": "responses", "models": ["model-a", "model-b"] }] },
                 "grants": [
                     { "judge": { "name": "train", "role": "trainer" } },
                     lease("gpu", 60),
@@ -613,7 +611,7 @@ fn judged_log() -> Vec<Value> {
     let answered = |request: u64, usage: Value, first_token_ns: Option<&str>| {
         let mut answered = json!({
             "kind": "model_answered", "caller": "agent", "request": request, "model": "model-a",
-            "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
+            "api": "responses", "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
         });
         if let Some(first_token_ns) = first_token_ns {
             answered["first_token_ns"] = json!(first_token_ns);
@@ -696,7 +694,7 @@ fn judged_log() -> Vec<Value> {
     let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
     let judge_answered = json!({
         "kind": "model_answered", "caller": "job-4", "request": 3, "model": "model-b",
-        "answer": { "kind": "forwarded" }, "upstream_status": 200,
+        "api": "responses", "answer": { "kind": "forwarded" }, "upstream_status": 200,
         "failed": { "code": "rate_limit_exceeded" },
         "usage": { "input_tokens": 500, "output_tokens": 50 },
         "first_token_ns": "1013000000000",

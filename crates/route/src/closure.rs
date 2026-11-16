@@ -256,13 +256,17 @@ impl Route {
     }
 
     /// The form of `request` that goes upstream, with its model named as its upstream takes it, or
-    /// the refusal that answers it.
-    pub(crate) fn close(&self, request: &ModelRequest) -> Result<Closed<'_>, Refusal> {
+    /// the refusal that answers it. `body` is the request's body as [`parsed`] gives it.
+    pub(crate) fn close(
+        &self,
+        request: &ModelRequest,
+        body: Result<Map<String, Value>, Refusal>,
+    ) -> Result<Closed<'_>, Refusal> {
         let ModelRequest {
             method,
             path,
             headers,
-            body,
+            body: _,
         } = request;
         if method != "POST" {
             let message = format!("`{} {path}` is not served: send POST {path}", shown(method));
@@ -274,15 +278,12 @@ impl Route {
             .map(|(_, query)| query);
         let dropped_headers = self.dropped(headers);
         let headers = passed(&self.request_headers, headers)?;
-        let mut body: Map<String, Value> = serde_json::from_slice(body).map_err(|error| {
-            let error = error.to_string();
-            bad(format!(
-                "the body is not a JSON object ({}): send one",
-                shown(&error)
-            ))
-        })?;
+        let mut body = body?;
         (rules.stored)(&body)?;
-        let (model, upstream_name) = self.allows(&body)?;
+        let named = body.get("model").and_then(Value::as_str);
+        let allowed = named.and_then(|named| self.allows(named));
+        let (model, upstream_name) =
+            allowed.ok_or_else(|| Refusal::unallowed(named, self.models.keys()))?;
         (rules.feature)(&body)?;
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
@@ -322,24 +323,27 @@ impl Route {
         dropped
     }
 
-    fn allows(&self, body: &Map<String, Value>) -> Result<(&ModelName, &ModelName), Refusal> {
-        let named = body.get("model").and_then(Value::as_str);
-        let allowed =
-            named.and_then(|named| (self.models.iter()).find(|(model, _)| model.as_str() == named));
-        if let Some(allowed) = allowed {
-            return Ok(allowed);
-        }
-        let allowed: Vec<String> = self
-            .models
-            .keys()
-            .map(|model| format!("`{model}`"))
-            .collect();
-        let named = named.map_or("no model".to_owned(), |named| format!("`{}`", shown(named)));
-        Err(bad(format!(
-            "the request names {named}, which the route doesn't allow: name {}",
-            allowed.join(" or ")
-        )))
+    /// The model that requests may name as `named`, with the name that its upstream takes for it,
+    /// if they may.
+    pub(crate) fn allows(&self, named: &str) -> Option<(&ModelName, &ModelName)> {
+        (self.models.iter()).find(|(model, _)| model.as_str() == named)
     }
+
+    /// Each model that requests may name.
+    pub(crate) fn models(&self) -> impl Iterator<Item = &ModelName> {
+        self.models.keys()
+    }
+}
+
+/// `body`, a request's, as the JSON object it holds, or the refusal of a body that holds none.
+pub(crate) fn parsed(body: &[u8]) -> Result<Map<String, Value>, Refusal> {
+    serde_json::from_slice(body).map_err(|error| {
+        let error = error.to_string();
+        bad(format!(
+            "the body is not a JSON object ({}): send one",
+            shown(&error)
+        ))
+    })
 }
 
 impl Closed<'_> {
@@ -398,15 +402,33 @@ impl Closed<'_> {
 impl Refusal {
     /// The refusal of a request to none of `routes`' endpoints, which names each.
     pub(crate) fn unserved<'a>(path: &str, routes: impl Iterator<Item = &'a Route>) -> Self {
-        let targets: Vec<String> = routes
-            .map(|route| format!("POST {}", route.rules.targets[0]))
-            .collect();
+        let mut targets: Vec<String> = Vec::new();
+        for route in routes {
+            // Several entries may be for one API.
+            let target = format!("POST {}", route.rules.targets[0]);
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
         let message = format!(
             "`{}` is not served: send {}",
             shown(path),
             targets.join(" or ")
         );
         refusal(Status::NotFound, message)
+    }
+
+    /// The refusal of a request that names `named`, or no model, which none of `allowed` is.
+    pub(crate) fn unallowed<'a>(
+        named: Option<&str>,
+        allowed: impl Iterator<Item = &'a ModelName>,
+    ) -> Self {
+        let allowed: Vec<String> = allowed.map(|model| format!("`{model}`")).collect();
+        let named = named.map_or("no model".to_owned(), |named| format!("`{}`", shown(named)));
+        bad(format!(
+            "the request names {named}, which the route doesn't allow: name {}",
+            allowed.join(" or ")
+        ))
     }
 
     pub(crate) fn ended() -> Self {
@@ -426,11 +448,14 @@ impl Refusal {
         refusal(Status::BadRequest, message.to_owned())
     }
 
-    pub(crate) fn spent(budget: &ModelBudget) -> Self {
+    /// The refusal of a request through `route`, whose `budget` is spent.
+    pub(crate) fn spent(budget: &ModelBudget, route: &Route) -> Self {
+        let models: Vec<String> = route.models().map(|model| format!("`{model}`")).collect();
         // A 400, as for the route's end, which a harness takes as final.
         let message = format!(
-            "the role's model budget, {budget} at the configured prices, is exhausted: make no \
-             more model requests"
+            "the model budget of the role's entry for {}, {budget} at the configured prices, is \
+             exhausted: make no more requests for its models",
+            models.join(", ")
         );
         refusal(Status::BadRequest, message)
     }

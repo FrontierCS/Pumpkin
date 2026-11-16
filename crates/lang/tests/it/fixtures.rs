@@ -105,17 +105,15 @@ fn tasks() {
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "route": [
-                        {
-                          "api": "responses",
-                          "models": [
-                            "model-large",
-                            "model-small"
-                          ]
-                        }
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large",
+                          "model-small"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {
@@ -257,24 +255,22 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 577 prefixes evaluate
+            == tasks/literal/task.star: 2 of 572 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
               "roles": [
                 {
                   "egress": {
-                    "model": {
-                      "route": [
-                        {
-                          "api": "responses",
-                          "models": [
-                            "model-large",
-                            "model-small"
-                          ]
-                        }
-                      ]
-                    }
+                    "model": [
+                      {
+                        "api": "responses",
+                        "models": [
+                          "model-large",
+                          "model-small"
+                        ]
+                      }
+                    ]
                   },
                   "grants": [
                     {
@@ -590,9 +586,9 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 502 prefixes evaluate
+            == lib/images.star: 0 of 498 prefixes evaluate
 
-            == lib/judged.star: 0 of 568 prefixes evaluate
+            == lib/judged.star: 0 of 562 prefixes evaluate
 
             == lib/parts.star: 0 of 221 prefixes evaluate"#]],
     );

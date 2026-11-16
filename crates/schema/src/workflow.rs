@@ -14,8 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{
-    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, Model, Name,
-    Needs, ResultSpec, User, WorkflowName,
+    AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
+    Name, Needs, ResultSpec, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -328,8 +328,8 @@ pub struct Sandbox {
     pub needs: Needs,
     /// The role's place in the IR, where placing it reports what is wrong.
     pub(crate) at: JsonPointer,
-    /// The role's model route, with what bounds its spend, if it has one; a runner has none.
-    pub model: Option<Model>,
+    /// The role's model route, with the budgets of its entries, if it has one; a runner has none.
+    pub model: Option<ModelRoute>,
 }
 
 /// The agent role; see [`ir::AgentRuntime`](crate::ir::AgentRuntime), whose rules its `dirs`

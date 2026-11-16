@@ -40,7 +40,7 @@ joined\n',
                     + ((-9223372036854775807 - 1) % -1 - 0),
                 "finalize_grace_seconds": 60,
             }},
-            "egress": {"model": {"route": [{"api": "responses", "models": ["model-large", "model-small"]}]}},
+            "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
             "grants": [
                 {"judge": {
                     "name": "train",

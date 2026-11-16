@@ -6,8 +6,9 @@
 //! of the model provider's, neither the state it keeps nor the tools it runs nor the URLs it
 //! fetches, so that a response carries nothing but what its own request sent.
 //!
-//! [`serve`] answers each request through the entry of the route, one for each API, whose
-//! endpoint it names: that entry's [`Route`] admits it, or the client hears why it is refused.
+//! [`serve`] answers each request through the entry of the route whose endpoint it names, and of
+//! several, the one that allows its model: that entry's [`Route`] admits it, or the client hears
+//! why it is refused.
 //! The rules of each API are the `closure` module's.
 //!
 //! [`serve`] sends an admitted request upstream ([`Upstream`]), streams back its response, and

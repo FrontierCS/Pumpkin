@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use provider::UnixTime;
-use schema::ir::Name;
+use schema::ir::{Api, Name};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde::de::{DeserializeOwned, Deserializer, Error as _};
@@ -156,6 +156,7 @@ pub(super) enum Event {
     ModelAnswered {
         caller: Option<Caller>,
         request: u64,
+        api: Option<Api>,
         model: Option<String>,
         #[serde(default, deserialize_with = "optional_nanos")]
         first_token_ns: Option<Duration>,

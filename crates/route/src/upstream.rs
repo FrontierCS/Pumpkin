@@ -11,12 +11,13 @@ use std::{fmt, fs};
 use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
 use schema::ir::{Api, ModelBudget, ModelName, Name};
 use schema::sandbox::frame;
+use serde_json::{Map, Value};
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
 use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
 use super::Keep;
-use super::closure::{Closed, Headers, Refusal, Route, Status, refusal};
+use super::closure::{Closed, Headers, Refusal, Route, Status, parsed, refusal};
 use super::usage::{Failure, Scan, Usage};
 
 /// How long the upstream may take to resolve the provider's host name.
@@ -365,13 +366,18 @@ impl Upstream {
         }
     }
 
-    fn close<'r>(&self, route: &'r Route, request: &ModelRequest) -> Result<Closed<'r>, Refusal> {
+    fn close<'r>(
+        &self,
+        route: &'r Route,
+        request: &ModelRequest,
+        body: Result<Map<String, Value>, Refusal>,
+    ) -> Result<Closed<'r>, Refusal> {
         if self.was_shut_down() {
             Err(Refusal::ended())
         } else if self.key_was_refused() {
             Err(Refusal::key_refused())
         } else {
-            route.close(request)
+            route.close(request, body)
         }
     }
 
@@ -379,15 +385,16 @@ impl Upstream {
         &self,
         route: &Route,
         client: Client<'_>,
+        body: Result<Map<String, Value>, Refusal>,
         admission: Admission<'_>,
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) {
         let taken = match admission {
             Admission::Ended => Err(Refusal::ended()),
-            Admission::Open => self.close(route, &client.request.request),
+            Admission::Open => self.close(route, &client.request.request, body),
             Admission::Spent { .. } if self.was_shut_down() => Err(Refusal::ended()),
-            Admission::Spent { budget } => Err(Refusal::spent(budget)),
+            Admission::Spent { budget } => Err(Refusal::spent(budget, route)),
         };
         let _ = match taken {
             Ok(closed) => self.forward(&closed, client, forwarding, answered),
@@ -426,46 +433,44 @@ impl Upstream {
     }
 }
 
-/// Whether the caller still takes a role's model requests.
+/// Whether the caller still takes a role's model requests through an entry of its route.
 #[derive(Clone, Copy, Debug)]
 pub enum Admission<'b> {
     Open,
     /// The caller has stopped taking them: the route's end.
     Ended,
-    /// The role's `budget` is spent ([`ModelBudget`]).
+    /// The entry's `budget` is spent ([`ModelBudget`]).
     Spent {
         budget: &'b ModelBudget,
     },
 }
 
-/// Answers `request` for the sandbox that made it, by `by`, through the entry of `entries`, each
-/// a route's entry for one API and its upstream, whose endpoint it names.
+/// Answers `request` for the sandbox that made it, by `by`, through an entry of `entries`.
 ///
-/// One that names none is refused with a 404 that names each. The entry's upstream refuses it
-/// unless `admission` is open, or once it has shut down ([`Upstream::shutdown`]) or its key was
-/// refused, and else forwards it closed, giving up at `by` too, calling `forwarding` just before
-/// it sends it. It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered
-/// ([`Answer`]) and through which entry's index, once `keep` has the whole answer and before the
-/// answer's end is written.
+/// Each is a route's entry and its upstream. The one whose endpoint the request names takes it,
+/// and of several, the one that allows the model it names; else it is refused with a 404 or a 400
+/// that names what they serve. The entry's upstream refuses it unless `admission` of the entry's
+/// index is open, or once it has shut down ([`Upstream::shutdown`]) or its key was refused, and
+/// else forwards it closed, giving up at `by` too, calling `forwarding` just before it sends it.
+/// It gives `keep` the exchange ([`Keep`]), and tells `answered` how it answered ([`Answer`]) and
+/// through which entry's index, once `keep` has the whole answer and before its end is written.
 // Whether the answer reached the sandbox isn't told: writing it fails only for a response's head
 // too long for a frame, or as the sandbox's session ends, which the run log shows.
-pub fn serve(
+pub fn serve<'b>(
     entries: &[(Route, Upstream)],
     request: IncomingModelRequest,
-    admission: Admission<'_>,
+    admission: impl FnOnce(usize) -> Admission<'b>,
     by: Deadline,
     keep: &dyn Keep,
     forwarding: impl FnOnce(),
     answered: impl FnOnce(Option<usize>, Answer),
 ) {
-    let taken = entries
-        .iter()
-        .position(|(route, _)| route.takes(&request.request));
     let client = Client { request, by, keep };
-    let Some(index) = taken else {
-        let path = &client.request.request.path;
+    let request = &client.request.request;
+    let taking = || (entries.iter().enumerate()).filter(|(_, (route, _))| route.takes(request));
+    let Some((first, _)) = taking().next() else {
         let routes = || entries.iter().map(|(route, _)| route);
-        let refusal = Refusal::unserved(path, routes());
+        let refusal = Refusal::unserved(&request.path, routes());
         // In the form of the entries' API, so that a client of the Messages API alone, which may
         // try its other endpoints, reads it.
         let messages = routes().all(|route| route.api() == Api::Messages) && !entries.is_empty();
@@ -477,9 +482,26 @@ pub fn serve(
         let _ = barred(refusal, api, client, |answer| answered(None, answer));
         return;
     };
+    let body = parsed(&request.body);
+    let index = if taking().nth(1).is_none() {
+        first
+    } else {
+        let named = (body.as_ref().ok())
+            .and_then(|body| body.get("model"))
+            .and_then(Value::as_str);
+        let allows = |route: &Route| named.is_some_and(|named| route.allows(named).is_some());
+        let Some((index, _)) = taking().find(|(_, (route, _))| allows(route)) else {
+            let allowed = taking().flat_map(|(_, (route, _))| route.models());
+            let refusal = Refusal::unallowed(named, allowed);
+            let api = entries[first].0.api();
+            let _ = barred(refusal, api, client, |answer| answered(None, answer));
+            return;
+        };
+        index
+    };
     let (route, upstream) = &entries[index];
     let answered = |answer| answered(Some(index), answer);
-    upstream.serve(route, client, admission, forwarding, answered);
+    upstream.serve(route, client, body, admission(index), forwarding, answered);
 }
 
 pub(crate) struct Client<'k> {

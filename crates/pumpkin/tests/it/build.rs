@@ -325,51 +325,49 @@ fn builds_on_docker() {
                       }
                     },
                     "egress": {
-                      "model": {
-                        "route": [
-                          {
-                            "api": "responses",
-                            "models": [
-                              "model-a"
-                            ],
-                            "request_headers": [
-                              "originator",
-                              "user-agent",
-                              "session-id",
-                              "thread-id",
-                              "x-codex-beta-features",
-                              "x-codex-window-id",
-                              "x-codex-turn-metadata",
-                              "x-openai-internal-codex-responses-lite"
-                            ],
-                            "response_headers": [
-                              "openai-model",
-                              "x-reasoning-included",
-                              "x-models-etag",
-                              "x-codex-turn-state",
-                              "x-codex-safety-buffering-enabled",
-                              "x-codex-safety-buffering-faster-model",
-                              "x-codex-credits-has-credits",
-                              "x-codex-credits-unlimited",
-                              "x-codex-credits-balance",
-                              "x-codex-promo-message",
-                              "x-codex-rate-limit-reached-type",
-                              "x-codex-active-limit",
-                              "x-oai-request-id",
-                              "cf-ray",
-                              "x-openai-authorization-error",
-                              "x-error-json",
-                              "x-codex-primary-used-percent",
-                              "x-codex-primary-window-minutes",
-                              "x-codex-primary-reset-at",
-                              "x-codex-secondary-used-percent",
-                              "x-codex-secondary-window-minutes",
-                              "x-codex-secondary-reset-at",
-                              "x-codex-limit-name"
-                            ]
-                          }
-                        ]
-                      }
+                      "model": [
+                        {
+                          "api": "responses",
+                          "models": [
+                            "model-a"
+                          ],
+                          "request_headers": [
+                            "originator",
+                            "user-agent",
+                            "session-id",
+                            "thread-id",
+                            "x-codex-beta-features",
+                            "x-codex-window-id",
+                            "x-codex-turn-metadata",
+                            "x-openai-internal-codex-responses-lite"
+                          ],
+                          "response_headers": [
+                            "openai-model",
+                            "x-reasoning-included",
+                            "x-models-etag",
+                            "x-codex-turn-state",
+                            "x-codex-safety-buffering-enabled",
+                            "x-codex-safety-buffering-faster-model",
+                            "x-codex-credits-has-credits",
+                            "x-codex-credits-unlimited",
+                            "x-codex-credits-balance",
+                            "x-codex-promo-message",
+                            "x-codex-rate-limit-reached-type",
+                            "x-codex-active-limit",
+                            "x-oai-request-id",
+                            "cf-ray",
+                            "x-openai-authorization-error",
+                            "x-error-json",
+                            "x-codex-primary-used-percent",
+                            "x-codex-primary-window-minutes",
+                            "x-codex-primary-reset-at",
+                            "x-codex-secondary-used-percent",
+                            "x-codex-secondary-window-minutes",
+                            "x-codex-secondary-reset-at",
+                            "x-codex-limit-name"
+                          ]
+                        }
+                      ]
                     },
                     "grants": [
                       {
