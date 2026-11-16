@@ -30,6 +30,9 @@
      tables have 48 px rows, and a log keeps more of itself in view in rows of 32 px */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
   --row: 32px; --lane: 28px; --axis: 28px; --bar: 56px;
+  /* the most of the split's width or a column's height that a grip may give a pane, so that a
+     length kept in a larger window leaves the panes beside it room in a smaller one */
+  --grip-max: 60%;
   /* the diagram of who talks to whom, whose boxes are sized for this size */
   --fs-diagram: 12px;
   --control: 30px; --field: 32px; --tab: 36px;
@@ -132,14 +135,14 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .warn { color: var(--text-2); }
 
 /* The split: lanes, filter and log at left; roles and inspector at right. */
-.split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 32%); gap: var(--s3); }
+.split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px min(clamp(280px, var(--side, min(32%, 520px)), 900px), var(--grip-max)); column-gap: var(--s1); }
 .left, .right { min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
 .panel { border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--panel); }
 
 /* The lanes of a run's sandboxes, the run's time across. At most two fifths of the window high,
-   in whole lanes. */
+   or as high as their grip sets, and no more than `--grip-max` of their column, in whole lanes. */
 /* A monospace character is about 0.61 of its size wide. */
-.lanes { --label: calc(var(--label-chars) * 0.61 * var(--fs-mono) + var(--s3)); flex: none; overflow-y: auto; max-height: calc(var(--axis) + round(down, 40vh - var(--axis), var(--lane))); user-select: none; padding: 0 var(--s2); }
+.lanes { --label: calc(var(--label-chars) * 0.61 * var(--fs-mono) + var(--s3)); flex: none; overflow-y: auto; max-height: calc(var(--axis) + round(down, min(max(80px, var(--pane, 40vh)), var(--grip-max)) - var(--axis), var(--lane))); user-select: none; padding: 0 var(--s2); }
 .lane { display: grid; grid-template-columns: var(--label) 1fr; align-items: center; height: var(--lane); border-bottom: 1px solid var(--line-soft); }
 .lane:last-child { border-bottom: none; }
 .lane .name { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding-right: var(--s2); }
@@ -194,7 +197,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .row.refused .kind { color: var(--warn); } .row.failed .kind { color: var(--fail); }
 
 /* Who talks to whom. */
-.talk { flex: none; padding: var(--s2) var(--s3); max-height: 40vh; overflow: auto; }
+.talk { flex: none; padding: var(--s2) var(--s3); max-height: min(max(80px, var(--pane, 40vh)), var(--grip-max)); overflow: auto; }
 .talk svg { max-width: 100%; height: auto; display: block; }
 .talk .node { cursor: pointer; }
 .talk .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
@@ -245,13 +248,16 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .toolbar button.on { color: var(--accent); border-color: var(--accent); background: var(--select); }
 .toolbar .status { margin-left: auto; }
 .dim { color: var(--dim); }
-.trace-split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px var(--inspector, 440px); }
+.trace-split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px min(clamp(320px, var(--inspector, min(34%, 440px)), 720px), var(--grip-max)); }
 .trace-split .left { min-width: 0; }
 .trace-split .list { border: 1px solid var(--line); border-top: 1px solid var(--rule); border-radius: 0 0 var(--r-panel) var(--r-panel); }
-.grip { cursor: col-resize; position: relative; }
+/* A touch drag on a grip sizes its pane, in place of scrolling the page. */
+.grip { cursor: col-resize; position: relative; touch-action: none; }
 .grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms; }
 .grip:hover::after, .grip:focus-visible::after { background: var(--accent); }
 .grip:focus-visible { outline: none; }
+.grip.across-y { cursor: row-resize; flex: none; height: 8px; margin: calc(-1 * var(--s1)) 0; }
+.grip.across-y::after { top: 3px; bottom: auto; left: 0; right: 0; width: auto; height: 2px; }
 
 /* A trace's tab: the Steps tab's toolbar and split, or the Statistics or Log tab, below the tabs. */
 .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
@@ -356,7 +362,6 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 mark { background: var(--mark); color: inherit; border-radius: 2px; }
 
 @media (max-width: 1200px) {
-  .split { grid-template-columns: minmax(0, 1fr) minmax(260px, 36%); }
   .lrow.step .tk0 { width: 12ch; }
   .lrow.step .tk1 { display: none; }
   .lrow.step .tk2 { width: 8ch; }
