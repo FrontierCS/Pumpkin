@@ -472,6 +472,19 @@ DEEP = [
                 10 |     [[[[[[[[[[[[[[[[
                    |                    ^"#]],
     );
+    // A type nests as brackets do, so that reading it, and checking a value against it, keeps to
+    // the stack.
+    check(
+        &format!(
+            "#- //text.star\nload(\"//lib.star\", \"X\")\n#- //lib.star\ndef f(x: {}int{}):\n    pass",
+            "list[\n".repeat(128),
+            "]".repeat(128)
+        ),
+        &expect![[r#"
+            lib.star:128:5: this nests 129 deep: nest a type at most 128 deep
+                128 | list[
+                    |     ^"#]],
+    );
     check(
         r#"
 #- //bad/nested/task.star
@@ -951,7 +964,7 @@ Y = 2
     check(
         "X: int = 1",
         &expect![[r#"
-            text.star:1:2: type annotations are not in Starlark: drop the `:` and the type
+            text.star:1:2: an annotation of a variable is not in Pumpkin's Starlark: drop the `:` and the type
                 1 | X: int = 1
                   |  ^"#]],
     );
@@ -3108,30 +3121,6 @@ def f(a, a):
 #- //text.star
 load("//lib.star", "X")
 #- //lib.star
-def f(x: int):
-    pass"#,
-        &expect![[r#"
-            lib.star:1:8: type annotations are not in Starlark: drop the `:` and the type
-                1 | def f(x: int):
-                  |        ^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
-def f() -> int:
-    return 1"#,
-        &expect![[r#"
-            lib.star:1:9: type annotations are not in Starlark: drop the `->` and the type
-                1 | def f() -> int:
-                  |         ^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
 def f() - 1:
     return 1"#,
         &expect![[r#"
@@ -3238,6 +3227,310 @@ load("//lib/images.star", "images_task")
 
 images_task(agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB})
 "#;
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshots"
+)]
+fn annotations() {
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(n: int, x: float, s: str, z: None, xs: list[int], d: dict[str, list[float]], b: bool = False) -> str:
+    return s
+def g() -> None:
+    pass
+f(1, 2.5, "fits", g(), [1, 2], {"a": [1.5]}, b = True)
+fail(f(1, 2.5, "fits", None, [], {}))"#,
+        &expect![[r#"
+            lib.star:6:1: fail: fits
+                6 | fail(f(1, 2.5, "fits", None, [], {}))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(n: int):
+    pass
+f("x")"#,
+        &expect![[r#"
+            lib.star:3:1: `f`'s `n` can't be `"x"`: give an int
+                3 | f("x")
+                  | ^^^^^^
+                the argument, `"x"`, is made at lib.star:3:3"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(x: float):
+    pass
+f(1)"#,
+        &expect![[r#"
+            lib.star:3:1: `f`'s `x` can't be `1`: give a float
+                3 | f(1)
+                  | ^^^^
+                the argument, `1`, is made at lib.star:3:3"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(n: int):
+    pass
+f(True)"#,
+        &expect![[r#"
+            lib.star:3:1: `f`'s `n` can't be `True`: give an int
+                3 | f(True)
+                  | ^^^^^^^
+                the argument, `True`, is made at lib.star:3:3"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(xs: list[int]):
+    pass
+f(xs = [1, "a"])"#,
+        &expect![[r#"
+            lib.star:3:1: an element of `f`'s `xs` can't be `"a"`: give an int
+                3 | f(xs = [1, "a"])
+                  | ^^^^^^^^^^^^^^^^
+                the element, `"a"`, is made at lib.star:3:12"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(d: dict[str, int]):
+    pass
+f({1: 2})"#,
+        &expect![[r#"
+            lib.star:3:1: a key of `f`'s `d` can't be `1`: give a string
+                3 | f({1: 2})
+                  | ^^^^^^^^^
+                the key, `1`, is made at lib.star:3:4"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(d: dict[str, list[float]]):
+    pass
+f({"a": [1]})"#,
+        &expect![[r#"
+            lib.star:3:1: an element of a value of `f`'s `d` can't be `1`: give a float
+                3 | f({"a": [1]})
+                  | ^^^^^^^^^^^^^
+                the element, `1`, is made at lib.star:3:10"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(a: int, b):
+    pass
+f("x")"#,
+        &expect![[r#"
+            lib.star:3:1: `f` lacks `b`: give it
+                3 | f("x")
+                  | ^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(n) -> int:
+    if n:
+        return "x"
+    return n
+def g():
+    return f(1)
+g()"#,
+        &expect![[r#"
+            lib.star:3:9: `f` can't return `"x"`: it returns an int
+                3 |         return "x"
+                  |         ^^^^^^
+                in `f()`, called at lib.star:6:12
+                in `g()`, called at lib.star:7:1"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f() -> int:
+    pass
+f()"#,
+        &expect![[r#"
+            lib.star:1:5: `f` can't return `None`: it returns an int
+                1 | def f() -> int:
+                  |     ^
+                in `f()`, called at lib.star:3:1"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f() -> list[int]:
+    return [1, "a"]
+f()"#,
+        &expect![[r#"
+            lib.star:2:5: an element of what `f` returns can't be `"a"`: give an int
+                2 |     return [1, "a"]
+                  |     ^^^^^^
+                the element, `"a"`, is made at lib.star:2:16
+                in `f()`, called at lib.star:3:1"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def submit(finalize: bool = 0):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:29: `finalize` is a bool, and can't default to `0`: give a bool
+                1 | def submit(finalize: bool = 0):
+                  |                             ^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+NO = 0
+def submit(finalize: bool = NO):
+    pass"#,
+        &expect![[r#"
+            lib.star:2:29: `finalize` is a bool, and can't default to `0`: give a bool
+                2 | def submit(finalize: bool = NO):
+                  |                             ^^
+                the default, `0`, is made at lib.star:1:6"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(d: dict[str, int] = {"a": "b"}):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:27: a value of `d`'s default can't be `"b"`: give an int
+                1 | def f(d: dict[str, int] = {"a": "b"}):
+                  |                           ^^^^^^^^^^
+                the value, `"b"`, is made at lib.star:1:33"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(x: Strng):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]` or `dict[…, …]`
+                1 | def f(x: Strng):
+                  |          ^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(x: "str"):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:10: unexpected string: expected a type, as `str` or `list[int]`
+                1 | def f(x: "str"):
+                  |          ^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(xs: list):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:11: `list` takes its elements' type: write `list[str]`
+                1 | def f(xs: list):
+                  |           ^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f() -> dict:
+    pass"#,
+        &expect![[r#"
+            lib.star:1:12: `dict` takes its keys' and values' types: write `dict[str, int]`
+                1 | def f() -> dict:
+                  |            ^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(d: dict[str]):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:18: unexpected `]`: expected `,` and the values' type
+                1 | def f(d: dict[str]):
+                  |                  ^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(d: dict[list[str], int]):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:15: a dict's keys can't be lists of strings: key a dict with strings or numbers, as `str`, `int` or `float`
+                1 | def f(d: dict[list[str], int]):
+                  |               ^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(x: int | None = None):
+    pass"#,
+        &expect![[r#"
+            lib.star:1:14: `|` in a type is not in Pumpkin's Starlark: take one type
+                1 | def f(x: int | None = None):
+                  |              ^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f() - > int:
+    pass"#,
+        &expect![[r#"
+            lib.star:1:9: unexpected `-`: expected `:`
+                1 | def f() - > int:
+                  |         ^"#]],
+    );
+}
 
 #[test]
 fn picks() {

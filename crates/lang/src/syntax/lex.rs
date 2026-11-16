@@ -11,6 +11,11 @@
 //! - a reserved word, wherever it appears;
 //! - a tab outside a string or a comment, but on a line outside brackets that holds no token.
 //!
+//! It adds one token, `->`, which marks a `def`'s return type, as starlark-rust lexes it:
+//! <https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark_syntax/src/lexer.rs#L1450-L1451>.
+//! A `-` right before a `>` is in no valid program of the specification's, as no operand starts
+//! with `>`.
+//!
 //! A line's indentation counts only outside brackets, inside which lines join.
 
 use alloc::format;
@@ -79,7 +84,8 @@ tokens! {
         SlashSlashEq = "//=", LessLessEq = "<<=", GreaterGreaterEq = ">>=", StarStar = "**",
         SlashSlash = "//", LessLess = "<<", GreaterGreater = ">>", LessEq = "<=", GreaterEq = ">=",
         EqEq = "==", BangEq = "!=", PlusEq = "+=", MinusEq = "-=", StarEq = "*=", SlashEq = "/=",
-        PercentEq = "%=", AmpEq = "&=", PipeEq = "|=", CaretEq = "^=", Plus = "+", Minus = "-",
+        PercentEq = "%=", AmpEq = "&=", PipeEq = "|=", CaretEq = "^=", MinusGreater = "->",
+        Plus = "+", Minus = "-",
         Star = "*", Slash = "/", Percent = "%", Tilde = "~", Amp = "&", Pipe = "|", Caret = "^",
         Dot = ".", Comma = ",", Eq = "=", Semicolon = ";", Colon = ":", LeftParen = "(",
         RightParen = ")", LeftBracket = "[", RightBracket = "]", LeftBrace = "{", RightBrace = "}",

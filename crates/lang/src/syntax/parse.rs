@@ -2,6 +2,7 @@
 
 mod expr;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::rc::Rc;
@@ -10,8 +11,8 @@ use alloc::vec::Vec;
 
 use super::lex::{Keyword, Punct, Token, TokenKind, lex};
 use super::{
-    Branch, Def, Expr, ExprKind, Load, LoadName, Module, Name, Param, Simple, Statement, Step,
-    Target,
+    Branch, Def, Expr, ExprKind, KeyType, Load, LoadName, Module, Name, Param, Simple, Statement,
+    Step, Target, Type,
 };
 use crate::problem::{Fault, refusal};
 use crate::value::{FileId, Span};
@@ -128,7 +129,8 @@ impl Parser<'_> {
         }
         let expr = self.expressions()?;
         if self.at_punct(Punct::Colon) {
-            return Err(annotation(self.peek().span, ":"));
+            let message = refusal("an annotation of a variable", "drop the `:` and the type");
+            return Err(Fault::new(self.peek().span, message));
         }
         if let Some(message) = left_out(&self.peek().kind, At::Target) {
             return Err(Fault::new(self.peek().span, message));
@@ -162,11 +164,11 @@ impl Parser<'_> {
         let name = self.name("the function's name")?;
         let open = self.expect_punct(Punct::LeftParen, "`(`")?;
         let (params, positional) = self.nested(open, Self::params)?;
-        if self.at_punct(Punct::Minus)
-            && matches!(self.peek_next(), Some(TokenKind::Punct(Punct::Greater)))
-        {
-            return Err(annotation(self.peek().span, "->"));
-        }
+        let returns = if self.eat_punct(Punct::MinusGreater) {
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
         // The parameters' defaults run where the `def` does, so only the body's depth is what a
         // call of the function adds.
         self.deepest = 0;
@@ -177,6 +179,7 @@ impl Parser<'_> {
             name,
             params,
             positional,
+            returns,
             body,
             locals,
             depth: self.deepest,
@@ -255,15 +258,108 @@ impl Parser<'_> {
 
     fn param(&mut self) -> Result<Param, Fault> {
         let name = self.name("a parameter's name, or `*`")?;
-        if self.at_punct(Punct::Colon) {
-            return Err(annotation(self.peek().span, ":"));
-        }
+        let annotation = if self.eat_punct(Punct::Colon) {
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
         let default = if self.eat_punct(Punct::Eq) {
             Some(self.test()?)
         } else {
             None
         };
-        Ok(Param { name, default })
+        Ok(Param {
+            name,
+            annotation,
+            default,
+        })
+    }
+
+    fn type_expr(&mut self) -> Result<Type, Fault> {
+        let name = self.name("a type, as `str` or `list[int]`")?;
+        // A name of this closed set, resolved as Bazel resolves one against its universe of types,
+        // not evaluated to a value as starlark-rust does, so that `list` and `dict`, which the
+        // subset has no value for, name a type only with the types they hold:
+        // https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/net/starlark/java/eval/Module.java#L267-L305
+        let found = match name.text.as_str() {
+            "None" => Type::None,
+            "bool" => Type::Bool,
+            "int" => Type::Int,
+            "float" => Type::Float,
+            "str" => Type::Str,
+            "list" => {
+                let takes = "its elements' type: write `list[str]`";
+                let element = self.type_arguments(&name, takes, Self::type_expr)?;
+                Type::List(Box::new(element))
+            }
+            "dict" => {
+                let takes = "its keys' and values' types: write `dict[str, int]`";
+                let (key, value) = self.type_arguments(&name, takes, |parser| {
+                    let key = parser.key_type()?;
+                    parser.expect_punct(Punct::Comma, "`,` and the values' type")?;
+                    let value = parser.type_expr()?;
+                    Ok((key, value))
+                })?;
+                Type::Dict(key, Box::new(value))
+            }
+            text => {
+                let message = format!(
+                    "`{text}` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]` \
+                     or `dict[…, …]`"
+                );
+                return Err(Fault::new(name.span, message));
+            }
+        };
+        if self.at_punct(Punct::Pipe) {
+            let message = refusal("`|` in a type", "take one type");
+            return Err(Fault::new(self.peek().span, message));
+        }
+        Ok(found)
+    }
+
+    // A dict's key type, refused unless it is one that a key can be.
+    fn key_type(&mut self) -> Result<KeyType, Fault> {
+        let at = self.peek().span;
+        match self.type_expr()? {
+            Type::Int => Ok(KeyType::Int),
+            Type::Float => Ok(KeyType::Float),
+            Type::Str => Ok(KeyType::Str),
+            other @ (Type::None | Type::Bool | Type::List(_) | Type::Dict(..)) => {
+                let message = format!(
+                    "a dict's keys can't be {}: key a dict with strings or numbers, as `str`, \
+                     `int` or `float`",
+                    other.plural()
+                );
+                Err(Fault::new(at, message))
+            }
+        }
+    }
+
+    // The types that `inner` reads in the brackets after `name`, refused without them, in a
+    // message that ends in `takes`: what `name` takes, and how to write it.
+    fn type_arguments<T>(
+        &mut self,
+        name: &Name,
+        takes: &str,
+        inner: impl FnOnce(&mut Self) -> Result<T, Fault>,
+    ) -> Result<T, Fault> {
+        if !self.at_punct(Punct::LeftBracket) {
+            let message = format!("`{}` takes {takes}", name.text);
+            return Err(Fault::new(name.span, message));
+        }
+        let open = self.advance();
+        let depth = self.depth;
+        // A type can't be bound to a name, as a part of an expression can, so its depth alone is
+        // what its writer can change.
+        self.deeper().map_err(|deep| {
+            let message = format!("this nests {deep} deep: nest a type at most {MAX_NESTING} deep");
+            Fault::new(open, message)
+        })?;
+        let arguments = inner(self);
+        self.depth = depth;
+        let arguments = arguments?;
+        self.expect_punct(Punct::RightBracket, "`]`")?;
+        Ok(arguments)
     }
 
     // A block's `:`, then its statements one level deeper than the header at `header`: an indented
@@ -408,17 +504,24 @@ impl Parser<'_> {
 
     // Goes one level deeper, refused past `MAX_NESTING`. The caller restores the depth.
     fn nest(&mut self, at: Span) -> Result<(), Fault> {
+        self.deeper().map_err(|deep| {
+            let message = format!(
+                "this nests {deep} deep: nest expressions and blocks at most {MAX_NESTING} deep, \
+                 binding inner parts to names"
+            );
+            Fault::new(at, message)
+        })
+    }
+
+    // Goes one level deeper, or else gives the depth past `MAX_NESTING`. The caller restores the
+    // depth.
+    fn deeper(&mut self) -> Result<(), usize> {
         self.depth += 1;
         self.deepest = self.deepest.max(self.depth);
         if self.depth <= MAX_NESTING {
             return Ok(());
         }
-        let message = format!(
-            "this nests {} deep: nest expressions and blocks at most {MAX_NESTING} deep, binding \
-             inner parts to names",
-            self.depth
-        );
-        Err(Fault::new(at, message))
+        Err(self.depth)
     }
 
     fn name(&mut self, expected: &str) -> Result<Name, Fault> {
@@ -589,11 +692,6 @@ fn left_out(kind: &TokenKind, at: At) -> Option<String> {
         _ => return None,
     };
     Some(message)
-}
-
-fn annotation(at: Span, mark: &str) -> Fault {
-    let message = format!("type annotations are not in Starlark: drop the `{mark}` and the type");
-    Fault::new(at, message)
 }
 
 fn locals(params: &[Param], body: &[Step]) -> Vec<String> {

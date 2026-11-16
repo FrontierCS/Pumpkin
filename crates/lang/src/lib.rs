@@ -1,9 +1,16 @@
 //! Pumpkin's workflow language: a subset of Starlark, the language of Bazel's files, that
 //! [`evaluate`] runs to a [`Plan`]: the images to build, and the workflow that names them.
 //!
-//! The subset only refuses: a program it accepts means what the Starlark specification
-//! (<https://github.com/bazelbuild/starlark/blob/master/spec.md>) says it does, so every file it
-//! accepts is valid Starlark. The workflow is what the entry file's `workflow()` call gives.
+//! The subset only refuses, with one addition the Starlark specification
+//! (<https://github.com/bazelbuild/starlark/blob/master/spec.md>) lacks: type annotations on a
+//! `def`'s parameters and return, which starlark-rust
+//! (<https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/docs/types.md#L1-L25>)
+//! and Bazel
+//! (<https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/com/google/devtools/build/lib/packages/semantics/BuildLanguageOptions.java#L663-L675>)
+//! accept.
+//! An annotation only refuses too, where a value doesn't fit it, so a file the subset
+//! accepts, with its annotations dropped, is valid Starlark and means what the specification
+//! says it does. The workflow is what the entry file's `workflow()` call gives.
 //! `eval` runs `pumpkin`'s functions, which record what an evaluation gives in `plan`'s types,
 //! and `plan` reads it through `ir`: none uses one before it.
 //!
