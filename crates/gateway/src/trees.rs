@@ -4,14 +4,14 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use schema::ir::{AbsolutePath, Mode};
 use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{Entry, RelativePath, Root, ToSandbox, frame};
 use stdx::Deadline;
 
-use crate::{Part, Put, Route, Shared, broke, context};
+use crate::{Part, Put, Reply, Route, Shared, broke, context, out_of_turn};
 
 impl Shared {
     pub(crate) fn put<'a>(
@@ -62,10 +62,18 @@ impl Shared {
         self.send(&ToSandbox::Put { stream, dir, root }, &[], by)?;
         for entry in entries {
             // `sandboxd` replies before the end only to fail the tree, which then takes nothing
-            // more.
-            if let Ok(failed) = replies.try_recv() {
-                self.send(&ToSandbox::End { stream }, &[], by)?;
-                return failed.map_err(io::Error::other);
+            // more. A `done` is out of turn: this entry and the tree's end are still to send.
+            match replies.try_recv() {
+                Ok(Ok(())) => {
+                    let expected = "`failed`, or nothing before the tree's end";
+                    self.end(out_of_turn(stream, &Reply::Done, expected));
+                    return Err(self.ended());
+                }
+                Ok(Err(message)) => {
+                    self.send(&ToSandbox::End { stream }, &[], by)?;
+                    return Err(io::Error::other(message));
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
             }
             match entry {
                 Put::Dir(path, mode) => {

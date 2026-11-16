@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{fs, panic};
+use std::{fs, iter, panic};
 
 use expect_test::{Expect, expect};
 use gateway::{
@@ -150,6 +150,8 @@ fn connect(
         for (message, body) in answer(stream_of(&request).unwrap()) {
             let went_on = if message.is_null() {
                 hear_reply(&mut connection, &mut replies)
+            } else if message == "read_frame" {
+                frame::read::<ToSandbox>(&mut connection).unwrap().is_some()
             } else if message == "pause" {
                 thread::sleep(PAUSE);
                 true
@@ -605,6 +607,18 @@ fn put_large(session: &mut Session, by: Deadline) -> std::io::Result<()> {
     session.put(&dir, [Put::File(file, file_mode(), &bytes)], by)
 }
 
+// The put's entry waits for an op that the sandbox sends after its `done`, and the reader passes on
+// frames in the order they came, so the `done` is waiting when the put looks.
+fn put_after_op(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
+    let dir = AbsolutePath::try_from("/in".to_owned()).unwrap();
+    let entry = iter::once_with(|| {
+        let _ = next_op(arrivals);
+        let file = RelativePath::try_from("f".to_owned()).unwrap();
+        Put::File(file, file_mode(), b"hi")
+    });
+    format!("put: {}", outcome(session.put(&dir, entry, hung())))
+}
+
 fn late_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path) -> String {
     session.freeze(hung()).unwrap();
     let op = next_op(arrivals);
@@ -707,10 +721,14 @@ fn flight() -> Range<u32> {
     0..u32::try_from(MAX_MODEL_REQUESTS_IN_FLIGHT).unwrap()
 }
 
-// Not frames: `await_reply`, `pause`, `until_hang_up`, `stall` and `hang_up_unread` mark where the
-// fake sandbox waits, and `connect` acts on them.
+// Not frames: `await_reply`, `read_frame`, `pause`, `until_hang_up`, `stall` and `hang_up_unread`
+// mark where the fake sandbox waits, and `connect` acts on them.
 fn await_reply() -> (Value, Vec<u8>) {
     (Value::Null, Vec::new())
+}
+
+fn read_frame() -> (Value, Vec<u8>) {
+    (Value::from("read_frame"), Vec::new())
 }
 
 fn pause() -> (Value, Vec<u8>) {
@@ -833,12 +851,15 @@ fn sandbox_answers() {
 fn protocol_breaks() {
     check(
         fakes(
-            None,
+            Some(OpPayloadLimit::NONE),
             false,
             &[
                 (freeze_and_take, |s| vec![end(s), done(s)]),
                 (start_and_take, |s| vec![reply("exited", s), done(s)]),
                 (collect_and_take, |s| vec![dir(s, "a"), done(s), end(s)]),
+                (put_after_op, |s| {
+                    vec![done(s), op(0, json!({ "kind": "ops" }), 0), await_reply()]
+                }),
                 (freeze_and_take, |s| vec![done(s + 1), done(s)]),
                 (freeze_and_take, |s| vec![done(0), done(s)]),
                 (collect_and_take, |s| vec![dir(s, "a/b"), stall()]),
@@ -856,6 +877,7 @@ fn protocol_breaks() {
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent `end` on stream 1 out of turn: expected `done` or `failed`; ended: the sandbox broke the protocol: it sent `end` on stream 1 out of turn: expected `done` or `failed`
             start: ConnectionAborted: the sandbox broke the protocol: it sent `exited` on stream 1 out of turn: expected `done` or `failed`; ended: the sandbox broke the protocol: it sent `exited` on stream 1 out of turn: expected `done` or `failed`
             ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 1 out of turn: expected `entry`, `data`, `end` or `failed`; arrived ["a/"]; ended: the sandbox broke the protocol: it sent `done` on stream 1 out of turn: expected `entry`, `data`, `end` or `failed`
+            put: ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 1 out of turn: expected `failed`, or nothing before the tree's end
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 2 out of turn: expected nothing on a stream no request has opened; ended: the sandbox broke the protocol: it sent `done` on stream 2 out of turn: expected nothing on a stream no request has opened
             freeze: ConnectionAborted: the sandbox broke the protocol: it sent `done` on stream 0 out of turn: expected nothing on a stream no request has opened; ended: the sandbox broke the protocol: it sent `done` on stream 0 out of turn: expected nothing on a stream no request has opened
             ConnectionAborted: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2); arrived []; ended: the sandbox broke the protocol: the tree it sent on stream 1 is malformed: a/b: No such file or directory (os error 2)
@@ -1102,15 +1124,16 @@ fn deadlines() {
             false,
             &[
                 // The sandbox pauses, or stops reading a large put, then reads on: the requests
-                // wait, as their deadlines haven't passed. It answers the put before reading it
-                // all, which the gateway takes once the put is all written.
+                // wait, as their deadlines haven't passed. It answers the put after reading its
+                // entry but before reading the entry's data, and the gateway takes the answer once
+                // the put is all written.
                 (
                     |session, _, _| freezes(session, hung()),
                     |s| vec![pause(), done(s)],
                 ),
                 (
                     |session, _, _| outcome(put_large(session, hung())),
-                    |s| vec![pause(), done(s), await_reply()],
+                    |s| vec![read_frame(), pause(), done(s), await_reply()],
                 ),
                 // The sandbox answers nothing, reads nothing past a large put's first frame, or
                 // sends a tree that never ends, until the gateway hangs up.
