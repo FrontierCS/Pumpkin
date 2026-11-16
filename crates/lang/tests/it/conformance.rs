@@ -480,13 +480,13 @@ fn suites() {
                3 an int can't be unpacked into names: give a list or a tuple of 1
                3 an int can't be unpacked into names: give a list or a tuple of 3
                3 comparisons don't chain in Starlark: join them with `and`
-               2 `**` before an argument, which passes a dict's entries, is not in Pumpkin's Starlark: name each keyword argument
                2 `3` indexes no element of a list of 3: index from -3 to 2
                2 `M` is bound already: bind each global once
                2 `` is no label: start it with `//`, the root
                2 `dir`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
                2 `enumerate`, a builtin of Starlark's, is not in Pumpkin's Starlark: write the value out, or build it with a comprehension
                2 `find` of a string is not in Pumpkin's Starlark: call one of `endswith`, `format`, `join`, `replace`, `split`, `startswith`
+               2 `format` of a bool is not in Pumpkin's Starlark: give it an int or a string
                2 `g` is used before it is bound: bind it above this use
                2 `getattr`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
                2 `in` can't find an int in a string: look for a string in it

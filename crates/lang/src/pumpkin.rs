@@ -190,12 +190,12 @@ fn workflow(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Resu
         let message = "`workflow()` is called a second time: call it once";
         return Err(Fault::new(at, message).note("it is first called at", Some(first.at)));
     }
-    let fields = (call.keyword.iter())
-        .map(|(name, value)| {
+    let fields = (call.keywords())
+        .map(|keyword| {
             Ok(Entry {
-                key: Key::Str(Text::new(&name.text, name.span, call.budget)?),
-                key_span: name.span,
-                value: value.clone(),
+                key: Key::Str(Text::new(keyword.name, keyword.span, call.budget)?),
+                key_span: keyword.span,
+                value: keyword.value.clone(),
             })
         })
         .collect::<Result<_, Fault>>()?;

@@ -893,11 +893,25 @@ Y = 2
                   |          ^"#]],
     );
     check(
-        "workflow(**X)",
+        "workflow(**X, 1)",
         &expect![[r#"
-            text.star:1:10: `**` before an argument, which passes a dict's entries, is not in Pumpkin's Starlark: name each keyword argument
-                1 | workflow(**X)
-                  |          ^^"#]],
+        text.star:1:15: a positional argument follows `**`: put positional arguments first
+            1 | workflow(**X, 1)
+              |               ^"#]],
+    );
+    check(
+        "workflow(**X, name = 1)",
+        &expect![[r#"
+        text.star:1:15: a keyword argument follows `**`: put `**` last
+            1 | workflow(**X, name = 1)
+              |               ^^^^"#]],
+    );
+    check(
+        "workflow(**X, **X)",
+        &expect![[r#"
+        text.star:1:15: this is a second `**`: pass one dict, joining them with `|`
+            1 | workflow(**X, **X)
+              |               ^^"#]],
     );
     check(
         "X = lambda: 1",
@@ -2682,6 +2696,125 @@ X = f(a = 1, a = 2)"#,
             lib.star:3:14: `a` is given twice: give it once
                 3 | X = f(a = 1, a = 2)
                   |              ^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def codex(model, *, effort = "low"):
+    return "codex {} {}".format(model, effort)
+def claude(model, *, thinking):
+    return "claude {} {}".format(model, thinking)
+HARNESSES = {"codex": (codex, {"effort": "high"}), "claude": (claude, {"thinking": "on"})}
+OPTIONS = {"a": 1, "b": 2}
+PASSED = [h("m", **o) for h, o in HARNESSES.values()] + ["{a} {b}".format(**OPTIONS)]
+fail(", ".join(PASSED + [str(len([0], **{}))]))"#,
+        &expect![[r#"
+            lib.star:8:1: fail: codex m high, claude m on, 1 2, 1
+                8 | fail(", ".join(PASSED + [str(len([0], **{}))]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(a):
+    return a
+X = f(**{"b": 1})"#,
+        &expect![[r#"
+            lib.star:3:9: `b` is no parameter of `f`: expected one of `a`
+                3 | X = f(**{"b": 1})
+                  |         ^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(a, *, b):
+    return a
+X = f(1, **{"a": 2})"#,
+        &expect![[r#"
+            lib.star:3:12: `a` is given by position already: give it once
+                3 | X = f(1, **{"a": 2})
+                  |            ^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(a, *, b):
+    return a
+X = f(1, **{})"#,
+        &expect![[r#"
+            lib.star:3:5: `f` lacks `b`: give it
+                3 | X = f(1, **{})
+                  |     ^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+def f(a, *, b):
+    return a
+X = f(1, b = 2, **{"b": 3})"#,
+        &expect![[r#"
+            lib.star:3:19: `b` is given by name already, and again with `**`: give it once
+                3 | X = f(1, b = 2, **{"b": 3})
+                  |                   ^^^^^^^^
+                it is first given at lib.star:3:10"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+OPTIONS = [1]
+X = len("a", **OPTIONS)"#,
+        &expect![[r#"
+            lib.star:2:16: a list can't be passed with `**`: pass a dict of keyword arguments
+                2 | X = len("a", **OPTIONS)
+                  |                ^^^^^^^
+                the value, a list, is made at lib.star:1:11"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+OPTIONS = {1: 2}
+X = len([], **OPTIONS)"#,
+        &expect![[r#"
+            lib.star:2:15: `1`, a key of the dict passed with `**`, is no string: key each keyword argument by its name
+                2 | X = len([], **OPTIONS)
+                  |               ^^^^^^^
+                the key, `1`, is made at lib.star:1:12"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+X = len([], **{"x": 1})"#,
+        &expect![[r#"
+            lib.star:1:15: `len` takes no keyword argument `x`: give it 1 argument, by position
+                1 | X = len([], **{"x": 1})
+                  |               ^^^^^^^^"#]],
+    );
+    check(
+        r#"
+#- //text.star
+load("//lib.star", "X")
+#- //lib.star
+X = arg("n", str, **{"defualt": "x"})"#,
+        &expect![[r#"
+            lib.star:1:21: `defualt` is no parameter of `arg`: expected one of `name`, `type`, `default`
+                1 | X = arg("n", str, **{"defualt": "x"})
+                  |                     ^^^^^^^^^^^^^^^^"#]],
     );
     check(
         r#"

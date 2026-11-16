@@ -282,6 +282,9 @@ impl<'m> Uses<'m, '_> {
         for (_, arg) in &args.keyword {
             self.expr(arg);
         }
+        if let Some(kwargs) = &args.kwargs {
+            self.expr(kwargs);
+        }
     }
 
     /// Checks `comprehension`, whose first iterable is in the block around it, and the rest of

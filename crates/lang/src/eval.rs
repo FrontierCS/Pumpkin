@@ -516,12 +516,11 @@ impl<'l, L: Loader> Evaluation<'l, L> {
         let keyword = (args.keyword.iter())
             .map(|(name, arg)| Ok((name, self.eval(scope, arg)?)))
             .collect::<Result<_, Fault>>()?;
-        Ok(Call {
-            at,
-            positional,
-            keyword,
-            budget: self.budget,
-        })
+        let kwargs = match &args.kwargs {
+            Some(kwargs) => Some((kwargs.span, self.eval(scope, kwargs)?)),
+            None => None,
+        };
+        Call::new(at, positional, keyword, kwargs, self.budget)
     }
 
     fn suffixed(&mut self, scope: &Scope<'_>, expr: &Expr) -> Result<Value, Fault> {
