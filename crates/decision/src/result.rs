@@ -12,6 +12,7 @@ use serde_json::{Number, Value};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JudgeResult {
     score: Option<Number>,
+    passed: Option<bool>,
     returned: Returned,
 }
 
@@ -21,9 +22,14 @@ impl JudgeResult {
     /// # Errors
     ///
     /// Fails, with the reason, if the file is not JSON, nests deeper than [`RESULT_MAX_DEPTH`],
-    /// or if its score breaks the rule of [`ResultSpec::score`].
+    /// or if its score or its passing breaks the rule of [`ResultSpec::score`] or
+    /// [`ResultSpec::passed`].
     pub fn parse(spec: &ResultSpec, json: &[u8]) -> Result<Self, String> {
-        let ResultSpec { score, returns } = spec;
+        let ResultSpec {
+            score,
+            passed,
+            returns,
+        } = spec;
         let document: Value = serde_json::from_slice(json)
             .map_err(|error| format!("result.json is not JSON: {error}"))?;
         if depth(&document) > RESULT_MAX_DEPTH {
@@ -41,17 +47,41 @@ impl JudgeResult {
                 ));
             }
         };
+        let passed = match passed
+            .as_ref()
+            .map(|pointer| (pointer, pointer.resolve(&document)))
+        {
+            None | Some((_, None | Some(Value::Null))) => None,
+            Some((_, Some(Value::Bool(passed)))) => Some(*passed),
+            Some((_, Some(Value::Number(number)))) if number.as_u64() == Some(1) => Some(true),
+            Some((_, Some(Value::Number(number)))) if number.as_u64() == Some(0) => Some(false),
+            Some((pointer, Some(_))) => {
+                return Err(format!(
+                    "whether the call passed, at `{pointer}`, is neither true nor false, nor 1 \
+                     nor 0: write one of them there, or null"
+                ));
+            }
+        };
         let returned = returns
             .iter()
             .filter_map(|(key, pointer)| {
                 Some((key.to_owned(), pointer.resolve(&document)?.clone()))
             })
             .collect();
-        Ok(Self { score, returned })
+        Ok(Self {
+            score,
+            passed,
+            returned,
+        })
     }
 
     pub fn score(&self) -> Option<&Number> {
         self.score.as_ref()
+    }
+
+    /// Whether the call passed, if the result says, as [`ResultSpec::passed`] reads it.
+    pub fn passed(&self) -> Option<bool> {
+        self.passed
     }
 
     /// The fields the caller's reply returns, by key: those the judge's
@@ -61,7 +91,11 @@ impl JudgeResult {
     }
 
     pub(super) fn job_state(&self) -> JobState {
-        let Self { score, returned } = self;
+        let Self {
+            score,
+            passed: _,
+            returned,
+        } = self;
         JobState::Completed {
             returned: returned.clone(),
             scored: score.is_some(),

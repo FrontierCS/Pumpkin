@@ -618,7 +618,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
 }
 
 /// The JSON form of an outcome: `{"score": s, "work_end": w, "verdict": v}`, where the score
-/// is `null` if there is none.
+/// is `null` if there is none, and `"passed": p` too where the final judge's result says.
 pub(super) fn outcome_json(outcome: &Outcome) -> Value {
     let Outcome { work_end, verdict } = outcome;
     let work_end = match work_end {
@@ -643,7 +643,11 @@ pub(super) fn outcome_json(outcome: &Outcome) -> Value {
             "failure": failure_json(failure),
         }),
     };
-    json!({ "score": outcome.score(), "work_end": work_end, "verdict": verdict })
+    let mut json = json!({ "score": outcome.score(), "work_end": work_end, "verdict": verdict });
+    if let Some(passed) = outcome.passed() {
+        json["passed"] = Value::Bool(passed);
+    }
+    json
 }
 
 fn submission_json(submission: &Submission) -> Value {
@@ -651,11 +655,13 @@ fn submission_json(submission: &Submission) -> Value {
     json!({ "payload": payload_json(payload), "finalized": finalized })
 }
 
+/// `{"score": s, "returned": r}`, and `"passed": p` too where the result says.
 fn result_json(result: &JudgeResult) -> Value {
-    json!({
-        "score": result.score(),
-        "returned": result.returned(),
-    })
+    let mut json = json!({ "score": result.score(), "returned": result.returned() });
+    if let Some(passed) = result.passed() {
+        json["passed"] = Value::Bool(passed);
+    }
+    json
 }
 
 fn failure_json(failure: &Failure) -> Value {

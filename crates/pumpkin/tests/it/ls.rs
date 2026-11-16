@@ -179,6 +179,40 @@ fn lists() {
 }
 
 #[test]
+fn lists_whether_runs_passed() {
+    let scratch = Scratch::new("lists-passed");
+    let ended = |id: &str, outcome| {
+        write_record(&scratch, id, true, Some(outcome));
+        scratch.write(
+            &format!("runs/{id}/ir.json"),
+            &json!({ "name": "examples/hello" }),
+        );
+    };
+    ended(
+        "20261107-120010-1b8a6390",
+        json!({ "state": "finished", "score": 90, "passed": true }),
+    );
+    ended(
+        "20261107-120020-1b8a6391",
+        json!({ "state": "finished", "score": 77.5, "passed": false }),
+    );
+    let ls = Step::from(scratch.pumpkin(&["ls", "--runs", "runs"]));
+    check(
+        &scratch,
+        [ls],
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin ls --runs runs
+        exit status: Some(0)
+        printed:
+          20261107-120010-1b8a6390 finished          -  90 pass         -  examples/hello
+          20261107-120020-1b8a6391 finished          -  77.5 fail       -  examples/hello
+          2 runs: 2 finished"#]],
+    );
+}
+
+#[test]
 fn lists_the_last_day() {
     let scratch = Scratch::new("lists-the-last-day");
     let ended = |id: &str, days: u64| {

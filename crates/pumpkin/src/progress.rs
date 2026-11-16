@@ -375,7 +375,15 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
 /// The score column of a run that ended as `ending` says: its score, or `-`.
 fn score(ending: &Ending) -> String {
     match ending {
-        Ending::Scored { score, after: _ } => shown_score(score),
+        Ending::Scored {
+            score,
+            passed,
+            after: _,
+        } => match passed {
+            Some(true) => format!("{} pass", shown_score(score)),
+            Some(false) => format!("{} fail", shown_score(score)),
+            None => shown_score(score),
+        },
         Ending::Unscored(_)
         | Ending::NoResult { .. }
         | Ending::Failed(_)
@@ -706,6 +714,20 @@ pub(crate) fn shown_score(score: &str) -> String {
     let shown = format!("{value:.decimals$}");
     let shown = shown.trim_end_matches('0').trim_end_matches('.');
     if shown == "-0" { "0" } else { shown }.to_owned()
+}
+
+/// How a run that finished with `score`, and passed or failed if its final judge said, ended, as
+/// a sentence that follows its id says it: `finished with a score of 77.5, and failed, <after>`.
+pub(crate) fn scored(score: &str, passed: Option<bool>, after: &str) -> String {
+    let passed = match passed {
+        Some(true) => ", and passed",
+        Some(false) => ", and failed",
+        None => "",
+    };
+    format!(
+        "finished with a score of {}{passed}, {after}",
+        shown_score(score)
+    )
 }
 
 /// `span` to the second, for a glance, as a sentence says it: as `45s`, `3m05s`, or past an hour

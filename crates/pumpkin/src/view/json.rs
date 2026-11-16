@@ -135,10 +135,11 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
 /// How a run that ended as `ending` says ended, in words that follow its id.
 fn how(ending: &Ending) -> String {
     match ending {
-        Ending::Scored { score, after } => format!(
-            "finished with a score of {}, {after}",
-            progress::shown_score(score)
-        ),
+        Ending::Scored {
+            score,
+            passed,
+            after,
+        } => progress::scored(score, *passed, after),
         Ending::Unscored(why) | Ending::NoResult { why, .. } => why.clone(),
         Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),

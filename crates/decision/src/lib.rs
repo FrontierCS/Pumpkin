@@ -310,6 +310,14 @@ impl Outcome {
             Verdict::NoSubmission | Verdict::NoResult { .. } => None,
         }
     }
+
+    /// Whether the selected submission passed, if the final judge's result says.
+    pub fn passed(&self) -> Option<bool> {
+        match &self.verdict {
+            Verdict::Judged { result, .. } => result.passed(),
+            Verdict::NoSubmission | Verdict::NoResult { .. } => None,
+        }
+    }
 }
 
 /// What the final judge made of the selected submission.

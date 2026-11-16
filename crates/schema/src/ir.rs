@@ -244,6 +244,11 @@ pub struct ResultSpec {
     /// Points to the call's score in the result: a number. The result is scored exactly when
     /// it does; `null` or nothing there means no score, and any other value is invalid.
     pub score: JsonPointer,
+    /// Points to whether the call passed, in the result: `true` or `false`, or `1` or `0`.
+    /// `null` or nothing there means the result doesn't say, and any other value is invalid. A
+    /// workflow that names none leaves every call's passing unsaid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed: Option<JsonPointer>,
     /// The fields of the result that the caller's reply returns. A field the result lacks is
     /// left out.
     pub returns: Returns,

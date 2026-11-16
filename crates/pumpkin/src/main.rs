@@ -1165,11 +1165,15 @@ fn end(
 ) -> Result<ExitCode, String> {
     let id = record.id();
     let (exit, how, judge_stderr) = match ending {
-        Ending::Scored { score, after } => {
-            let score = progress::shown_score(score);
-            let how = format!("finished with a score of {score}, {after}");
-            (ExitCode::SUCCESS, how, None)
-        }
+        Ending::Scored {
+            score,
+            passed,
+            after,
+        } => (
+            ExitCode::SUCCESS,
+            progress::scored(score, *passed, after),
+            None,
+        ),
         Ending::Unscored(why) => (ExitCode::from(3), why.clone(), None),
         Ending::NoResult { why, judge_stderr } => {
             (ExitCode::from(3), why.clone(), Some(judge_stderr))

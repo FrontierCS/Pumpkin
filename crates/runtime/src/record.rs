@@ -321,9 +321,14 @@ pub struct Record {
 /// and says how in words, but a score, which the reader words as it shows any score.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// The run finished with a score, the JSON number `score`, after its work phase ended as
-    /// `after` says: `after the work phase ended <how>`.
-    Scored { score: String, after: String },
+    /// The run finished with a score, the JSON number `score`, and passed or failed if its final
+    /// judge's result says, after its work phase ended as `after` says: `after the work phase
+    /// ended <how>`.
+    Scored {
+        score: String,
+        passed: Option<bool>,
+        after: String,
+    },
     /// The run finished without a score, as the agent submitted nothing or the verdict has
     /// none: `finished without a score: <why>`.
     Unscored(String),
@@ -1062,6 +1067,7 @@ fn finished(outcome: &serde_json::Value, dir: &Path) -> Ending {
     if !score.is_null() {
         return Ending::Scored {
             score: score.to_string(),
+            passed: outcome["passed"].as_bool(),
             after: format!("after the work phase ended {ended}"),
         };
     }

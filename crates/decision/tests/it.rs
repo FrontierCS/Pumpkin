@@ -462,9 +462,11 @@ fn outcome_text(outcome: &Outcome) -> String {
         WorkEnd::AgentExited(status) => format!("the agent's exit, {status:?}"),
         WorkEnd::AgentFailed(reason) => format!("the agent's failure, {reason}"),
     };
-    let score = match outcome.score() {
-        Some(score) => format!("score {score}"),
-        None => "no score".to_owned(),
+    let score = match (outcome.score(), outcome.passed()) {
+        (Some(score), Some(true)) => format!("score {score}, passed"),
+        (Some(score), Some(false)) => format!("score {score}, failed"),
+        (Some(score), None) => format!("score {score}"),
+        (None, _) => "no score".to_owned(),
     };
     let verdict = match &outcome.verdict {
         Verdict::NoSubmission => "no submission".to_owned(),
@@ -1249,6 +1251,106 @@ fn reports_for_the_log() {
             3200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"scored":true,"remaining":{"calls":99,"seconds":11998}}
         "#]],
+    );
+}
+
+/// [`WORKFLOW`] with the score judge's result saying whether the call passed, at `/passed`.
+fn say_passed(ir: &mut Value) {
+    let score = ir["score"]["role"].clone();
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let role = roles.iter_mut().find(|role| role["name"] == score).unwrap();
+    role["runtime"]["judge"]["result"]["passed"] = json!("/passed");
+}
+
+/// A run whose finalized submission the score judge's `result` judges.
+fn passing_script(result: &str) -> String {
+    format!(
+        "
+        0 agent_started
+        1000 submit submit 10 final
+        1100 agent_exited 0
+        1500 judge_started 0
+        2000 judge_exited 0
+        2100 collected 0 {result}
+        "
+    )
+}
+
+#[test]
+fn passes() {
+    check(
+        say_passed,
+        &passing_script(r#"{"raw_score": 77.5, "passed": false}"#),
+        &expect![[r#"
+        start
+          start the agent
+          (tick due at 18010000)
+        0 agent_started
+          (tick due at 18000000)
+        1000 submit submit 10 final
+          reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":60}
+          (tick due at 61000)
+        1100 agent_exited 0
+          tear down the agent
+          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+          (tick due at 18210000)
+        1500 judge_started 0
+        2000 judge_exited 0
+        2100 collected 0 {"raw_score": 77.5, "passed": false}
+          finish: score 77.5, failed; work ended at the agent's exit, Code(0); the finalized submission, op 1's payload of 10 bytes, judged, returning {"raw_score":77.5}
+    "#]],
+    );
+}
+
+#[test]
+fn fails() {
+    check(
+        say_passed,
+        &passing_script(r#"{"raw_score": 90, "passed": 1}"#),
+        &expect![[r#"
+        start
+          start the agent
+          (tick due at 18010000)
+        0 agent_started
+          (tick due at 18000000)
+        1000 submit submit 10 final
+          reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":60}
+          (tick due at 61000)
+        1100 agent_exited 0
+          tear down the agent
+          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+          (tick due at 18210000)
+        1500 judge_started 0
+        2000 judge_exited 0
+        2100 collected 0 {"raw_score": 90, "passed": 1}
+          finish: score 90, passed; work ended at the agent's exit, Code(0); the finalized submission, op 1's payload of 10 bytes, judged, returning {"raw_score":90}
+    "#]],
+    );
+}
+
+#[test]
+fn refuses_a_passing_neither_true_nor_false() {
+    check(
+        say_passed,
+        &passing_script(r#"{"raw_score": 90, "passed": "yes"}"#),
+        &expect![[r#"
+        start
+          start the agent
+          (tick due at 18010000)
+        0 agent_started
+          (tick due at 18000000)
+        1000 submit submit 10 final
+          reply to op 1: {"kind":"submit","state":"accepted","remaining_seconds":60}
+          (tick due at 61000)
+        1100 agent_exited 0
+          tear down the agent
+          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+          (tick due at 18210000)
+        1500 judge_started 0
+        2000 judge_exited 0
+        2100 collected 0 {"raw_score": 90, "passed": "yes"}
+          finish: no score; work ended at the agent's exit, Code(0); the finalized submission, op 1's payload of 10 bytes, got no result, InvalidResult("whether the call passed, at `/passed`, is neither true nor false, nor 1 nor 0: write one of them there, or null")
+    "#]],
     );
 }
 
