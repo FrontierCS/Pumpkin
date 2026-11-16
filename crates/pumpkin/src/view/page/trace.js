@@ -17,7 +17,7 @@
 // each poll, and the rows that differ taken; and the search reads the trace's text a chunk at a
 // time (`search.js`).
 
-import { POLL_MS, Refused, STATIC, byId, fill, follow, get, h, keepSetting, plural, route, sentence, setKeys, setQuery, setting, show, tone, typing } from "./h.js";
+import { POLL_MS, Refused, STATIC, byId, fill, follow, get, grip, h, plural, route, sentence, setKeys, setQuery, show, tone, typing } from "./h.js";
 import { forgetExchanges, inspect } from "./inspector.js";
 import { drawRow, keyOf, layout, matches, stepFolded, threadFolded } from "./ledger.js";
 import { logView } from "./log.js";
@@ -53,9 +53,6 @@ const SETTLE_MS = 100;
 // The windows of entries kept, those read last; one further from view is dropped, and read again
 // when shown.
 const KEPT_WINDOWS = 48;
-// The inspector's width, its bounds and its default, in px, which is less in a narrow window.
-const INSPECTOR_PX = { min: 320, max: 720, default: 440, share: 0.34 };
-const inspectorDefault = () => Math.min(INSPECTOR_PX.default, Math.round(innerWidth * INSPECTOR_PX.share));
 
 /** @typedef {"trace" | "stats" | "log"} View */
 /** @returns {View} */
@@ -152,7 +149,6 @@ export async function traceView(id) {
   const status = h("span", { class: "counted status" }, "Reading the steps of " + caller.replace("-", " ") + "…");
   const toolbar = h("div", { class: "filter toolbar" }, search, prev, next, found, folds, kinds, threads, status);
   const inspector = h("div", { class: "inspector panel" });
-  const grip = h("div", { class: "grip", tabindex: 0, role: "separator", "aria-orientation": "vertical", title: "Drag to widen the inspector (arrows too; double-click resets)" });
   const startedOver = h("p", { class: "empty" });
   /** @type {RowList<Row>} */
   const list = new RowList(
@@ -173,14 +169,9 @@ export async function traceView(id) {
     },
     (first, end) => seen(first, end),
   );
-  const split = h("div", { class: "trace-split" + (caller === "agent" ? "" : " of-judge") }, h("div", { class: "left" }, list.node), grip, inspector);
-  const width = Number(setting("inspector")) || inspectorDefault();
-  const widen = (/** @type {number} */ px) => {
-    const kept = Math.round(Math.min(INSPECTOR_PX.max, Math.max(INSPECTOR_PX.min, px)));
-    split.style.setProperty("--inspector", kept + "px");
-    return kept;
-  };
-  widen(width);
+  const split = h("div", { class: "trace-split" + (caller === "agent" ? "" : " of-judge") });
+  const inspectorGrip = grip({ name: "inspector", across: "x", sized: inspector, on: split, property: "--inspector", title: "Drag to widen the inspector" });
+  fill(split, h("div", { class: "left" }, list.node), inspectorGrip, inspector);
   const pane = h("div", { class: "pane" }, toolbar, startedOver, timeline.node, split);
   // The Statistics and Log tabs, each made when first shown.
   /** @type {Partial<Record<View, { node: HTMLElement, show: () => void, key: (event: KeyboardEvent) => void }>>} */
@@ -202,24 +193,6 @@ export async function traceView(id) {
     fill(panes, other.node);
     other.show();
   };
-
-  // ---- the inspector's width: dragged, stepped by arrows, reset by a double-click
-
-  grip.addEventListener("pointerdown", (event) => {
-    grip.setPointerCapture(event.pointerId);
-    const move = (/** @type {PointerEvent} */ moved) => widen(split.getBoundingClientRect().right - moved.clientX);
-    const up = () => {
-      grip.removeEventListener("pointermove", move);
-      keepSetting("inspector", String(widen(inspector.getBoundingClientRect().width)));
-    };
-    grip.addEventListener("pointermove", move);
-    grip.addEventListener("pointerup", up, { once: true });
-  });
-  grip.addEventListener("dblclick", () => keepSetting("inspector", String(widen(inspectorDefault()))));
-  grip.addEventListener("keydown", (event) => {
-    const by = { ArrowLeft: 16, ArrowRight: -16 }[event.key];
-    if (by) keepSetting("inspector", String(widen(inspector.getBoundingClientRect().width + by)));
-  });
 
   // ---- the entries: read in windows of the steps in view, and kept
 

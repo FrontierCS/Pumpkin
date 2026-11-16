@@ -1,6 +1,7 @@
 // What the page's views share: making elements, the address, reading the server or the files of
-// an export, following a live run, and the units numbers and times are shown in. Text from a
-// record is only ever set as text, by `h` and `svg`, never as markup.
+// an export, following a live run, the units numbers and times are shown in, and the grips that
+// size the panes, whose lengths this browser keeps. Text from a record is only ever set as text,
+// by `h` and `svg`, never as markup.
 //
 // Every word or phrase of the interface (a tab, a button, a menu's option, a column's head, a
 // field's name, a state, a title, a hover's text) is in sentence case: its first letter a capital,
@@ -428,10 +429,12 @@ export const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 /** @param {string | null | undefined} nanos */
 export const seconds = (nanos) => (nanos === null || nanos === undefined ? null : Number(nanos) / 1e9);
 
+// ---- grips: the panes' lengths, set by dragging and kept in this browser
+
 // A setting of this browser's, such as a panel's width, which the page works without: storage
 // can be refused, as in a private window.
 /** @param {string} name @returns {string | null} */
-export function setting(name) {
+function setting(name) {
   try {
     return localStorage.getItem("pumpkin." + name);
   } catch {
@@ -439,10 +442,85 @@ export function setting(name) {
   }
 }
 /** @param {string} name @param {string} value */
-export function keepSetting(name, value) {
+function keepSetting(name, value) {
   try {
     localStorage.setItem("pumpkin." + name, value);
   } catch {
     // Not kept: the setting is the default next time.
   }
+}
+/** @param {string} name */
+function forgetSetting(name) {
+  try {
+    localStorage.removeItem("pumpkin." + name);
+  } catch {
+    // Not forgotten: the setting is kept next time.
+  }
+}
+
+// How far a press of an arrow moves a grip, unless its pane comes in steps of its own.
+const GRIP_STEP_PX = 16;
+// The arrows that move a grip across columns (`x`) or rows (`y`), each to the left or up (-1), or
+// to the right or down (1).
+/** @type {Record<"x" | "y", Record<string, -1 | 1>>} */
+const GRIP_ARROWS = { x: { ArrowLeft: -1, ArrowRight: 1 }, y: { ArrowUp: -1, ArrowDown: 1 } };
+
+// A grip between two panes that sizes the pane `sized` by the CSS length `property` of `on`, kept
+// as the setting `name`: by dragging it, by its arrows, `stepPx` a press, and back to the style's
+// default by a double-click. `across` is "x" for a grip between columns, which sizes the column
+// after it, and "y" for one between rows, which sizes the row before it. The style bounds the
+// length.
+/**
+ * @param {{ name: string, across: "x" | "y", sized: HTMLElement, on: HTMLElement, property: "--side" | "--pane" | "--inspector", stepPx?: number, title: string }} spec
+ * @returns {HTMLElement}
+ */
+export function grip({ name, across, sized, on, property, stepPx = GRIP_STEP_PX, title }) {
+  const node = h("div", { class: "grip" + (across === "y" ? " across-y" : ""), tabindex: 0, role: "separator", "aria-orientation": across === "x" ? "vertical" : "horizontal", title: title + " (arrows too; double-click resets)" });
+  // The column after the grip narrows as the grip moves right; the row before it grows as it
+  // moves down.
+  const grows = across === "x" ? -1 : 1;
+  const set = (/** @type {number} */ px) => on.style.setProperty(property, Math.round(px) + "px");
+  const lengthPx = () => (across === "x" ? sized.getBoundingClientRect().width : sized.getBoundingClientRect().height);
+  const at = (/** @type {PointerEvent} */ event) => (across === "x" ? event.clientX : event.clientY);
+  const measure = () => ({ px: lengthPx(), property: on.style.getPropertyValue(property) });
+  // Keeps the length shown, if it differs from the one `before`; else puts the property back as it
+  // was, so that a click, or a push against a bound, leaves a pane at its default following the
+  // window as it is resized.
+  const keepChanged = (/** @type {{ px: number, property: string }} */ before) => {
+    const afterPx = Math.round(lengthPx());
+    if (afterPx !== Math.round(before.px)) {
+      set(afterPx);
+      keepSetting(name, String(afterPx));
+    } else if (before.property) on.style.setProperty(property, before.property);
+    else on.style.removeProperty(property);
+  };
+  const keptPx = Number(setting(name));
+  if (keptPx) set(keptPx);
+  node.addEventListener("pointerdown", (down) => {
+    node.setPointerCapture(down.pointerId);
+    const [fromPx, before] = [at(down), measure()];
+    const move = (/** @type {PointerEvent} */ moved) => set(before.px + grows * (at(moved) - fromPx));
+    // The grip loses the pointer when it is let go and when the browser cancels the drag: either
+    // ends the drag, at the length shown.
+    const end = () => {
+      node.removeEventListener("pointermove", move);
+      keepChanged(before);
+    };
+    node.addEventListener("pointermove", move);
+    node.addEventListener("lostpointercapture", end, { once: true });
+  });
+  node.addEventListener("dblclick", () => {
+    on.style.removeProperty(property);
+    forgetSetting(name);
+  });
+  node.addEventListener("keydown", (event) => {
+    const way = GRIP_ARROWS[across][event.key];
+    if (!way) return;
+    // The arrow moves the grip, not the page.
+    event.preventDefault();
+    const before = measure();
+    set(before.px + grows * way * stepPx);
+    keepChanged(before);
+  });
+  return node;
 }

@@ -20,6 +20,7 @@ import {
   fill,
   follow,
   get,
+  grip,
   h,
   plural,
   post,
@@ -157,7 +158,16 @@ export async function runView(id) {
       select(item);
     },
   );
-  show(verdict, facts, again, traces, cancelBox, unread, startedOver, h("div", { class: "split" }, h("div", { class: "left" }, lanes, filter, list.node), h("div", { class: "right" }, talk, inspector)));
+  const split = h("div", { class: "split" });
+  // The lanes come in whole lanes, so their grip steps by one.
+  const lanePx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--lane"));
+  const grips = {
+    side: grip({ name: "run.side", across: "x", sized: inspector, on: split, property: "--side", title: "Drag to widen the right column" }),
+    lanes: grip({ name: "run.lanes", across: "y", sized: lanes, on: lanes, property: "--pane", stepPx: lanePx, title: "Drag to size the lanes" }),
+    talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
+  };
+  fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
+  show(verdict, facts, again, traces, cancelBox, unread, startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
