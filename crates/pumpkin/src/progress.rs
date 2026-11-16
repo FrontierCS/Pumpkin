@@ -227,6 +227,7 @@ struct Totals {
     ends: Option<UnixTime>,
     usd: Option<f64>,
     unpriced: bool,
+    unreported: u64,
 }
 
 impl Totals {
@@ -248,7 +249,8 @@ impl Totals {
         match progress.cost() {
             Some(cost) => {
                 *self.usd.get_or_insert(0.0) += cost.usd();
-                self.unpriced |= cost.unpriced();
+                self.unpriced |= !cost.unpriced_models.is_empty() || cost.unpriced_classes;
+                self.unreported += cost.unreported;
             }
             None => self.unpriced = true,
         }
@@ -267,9 +269,10 @@ impl Totals {
         let mut line = format!("{runs}: {}", states.join(", "));
         if let Some(usd) = self.usd {
             let _ = write!(line, "; ${usd:.2} so far");
-            if self.unpriced {
-                line.push_str(", and more without a price");
-            }
+            line.push_str(&cost::more(
+                self.unpriced.then_some("without a price"),
+                self.unreported,
+            ));
         }
         if let Some(ends) = self.ends {
             let Utc { hour, minute, .. } = Utc::from_unix(ends.since_epoch().as_secs());
@@ -327,7 +330,7 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
     let task = run.task.as_deref().unwrap_or("-");
     let usd = match run.progress.as_ref().and_then(Progress::cost) {
         None => "-".to_owned(),
-        Some(cost) => usd(cost.usd(), cost.unpriced()),
+        Some(cost) => usd(cost.usd(), cost.partial()),
     };
     let Some(ending) = &run.ending else {
         let Some(progress) = &run.progress else {

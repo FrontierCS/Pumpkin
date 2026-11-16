@@ -348,13 +348,15 @@ fn reads_model_answers() {
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let answers = [
-        r#"{"answer":{"kind":"forwarded"},"upstream_status":200}"#,
-        r#"{"answer":{"kind":"forwarded"},"upstream_status":429}"#,
-        r#"{"answer":{"kind":"cut"},"upstream_status":200}"#,
-        r#"{"answer":{"kind":"forwarded"},"upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":429}"#,
+        r#"{"answer":{"kind":"cut"},"model":"m","upstream_status":200}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","upstream_status":200,"failed":{"code":"rate_limit_exceeded"}}"#,
         r#"{"answer":{"kind":"refused","status":502,"message":"m"},"upstream_status":null}"#,
         r#"{"answer":{"kind":"barred","status":400,"message":"m"},"upstream_status":null}"#,
-        r#"{"answer":{"kind":"forwarded"},"api":"messages","upstream":"u","upstream_status":200,"usage":{"input_tokens":2312,"output_tokens":5,"cached_tokens":2000,"cache_write_tokens":300}}"#,
+        r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream":"u","upstream_status":200,"usage":{"input_tokens":2312,"output_tokens":5,"cached_tokens":2000,"cache_write_tokens":300}}"#,
+        // As a Messages stream cut short reports its `message_start`'s counts.
+        r#"{"answer":{"kind":"cut"},"model":"m","upstream_status":200,"usage":{"input_tokens":0,"output_tokens":0}}"#,
     ];
     let mut log = String::from(
         r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#,
@@ -380,10 +382,10 @@ fn reads_model_answers() {
         .unwrap();
     expect![[r#"
         ModelUse {
-            requests: 7,
+            requests: 8,
             answers: {
                 "200": 3,
-                "200 cut": 1,
+                "200 cut": 2,
                 "429": 1,
                 "barred": 1,
                 "refused": 1,
@@ -393,7 +395,7 @@ fn reads_model_answers() {
                     "rate_limit_exceeded",
                 ): 1,
             },
-            not_2xx: 4,
+            not_2xx: 5,
             last_good: Some(
                 7s,
             ),
@@ -401,7 +403,7 @@ fn reads_model_answers() {
             took: [],
             first_tokens: [],
             tokens: Tokens {
-                reported: 1,
+                reported: 2,
                 input: 2312,
                 output: 5,
                 cached: Some(
@@ -412,7 +414,23 @@ fn reads_model_answers() {
                 ),
                 reasoning: None,
             },
-            by_model: {},
+            by_model: {
+                "m": Tokens {
+                    reported: 2,
+                    input: 2312,
+                    output: 5,
+                    cached: Some(
+                        2000,
+                    ),
+                    cache_write: Some(
+                        300,
+                    ),
+                    reasoning: None,
+                },
+            },
+            unreported: {
+                "m": 4,
+            },
             dropped_headers: {},
             more_dropped_headers: false,
         }"#]]

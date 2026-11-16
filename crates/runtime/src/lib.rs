@@ -51,7 +51,7 @@ pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Cost, Direction, LeaseSpan, LogFold, ModelUse,
     Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens,
-    Unread, Used, Work,
+    TokensCost, Unread, Used, Work,
 };
 use log::{Entry, Log, ModelAnswer};
 use model::{Exchange, Served};

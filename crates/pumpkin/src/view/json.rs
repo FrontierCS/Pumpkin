@@ -222,7 +222,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
 
 fn cost_json(cost: &Cost) -> Value {
     json!({
-        "shown": progress::usd(cost.usd(), cost.unpriced()),
+        "shown": progress::usd(cost.usd(), cost.partial()),
         "said": progress::cost::line(cost),
     })
 }
@@ -239,6 +239,7 @@ fn model_json(model: &ModelUse) -> Value {
         first_tokens,
         tokens,
         by_model: _,
+        unreported: _,
         dropped_headers,
         more_dropped_headers,
     } = model;

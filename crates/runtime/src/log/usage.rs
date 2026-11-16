@@ -5,7 +5,7 @@
 //! A cost counts only what has a price, and says what hasn't ([`Cost`]), so a total never passes
 //! for more than it covers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -71,7 +71,11 @@ impl Progress {
 
     /// What the run cost, as far as it is priced; `None` if nothing is.
     pub fn cost(&self) -> Option<Cost> {
-        let (tokens, unpriced_models) = self.model.usd(&self.token_prices);
+        let TokensCost {
+            usd: tokens,
+            unpriced: unpriced_models,
+            unreported,
+        } = self.model.usd(&self.token_prices);
         let (sandboxes, unpriced_classes) = self.usd();
         let priced = match (tokens, sandboxes) {
             (Some(tokens), Some(sandboxes)) => Priced::Both { tokens, sandboxes },
@@ -83,25 +87,53 @@ impl Progress {
             priced,
             unpriced_models,
             unpriced_classes,
+            unreported,
         })
     }
 }
 
 impl ModelUse {
-    /// What the tokens that responses reported cost at `prices`, by model, in US dollars, with the
-    /// models that have no price, or whose tokens `prices` can't cost ([`TokenPrices::usd`]). The
-    /// cost is `None` if no model is priced.
-    pub fn usd(&self, prices: &BTreeMap<String, TokenPrices>) -> (Option<f64>, Vec<String>) {
-        let mut usd = None;
-        let mut unpriced = Vec::new();
-        for (model, tokens) in &self.by_model {
-            match prices.get(model).and_then(|prices| prices.usd(tokens)) {
-                Some(cost) => *usd.get_or_insert(0.0) += cost,
-                None => unpriced.push(model.clone()),
+    /// What the tokens that responses reported cost at `prices`, in US dollars, and what that
+    /// leaves out.
+    pub fn usd(&self, prices: &BTreeMap<String, TokenPrices>) -> TokensCost {
+        let mut cost = TokensCost {
+            usd: None,
+            unpriced: Vec::new(),
+            unreported: 0,
+        };
+        let models: BTreeSet<&String> =
+            self.by_model.keys().chain(self.unreported.keys()).collect();
+        for model in models {
+            let unreported = self.unreported.get(model).copied().unwrap_or(0);
+            match (prices.get(model), self.by_model.get(model)) {
+                (None, _) => cost.unpriced.push(model.clone()),
+                (Some(prices), Some(tokens)) => match prices.usd(tokens) {
+                    Some(usd) => {
+                        *cost.usd.get_or_insert(0.0) += usd;
+                        cost.unreported += unreported;
+                    }
+                    None => cost.unpriced.push(model.clone()),
+                },
+                // Its responses reported no tokens, whose cost is unknown, never zero.
+                (Some(_), None) => cost.unreported += unreported,
             }
         }
-        (usd, unpriced)
+        cost
     }
+}
+
+/// What the tokens that responses reported cost, and what that leaves out.
+#[derive(Debug)]
+pub struct TokensCost {
+    /// What the tokens that responses reported cost, in US dollars; `None` if no model that
+    /// reported tokens has a price.
+    pub usd: Option<f64>,
+    /// The models that have no price, or whose tokens their prices can't cost
+    /// ([`TokenPrices::usd`]).
+    pub unpriced: Vec<String>,
+    /// How many responses of the models that have a price went with tokens unreported
+    /// ([`ModelUse::unreported`]), whose cost `usd` leaves out in whole or in part.
+    pub unreported: u64,
 }
 
 /// A run's cost in US dollars, and what the total leaves out.
@@ -113,6 +145,9 @@ pub struct Cost {
     pub unpriced_models: Vec<String>,
     /// Whether a sandbox's class has no price, so its time went unpriced.
     pub unpriced_classes: bool,
+    /// How many responses of the models that have a price went with tokens unreported
+    /// ([`ModelUse::unreported`]).
+    pub unreported: u64,
 }
 
 /// Which of a run's costs have a price, and what each comes to in US dollars.
@@ -133,8 +168,8 @@ impl Cost {
     }
 
     /// Whether the total leaves something out: it is then a lower bound.
-    pub fn unpriced(&self) -> bool {
-        !self.unpriced_models.is_empty() || self.unpriced_classes
+    pub fn partial(&self) -> bool {
+        !self.unpriced_models.is_empty() || self.unpriced_classes || self.unreported > 0
     }
 }
 
@@ -170,7 +205,7 @@ impl PlaceUse {
 /// `class`, `count`, `lasted_ns`, `charged_ns` and `busy_ns` if a lease ran there, `undeleted` if
 /// some weren't deleted, and `usd_per_hour` and `usd` if its class is priced; `calls`, if a judge
 /// call made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; and `usd`
-/// with `unpriced_models`, unless nothing is priced.
+/// with `unpriced_models` and `unreported_responses` ([`Cost`]), unless nothing is priced.
 pub(crate) fn usage_of(progress: &Progress) -> Value {
     let sandboxes = progress.sandboxes().into_iter().map(|(place, used)| {
         let mut sandboxes = json!({
@@ -217,6 +252,9 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
         if !cost.unpriced_models.is_empty() {
             usage["unpriced_models"] = json!(cost.unpriced_models);
         }
+        if cost.unreported > 0 {
+            usage["unreported_responses"] = json!(cost.unreported);
+        }
     }
     usage
 }
@@ -230,8 +268,8 @@ pub struct Used {
     pub tokens: Tokens,
     /// What it cost, its tokens and its sandboxes, in dollars; `None` if nothing is priced.
     pub usd: Option<f64>,
-    /// Whether `usd` leaves out a model or a class that has no price.
-    pub unpriced: bool,
+    /// Whether `usd` leaves something out, as [`Cost::partial`] says it of a total.
+    pub partial: bool,
 }
 
 /// The [`Used`] that a `usage` says, or why it isn't one.
@@ -246,6 +284,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         usd: Option<f64>,
         #[serde(default)]
         unpriced_models: Vec<String>,
+        #[serde(default)]
+        unreported_responses: u64,
     }
     #[derive(Deserialize)]
     struct Counted {
@@ -267,6 +307,7 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         sandboxes,
         usd,
         unpriced_models,
+        unreported_responses,
     } = Usage::deserialize(usage).map_err(|error| error.to_string())?;
     let Counted {
         responses,
@@ -288,7 +329,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
             reasoning,
         },
         usd,
-        unpriced: !unpriced_models.is_empty()
+        partial: !unpriced_models.is_empty()
+            || unreported_responses > 0
             || sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
     })
 }

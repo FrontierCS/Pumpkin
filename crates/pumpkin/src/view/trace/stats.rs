@@ -156,7 +156,12 @@ impl Trace {
         let first_token = nanos(&event["first_token_ns"]);
         let usage = &event["usage"];
         let tokens = TOKENS.map(|name| usage[format!("{name}_tokens")].as_u64());
+        // A 2xx response cut short is of unknown cost, as `runtime::ModelUse::unreported` has it.
+        let cut = event["answer"]["kind"] == "cut"
+            && (event["upstream_status"].as_u64())
+                .is_some_and(|status| (200..300).contains(&status));
         let usd = (event["model"].as_str())
+            .filter(|_| !cut)
             .and_then(|model| prices.get(model))
             .and_then(|prices| {
                 let [input, cached, cache_write, output, reasoning] = tokens;

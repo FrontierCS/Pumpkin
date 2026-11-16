@@ -678,7 +678,7 @@ impl View {
             row["time"] = json!(progress::column_span(used.ran));
             row["usd"] = json!(
                 used.usd
-                    .map_or("-".to_owned(), |usd| { progress::usd(usd, used.unpriced) })
+                    .map_or("-".to_owned(), |usd| { progress::usd(usd, used.partial) })
             );
             row["requests"] = json!(used.model_requests);
             row["tokens"] = tokens_json(&used.tokens, used.model_requests);
