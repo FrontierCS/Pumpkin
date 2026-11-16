@@ -1841,7 +1841,7 @@ fn traces_a_messages_exchange() {
     ]);
     let tools = json!([{ "name": "Bash", "description": "Executes a bash command.",
         "input_schema": { "type": "object", "properties": { "command": { "type": "string" } } } }]);
-    let whole = [("system", system), ("tools", tools)];
+    let whole = [("system", system), ("tools", tools.clone())];
     let rest = || {
         json!({ "model": "glm-5.3", "max_tokens": 32000, "stream": true,
         "thinking": { "type": "adaptive" } })
@@ -1893,22 +1893,42 @@ fn traces_a_messages_exchange() {
         Some(&answer("a.txt is there")),
     );
     log.push(answered(4, "agent", 1, 200, kept, Some("messages")));
-    // This request sends the update again, its mark left out: its system is its parent's.
+    // This request sends the update again, its mark left out, as the item its parent sent.
     let update = json!({ "role": "system",
         "content": "# Environment update\n - Primary working directory: /workspace" });
     let reply = json!({ "role": "assistant", "content": "a.txt is there" });
     let next = json!({ "role": "user", "content": [{ "type": "text", "text": "and b?",
         "cache_control": { "type": "ephemeral" } }] });
     log.push(started(5, "agent", 2));
+    let sent = [first, call, result, update, reply, next];
     let kept = model.keep(
         2,
         "messages",
-        &[first, call, result, update, reply, next],
+        &sent,
         &whole,
         rest(),
         Some(&answer("b.txt is not")),
     );
     log.push(answered(6, "agent", 2, 200, kept, Some("messages")));
+    let changed = json!([{ "type": "text", "text": "You are a Claude agent.\nAssist with the task, briefly." }]);
+    let sent = [
+        &sent[..],
+        &[
+            json!({ "role": "assistant", "content": "b.txt is not" }),
+            json!({ "role": "user", "content": "and c?" }),
+        ],
+    ]
+    .concat();
+    log.push(started(7, "agent", 3));
+    let kept = model.keep(
+        3,
+        "messages",
+        &sent,
+        &[("system", changed), ("tools", tools)],
+        rest(),
+        Some(&answer("c.txt is not")),
+    );
+    log.push(answered(8, "agent", 3, 200, kept, Some("messages")));
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
         &scratch,
@@ -1935,6 +1955,8 @@ fn traces_a_messages_exchange() {
     said.push(format!("by step:\n{}", columns_text(&folded, "rows")));
     let exchange = served.get(&format!("{run}/exchange/0"));
     said.push(format!("exchange 0:\n{}", fields(&exchange, &[])));
+    let diff = served.get(&format!("{run}/diff?a=2&b=3&part=system"));
+    said.push(format!("diff of steps 2 and 3's system: {diff}"));
     check(
         &scratch,
         said.into_iter().map(Step::Ran),
@@ -1943,13 +1965,14 @@ fn traces_a_messages_exchange() {
         &expect![[r##"
             the agent's steps:
             added=1 added_entries=2 answer="forwarded" answers=2 api="messages" back_bytes=1376 cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls=["Bash"] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=36838 items=1 kept_bytes=335 model_ns=1000000001 output=83 request=0 sent_bytes=100 start_ns="999999999" status=200 stop="tool_use" thread=0 tools=0 turn=0 upstream="zai" whole=true
-            added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=["system"] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
+            added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=6 kept_bytes=705 model_ns=1000000001 output=10 parent=1 request=2 sent_bytes=100 start_ns="4999999999" status=200 thread=0 tools=0 turn=2 upstream="zai" whole=true
+            added=2 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.16666666666666666 cached=50 calls=[] differs=["system"] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=8 kept_bytes=853 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 tools=0 turn=3 upstream="zai" whole=true
             caller: "agent"
-            end: 2190
+            end: 2860
             live: false
             log_epoch: 0
-            thread_spans: {"span_ns":[5000000001],"thread":[0]}
+            thread_spans: {"span_ns":[7000000001],"thread":[0]}
             threads: 1
             tool_lists: [{"digest":"0000000000000000000000000000000000000000000000000000000000000002","names":["Bash"]}]
 
@@ -1967,9 +1990,10 @@ fn traces_a_messages_exchange() {
             cache_hit=0.9920191107009066 cache_write=120 cached=36544 calls={"Bash":1} decode_ns=400000000 input=36838 model_ns=1000000001 outcome="ok" output=83 request=0 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=207.5 turn=0 usd=1.31802
             cache_hit=0.5 cached=50 calls={} decode_ns=400000000 input=100 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=1 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=0 usd=0.0315
             cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=2 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.0615
+            cache_hit=0.16666666666666666 cached=50 calls={} decode_ns=400000000 input=300 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=3 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=3 usd=0.0915
             by: "step"
             caller: "agent"
-            totals: {"cache_hit":0.9866982605417631,"cache_write":120,"cache_write_unknown":2,"cached":36644,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1200000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37138,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":3000000003,"model_ns_unknown":0,"output":103,"output_unknown":0,"queue_ns":1999999998,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":3,"refusals":0,"repeats":0,"retries":0,"span_ns":5000000001,"steps":3,"threads":1,"tok_s":85.83333333333333,"turns":2,"usd":1.4110200000000002,"usd_unknown":0}
+            totals: {"cache_hit":0.9801271435439928,"cache_write":120,"cache_write_unknown":3,"cached":36694,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1600000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37438,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":4000000004,"model_ns_unknown":0,"output":113,"output_unknown":0,"queue_ns":2999999997,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":4,"refusals":0,"repeats":0,"retries":0,"span_ns":7000000001,"steps":4,"threads":1,"tok_s":70.625,"turns":3,"usd":1.50252,"usd_unknown":0}
 
             exchange 0:
             answer: {"kind":"forwarded"}
@@ -1985,7 +2009,8 @@ fn traces_a_messages_exchange() {
             times: {"end_ns":"2000000000","first_byte_ns":"1999999500","first_token_ns":"1600000000","start_ns":"999999999"}
             upstream: "zai"
             usage: {"cache_write_tokens":120,"cached_tokens":36544,"input_tokens":36838,"output_tokens":83}
-        "##]],
+
+            diff of steps 2 and 3's system: {"a":2,"b":3,"hunks":[{"at":[0,0],"lines":[[" ","You are a Claude agent."],["-","Assist with the task."],["+","Assist with the task, briefly."]]}],"lines":[2,2],"part":"system","same":false}"##]],
     );
 }
 #[test]

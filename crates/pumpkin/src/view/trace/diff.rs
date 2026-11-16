@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use route::read::Item;
+use route::read::{self, Item};
 use runtime::Record;
 use schema::ir::Sha256Digest;
 use serde_json::{Value, json};
@@ -23,7 +23,8 @@ const DIFF_CONTEXT_LINES: usize = 3;
 /// The part of two requests that a diff compares.
 #[derive(Clone, Copy)]
 pub(in crate::view) enum Compared {
-    /// The entries a request's API reads as a system's, of its fields and of its conversation.
+    /// The field that its API holds its system prompt in ([`read::system_field`]); a system
+    /// message in its conversation is an item of the conversation like any other.
     System,
     /// Its body's list of tools.
     Tools,
@@ -55,8 +56,7 @@ impl Trace {
                 })
         };
         let sides = step(a).and_then(|a| Ok((a, step(b)?))).and_then(|(a, b)| {
-            let (key_a, key_b) = (self.key(a, part), self.key(b, part));
-            if key_a == key_b {
+            if a.key(part) == b.key(part) {
                 return Ok(None);
             }
             Ok(Some((
@@ -93,40 +93,19 @@ impl Trace {
         super::cut(reply)
     }
 
-    /// What names `step`'s `part`: the parts that hold its system's entries, each named by its
-    /// [`Part::same`](super::Part::same), or its tools'.
-    pub(super) fn key(&self, step: &Step, part: Compared) -> Vec<u32> {
-        match part {
-            Compared::Tools => step.tools_part.into_iter().collect(),
-            Compared::System => {
-                let fields = step.fields.values().copied();
-                let items = step.list.iter().map(|&part| self.parts[part as usize].same);
-                let parts = (fields.filter(|&part| Some(part) != step.tools_part)).chain(items);
-                parts.filter(|&part| self.is_system(part)).collect()
-            }
-        }
-    }
-
-    /// Whether `part` holds a system's entry.
-    fn is_system(&self, part: u32) -> bool {
-        match &self.parts[part as usize].entries {
-            Ok(entries) => (entries.iter()).any(|entry| matches!(entry, Item::System { .. })),
-            Err(_) => false,
-        }
-    }
-
-    /// The lines of `step`'s `part`, or why they can't be read: its system's texts, or its tools
-    /// as the record keeps them, each printed as indented JSON.
+    /// The lines of `step`'s `part`, or why they can't be read: its system prompt's texts, or its
+    /// tools as the record keeps them, each printed as indented JSON.
     fn lines(&self, record: &Record, step: &Step, part: Compared) -> Result<Vec<String>, String> {
         let mut lines = Vec::new();
         match part {
             Compared::System => {
-                for part in self.key(step, part) {
-                    let entries = self.parts[part as usize].entries.as_ref();
-                    for entry in entries.map_err(String::clone)? {
-                        if let Item::System { text } = entry {
-                            lines.extend(text.lines().map(str::to_owned));
-                        }
+                let Some(part) = step.system_part() else {
+                    return Ok(lines);
+                };
+                let entries = self.parts[part as usize].entries.as_ref();
+                for entry in entries.map_err(String::clone)? {
+                    if let Item::System { text } = entry {
+                        lines.extend(text.lines().map(str::to_owned));
                     }
                 }
             }
@@ -262,4 +241,19 @@ fn hunks(lines: &[(Change, &str)], context: usize) -> Value {
         from = end;
     }
     json!(hunks)
+}
+
+impl Step {
+    /// What names its `part`: the part of the field that holds it, or `None` if it sent none.
+    pub(super) fn key(&self, part: Compared) -> Option<u32> {
+        match part {
+            Compared::System => self.system_part(),
+            Compared::Tools => self.tools_part,
+        }
+    }
+
+    fn system_part(&self) -> Option<u32> {
+        let field = self.api.and_then(read::system_field)?;
+        self.fields.get(field).copied()
+    }
 }

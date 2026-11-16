@@ -207,6 +207,16 @@ pub fn tools_field(api: Api) -> &'static str {
     }
 }
 
+/// The field of a request's body, as `api` writes it, that holds its system prompt; `None` if
+/// the API holds it only in the conversation, as an item like any other.
+pub fn system_field(api: Api) -> Option<&'static str> {
+    match api {
+        Api::Responses => Some("instructions"),
+        Api::Messages => Some("system"),
+        Api::Chat => None,
+    }
+}
+
 /// The text of `content`: a string, or its parts' text.
 fn text(content: &Value) -> String {
     match content {

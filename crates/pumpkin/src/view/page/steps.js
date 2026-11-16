@@ -39,7 +39,7 @@ import { count, seconds } from "./h.js";
  * @property {Array<number | null>} answers its answer's entries; in flight, those so far
  * @property {string[][]} calls
  * @property {Array<number | null>} tools
- * @property {Array<string[] | null>} differs which of "system" and "tools" differ from its parent's; null with no parent
+ * @property {Array<string[] | null>} differs which of "system" (the system prompt's field) and "tools" differ from its parent's; null with no parent
  * @property {Array<string | null>} stop
  * @property {Array<boolean | null>} whole
  * @property {Array<string[] | null>} notes

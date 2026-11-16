@@ -223,8 +223,7 @@ impl Trace {
     /// no parent.
     fn differs(&self, step: &Step) -> Option<Vec<&'static str>> {
         let parent = &self.steps[step.parent?];
-        let system =
-            self.key(step, diff::Compared::System) != self.key(parent, diff::Compared::System);
+        let system = step.key(diff::Compared::System) != parent.key(diff::Compared::System);
         let differs = [(system, "system"), (step.tools != parent.tools, "tools")];
         Some(
             differs

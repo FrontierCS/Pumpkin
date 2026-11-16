@@ -1,5 +1,5 @@
 // A step's Diff tab: what its request changed against its parent's, the step before it in its
-// thread: the items it added past the parent's list, and its system text and its tools as the
+// thread: the items it added past the parent's list, and its system prompt and its tools as the
 // server's `diff` gives them, a line diff in hunks, read only for a part the steps reply says
 // differs.
 
@@ -17,7 +17,7 @@ import { fill, get, h, plural } from "./h.js";
 
 // The parts of a request that the server's diff compares, with the words for each.
 const PARTS = [
-  ["system", "System text"],
+  ["system", "System prompt"],
   ["tools", "Tool list"],
 ];
 
