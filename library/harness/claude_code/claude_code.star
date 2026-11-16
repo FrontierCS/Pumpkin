@@ -57,7 +57,7 @@ def claude_code(
     and `max_output_tokens`, in the sense `crates/library` gives them, and none of its own.
 
     Args:
-      base: as every harness.
+      base: as every harness, and must have `bash`, which Claude Code's shell tool runs.
       model: as every harness; every model Claude Code calls.
       effort: as every harness; Claude Code's `--effort`: one of `_EFFORTS`.
       workspace: as every harness.

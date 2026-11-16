@@ -40,7 +40,8 @@ def qwen_code(
     `context_tokens`, in the sense `crates/library` gives them, and `extra_body`, its own.
 
     Args:
-      base: as every harness; the image adds Node too.
+      base: as every harness, and must have `bash`, which Qwen Code's shell tool runs; the image
+        adds Node too.
       model: as every harness.
       effort: as every harness; the request's `reasoning_effort`: one of `_EFFORTS`.
       workspace: as every harness.
