@@ -31,8 +31,8 @@ use crate::star::Entry;
 #[command(
     name = "pumpkin",
     about = "\
-Run workflows: in each run, an agent works in a sandbox, and judges score what
-it submits. It keeps what it writes in the .pumpkin directory that it is in,
+Run workflows: in each run, an agent works in a sandbox, and a final call judges
+what it submits. It keeps what it writes in the .pumpkin directory that it is in,
 where a repository's ./pumpkin builds it: the runs' records, but where --runs
 names another directory, and what its builds and providers keep.",
     disable_help_flag = true,
@@ -733,8 +733,6 @@ with how long they lasted and how many were deleted; then how it ended, and
 where its record is, then the command that runs it again, as
 `pumpkin run --help` says, and of a lost run, the commands that remove what it
 left; any other exit but 0 ends with a `pumpkin:` line that says why.
-If the final judge returned no result, its standard error is shown first, or,
-if it is long, named.
 
 Ending `pumpkin wait` doesn't stop the run: `pumpkin cancel` does.
 
@@ -756,7 +754,7 @@ Exit status:
   2  A usage error.
 
 A live run's phase is `publishing` what its sandboxes run, `starting` its agent,
-`agent` at work, `ending` the work phase, or `final judge`; under it, a line for
+`agent` at work, `ending` the work phase, or `final call`; under it, a line for
 each call the agent made, by its function, and each lease, by its grant and
 state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
 ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
@@ -976,7 +974,7 @@ Example, of a machine whose runs go to EC2 and Modal:
   group = \"pumpkin\"
   role_arn = \"arn:aws:iam::123456789012:role/pumpkin-timer\"
 
-  [providers.aws.ec2.classes.judge]
+  [providers.aws.ec2.classes.cpu]
   template = \"lt-0123456789abcdef0\"
   version = 1
   vcpus = 8

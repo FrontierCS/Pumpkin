@@ -169,7 +169,7 @@ export async function traceView(id) {
     },
     (first, end) => seen(first, end),
   );
-  const split = h("div", { class: "trace-split" + (caller === "agent" ? "" : " of-judge") });
+  const split = h("div", { class: "trace-split" + (caller === "agent" ? "" : " of-target") });
   const inspectorGrip = grip({ name: "inspector", across: "x", sized: inspector, on: split, property: "--inspector", title: "Drag to widen the inspector" });
   fill(split, h("div", { class: "left" }, list.node), inspectorGrip, inspector);
   const pane = h("div", { class: "pane" }, toolbar, startedOver, timeline.node, split);
@@ -415,7 +415,7 @@ export async function traceView(id) {
     const named = "Run " + run.id + " ";
     const how = run.live ? "live" : run.verdict.startsWith(named) ? run.verdict.slice(named.length) : run.verdict;
     fill(within, "In run ", h("a", { href: "#/run/" + encodeURIComponent(id), title: "The run" }, h("span", { class: "mark " + tone(run) }), how));
-    const lanes = /** @type {any[]} */ (run.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "judge" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
+    const lanes = /** @type {any[]} */ (run.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
     fill(
       callers,
       lanes.length > 1 ? h("span", { class: "dim" }, "Other traces") : null,

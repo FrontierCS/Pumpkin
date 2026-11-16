@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::ir::values::RelativePath;
-use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, Mode, Name};
+use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, Mode};
 
 pub mod frame;
 pub mod op;
@@ -100,10 +100,9 @@ pub fn pumpkin_dir() -> AbsolutePath {
 /// The directories below [`pumpkin_dir()`], there before a role's first command starts: the
 /// in-sandbox contract that a task's images are written against, the same for every workflow.
 ///
-/// `in` holds what the session's owner puts in, as a judge call's payload ([`slot_payload()`]) or
-/// the agent's standard input ([`command_stdin()`]); [`out_dir()`] what it collects, as a judge's
-/// result ([`result_file()`]) and evidence ([`evidence_dir()`]); `home` the commands' home
-/// ([`command_env()`]); and [`log_dir()`] their output ([`command_stdout()`],
+/// `in` holds what the session's owner puts in, as the agent's standard input
+/// ([`command_stdin()`]); [`out_dir()`] what it collects, as the agent's output; `home` the
+/// commands' home ([`command_env()`]); and [`log_dir()`] their output ([`command_stdout()`],
 /// [`command_stderr()`]). These paths are relative to [`pumpkin_dir()`].
 pub fn pumpkin_subdirs() -> [RelativePath; 4] {
     [in_dir(), out_dir(), home_dir(), log_dir()]
@@ -135,46 +134,19 @@ pub fn log_dir() -> RelativePath {
     const { RelativePath::from_static("log") }
 }
 
-/// `in/<slot>`, the directory of a judge's slot named `slot`.
-pub fn slot_dir(slot: &Name) -> RelativePath {
-    in_dir().join(&RelativePath::from(slot))
-}
-
-/// `in/<slot>/raw`, where the score's payload is, in the score's slot, before the judge's command
-/// starts.
-pub fn slot_payload(slot: &Name) -> RelativePath {
-    slot_dir(slot).join(&const { RelativePath::from_static("raw") })
-}
-
-/// `out/result.json`, where a judge writes its result, of at most [`RESULT_MAX_BYTES`]: its
-/// [`ResultSpec`](crate::ir::ResultSpec) says how it is read, and what of it the caller sees.
-pub fn result_file() -> RelativePath {
-    out_dir().join(&const { RelativePath::from_static("result.json") })
-}
-
-/// The most bytes a judge's result ([`result_file()`]) may hold: a larger one is no result,
-/// rejected whole rather than cut short. A judge keeps its bulk output in [`evidence_dir()`].
-// The session's owner collects a result as a file in the sandbox's `out`, then reads it whole
-// into memory to parse it, and a reply returns some of its fields: the bound keeps a result a
-// small document, and what the host holds for it small. A reply has its own bound,
-// `frame::MAX_MESSAGE_BYTES`. Cutting a larger result short would not help, since a JSON document
-// cut short is no document. 1 MiB holds the values a run shows and the fields a reply returns with
-// room to spare.
+/// The most bytes a body may get from its target in one file: a larger one is refused whole
+/// rather than cut short.
+// The host collects the file, then reads it whole into memory for the body, which may parse it
+// as a document: the bound keeps what the host holds for it small, and a document cut short is no
+// document. 1 MiB holds a result that a body returns fields of with room to spare.
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
-/// How deep a judge's result ([`result_file()`]) may nest arrays and objects, the document
-/// included, and a job function's body its return, the returned dict included: a deeper one is
-/// no result.
-// A run's record nests what a result returns inside objects of its own, a log line's `result` and
+/// How deep a body's return may nest lists, tuples and dicts, the returned dict included: a
+/// deeper one is no result.
+// A run's record nests what a body returns inside objects of its own, a log line's `result` and
 // `returned` among them, and serde_json reads at most 127 nested arrays and objects: this bound
-// leaves 7 of them for what holds a result, so that every line of a run's log reads back.
+// leaves 7 of them for what holds a return, so that every line of a run's log reads back.
 pub const RESULT_MAX_DEPTH: usize = 127 - 7;
-
-/// `out/evidence`, there before a judge's command starts, which holds the files of evidence
-/// that only the operator sees.
-pub fn evidence_dir() -> RelativePath {
-    out_dir().join(&const { RelativePath::from_static("evidence") })
-}
 
 /// The environment that a role's command, whose IR gives it `env`, runs with: `HOME` first, set to
 /// `home` below [`pumpkin_dir()`], then `env`; or `env` alone, if it sets `HOME` itself.

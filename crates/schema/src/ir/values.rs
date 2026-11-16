@@ -45,7 +45,7 @@ macro_rules! checked_string {
 }
 
 checked_string!(
-    /// The name of a role, slot or grant, a provider, a class of sandbox, or a sandbox within its
+    /// The name of a role or grant, a provider, a class of sandbox, or a sandbox within its
     /// run: 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter.
     Name,
     check_name
@@ -133,13 +133,6 @@ impl JsonPointer {
         // `~` first, so that the `~` of a `~1` is not escaped again.
         let token = token.to_string().replace('~', "~0").replace('/', "~1");
         Self(Cow::Owned(format!("{}/{token}", self.0)))
-    }
-
-    /// The value the pointer names in `document`, if there is one. A token names an object's
-    /// member, or an array's element by its index in decimal without leading zeros.
-    pub fn resolve<'v>(&self, document: &'v serde_json::Value) -> Option<&'v serde_json::Value> {
-        // serde_json resolves RFC 6901 pointers, and the check above has refused any other.
-        document.pointer(self.as_str())
     }
 
     /// The reference tokens, unescaped, from the document's top down: none for the whole
@@ -818,109 +811,5 @@ impl TryFrom<Vec<ModelName>> for Models {
 impl From<Models> for Vec<ModelName> {
     fn from(models: Models) -> Self {
         models.0
-    }
-}
-
-/// The fields of a judge's result that its caller's reply returns.
-///
-/// Each is a JSON pointer into the result, keyed in the reply's
-/// [`Returned`](crate::sandbox::op::Returned) by its last reference token. So every pointer
-/// names a field below the whole result, and no two share a key. Nor is any key empty.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<JsonPointer>", into = "Vec<JsonPointer>")]
-pub struct Returns(Vec<(String, JsonPointer)>);
-
-impl Returns {
-    /// Each field's key, with the pointer to its value, in the IR's order.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &JsonPointer)> {
-        self.0.iter().map(|(key, pointer)| (key.as_str(), pointer))
-    }
-}
-
-impl TryFrom<Vec<JsonPointer>> for Returns {
-    type Error = String;
-
-    fn try_from(pointers: Vec<JsonPointer>) -> Result<Self, Self::Error> {
-        let mut fields: Vec<(String, JsonPointer)> = Vec::with_capacity(pointers.len());
-        for pointer in pointers {
-            let Some(key) = pointer.tokens().last() else {
-                let message = "the empty pointer names the whole result, with no key: point to \
-                               a field";
-                return Err(message.to_owned());
-            };
-            if key.is_empty() {
-                return Err(format!(
-                    "`{pointer}` would return the empty key: point to a field with a name"
-                ));
-            }
-            if let Some((_, earlier)) = fields.iter().find(|(seen, _)| *seen == key) {
-                return Err(format!(
-                    "`{earlier}` and `{pointer}` would both return `{key}`: return each key once"
-                ));
-            }
-            fields.push((key, pointer));
-        }
-        Ok(Self(fields))
-    }
-}
-
-impl From<Returns> for Vec<JsonPointer> {
-    fn from(returns: Returns) -> Self {
-        returns.0.into_iter().map(|(_, pointer)| pointer).collect()
-    }
-}
-
-/// The values of a judge's result that its run shows, each named, in the order the IR lists
-/// them: a JSON object from each name to a JSON pointer into the result. No two share a name.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Shows(Vec<(Name, JsonPointer)>);
-
-impl Shows {
-    /// Each value's name, with the pointer to it, in the IR's order.
-    pub fn iter(&self) -> impl Iterator<Item = (&Name, &JsonPointer)> {
-        self.0.iter().map(|(name, pointer)| (name, pointer))
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl Serialize for Shows {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_map(self.iter())
-    }
-}
-
-// A map visitor, as a map type would sort the entries or keep only the last of a repeated name.
-impl<'de> Deserialize<'de> for Shows {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Shows;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an object from each value's name to a JSON pointer")
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Shows, A::Error> {
-                let mut shows: Vec<(Name, JsonPointer)> = Vec::new();
-                while let Some((name, pointer)) = map.next_entry::<Name, JsonPointer>()? {
-                    if shows.iter().any(|(seen, _)| *seen == name) {
-                        return Err(serde::de::Error::custom(format!(
-                            "`{name}` is shown more than once: show each name once"
-                        )));
-                    }
-                    shows.push((name, pointer));
-                }
-                Ok(Shows(shows))
-            }
-        }
-
-        deserializer.deserialize_map(Visitor)
     }
 }

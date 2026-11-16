@@ -1,15 +1,13 @@
-//! The jobs that calls of job functions, and the score, become, and the meter they keep.
+//! The jobs that calls of job functions, and the final call, become, and the meter they keep.
 //!
 //! A call counts from when it is accepted, unless its job fails before it starts, as when its
 //! sandbox fails to start: that is the run's or its provider's failure, not the caller's, so the
-//! call is given back, as a lease that fails to start costs nothing. A job starts with its
-//! judge's command, or its function's body. Its seconds run from its start to its command's
-//! exit, or to its body's end once its target is gone, to its stop at the timeout, to the job's
-//! failure, or to the core stopping it when the work phase ends, each as the runtime observed
-//! it. A call keeps its function, which
-//! [runs one call at a time](schema::ir::JobFunction), busy until its job has ended,
-//! once its outputs are collected and its sandbox destroyed, and every lease it held has ended,
-//! which the core reads from its leases.
+//! call is given back, as a lease that fails to start costs nothing. A job starts with its body.
+//! Its seconds run from its start to its body's end once its target is gone, to its stop at the
+//! timeout, to the job's failure, or to the core stopping it when the work phase ends, each as the
+//! runtime observed it. A call keeps its function, which [runs one call at a
+//! time](schema::ir::JobFunction), busy until its job has ended, once its outputs are collected and
+//! its sandbox destroyed, and every lease it held has ended, which the core reads from its leases.
 //!
 //! The cumulative seconds left are what the function allows less what ended calls used. A call
 //! is accepted only once the function's earlier calls have all ended, and its timeout is at most
@@ -28,17 +26,15 @@ use core::time::Duration;
 use schema::sandbox::op::{self, FailureCode};
 use schema::workflow::JobOf;
 
-use super::{JobId, JudgeResult};
+use super::{CallResult, JobId};
 
 /// Why a job gave no result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// It ran past its timeout. A timed-out job gives no result, whatever its judge wrote.
+    /// Its body ran past its timeout. A timed-out call returns no result.
     Timeout,
     /// It failed before giving a result, for the runtime's reason.
     Error(String),
-    /// Its `result.json` was missing or invalid, for this reason.
-    InvalidResult(String),
 }
 
 /// What the caller of a function whose body failed hears: a fixed sentence, as the record says
@@ -52,11 +48,6 @@ impl Failure {
         let (code, message) = match self {
             Self::Timeout => (FailureCode::CallTimeout, "the call ran past its timeout"),
             Self::Error(_) => (FailureCode::CallError, BODY_FAILED),
-            // A type of its own for a function's failures would split the jobs' states by kind.
-            Self::InvalidResult(_) => unreachable!(
-                "a job function's call gave an invalid result, though only the score's judge \
-                 writes a result, and a body's return is its result"
-            ),
         };
         op::Failure {
             code,
@@ -81,7 +72,7 @@ pub(super) struct Job {
 pub(super) enum State {
     /// Accepted; it has not started.
     Queued,
-    /// Its judge's command, or its function's body, started at `started`.
+    /// Its body started at `started`.
     Running { started: Duration },
     /// It has ended, or the core stopped it; its sandbox is being collected and destroyed. `used`
     /// is how long it ran, none if it didn't start.
@@ -90,15 +81,13 @@ pub(super) enum State {
     /// it started.
     Ended {
         used: Duration,
-        outcome: Result<JudgeResult, Failure>,
+        outcome: Result<CallResult, Failure>,
         charged: bool,
     },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum End {
-    /// By itself.
-    Exited,
     /// At its timeout.
     TimedOut,
     /// When the core stopped the job.
@@ -133,9 +122,9 @@ impl State {
         *self = Self::Ending { used, end };
     }
 
-    /// A report that skips a step, such as a failure before the command started, ends the job
-    /// all the same, its command's time running until the report if it had started.
-    pub(super) fn report(&mut self, at: Duration, outcome: Result<JudgeResult, Failure>) {
+    /// A report that skips a step, such as a failure before the body started, ends the job all
+    /// the same, its body's time running until the report if it had started.
+    pub(super) fn report(&mut self, at: Duration, outcome: Result<CallResult, Failure>) {
         let charged = !matches!((&*self, &outcome), (Self::Queued, Err(_)));
         let (used, outcome) = match *self {
             Self::Queued => (Duration::ZERO, outcome),
@@ -144,7 +133,7 @@ impl State {
             // as the work phase ends, after which no status asks what came of them.
             Self::Ending { used, end } => match end {
                 End::TimedOut => (used, Err(Failure::Timeout)),
-                End::Exited | End::Stopped => (used, outcome),
+                End::Stopped => (used, outcome),
             },
             Self::Ended { .. } => return,
         };

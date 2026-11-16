@@ -1,4 +1,5 @@
-//! The start of a run's children, each on a thread of its own: a call, and a lease of a runner.
+//! The start of a run's children, each on a thread of its own: a call of a body, and a lease of a
+//! runner.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,42 +15,9 @@ use stdx::Context;
 
 use crate::child::{Child, Deadlines, Message, Report};
 use crate::sandbox::Which;
-use crate::{Called, Clock, Host, Inbox, Input, Runtime, call, judge, lease};
+use crate::{Called, Clock, Host, Inbox, Input, Runtime, body, call, lease};
 
 impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(crate) fn start_judge<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        job: JobId,
-        payload: &PayloadRef,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        let slot = self.workflow().score().slot;
-        let role = slot.judge().role();
-        // The final judge's command starts in time to run its whole timeout before the hard end,
-        // by which what it left is collected.
-        let start = self.hard_end().saturating_sub(timeout);
-        let startup = (self.clock.now())
-            .saturating_add(self.placed.startup(role))
-            .min(start);
-        let deadlines = Deadlines {
-            startup,
-            collect: self.hard_end(),
-        };
-        let call = judge::Call {
-            job,
-            slot,
-            payload: self.payloads.stored(payload),
-            start,
-            timeout,
-        };
-        let run = move |mut child: Child<'r, H, OpReply>| judge::run(&call, &mut child);
-        let which = Which::Job(job, slot.judge());
-        let orders = self.start_child(scope, which, deadlines, None, run)?;
-        self.called(job, orders, deadlines, role);
-        Ok(())
-    }
-
     pub(crate) fn start_call<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -62,7 +30,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let function = self.workflow().job_function(function);
         let role = function.target.role();
         // A call ends with the work phase, which ends by the core's next act of its own, and what
-        // it left is collected by the agent's teardown's end, which leaves the final judge its
+        // it left is collected by the agent's teardown's end, which leaves the final call its
         // share of the hard end.
         let startup = (self.clock.now())
             .saturating_add(self.placed.startup(role))
@@ -73,19 +41,60 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         let call = call::job::Call {
             job,
-            function,
+            of: body::Of::Function {
+                function,
+                arguments,
+            },
             payload: self.payloads.stored(payload),
-            arguments,
             timeout,
         };
+        self.start_body(scope, call, deadlines)
+    }
+
+    pub(crate) fn start_final_call<'s>(
+        &mut self,
+        scope: &'s Scope<'s, 'r>,
+        job: JobId,
+        payload: &PayloadRef,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let final_call = self.workflow().final_call();
+        let role = final_call.target.role();
+        // The final call's body starts in time to run its whole timeout before the hard end, by
+        // which what it left is collected.
+        let start = self.hard_end().saturating_sub(timeout);
+        let startup = (self.clock.now())
+            .saturating_add(self.placed.startup(role))
+            .min(start);
+        let deadlines = Deadlines {
+            startup,
+            collect: self.hard_end(),
+        };
+        let call = call::job::Call {
+            job,
+            of: body::Of::Final(final_call),
+            payload: self.payloads.stored(payload),
+            timeout,
+        };
+        self.start_body(scope, call, deadlines)
+    }
+
+    /// Starts `call` on a fresh sandbox of its target, on a thread of its own.
+    fn start_body<'s>(
+        &mut self,
+        scope: &'s Scope<'s, 'r>,
+        call: call::job::Call<'r>,
+        deadlines: Deadlines,
+    ) -> Result<(), String> {
+        let (job, target) = (call.job, call.of.target());
         let bodies = self.bodies;
         let run = move |mut child: Child<'r, H, OpReply>| {
             call::job::run(call, bodies, &mut child);
         };
         let stack = Some(bodies.stack_bytes());
-        let which = Which::Call(job, function.target);
+        let which = Which::Call(job, target);
         let orders = self.start_child(scope, which, deadlines, stack, run)?;
-        self.called(job, orders, deadlines, role);
+        self.called(job, orders, deadlines, target.role());
         Ok(())
     }
 
@@ -117,10 +126,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let runner = self.workflow().runner(runner_id);
         let (start, collect) = match holder {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of
-            // a phase, and what it left is collected by the agent's teardown's end, as a judge
-            // call's is.
+            // a phase, and what it left is collected by the agent's teardown's end, as a call's
+            // is.
             Caller::Agent => (core.phase_due(), self.teardown_end()),
-            // A call's ends with the call's command, and what it left is collected by when the
+            // A call's ends with the call's body, and what it left is collected by when the
             // call's is.
             Caller::Job(job) => {
                 let collect = self.call(job).collect;

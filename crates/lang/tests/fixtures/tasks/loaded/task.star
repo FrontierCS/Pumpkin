@@ -5,8 +5,7 @@ load(
     "AGENT",
     "JUDGE_IMAGE",
     "JUDGE_USER",
-    "SCORE",
-    result = "RESULT",
+    ending = "FINAL",
 )
 
 workflow(
@@ -18,12 +17,8 @@ workflow(
             "image": JUDGE_IMAGE,
             "user": JUDGE_USER,
             "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
-                "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-                "result": result,
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = SCORE,
+    final = ending,
 )

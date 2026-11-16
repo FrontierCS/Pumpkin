@@ -1,6 +1,6 @@
 //! The leases a run has opened, and what each holder has used of them.
 //!
-//! A grant's limits count per holder, so each call of a judge starts with its grants' limits
+//! A session's limits count per holder, so each call of a target starts with its sessions' limits
 //! whole. A lease's time counts from when its runner is ready, so the time a runner takes to
 //! start costs its holder nothing.
 //!

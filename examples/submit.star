@@ -1,7 +1,7 @@
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the final judge, replacing the last.
+    """Selects `payload` for the final call, replacing the last.
 
     Args:
       run: the run's state.

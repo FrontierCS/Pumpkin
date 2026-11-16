@@ -16,7 +16,7 @@
 //!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
 //! - `agent/`, `jobs/<n>/` and `leases/<n>/`, a sandbox each, with its `sandbox.json`: `provider`,
 //!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once tried; its `out/`,
-//!   `log/` and a body's `got/` as far as collected, but a judge's result over `RESULT_MAX_BYTES`.
+//!   `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
 //!   `failed`, with a `reason`, or `interrupted`, with a `signal`; and `usage`, if the run began
 //!   its log, which an older record lacks.
@@ -656,7 +656,7 @@ impl Record {
     /// which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
     pub fn ended_clean(&self) -> Result<bool, String> {
         let finished = match self.ended()? {
-            Some(Ending::Judged { .. } | Ending::Unjudged(_) | Ending::NoResult { .. }) => true,
+            Some(Ending::Returned { .. } | Ending::NoResult(_)) => true,
             Some(Ending::Failed(_) | Ending::Interrupted(_) | Ending::Lost) | None => false,
         };
         Ok(finished && self.undeleted()?.is_empty())
@@ -1122,7 +1122,7 @@ pub(super) fn provided(
 /// The workflow's IR as a run's `ir.json` holds it: the IR's one encoding as text, so an IR printed
 /// elsewhere is byte for byte what a run of it records.
 pub fn ir_json(workflow: &Workflow) -> String {
-    // Not through a `Value`, which sorts an object's keys and so a judge's `shows`.
+    // Not through a `Value`, which sorts an object's keys, so that the text keeps the IR's order.
     let Ok(ir) = serde_json::to_string_pretty(workflow.ir()) else {
         unreachable!("the IR's maps are keyed by strings, which JSON can hold");
     };

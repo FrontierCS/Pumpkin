@@ -2,7 +2,6 @@
 //! from a record and of what [`super::talk`] folds from its log.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::Duration;
 
 use runtime::{Cost, Ending, ModelUse, Progress, Readout, Tokens};
@@ -124,8 +123,8 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
 
 fn how(ending: &Ending) -> String {
     match ending {
-        Ending::Judged { values, after } => crate::ending::judged(values, after),
-        Ending::Unjudged(why) | Ending::NoResult { why, .. } => why.clone(),
+        Ending::Returned { values, after } => crate::ending::returned(values, after),
+        Ending::NoResult(why) => why.clone(),
         Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),
     }
@@ -193,7 +192,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "verdict": verdict,
         "other_build": record.other_build(),
         "times": times,
-        "lanes": progress.as_ref().map(|progress| lanes(record.dir(), progress, held.talk.as_ref())),
+        "lanes": progress.as_ref().map(|progress| lanes(progress, held.talk.as_ref())),
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
         "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
@@ -254,7 +253,7 @@ fn model_json(model: &ModelUse) -> Value {
     })
 }
 
-fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
+fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
     let sandbox = |sandbox: &runtime::Sandbox| {
@@ -291,11 +290,11 @@ fn lanes(dir: &Path, progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         let mut lane_json = json!({
             "lane": lane,
             "caller": format!("job-{}", call.job),
-            "kind": if call.function.is_some() { "target" } else { "judge" },
+            "kind": "target",
             "role": call.role,
-            "grant": call.function,
+            "of": call.of,
             "sandbox": sandbox(&call.sandbox),
-            "said": progress::called(call, dir),
+            "said": progress::called(call),
             "model": model_json(&call.model),
         });
         answered(&lane, &mut lane_json);

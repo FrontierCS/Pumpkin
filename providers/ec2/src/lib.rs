@@ -55,7 +55,7 @@ const MIB: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 /// region = "us-west-1"
 /// repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
 /// timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
-/// classes.judge = { template = "lt-0123456789abcdef0", version = 1, vcpus = 8, memory_mib = 8192 }
+/// classes.cpu = { template = "lt-0123456789abcdef0", version = 1, vcpus = 8, memory_mib = 8192 }
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

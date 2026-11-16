@@ -254,8 +254,8 @@ fn build() {
     }
 }
 
-// The agent and the trainer run at once, and the final judge after, so `wide` needs 1100 CPUs
-// at once, more than the provider holds, though each role fits its class.
+// The agent and the trainer run at once, and the final call's target after, so `wide` needs 1100
+// CPUs at once, more than the provider holds, though each role fits its class.
 #[test]
 fn prepare() {
     let ir: Value = serde_json::from_str(WORKFLOW).unwrap();
@@ -584,7 +584,7 @@ fn reads_other_builds_lines() {
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let later = r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"later","job":0},"actions":[{"kind":"later"}]}"#;
     let unnumbered =
-        r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"judge_started"},"actions":[]}"#;
+        r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"call_started"},"actions":[]}"#;
     let killed = r#"{"seq":3,"at_ns":"3000000000","event":{"kind":"command_ended","lease":0,"end":"killed"},"actions":[]}"#;
     let ungranted = r#"{"seq":4,"at_ns":"4000000000","event":{"kind":"agent_started"},"actions":[{"kind":"start_lease","lease":0},{"kind":"finish"}]}"#;
     let leased = r#"{"seq":5,"at_ns":"5000000000","event":{"kind":"model_answered","caller":"lease-1","upstream_status":200,"answer":{"kind":"forwarded"}},"actions":[]}"#;
@@ -650,7 +650,7 @@ fn reads_core_times() {
     } });
     fs::write(record.join("provider.json"), provided.to_string()).unwrap();
     let log = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}
-{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"call","grant":"train"}},"actions":[{"kind":"start_call","job":0,"grant":"train","timeout_ns":"60000000000"}]}
+{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"call","grant":"train"}},"actions":[{"kind":"start_call","job":0,"grant":"train","payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3},"timeout_ns":"60000000000"}]}
 {"seq":2,"at_ns":"3000000000","observed_ns":"1000000000","event":{"kind":"tick"},"actions":[{"kind":"start_lease","grant":"runner","holder":"agent","lease":0},{"kind":"start_lease","grant":"runner","holder":"agent","lease":1}]}
 {"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"call_started","job":0},"actions":[]}
 {"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
@@ -713,7 +713,7 @@ fn reads_a_growing_log() {
     fs::write(record.join("record.json"), version).unwrap();
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let unnumbered =
-        r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"judge_started"},"actions":[]}"#;
+        r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"call_started"},"actions":[]}"#;
     let finished =
         r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"tick"},"actions":[{"kind":"finish"}]}"#;
     let log = record.join("log.jsonl");
@@ -762,9 +762,9 @@ fn reads_a_growing_log() {
         None None []
         None Some((1s, None)) [Unread { line: 2, part: Event, reason: "missing field `job`" }]
         None Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]
-        Some("its log is 248 bytes, shorter than the 366 bytes read of it before: reading it again from its start") Some((1s, None)) [Unread { line: 1, part: Event, reason: "missing field `job`" }]
-        Some("its log is another file than the one 204 bytes were read of before: reading it from its start") Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]
-        Some("its log is gone, after 366 bytes were read of it: reading the next log there from its start") None []
+        Some("its log is 247 bytes, shorter than the 364 bytes read of it before: reading it again from its start") Some((1s, None)) [Unread { line: 1, part: Event, reason: "missing field `job`" }]
+        Some("its log is another file than the one 203 bytes were read of before: reading it from its start") Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]
+        Some("its log is gone, after 364 bytes were read of it: reading the next log there from its start") None []
         …/20261114-120000-00000001/log.jsonl: Is a directory (os error 21)
         None Some((2s, Some(2s))) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 4, part: Event, reason: "missing field `job`" }]"#]]
     .assert_eq(&read.join("\n"));

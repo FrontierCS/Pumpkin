@@ -3,7 +3,7 @@
 /// Whether `line`, one that `./pumpkin wait` says, is the milestone of a lease of the agent's
 /// that its runner is ready: `<grant> lease <n> ready`, `<grant>` the name of the lease's grant,
 /// with ` with <GPUs>` after it for a lease of GPUs, as `pumpkin`'s `progress::milestones` says
-/// it. A lease that a judge's job holds says `<grant> lease <n> of job <j> ready`, which this
+/// it. A lease that a call's target holds says `<grant> lease <n> of job <j> ready`, which this
 /// doesn't count.
 pub(crate) fn lease_ready(line: &str) -> bool {
     let Some((_, after)) = line.split_once(" lease ") else {

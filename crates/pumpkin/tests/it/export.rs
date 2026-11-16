@@ -13,7 +13,7 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::view::{Model, Piped, answered, said, started, user};
-use super::{Prices, Scratch, Step, check, judged, judged_log, lease_places, logged, write_run};
+use super::{Prices, Scratch, Step, check, lease_places, logged, returned, whole_log, write_run};
 
 /// The run that [`write_exported`] writes.
 pub(super) const EXPORTED: &str = "20261110-170000-00000012";
@@ -22,9 +22,9 @@ pub(super) const EXPORTED: &str = "20261110-170000-00000012";
 /// the view refuses its `run.json` and the export leaves it out.
 const UNREADABLE: &str = "20261110-180000-00000013";
 
-/// Writes into `scratch`'s default runs directory run [`EXPORTED`], of [`judged_log`] and then
+/// Writes into `scratch`'s default runs directory run [`EXPORTED`], of [`whole_log`] and then
 /// the agent's requests 10 to 12, which call a tool whose output is longer than an entry's text
-/// in a window, and change the instructions at the last, and a judge's request 13; it ended if
+/// in a window, and change the instructions at the last, and a call's request 13; it ended if
 /// `ended`, else it is live, and the lock of its driver is returned held; the agent's first
 /// message says `asked`, and each provider reports `reports`.
 #[expect(
@@ -49,7 +49,7 @@ pub(super) fn write_exported(
     let second = [user(asked), call.clone(), output];
     let mut third = second.to_vec();
     third.extend([said("A.TXT is there"), user("and now?")]);
-    let mut log = judged_log();
+    let mut log = whole_log();
     log.push(started(1001, "agent", 10));
     let kept = model.keep(
         10,
@@ -98,7 +98,7 @@ pub(super) fn write_exported(
     log.push(started(1007, "job-0", 13));
     log.push(answered(1008, "job-0", 13, 200, kept, Some("chat")));
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let outcome = ended.then(|| judged(49.36, json!({ "raw_score": 49.36 })));
+    let outcome = ended.then(|| returned(49.36));
     let started = since.checked_sub(Duration::from_secs(1100)).unwrap();
     let mut places = lease_places(Prices::Both);
     for (provider, report) in reports.as_object().unwrap() {
@@ -425,7 +425,7 @@ fn rewrites_what_a_live_run_changed() {
         &scratch,
         UNREADABLE,
         started_at,
-        &judged_log(),
+        &whole_log(),
         None,
         &unreadable,
     );
@@ -553,7 +553,7 @@ fn replaces_what_names_the_machines() {
     };
     for (text, why) in [
         (ec2, "the agent's sandbox"),
-        (modal, "a judge's sandbox, as the log names it"),
+        (modal, "a call's target's sandbox, as the log names it"),
         ("3.101.18.71", "an address that a provider reported"),
         ("311100000000", "an account that a provider reported"),
         ("/home/exporter", "this machine's home"),

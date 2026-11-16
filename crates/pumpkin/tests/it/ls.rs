@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, StandIn, Step, asked, check, cut, judged, judged_log, lease_places,
-    lease_task, logged, masked, poll, ran, write_record, write_run,
+    Prices, Scratch, StandIn, Step, asked, check, cut, lease_places, lease_task, logged, masked,
+    poll, ran, returned, whole_log, write_record, write_run,
 };
 
 #[test]
@@ -97,7 +97,7 @@ fn runs_a_task() {
               sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
+            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/final.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
             outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             printed outcome.json: true"#]],
     );
@@ -113,16 +113,10 @@ fn lists() {
         write_record(&scratch, id, true, Some(outcome));
         task(id, name);
     };
-    ended(
-        "20261107-120000-1b8a6389",
-        "examples/hello",
-        judged(7.0, json!({})),
-    );
-    ended(
-        "20261107-120100-2c9b0001",
-        "examples/hello",
-        json!({ "state": "finished", "verdict": { "kind": "judged" } }),
-    );
+    ended("20261107-120000-1b8a6389", "examples/hello", returned(7.0));
+    let mut showing_none = returned(7.0);
+    showing_none["verdict"]["result"]["values"] = json!([]);
+    ended("20261107-120100-2c9b0001", "examples/hello", showing_none);
     ended(
         "20261107-120200-3d0c0002",
         "examples/codex",
@@ -235,11 +229,11 @@ fn lists_the_last_day() {
 )]
 fn lists_phases() {
     let scratch = Scratch::new("lists-phases");
-    let log = judged_log();
+    let log = whole_log();
     // A run that went the whole way, priced but for its box's class, and one that ended at its
     // deadline with nothing submitted, unpriced.
     let whole = "20261110-100000-0000000a";
-    let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+    let outcome = returned(49.36);
     let priced = lease_places(Prices::Both);
     write_run(
         &scratch,
@@ -250,7 +244,7 @@ fn lists_phases() {
         &priced,
     );
     let late = "20261110-110000-0000000b";
-    let unjudged = json!({
+    let unsubmitted = json!({
         "state": "finished",
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
@@ -273,7 +267,7 @@ fn lists_phases() {
         late,
         asked(late, 90),
         &late_log,
-        Some(unjudged),
+        Some(unsubmitted),
         &unpriced,
     );
     // And the first priced otherwise: its tokens alone, its sandboxes alone, and nothing.
@@ -282,13 +276,13 @@ fn lists_phases() {
         ("20261110-120000-0000000d", Prices::Sandboxes),
         ("20261110-120000-0000000e", Prices::Nothing),
     ] {
-        let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+        let outcome = returned(49.36);
         let places = lease_places(prices);
         write_run(&scratch, id, asked(id, 30), &log, Some(outcome), &places);
     }
     // Live, cut at the second named, its last record written 2 seconds ago: as it starts its
-    // agent, as the agent has made model requests, as it has called a judge, and as the final
-    // judge runs; and an agent's that was written long ago, past its deadline.
+    // agent, as the agent has made model requests, as it has called a job function, and as the
+    // final call runs; and an agent's that was written long ago, past its deadline.
     let ago = Duration::from_secs(2);
     let mut held: Vec<File> = [
         ("20261111-090000-0000000a", 0, ago),
@@ -379,7 +373,7 @@ fn lists_phases() {
               20261111-090000-0000000c agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
                                        job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261111-090000-0000000d final judge     <t>  of 15m04s  $1.04+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
+              20261111-090000-0000000d final call      <t>  of 15m04s  $1.04+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
               20261111-090000-0000000e agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
               20261111-090000-0000000f publishing      <t>                  -  example/lease
               20261111-090000-0000000g agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
@@ -393,7 +387,7 @@ fn lists_phases() {
 #[test]
 fn lists_leases() {
     let scratch = Scratch::new("lists-leases");
-    let log = judged_log();
+    let log = whole_log();
     // Live, cut at the second named, its last record written 2 seconds ago: as its train call's
     // box had a file put, ran a script, and was closed as its call ended; as the agent's runners
     // start, are ready, one running a command, and are closed by the agent or expire; and as the
@@ -478,7 +472,7 @@ fn says_unread_lines() {
             json!([{ "kind": "tear_down_agent" }, { "kind": "close_lease" }, { "kind": "finish" }]),
         ),
     ];
-    let unjudged = json!({
+    let unsubmitted = json!({
         "state": "finished",
         "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
     });
@@ -487,7 +481,7 @@ fn says_unread_lines() {
         id,
         asked(id, 90),
         &log,
-        Some(unjudged),
+        Some(unsubmitted),
         &lease_places(Prices::Nothing),
     );
     let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();

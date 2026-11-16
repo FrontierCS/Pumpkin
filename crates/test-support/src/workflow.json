@@ -84,23 +84,20 @@
         "memory_bytes": 2147483648
       },
       "runtime": {
-        "judge": {
-          "command": {
-            "argv": ["/usr/local/bin/judge"],
-            "cwd": "/pumpkin/home",
-            "env": [
-              "MODE=eval",
-              "DATASET=/data/eval.json"
-            ]
-          },
-          "slots": [{ "name": "payload", "max_bytes": 4194304 }],
-          "result": {
-            "shows": { "score": "/raw_score", "metrics": "/metrics" },
-            "returns": ["/raw_score", "/metrics", "/failure"]
-          }
+        "target": {
+          "cwd": "/pumpkin/home",
+          "env": [
+            "MODE=eval",
+            "DATASET=/data/eval.json"
+          ]
         }
       }
     }
   ],
-  "score": { "role": "final_judge", "slot": "payload", "timeout_seconds": 120 }
+  "final": {
+    "target": "final_judge",
+    "body": { "file": "//verify.star", "def": "final_call" },
+    "payload_max_bytes": 4194304,
+    "timeout_seconds": 120
+  }
 }

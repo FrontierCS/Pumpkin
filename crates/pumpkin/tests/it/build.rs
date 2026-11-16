@@ -117,14 +117,14 @@ fn refusals() {
               build while more than 85% of the controller's volume is used.
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
-            lib/bench.star:80:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
-                80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+            lib/bench.star:52:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does
+                52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/broken/task.star:5:1
-            lib/bench.star:140:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
-                140 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:110:18: `tasks/broken/judge/Dockerfile` doesn't exist: name a regular file below the root that does
+                110 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_trainer()`, called at lib/bench.star:82:9
+                in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/broken/task.star:5:1
             tasks/broken/task.star:6:28: `cpu_millis` can't be `0`: expected a positive int
                 6 |     agent = {"cpu_millis": 0, "memory_bytes": 32 * GiB},
@@ -452,46 +452,23 @@ fn builds_on_docker() {
                       ]
                     },
                     "runtime": {
-                      "judge": {
-                        "command": {
-                          "argv": [
-                            "/opt/judge/run"
-                          ],
-                          "env": [
-                            "JUDGE_MODE=final",
-                            "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
-                          ],
-                          "cwd": "/pumpkin/home"
-                        },
-                        "slots": [
-                          {
-                            "name": "payload",
-                            "max_bytes": 4194304
-                          }
-                        ],
-                        "result": {
-                          "shows": {
-                            "score": "/score"
-                          },
-                          "returns": [
-                            "/score",
-                            "/metrics/instances",
-                            "/metrics/solved",
-                            "/metrics/submitted",
-                            "/metrics/invalid",
-                            "/metrics/duplicate",
-                            "/metrics/unbounded",
-                            "/metrics/rejected",
-                            "/failure"
-                          ]
-                        }
+                      "target": {
+                        "cwd": "/pumpkin/home",
+                        "env": [
+                          "JUDGE_MODE=final",
+                          "JUDGE_PAYLOAD=/pumpkin/in/payload/raw"
+                        ]
                       }
                     }
                   }
                 ],
-                "score": {
-                  "role": "final_judge",
-                  "slot": "payload",
+                "final": {
+                  "target": "final_judge",
+                  "body": {
+                    "file": "//lib/bench.star",
+                    "def": "final_call"
+                  },
+                  "payload_max_bytes": 4194304,
                   "timeout_seconds": 120
                 }
               }
@@ -507,14 +484,14 @@ fn builds_on_docker() {
             builds ended: ["pumpkin: the build of an image in pumpkin/tasks/failing/agent failed", "pumpkin: the build of an image in pumpkin/tasks/failing/judge failed"]
             pumpkin: building an image in pumpkin/tasks/failing/agent
             pumpkin: building an image in pumpkin/tasks/failing/judge
-            lib/bench.star:80:19: building the image failed: `docker build` of `agent/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                80 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
+            lib/bench.star:52:19: building the image failed: `docker build` of `agent/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                52 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/failing/task.star:5:1
-            lib/bench.star:140:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-                140 |         "image": image(recipe, mount = SHARED),
+            lib/bench.star:110:18: building the image failed: `docker build` of `judge/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                110 |         "image": image(recipe, mount = SHARED),
                     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `_trainer()`, called at lib/bench.star:82:9
+                in `_target()`, called at lib/bench.star:54:9
                 in `bench_task()`, called at tasks/failing/task.star:5:1
             pumpkin: tasks/failing/task.star: the task has 2 problems
             pumpkin: to build it again: pumpkin build --arg model=model-a --config <scratch>/pumpkin.toml <scratch>/tasks/failing/task.star
@@ -593,8 +570,8 @@ fn variants_on_docker() {
             exit status: Some(1)
             builds' output shown: false, echoing: [], its steps' errors: []
             builds ended: []
-            lib/bench.star:83:13: tasks/bench/tools/Dockerfile:2: `${BASE}` expands to the build argument's value: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
-                83 |     tools = image("tools/Dockerfile", args = {"BASE": BASE, "NOTE": NOTE})
+            lib/bench.star:55:13: tasks/bench/tools/Dockerfile:2: `${BASE}` expands to the build argument's value: `busybox:1.37` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
+                55 |     tools = image("tools/Dockerfile", args = {"BASE": BASE, "NOTE": NOTE})
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `bench_task()`, called at tasks/bench/task.star:5:1
             pumpkin: tasks/bench/task.star: the task has 1 problem

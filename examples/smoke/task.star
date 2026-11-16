@@ -1,11 +1,12 @@
 """A check of a deployment, with no model, which `cargo xtask live` runs through the controller.
 
 The agent leases a CPU runner, and a GPU runner if `gpu_model` names a GPU's model, runs
-`probe.py` in its own sandbox and in each runner, and submits what each printed; the judge runs it
-in its own sandbox too, and scores each of its lines that says the sandbox is confined as it should
-be: 5 for each sandbox, so 15 without a GPU runner, and 20 with one.
+`probe.py` in its own sandbox and in each runner, and submits what each printed; the final call
+runs it in its target too, and scores each of its lines that says the sandbox is confined as it
+should be: 5 for each sandbox, so 15 without a GPU runner, and 20 with one.
 """
 
+load("//smoke/final.star", "final_call")
 load("//submit.star", "submit")
 
 DEADLINE = arg("deadline_seconds", int, default = 600)
@@ -59,12 +60,8 @@ workflow(
             "image": JUDGE_IMAGE,
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 500, "memory_bytes": 512 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["python3", "-u", "/opt/smoke/judge.py"], "cwd": "/pumpkin/home"},
-                "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-                "result": {"shows": {"score": "/score"}, "returns": ["/score", "/detail"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 300},
+    final = {"target": "judge", "body": final_call, "payload_max_bytes": 64 * KiB, "timeout_seconds": 300},
 )

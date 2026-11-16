@@ -145,8 +145,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     // selection was locked on a route that served before it, and for a failure of the agent's last
     // request.
     pub(crate) fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
-        // A refusal heard after the lock can't change the score: the agent's or a call's whose
-        // answer the agent can't act on. The score's call starts after the lock, so a
+        // A refusal heard after the lock can't change the result: the agent's or a call's whose
+        // answer the agent can't act on. The final call starts after the lock, so a
         // refusal on its route always fails the run.
         for (caller, served) in &self.served {
             if let Some(name) = served.key_refused_by()

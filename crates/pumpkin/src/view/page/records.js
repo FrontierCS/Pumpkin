@@ -96,9 +96,6 @@ function said(record) {
       text = "request " + event.request + " of " + (event.caller || "?") + ": " + event.answer.kind + " " + (event.upstream_status ?? "") + failure(event.failed) + usage;
       return [event.kind, text, event.failed ? "failed" : event.answer.kind === "forwarded" ? "" : "refused"];
     }
-    case "judge_collected":
-      text = "job " + event.job + ": " + JSON.stringify(event.result ?? event.invalid);
-      break;
     case "call_returned":
       text = "job " + event.job + ": " + event.returned.map((shown) => shown.name + "=" + JSON.stringify(shown.value)).join(" ");
       break;

@@ -29,8 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Caller, Effect, Evaluated, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef,
-    Request, Submission, Unevaluated, Verdict, WorkEnd,
+    Action, Caller, Effect, Evaluated, Event, JobId, Outcome, PayloadRef, Request, Unevaluated,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
@@ -48,13 +47,14 @@ use super::{Clock, Durable, Host, record};
 mod call;
 mod fold;
 mod logged;
+pub(super) mod outcome;
 mod progress;
 mod roles;
 mod usage;
 
-pub use call::{CallEnd, CallSpan};
+pub use call::{CallEnd, CallOf, CallSpan, CallStart};
 pub use fold::{LogFold, StartedOver, TakenLine};
-pub(super) use fold::{final_judge, lines, progress};
+pub(super) use fold::{final_call, lines, progress};
 pub use logged::Direction;
 pub(super) use progress::places;
 pub use progress::{
@@ -445,22 +445,6 @@ fn event_json(event: &Event) -> Value {
             "caller": logged::Caller::from(*caller),
             "request": request_json(request),
         }),
-        Event::JudgeStarted { job } => json!({ "kind": "judge_started", "job": job.0 }),
-        Event::JudgeExited { job, status } => {
-            json!({ "kind": "judge_exited", "job": job.0, "status": status })
-        }
-        Event::JudgeTimedOut { job } => json!({ "kind": "judge_timed_out", "job": job.0 }),
-        Event::JudgeCollected { job, result } => match result {
-            Ok(result) => json!({
-                "kind": "judge_collected",
-                "job": job.0,
-                "result": result_json(result),
-            }),
-            Err(reason) => json!({ "kind": "judge_collected", "job": job.0, "invalid": reason }),
-        },
-        Event::JudgeFailed { job, reason } => {
-            json!({ "kind": "judge_failed", "job": job.0, "reason": reason })
-        }
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
         Event::CallTimedOut { job } => json!({ "kind": "call_timed_out", "job": job.0 }),
         Event::CallReturned { job, result } => json!({
@@ -619,16 +603,6 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             };
             json!({ "kind": "reply", "reply": reply })
         }
-        Action::StartJudge {
-            job,
-            payload,
-            timeout,
-        } => json!({
-            "kind": "start_judge",
-            "job": job.0,
-            "payload": payload_json(payload),
-            "timeout_ns": nanos(*timeout),
-        }),
         Action::StartCall {
             job,
             function,
@@ -643,7 +617,17 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             "payload": payload_json(payload),
             "timeout_ns": nanos(*timeout),
         }),
-        Action::StopJudge { job } => json!({ "kind": "stop_judge", "job": job.0 }),
+        Action::StartFinalCall {
+            job,
+            payload,
+            timeout,
+        } => json!({
+            "kind": "start_final_call",
+            "job": job.0,
+            "payload": payload_json(payload),
+            "timeout_ns": nanos(*timeout),
+        }),
+        Action::StopCall { job } => json!({ "kind": "stop_call", "job": job.0 }),
         Action::StartLease {
             lease,
             holder,
@@ -697,50 +681,9 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
     }
 }
 
-/// How a run finished, for `outcome.json`: `work_end`, which is `deadline`, `finalized`,
-/// `agent_exited` with its `status`, or `agent_failed` with its `reason`; and `verdict`, which is
-/// `no_submission`, `judged` or `no_result`, the last two with the `submission` (`payload`,
-/// `finalized`) and the `result` (`values`, present when it shows any: an array of `name` and
-/// `value` in the order the spec shows them; and `returned`) or `failure` (`timeout`, `error` or
-/// `invalid_result`) that judging gave. Each of them is named by its `kind`.
+/// How a run finished, for `outcome.json`, in the form of [`outcome::Finished`].
 pub(super) fn outcome_json(outcome: &Outcome) -> Value {
-    let Outcome { work_end, verdict } = outcome;
-    let work_end = match work_end {
-        WorkEnd::Deadline => json!({ "kind": "deadline" }),
-        WorkEnd::Finalized => json!({ "kind": "finalized" }),
-        WorkEnd::AgentExited(status) => json!({ "kind": "agent_exited", "status": status }),
-        WorkEnd::AgentFailed(reason) => json!({ "kind": "agent_failed", "reason": reason }),
-    };
-    let verdict = match verdict {
-        Verdict::NoSubmission => json!({ "kind": "no_submission" }),
-        Verdict::Judged { submission, result } => json!({
-            "kind": "judged",
-            "submission": submission_json(submission),
-            "result": result_json(result),
-        }),
-        Verdict::NoResult {
-            submission,
-            failure,
-        } => json!({
-            "kind": "no_result",
-            "submission": submission_json(submission),
-            "failure": failure_json(failure),
-        }),
-    };
-    json!({ "work_end": work_end, "verdict": verdict })
-}
-
-fn submission_json(submission: &Submission) -> Value {
-    let Submission { payload, finalized } = submission;
-    json!({ "payload": payload_json(payload), "finalized": finalized })
-}
-
-fn result_json(result: &JudgeResult) -> Value {
-    let mut json = json!({ "returned": result.returned() });
-    if !result.values().is_empty() {
-        json["values"] = shown_json(result.values());
-    }
-    json
+    json!(outcome::Finished::from(outcome))
 }
 
 /// `values` in order, each as `{"name": …, "value": …}`.
@@ -752,21 +695,7 @@ fn shown_json(values: &[(Name, Value)]) -> Value {
     json!(values)
 }
 
-/// The values that `result`, a judge's result as the log's `judge_collected` and `outcome.json`'s
-/// `verdict` hold it, shows, each by its name, in order: none if it has no `values`.
-///
-/// # Errors
-///
-/// Fails if `values` is not an array of objects that each hold a `name`, a [`Name`], and a
-/// `value`.
-pub fn result_values(result: &Value) -> Result<Vec<(Name, Value)>, serde_json::Error> {
-    let Some(values) = result.get("values") else {
-        return Ok(Vec::new());
-    };
-    returned_values(values)
-}
-
-/// The values that `returned`, a job function's return as the log's `call_returned` holds it,
+/// The values that `returned`, a body's return as the log's `call_returned` holds it,
 /// gives, each by its name, in order.
 ///
 /// # Errors
@@ -779,14 +708,6 @@ pub fn returned_values(returned: &Value) -> Result<Vec<(Name, Value)>, serde_jso
         .into_iter()
         .map(|shown| (shown.name, shown.value))
         .collect())
-}
-
-fn failure_json(failure: &Failure) -> Value {
-    match failure {
-        Failure::Timeout => json!({ "kind": "timeout" }),
-        Failure::Error(reason) => json!({ "kind": "error", "reason": reason }),
-        Failure::InvalidResult(reason) => json!({ "kind": "invalid_result", "reason": reason }),
-    }
 }
 
 fn payload_json(payload: &PayloadRef) -> Value {

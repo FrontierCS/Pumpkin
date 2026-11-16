@@ -13,10 +13,8 @@
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
 //! - any op after `@<job>`, from that job's call instead;
-//! - `judge_started <job>`, `judge_exited <job> [<code>]`, `judge_timed_out <job>`,
-//!   `collected <job> <result.json>`, `judge_failed <job> <reason>`;
-//! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> <object>`, whose fields
-//!   are the body's return in order, `call_failed <job> <reason>`;
+//! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [<name>=<value>]…`, the
+//!   body's return in its order, `call_failed <job> <reason>`;
 //! - `lease_ready <lease>`, `command_ended <lease> <command> <code>|timed_out|unstarted
 //!   [<stdout>]`, `transfer_ended <lease> <transfer> moved <entries> <bytes>|failed <reason>`,
 //!   `lease_ended <lease>`, `lease_failed <lease> <reason>`;
@@ -36,13 +34,13 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use decision::{
-    Action, Caller, Core, Direction, Effect, Evaluated, Event, JobId, JudgeResult, LeaseId, OpId,
+    Action, CallResult, Caller, Core, Direction, Effect, Evaluated, Event, JobId, LeaseId, OpId,
     Outcome, PayloadRef, Request, Submission, Unevaluated, Verdict, WorkEnd,
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
+use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
-use schema::sandbox::{ExitStatus, RESULT_MAX_DEPTH};
 use schema::workflow::{Class, JobOf, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
@@ -58,7 +56,6 @@ const SLOW_STARTUP: Duration = Duration::from_secs(30);
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     edit(&mut ir);
-    // A `Value` sorts an object's keys, so a judge's `shows` comes here in the order of its names.
     check_ir(&serde_json::from_value(ir).unwrap(), script, expect);
 }
 
@@ -153,12 +150,15 @@ fn call_event(words: &[&str]) -> Event {
         "call_started" => Event::CallStarted { job },
         "call_timed_out" => Event::CallTimedOut { job },
         "call_returned" => {
-            let returned: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(words[2]).unwrap();
-            let returned = (returned.into_iter())
-                .map(|(name, value)| (serde_json::from_value(json!(name)).unwrap(), value))
+            let returned = (words[2..].iter())
+                .flat_map(|fields| fields.split(' '))
+                .map(|field| {
+                    let (name, value) = field.split_once('=').unwrap();
+                    let name = serde_json::from_value(json!(name)).unwrap();
+                    (name, serde_json::from_str(value).unwrap())
+                })
                 .collect();
-            let result = JudgeResult::returned_by(returned).unwrap();
+            let result = CallResult::returned_by(returned).unwrap();
             Event::CallReturned { job, result }
         }
         "call_failed" => Event::CallFailed {
@@ -170,15 +170,6 @@ fn call_event(words: &[&str]) -> Event {
 }
 
 impl Run<'_> {
-    fn collected(&self, job: JobId, result: &str) -> Event {
-        if let JobOf::Function(_) = self.jobs[&job] {
-            panic!("job {} runs a body, which writes no result", job.0);
-        }
-        let spec = &self.workflow.judge().result;
-        let result = JudgeResult::parse(spec, result.as_bytes());
-        Event::JudgeCollected { job, result }
-    }
-
     fn event(&mut self, event: &str) -> Event {
         let (caller, event) = match event.strip_prefix('@') {
             Some(called) => {
@@ -189,7 +180,6 @@ impl Run<'_> {
         };
         self.caller = caller;
         let words: Vec<&str> = event.splitn(3, ' ').collect();
-        let job = || JobId(words[1].parse().unwrap());
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
         if let Some((grant, op)) = words[0].split_once('.') {
             let grant = Name::try_from(grant.to_owned()).unwrap();
@@ -225,18 +215,6 @@ impl Run<'_> {
             "status" => self.op(Request::Status {
                 job: words[1].parse().unwrap(),
             }),
-            "judge_started" => Event::JudgeStarted { job: job() },
-            // A judge's exit code is 0 unless the script gives one.
-            "judge_exited" => Event::JudgeExited {
-                job: job(),
-                status: words.get(2).map_or(ExitStatus::Code(0), |word| code(word)),
-            },
-            "judge_timed_out" => Event::JudgeTimedOut { job: job() },
-            "collected" => self.collected(job(), words[2]),
-            "judge_failed" => Event::JudgeFailed {
-                job: job(),
-                reason: words[2].to_owned(),
-            },
             kind if kind.starts_with("call_") => call_event(&words),
             kind if kind.starts_with("lease_") || kind.ends_with("_ended") => lease_event(&words),
             "tick" => Event::Tick,
@@ -271,7 +249,7 @@ impl Run<'_> {
         let effects: Result<Vec<Effect>, Unevaluated> = effects.collect();
         let evaluated = effects.map(|effects| Evaluated {
             effects,
-            returned: JudgeResult::returned_by(vec![(Name::from_static("state"), "done".into())])
+            returned: CallResult::returned_by(vec![(Name::from_static("state"), "done".into())])
                 .unwrap(),
         });
         self.op(Request::Now {
@@ -327,15 +305,15 @@ impl Run<'_> {
                 op: OpId(op),
                 reply: OpReply::Refused { message },
             } => format!("refuse op {op}: {message}"),
-            Action::StartJudge {
+            Action::StartFinalCall {
                 job,
                 payload,
                 timeout,
             } => {
-                self.jobs.insert(*job, JobOf::Score);
+                self.jobs.insert(*job, JobOf::Final);
                 let payload = payload_name(payload);
                 format!(
-                    "start job {} of score on {payload}, with a timeout of {timeout:?}",
+                    "start call {} of final on {payload}, with a timeout of {timeout:?}",
                     job.0
                 )
             }
@@ -361,7 +339,7 @@ impl Run<'_> {
                     job.0
                 )
             }
-            Action::StopJudge { job } => format!("stop job {}", job.0),
+            Action::StopCall { job } => format!("stop call {}", job.0),
             Action::StartLease {
                 lease,
                 holder,
@@ -544,14 +522,13 @@ fn outcome_text(outcome: &Outcome) -> String {
     };
     let verdict = match &outcome.verdict {
         Verdict::NoSubmission => "no submission".to_owned(),
-        Verdict::Judged { submission, result } => {
+        Verdict::Returned { submission, result } => {
             let values = result.values().iter();
             let values: Vec<String> = values
                 .map(|(name, value)| format!("{name}={value}"))
                 .collect();
-            let returned = json!(result.returned());
             format!(
-                "{} judged, showing [{}], returning {returned}",
+                "{} returned, showing [{}]",
                 submission_text(submission),
                 values.join(" ")
             )
@@ -578,9 +555,8 @@ fn submission_text(submission: &Submission) -> String {
 
 #[test]
 fn whole_run() {
-    // Read from its text, the IR keeps the order in which the final judge declares its values.
-    check_ir(
-        &serde_json::from_str(WORKFLOW).unwrap(),
+    check(
+        |_| {},
         r#"
         0 agent_started
         1000 ops
@@ -588,14 +564,13 @@ fn whole_run() {
         2100 status 0
         2500 call_started 0
         3000 status 0
-        9600 call_returned 0 {"raw_score":0,"metrics":{"solved":0}}
+        9600 call_returned 0 raw_score=0 metrics={"solved":0}
         10000 status 0
         11000 now submit 10240 select
         12000 now submit 10240 select end_work
         12100 agent_exited 0
-        13500 judge_started 1
-        20000 judge_exited 1
-        20100 collected 1 {"raw_score": 0, "metrics": {"solved": 0}}
+        13500 call_started 1
+        20100 call_returned 1 score=0 metrics={"solved":0}
         "#,
         &expect![[r#"
             start
@@ -613,7 +588,7 @@ fn whole_run() {
             2500 call_started 0
             3000 status 0
               reply to op 4: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":12000}}
-            9600 call_returned 0 {"raw_score":0,"metrics":{"solved":0}}
+            9600 call_returned 0 raw_score=0 metrics={"solved":0}
             10000 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11992}}
             11000 now submit 10240 select
@@ -623,12 +598,11 @@ fn whole_run() {
               (tick due at 72000)
             12100 agent_exited 0
               tear down the agent
-              start job 1 of score on op 7's payload of 10240 bytes, with a timeout of 120s
+              start call 1 of final on op 7's payload of 10240 bytes, with a timeout of 120s
               (tick due at 18210000)
-            13500 judge_started 1
-            20000 judge_exited 1
-            20100 collected 1 {"raw_score": 0, "metrics": {"solved": 0}}
-              finish: work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, judged, showing [score=0 metrics={"solved":0}], returning {"metrics":{"solved":0},"raw_score":0}
+            13500 call_started 1
+            20100 call_returned 1 score=0 metrics={"solved":0}
+              finish: work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, returned, showing [score=0 metrics={"solved":0}]
         "#]],
     );
 }
@@ -648,7 +622,7 @@ fn quotas() {
         1000 now submit 4194305 select
         1000 call train 10
         2000 call_started 0
-        6100 call_returned 0 {"raw_score":null,"failure":{"code":"wrong_answer"}}
+        6100 call_returned 0 raw_score=null failure={"code":"wrong_answer"}
         6200 status 0
         7000 call train 10
         7500 call_started 1
@@ -674,7 +648,7 @@ fn quotas() {
               reply to op 4: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":10}}
               start call 0 of train on op 4's payload of 10 bytes, with a timeout of 6s
             2000 call_started 0
-            6100 call_returned 0 {"raw_score":null,"failure":{"code":"wrong_answer"}}
+            6100 call_returned 0 raw_score=null failure={"code":"wrong_answer"}
             6200 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":5}}
             7000 call train 10
@@ -725,7 +699,7 @@ fn job_functions() {
         2050 status 0
         2100 call check 10 n=-1 mode=slow
         2300 call_started 1
-        2600 call_returned 1 {"lines":1,"bytes":6}
+        2600 call_returned 1 lines=1 bytes=6
         2700 status 1
         "#,
         &expect![[r#"
@@ -754,7 +728,7 @@ fn job_functions() {
               reply to op 8: {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
               start call 1 of check on op 8's payload of 10 bytes, mode="slow", n=-1, with a timeout of 60s
             2300 call_started 1
-            2600 call_returned 1 {"lines":1,"bytes":6}
+            2600 call_returned 1 lines=1 bytes=6
             2700 status 1
               reply to op 9: {"kind":"status","job":1,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":null}}
         "#]],
@@ -772,7 +746,7 @@ fn one_call_at_a_time() {
         1200 status 0
         2000 call_started 0
         3100 call train 10
-        3200 call_returned 0 {}
+        3200 call_returned 0
         3300 status 0
         3400 call train 10
         4000 call_failed 1 the target's sandbox did not connect
@@ -795,7 +769,7 @@ fn one_call_at_a_time() {
             2000 call_started 0
             3100 call train 10
               refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
-            3200 call_returned 0 {}
+            3200 call_returned 0
             3300 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11998}}
             3400 call train 10
@@ -831,9 +805,9 @@ fn deadline() {
         60100 status 0
         60200 agent_exited 137
         60400 call_failed 0 stopped
-        60500 judge_started 1
-        180500 judge_timed_out 1
-        180600 collected 1 {"raw_score": 7}
+        60500 call_started 1
+        180500 call_timed_out 1
+        180600 call_returned 1 score=7
         "#,
         &expect![[r#"
             start
@@ -853,17 +827,17 @@ fn deadline() {
             60000 model
               model requests refused
             60000 tick
-              stop job 0
+              stop call 0
               tear down the agent
               (tick due at 270000)
             60100 status 0
               refuse op 3: the work phase has ended: make no more ops
             60200 agent_exited 137
             60400 call_failed 0 stopped
-              start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
-            60500 judge_started 1
-            180500 judge_timed_out 1
-            180600 collected 1 {"raw_score": 7}
+              start call 1 of final on op 1's payload of 10 bytes, with a timeout of 120s
+            60500 call_started 1
+            180500 call_timed_out 1
+            180600 call_returned 1 score=7
               finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
         "#]],
     );
@@ -887,9 +861,9 @@ fn deadline() {
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 2's payload of 10 bytes, with a timeout of 1ms
             60000 call_failed 0 the target's sandbox didn't start
-              stop job 0
+              stop call 0
               tear down the agent
-              start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 270000)
         "#]],
     );
@@ -963,17 +937,16 @@ fn deadline_from_the_agent_start() {
 
 #[test]
 fn hard_end_covers_the_run() {
-    // Each step takes as long as it may: the agent starts at its startup and works to the
-    // deadline, its teardown takes the grace and its startup again, and the final judge its own.
+    // Each step takes as long as it may: the agent starts at its startup and works to the deadline,
+    // its teardown takes the grace and its startup again, and the final call's target its own.
     check(
         |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r#"
         10000 agent_started
         69999 now submit 10 select
         70000 tick
-        150000 judge_started 0
-        269999 judge_exited 0
-        269999 collected 0 {"raw_score": 7}
+        150000 call_started 0
+        269999 call_returned 0 score=7
         "#,
         &expect![[r#"
             start
@@ -984,12 +957,11 @@ fn hard_end_covers_the_run() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
             70000 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 270000)
-            150000 judge_started 0
-            269999 judge_exited 0
-            269999 collected 0 {"raw_score": 7}
-              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, judged, showing [score=7], returning {"raw_score":7}
+            150000 call_started 0
+            269999 call_returned 0 score=7
+              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, returned, showing [score=7]
         "#]],
     );
 }
@@ -1004,11 +976,10 @@ fn agent_ends() {
         1500 call_started 0
         3100 now submit 10 select
         3200 agent_exited 0
-        3400 call_returned 0 {"raw_score":1}
-        3500 judge_started 1
+        3400 call_returned 0 raw_score=1
+        3500 call_started 1
         4000 call_failed 0 its report came again
-        5000 judge_exited 1
-        5100 collected 1 {"raw_score": "high"}
+        5100 call_returned 1 score="high"
         "#,
         &expect![[r#"
             start
@@ -1023,16 +994,15 @@ fn agent_ends() {
             3100 now submit 10 select
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
             3200 agent_exited 0
-              stop job 0
+              stop call 0
               tear down the agent
               (tick due at 18210000)
-            3400 call_returned 0 {"raw_score":1}
-              start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
-            3500 judge_started 1
+            3400 call_returned 0 raw_score=1
+              start call 1 of final on op 2's payload of 10 bytes, with a timeout of 120s
+            3500 call_started 1
             4000 call_failed 0 its report came again
-            5000 judge_exited 1
-            5100 collected 1 {"raw_score": "high"}
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, judged, showing [score="high"], returning {"raw_score":"high"}
+            5100 call_returned 1 score="high"
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, returned, showing [score="high"]
         "#]],
     );
     check(
@@ -1049,69 +1019,6 @@ fn agent_ends() {
               finish: work ended at the agent's failure, the agent's sandbox did not connect; no submission
               (tick due at 18210000)
         "#]],
-    );
-}
-
-#[test]
-fn deep_results() {
-    // A result whose `deep` field nests arrays to its depth in all, its object's included.
-    let nested = |depth: usize| {
-        let (open, close) = ("[".repeat(depth - 1), "]".repeat(depth - 1));
-        format!(r#"{{"raw_score": 3, "deep": {open}{close}}}"#)
-    };
-    let script = |result: String| {
-        format!(
-            "
-            0 agent_started
-            3300 now submit 10 select
-            3400 agent_exited 0
-            3500 judge_started 0
-            4000 judge_exited 0
-            4100 collected 0 {result}
-            "
-        )
-    };
-    check(
-        |_| {},
-        &script(nested(RESULT_MAX_DEPTH)),
-        &expect![[r#"
-        start
-          start the agent
-          (tick due at 18010000)
-        0 agent_started
-          (tick due at 18000000)
-        3300 now submit 10 select
-          reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
-        3400 agent_exited 0
-          tear down the agent
-          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-          (tick due at 18210000)
-        3500 judge_started 0
-        4000 judge_exited 0
-        4100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
-          finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=3], returning {"raw_score":3}
-    "#]],
-    );
-    check(
-        |_| {},
-        &script(nested(RESULT_MAX_DEPTH + 1)),
-        &expect![[r#"
-        start
-          start the agent
-          (tick due at 18010000)
-        0 agent_started
-          (tick due at 18000000)
-        3300 now submit 10 select
-          reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
-        3400 agent_exited 0
-          tear down the agent
-          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
-          (tick due at 18210000)
-        3500 judge_started 0
-        4000 judge_exited 0
-        4100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
-          finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
-    "#]],
     );
 }
 
@@ -1188,7 +1095,7 @@ fn hard_end_after_work() {
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
             1500 call_started 0
             60000 tick
-              stop job 0
+              stop call 0
               tear down the agent
               (tick due at 270000)
             269999 tick
@@ -1206,10 +1113,10 @@ fn hard_end_after_work() {
         0 agent_started
         1000 now submit 10 select
         2000 agent_exited 0
-        2500 judge_started 0
-        122500 judge_timed_out 0
+        2500 call_started 0
+        122500 call_timed_out 0
         239999 tick
-        240000 collected 0 {"raw_score": 7}
+        240000 call_returned 0 score=7
         "#,
         &expect![[r#"
             start
@@ -1221,12 +1128,12 @@ fn hard_end_after_work() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             2000 agent_exited 0
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 240000)
-            2500 judge_started 0
-            122500 judge_timed_out 0
+            2500 call_started 0
+            122500 call_timed_out 0
             239999 tick
-            240000 collected 0 {"raw_score": 7}
+            240000 call_returned 0 score=7
               abandon the run at its hard end
         "#]],
     );
@@ -1273,7 +1180,7 @@ fn hard_end_bounds() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 215000)
             214999 tick
             215000 tick
@@ -1297,7 +1204,7 @@ fn hard_end_bounds() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":18446744073709551614}
             2000 agent_exited 0
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18446744073709551615999.999999)
         "#]],
     );
@@ -1328,14 +1235,14 @@ fn hard_end_startups() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 255000)
             254999 tick
             255000 tick
               abandon the run at its hard end
         "#]],
     );
-    // In the slow class, the final judge's startup counts once.
+    // In the slow class, the final call's target's startup counts once.
     check(
         |ir| {
             ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
@@ -1358,7 +1265,7 @@ fn hard_end_startups() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             60000 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 290000)
             289999 tick
             290000 tick
@@ -1375,9 +1282,8 @@ fn reports_for_the_log() {
         0 agent_started
         1000 now submit 10 select
         1100 agent_exited 0
-        1500 judge_started 0
-        3000 judge_exited 0 1
-        3100 collected 0 {"raw_score": 1}
+        1500 call_started 0
+        3100 call_returned 0 score=1
         "#,
         &expect![[r#"
             start
@@ -1389,12 +1295,11 @@ fn reports_for_the_log() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17999}
             1100 agent_exited 0
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18210000)
-            1500 judge_started 0
-            3000 judge_exited 0 1
-            3100 collected 0 {"raw_score": 1}
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=1], returning {"raw_score":1}
+            1500 call_started 0
+            3100 call_returned 0 score=1
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, returned, showing [score=1]
         "#]],
     );
 }
@@ -1407,13 +1312,12 @@ fn exact_scores() {
         0 agent_started
         1000 call train 10
         1500 call_started 0
-        2100 call_returned 0 {"raw_score":22.833062975103598}
+        2100 call_returned 0 raw_score=22.833062975103598
         2200 status 0
         3000 now submit 10 select end_work
         3100 agent_exited 0
-        3500 judge_started 1
-        4000 judge_exited 1
-        4100 collected 1 {"raw_score": 22.830584316865718}
+        3500 call_started 1
+        4100 call_returned 1 score=22.830584316865718
         "#,
         &expect![[r#"
             start
@@ -1425,7 +1329,7 @@ fn exact_scores() {
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
-            2100 call_returned 0 {"raw_score":22.833062975103598}
+            2100 call_returned 0 raw_score=22.833062975103598
             2200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
             3000 now submit 10 select end_work
@@ -1433,12 +1337,11 @@ fn exact_scores() {
               (tick due at 63000)
             3100 agent_exited 0
               tear down the agent
-              start job 1 of score on op 3's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on op 3's payload of 10 bytes, with a timeout of 120s
               (tick due at 18210000)
-            3500 judge_started 1
-            4000 judge_exited 1
-            4100 collected 1 {"raw_score": 22.830584316865718}
-              finish: work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, judged, showing [score=22.830584316865718], returning {"raw_score":22.830584316865718}
+            3500 call_started 1
+            4100 call_returned 1 score=22.830584316865718
+              finish: work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, returned, showing [score=22.830584316865718]
         "#]],
     );
 }
@@ -1446,7 +1349,7 @@ fn exact_scores() {
 #[test]
 fn now_calls() {
     check(
-        |ir| ir["roles"][2]["runtime"]["judge"]["slots"][0]["max_bytes"] = 10.into(),
+        |ir| ir["final"]["payload_max_bytes"] = 10.into(),
         r"
         0 agent_started
         1000 now submit 10 end_work
@@ -1538,11 +1441,11 @@ fn finalize_lock() {
             62000 model
               model requests refused
             62000 tick
-              stop job 0
+              stop call 0
               tear down the agent
               (tick due at 18210000)
             62200 call_failed 0 stopped
-              start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
     check(
@@ -1562,7 +1465,7 @@ fn finalize_lock() {
             2000 now submit 10 select end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18150000)
             2000 model
               model requests refused
@@ -1612,9 +1515,8 @@ fn finalize_near_deadline() {
         19950 now submit 10 select end_work
         30100 tick
         30150 ops
-        30200 judge_started 0
-        30300 judge_exited 0
-        30400 collected 0 {"raw_score": 1}
+        30200 call_started 0
+        30400 call_returned 0 score=1
         "#,
         &expect![[r#"
             start
@@ -1627,14 +1529,13 @@ fn finalize_near_deadline() {
               (tick due at 29950)
             30100 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 190000)
             30150 ops
               refuse op 2: the work was ended: make no more ops
-            30200 judge_started 0
-            30300 judge_exited 0
-            30400 collected 0 {"raw_score": 1}
-              finish: work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, judged, showing [score=1], returning {"raw_score":1}
+            30200 call_started 0
+            30400 call_returned 0 score=1
+              finish: work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, returned, showing [score=1]
         "#]],
     );
     check(
@@ -1655,7 +1556,7 @@ fn finalize_near_deadline() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             30000 tick
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 190000)
             30000 ops
               refuse op 2: the work phase has ended: make no more ops
@@ -2041,7 +1942,7 @@ fn leases_end_with_work() {
         6000 lease_ended 1
         7000 lease_failed 0 the runner's session ended
         7100 gpu.status 0
-        8000 judge_started 0
+        8000 call_started 0
         ",
         &expect![[r#"
             start
@@ -2069,10 +1970,10 @@ fn leases_end_with_work() {
               (tick due at 18210000)
             6000 lease_ended 1
             7000 lease_failed 0 the runner's session ended
-              start job 0 of score on op 4's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 4's payload of 10 bytes, with a timeout of 120s
             7100 gpu.status 0
               refuse op 5: the work phase has ended: make no more ops
-            8000 judge_started 0
+            8000 call_started 0
         "#]],
     );
 }
@@ -2481,18 +2382,15 @@ fn lease_slots() {
     );
 }
 
-/// [`leasing`]'s workflow, whose trainer and final judge each lease a runner of their own under a
-/// session named `box`: `trainer` `train_box`, 1 at a time, each for 100 s, and 2 commands in
-/// all, and `final_judge` `final_box`, 1 at a time, each for 30 s; and whose train calls time out
-/// after 50 s.
+/// [`leasing`]'s workflow, whose trainer and final call's target each lease a runner of their own
+/// under a session named `box`: `trainer` `train_box`, 1 at a time, each for 100 s, and 2 commands
+/// in all, and `final_judge` `final_box`, 1 at a time, each for 30 s; and whose train calls time
+/// out after 50 s.
 fn holders_leasing(ir: &mut Value) {
     leasing(ir);
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(50);
-    let boxes = [
-        ("train_box", 1, "target", "4", 100),
-        ("final_box", 2, "judge", "5", 30),
-    ];
-    for (name, holder, kind, image, seconds) in boxes {
+    let boxes = [("train_box", 1, "4", 100), ("final_box", 2, "5", 30)];
+    for (name, holder, image, seconds) in boxes {
         let mut runner = ir["roles"][3].clone();
         runner["name"] = json!(name);
         runner["image"] = json!(format!("sha256:{}", image.repeat(64)));
@@ -2504,7 +2402,7 @@ fn holders_leasing(ir: &mut Value) {
         if holder == 1 {
             grant["session"]["commands"] = json!(2);
         }
-        ir["roles"][holder]["runtime"][kind]["sessions"] = json!([grant]);
+        ir["roles"][holder]["runtime"]["target"]["sessions"] = json!([grant]);
     }
 }
 
@@ -2527,7 +2425,7 @@ fn call_model_routes() {
         12000 @0 model
         12000 model
         12000 @0 model
-        12100 call_returned 0 {"raw_score":1}
+        12100 call_returned 0 raw_score=1
         12200 call train 10
         13000 call_started 1
         13100 @1 model
@@ -2541,10 +2439,9 @@ fn call_model_routes() {
         15200 @2 model
         15200 model
         15300 call_failed 2 the call was stopped
-        16000 judge_started 3
+        16000 call_started 3
         16000 @3 model
         16000 model
-        17000 judge_exited 3
         17000 @3 model
         "#,
         &expect![[r#"
@@ -2571,7 +2468,7 @@ fn call_model_routes() {
               model requests allowed
             12000 @0 model
               model requests refused
-            12100 call_returned 0 {"raw_score":1}
+            12100 call_returned 0 raw_score=1
             12200 call train 10
               reply to op 2: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":11989}}
               start call 1 of train on op 2's payload of 10 bytes, with a timeout of 10s
@@ -2589,7 +2486,7 @@ fn call_model_routes() {
             15100 now submit 10 select
               reply to op 4: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17984}
             15200 agent_exited 0
-              stop job 2
+              stop call 2
               tear down the agent
               (tick due at 18210000)
             15200 @2 model
@@ -2597,15 +2494,14 @@ fn call_model_routes() {
             15200 model
               model requests refused
             15300 call_failed 2 the call was stopped
-              start job 3 of score on op 4's payload of 10 bytes, with a timeout of 120s
-            16000 judge_started 3
+              start call 3 of final on op 4's payload of 10 bytes, with a timeout of 120s
+            16000 call_started 3
             16000 @3 model
               model requests allowed
             16000 model
               model requests refused
-            17000 judge_exited 3
             17000 @3 model
-              model requests refused
+              model requests allowed
         "#]],
     );
 }
@@ -2717,7 +2613,7 @@ fn call_leases() {
         3400 @0 box.run 0 - b
         3500 command_ended 0 1 0
         3600 @0 box.run 0 - c
-        4000 call_returned 0 {"raw_score":1}
+        4000 call_returned 0 raw_score=1
         4100 @0 box.status 0
         4300 status 0
         4400 call train 10
@@ -2768,7 +2664,7 @@ fn call_leases() {
             3500 command_ended 0 1 0
             3600 @0 box.run 0 - c
               refuse op 7: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
-            4000 call_returned 0 {"raw_score":1}
+            4000 call_returned 0 raw_score=1
               close lease 0
               (tick due at 18000000)
             4100 @0 box.status 0
@@ -2808,26 +2704,26 @@ fn call_leases() {
             9250 now submit 10 select
               reply to op 17: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17990}
             9300 agent_exited 0
-              stop job 2
+              stop call 2
               close lease 2
               tear down the agent
               (tick due at 18210000)
             9400 call_failed 2 the call was stopped
             9500 lease_ended 2
-              start job 3 of score on op 17's payload of 10 bytes, with a timeout of 120s
+              start call 3 of final on op 17's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
 }
 
 #[test]
-fn score_leases() {
+fn final_call_leases() {
     check(
         holders_leasing,
         r#"
         0 agent_started
         1000 now submit 10 select
         2000 agent_exited 0
-        3000 judge_started 0
+        3000 call_started 0
         3100 @0 ops
         3200 @0 box.open
         4000 lease_ready 0
@@ -2836,8 +2732,7 @@ fn score_leases() {
         34100 @0 box.open
         34200 lease_ended 0
         34300 @0 box.open
-        35000 judge_exited 0
-        35100 collected 0 {"raw_score": 7}
+        35100 call_returned 0 score=7
         36000 lease_ended 1
         "#,
         &expect![[r#"
@@ -2850,9 +2745,9 @@ fn score_leases() {
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17999}
             2000 agent_exited 0
               tear down the agent
-              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
               (tick due at 18210000)
-            3000 judge_started 0
+            3000 call_started 0
             3100 @0 ops
               reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
             3200 @0 box.open
@@ -2872,11 +2767,10 @@ fn score_leases() {
             34300 @0 box.open
               reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
               open lease 1 of box for job 0, as instance 0, started by 123000
-            35000 judge_exited 0
+            35100 call_returned 0 score=7
               close lease 1
-            35100 collected 0 {"raw_score": 7}
             36000 lease_ended 1
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=7], returning {"raw_score":7}
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, returned, showing [score=7]
         "#]],
     );
 }

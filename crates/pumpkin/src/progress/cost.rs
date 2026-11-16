@@ -133,7 +133,7 @@ pub(super) fn more(unpriced: Option<&str>, unreported: u64) -> String {
 
 /// A line for each entry of a role's model route that `ir`, the run's, gives a model budget, in
 /// the IR's order, naming the role and the entry's models, with what the role spent of it at as
-/// many places as the budget states: `budget train_judge (m-task): $20.04 of $20.00, exhausted`.
+/// many places as the budget states: `budget trainer (m-task): $20.04 of $20.00, exhausted`.
 /// The spend is `at least` that if a response left its tokens unreported or its tokens can't be
 /// costed; the budget is `exhausted` once the spend reaches it ([`ModelBudget`]).
 pub(super) fn budgets(progress: &Progress, ir: &ir::Workflow) -> Vec<String> {
@@ -141,7 +141,6 @@ pub(super) fn budgets(progress: &Progress, ir: &ir::Workflow) -> Vec<String> {
     let entries = ir.roles.iter().flat_map(|role| {
         let (agent, egress) = match &role.runtime {
             ir::Runtime::Agent(agent) => (true, Some(&agent.egress)),
-            ir::Runtime::Judge(judge) => (false, Some(&judge.egress)),
             ir::Runtime::Target(target) => (false, Some(&target.egress)),
             ir::Runtime::Runner(_) => (false, None),
         };

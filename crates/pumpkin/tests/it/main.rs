@@ -49,9 +49,34 @@ mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
-// The final judge's command in the runs on Docker: it scores the payload by its size.
-const SCORE: &str = r#"printf '{"raw_score": %s}' \
-    $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
+// The command of the final call of each task that a test writes: it scores the payload by its
+// size.
+const SCORE: &str =
+    r#"printf '{"raw_score": %s}' $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"#;
+
+/// A task's `final.star`, whose final call puts the payload at `/pumpkin/in/payload/raw`, runs
+/// `command` with `sh -c`, and shows as `score` the `raw_score` of the result that `command` wrote.
+fn final_running(command: &str) -> String {
+    let run = starlark(&json!(["sh", "-c", command]));
+    format!(
+        r#""""The final call of a task that a test writes."""
+
+def final_call(target: Target, payload: Payload):
+    """Runs a command on the submission, and shows the score it wrote.
+
+    Args:
+      target: the call's target.
+      payload: the agent's submission.
+
+    Returns:
+      The score.
+    """
+    target.put("/pumpkin/in/payload/raw", payload)
+    target.run({run})
+    return {{"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}}
+"#
+    )
+}
 
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
@@ -69,6 +94,9 @@ const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
 
 /// What [`Scratch::write_task_in`] writes in place of each now function's body, then replaces.
 const SUBMIT_BODY: &str = "<the body of submit.star>";
+
+/// What [`Scratch::write_task_in`] writes in place of the final call's body, then replaces.
+const FINAL_BODY: &str = "<the body of final.star>";
 
 impl Scratch {
     fn new(name: &str) -> Self {
@@ -136,11 +164,17 @@ impl Scratch {
         }
         self.write(&at("submit.star"), SUBMIT);
         let roles = starlark(&roles).replace(&starlark(&json!(SUBMIT_BODY)), "submit");
+        // The final call's body is `final_call` of `final_running(SCORE)`, which a test may write
+        // over.
+        let mut final_call = ir["final"].clone();
+        final_call["body"] = json!(FINAL_BODY);
+        self.write(&at("final.star"), &final_running(SCORE));
+        let final_call = starlark(&final_call).replace(&starlark(&json!(FINAL_BODY)), "final_call");
         let task = format!(
-            "{loads}load(\"//{name}/submit.star\", \"submit\")\n\n{images}\nworkflow(\n    name = {},\n    \
-             roles = {roles},\n    score = {},\n)\n",
+            "{loads}load(\"//{name}/submit.star\", \"submit\")\nload(\"//{name}/final.star\", \
+             \"final_call\")\n\n{images}\nworkflow(\n    name = {},\n    roles = {roles},\n    \
+             final = {final_call},\n)\n",
             starlark(&ir["name"]),
-            starlark(&ir["score"]),
         );
         self.write(&at("task.star"), &task);
     }
@@ -475,7 +509,7 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     }
     for (whose, path) in [
         ("the agent's", "agent/out/answer"),
-        ("the final judge's", "jobs/0/out/evidence/answer"),
+        ("the final call's", "jobs/0/out/answer"),
     ] {
         if let Ok(answer) = fs::read_to_string(record.join(path)) {
             lines.push(format!("{whose} answer: {}", answer.replace('\n', "\\n")));
@@ -571,7 +605,7 @@ fn masked(ran: &str, ids: &str) -> String {
     lines.collect::<Vec<String>>().join("\n")
 }
 
-/// A workflow whose agent holds leases and a job function, matching `judged_log`.
+/// A workflow whose agent holds leases and a job function, matching `whole_log`.
 fn lease_task() -> Value {
     let gpu = json!({ "count": 1, "model": "NVIDIA A100-SXM4-80GB" });
     let lease = |name: &str, seconds: u64| {
@@ -580,18 +614,6 @@ fn lease_task() -> Value {
         } })
     };
     let command = json!({ "argv": ["/bin/true"], "cwd": "/work" });
-    let judge = |extra: Value| {
-        let mut judge = json!({
-            "command": command,
-            "slots": [{ "name": "payload", "max_bytes": 4096 }],
-            "result": { "returns": ["/score"] },
-        });
-        judge
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        json!({ "judge": judge })
-    };
     let runner = json!({ "runner": { "cwd": "/work" } });
     let role = |name: &str, gpus: bool, runtime: Value| {
         let mut needs = json!({ "cpu_millis": 1000, "memory_bytes": 1_073_741_824 });
@@ -608,7 +630,6 @@ fn lease_task() -> Value {
     json!({
         "ir_version": "pumpkin.ir/v0",
         "name": "example/lease",
-        "score": { "role": "scorer", "slot": "payload", "timeout_seconds": 60 },
         "roles": [
             role("solver", false, json!({ "agent": {
                 "command": command,
@@ -627,11 +648,15 @@ fn lease_task() -> Value {
             role("trainer", true, json!({ "target": {
                 "cwd": "/work", "sessions": [lease("box", 60)],
             } })),
-            role("scorer", true, judge(json!({ "egress": { "model": route } }))),
+            role("scorer", true, json!({ "target": { "cwd": "/work", "egress": { "model": route } } })),
             role("gpu", true, runner.clone()),
             role("cpu", false, runner.clone()),
             role("box", false, runner),
         ],
+        "final": {
+            "target": "scorer", "body": { "file": "//task.star", "def": "final_call" },
+            "payload_max_bytes": 4096, "timeout_seconds": 60,
+        },
     })
 }
 
@@ -693,24 +718,34 @@ fn logged(seconds: u64, event: Value, actions: Value) -> Value {
     record
 }
 
-fn judged(score: f64, returned: Value) -> Value {
+fn returned(score: f64) -> Value {
     let values = json!([
         { "name": "score", "value": score },
         { "name": "metrics", "value": { "solved": 3 } },
     ]);
-    let mut outcome = json!({
+    let verdict =
+        json!({ "kind": "returned", "submission": submission(), "result": { "values": values } });
+    json!({
         "state": "finished",
-        "verdict": { "kind": "judged", "result": { "values": values } },
+        "verdict": verdict,
         "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
-    });
-    outcome["verdict"]["result"]["returned"] = returned;
-    outcome
+    })
 }
 
-/// The log of a run of `lease_task`, with every kind of lease, judge and model request that `ls`
+fn submission() -> Value {
+    json!({ "payload": payload(), "finalized": true })
+}
+
+/// A payload of 3 bytes, as the log and `outcome.json` name one.
+fn payload() -> Value {
+    let digest = "sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674";
+    json!({ "size": 3, "digest": digest })
+}
+
+/// The log of a run of `lease_task`, with every kind of lease, call and model request that `ls`
 /// and `wait` show.
 #[expect(clippy::too_many_lines, reason = "one line for each record")]
-fn judged_log() -> Vec<Value> {
+fn whole_log() -> Vec<Value> {
     let none = || json!([]);
     let tick = || json!({ "kind": "tick" });
     let started = |request: u64| json!({ "kind": "model_request_started", "caller": "agent", "request": request });
@@ -727,8 +762,10 @@ fn judged_log() -> Vec<Value> {
     let ask = |job: u64| {
         let request = json!({ "kind": "call", "grant": "train" });
         let timeout = "600000000000";
-        let start =
-            json!({ "kind": "start_call", "job": job, "grant": "train", "timeout_ns": timeout });
+        let start = json!({
+            "kind": "start_call", "job": job, "grant": "train", "payload": payload(),
+            "timeout_ns": timeout,
+        });
         (
             json!({ "kind": "op_arrived", "request": request }),
             json!([start]),
@@ -758,7 +795,6 @@ fn judged_log() -> Vec<Value> {
     let exited = || json!({ "exited": { "code": 0 } });
     let saw = |sandbox: &str, gpu: &str| json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": [gpu] });
     let close = |lease: u64| json!({ "kind": "close_lease", "lease": lease });
-    let collected = |job: u64, result: Value| json!({ "kind": "judge_collected", "job": job, "result": result });
     let call_returned = |job: u64, returned: Value| json!({ "kind": "call_returned", "job": job, "returned": returned });
     let failed =
         |job: u64, reason: &str| json!({ "kind": "call_failed", "job": job, "reason": reason });
@@ -788,21 +824,20 @@ fn judged_log() -> Vec<Value> {
         "end": { "moved": { "bytes": 1, "entries": 1 } },
     });
     let closing = json!({ "kind": "op_arrived", "request": { "kind": "lease_close", "lease": 1 } });
-    let unstarted = "the judge's sandbox didn't start: Modal refused the helper's `create`: \
+    let unstarted = "the job's sandbox didn't start: Modal refused the helper's `create`: \
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
-    let final_judge = json!([{
-        "kind": "start_judge", "job": 4, "timeout_ns": "900000000000",
+    let final_call = json!([{
+        "kind": "start_final_call", "job": 4, "payload": payload(), "timeout_ns": "900000000000",
     }]);
-    let returned = json!({ "raw_score": 49.36 });
     let values = json!([
         { "name": "score", "value": 49.36 },
         { "name": "metrics", "value": { "solved": 3 } },
     ]);
     let finish = json!([{ "kind": "finish" }]);
     let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
-    let judge_started = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
-    let judge_answered = json!({
+    let final_asked = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
+    let final_answered = json!({
         "kind": "model_answered", "caller": "job-4", "request": 3, "model": "model-b",
         "api": "responses", "answer": { "kind": "forwarded" }, "upstream_status": 200,
         "failed": { "code": "rate_limit_exceeded" },
@@ -862,7 +897,7 @@ fn judged_log() -> Vec<Value> {
         logged(300, asked_2, start_2),
         logged(310, saw("job-2", sxm), none()),
         logged(310, of_job("call_started", 2), none()),
-        logged(320, tick(), json!([of_job("stop_judge", 2)])),
+        logged(320, tick(), json!([of_job("stop_call", 2)])),
         logged(330, failed(2, "the call was stopped"), none()),
         logged(400, asked_3, start_3),
         logged(405, of_job("call_started", 3), none()),
@@ -878,16 +913,12 @@ fn judged_log() -> Vec<Value> {
         logged(1000, exit, json!([{ "kind": "tear_down_agent" }, close(2)])),
         json!({ "at_ns": "1002000000000", "note": "collected from the agent's sandbox: out, 1 file of 6 bytes" }),
         logged(1005, of_lease("lease_ended", 2), none()),
-        logged(1006, tick(), final_judge),
+        logged(1006, tick(), final_call),
         logged(1010, saw("job-4", sxm), none()),
-        logged(1010, of_job("judge_started", 4), none()),
-        logged(1012, judge_started, none()),
-        logged(1020, judge_answered, none()),
-        logged(
-            1100,
-            collected(4, json!({ "values": values, "returned": returned })),
-            finish,
-        ),
+        logged(1010, of_job("call_started", 4), none()),
+        logged(1012, final_asked, none()),
+        logged(1020, final_answered, none()),
+        logged(1100, call_returned(4, values), finish),
     ]
 }
 
@@ -930,7 +961,7 @@ fn write_run(
         let event = &record["event"];
         let sandbox = match event["kind"].as_str() {
             Some("agent_started") => Some("agent".to_owned()),
-            Some("judge_started" | "call_started") => Some(format!("jobs/{}", event["job"])),
+            Some("call_started") => Some(format!("jobs/{}", event["job"])),
             Some("lease_ready") => Some(format!("leases/{}", event["lease"])),
             _ => None,
         };
@@ -1009,7 +1040,6 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
         .unwrap()
         .remove("egress");
     ir["roles"][0]["runtime"]["agent"]["command"]["argv"] = json!(argv);
-    ir["roles"][2]["runtime"]["judge"]["command"]["argv"] = json!(["sh", "-c", SCORE]);
     for role in ir["roles"].as_array_mut().unwrap() {
         role["image"] = json!(image);
         role["needs"] = json!({ "cpu_millis": 500, "memory_bytes": 256 << 20 });

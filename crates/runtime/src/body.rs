@@ -19,15 +19,15 @@ use schema::sandbox::{
     Launch, RESULT_MAX_BYTES, RelativePath, command_env, dir_mode, file_mode, log_dir, out_dir,
     pumpkin_dir,
 };
-use schema::workflow;
+use schema::workflow::{self, Final, JobFunction, TargetId};
 use serde_json::{Map, Value};
 use stdx::{Context, Deadline};
 
 use crate::child::{Child, Report};
 use crate::host::deadline;
-use crate::judge::{Relay, Waited};
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
+use crate::relay::{Relay, Waited};
 use crate::sandbox::collect;
 use crate::{Clock, Entry, Host, Targeted};
 
@@ -50,6 +50,19 @@ pub trait Bodies: Sync {
         body: &ir::Body,
         keywords: &Map<String, Value>,
         arguments: &BTreeMap<Name, ir::ArgumentValue>,
+        target: &mut dyn Target,
+    ) -> Result<Vec<(Name, Value)>, String>;
+
+    /// Calls the final call's body `body`, given `keywords`, with a handle on `target` and the
+    /// payload, on the calling thread, whose stack is [`stack_bytes`](Self::stack_bytes).
+    ///
+    /// # Errors
+    ///
+    /// As [`job`](Self::job)'s.
+    fn final_call(
+        &self,
+        body: &ir::FinalBody,
+        keywords: &Map<String, Value>,
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
 
@@ -90,23 +103,40 @@ pub trait Target {
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String>;
 }
 
-/// What a body gets from its target: one file, of at most a judge's result's size.
+/// What a body gets from its target: one file, of at most [`RESULT_MAX_BYTES`].
 const GOT: Limits = Limits {
     bytes: RESULT_MAX_BYTES,
     entries: 1,
 };
 
-/// A call of a job's body on a target that its child has started.
+/// A call of a body on a target that its child has started.
 pub(crate) struct Call<'c> {
     pub(crate) job: JobId,
     /// The target, whose `cwd` and `env` its commands run with.
     pub(crate) target: &'c workflow::Target,
-    pub(crate) body: &'c ir::Body,
-    pub(crate) keywords: &'c Map<String, Value>,
-    pub(crate) arguments: &'c BTreeMap<Name, ir::ArgumentValue>,
+    pub(crate) of: &'c Of<'c>,
     pub(crate) payload: Stored,
     /// The longest the body may drive the target, from its start.
     pub(crate) timeout: Duration,
+}
+
+/// Whose body a call calls.
+pub(crate) enum Of<'r> {
+    /// A job function's, with the arguments its caller gave.
+    Function {
+        function: &'r JobFunction,
+        arguments: BTreeMap<Name, ir::ArgumentValue>,
+    },
+    Final(&'r Final),
+}
+
+impl Of<'_> {
+    pub(crate) fn target(&self) -> TargetId {
+        match self {
+            Self::Function { function, .. } => function.target,
+            Self::Final(final_call) => final_call.target,
+        }
+    }
 }
 
 /// How a body's call ended.
@@ -148,7 +178,15 @@ pub(crate) fn evaluate<H: Host>(
         runs_count: 0,
         gets_count: 0,
     };
-    let returned = bodies.job(call.body, call.keywords, call.arguments, &mut target);
+    let returned = match call.of {
+        Of::Function {
+            function,
+            arguments,
+        } => bodies.job(&function.body, &function.keywords, arguments, &mut target),
+        Of::Final(final_call) => {
+            bodies.final_call(&final_call.body, &final_call.keywords, &mut target)
+        }
+    };
     target.end();
     match (target.cut, returned) {
         (Some((Cut::TimedOut, _)), _) => Ended::TimedOut,

@@ -3,7 +3,7 @@
 //! same values.
 //!
 //! The kinds map one to one: a dict to a struct, or to an enum as its one key, the kind, and
-//! that key's value (`{"judge": {…}}`); a list or a tuple to a sequence; a string to a string,
+//! that key's value (`{"job": {…}}`); a list or a tuple to a sequence; a string to a string,
 //! which the IR's types check; an int to an integer, which they range-check; a float to a float;
 //! a bool to a bool; `None` to an absent option; an image to the string of its ID; and a function
 //! that a `def` makes to a body, the dict of its file's label and its name. Any other function is
@@ -48,14 +48,19 @@ pub(crate) fn workflow(
     struct Fields {
         name: ir::WorkflowName,
         roles: Vec<ir::Role>,
-        score: ir::Score,
+        #[serde(rename = "final")]
+        final_call: ir::Final,
     }
     let de = De {
         value: fields,
         images,
         sources,
     };
-    let Fields { name, roles, score } = Fields::deserialize(de).map_err(|error| {
+    let Fields {
+        name,
+        roles,
+        final_call,
+    } = Fields::deserialize(de).map_err(|error| {
         let Error {
             message,
             at,
@@ -73,7 +78,7 @@ pub(crate) fn workflow(
         ir_version: ir::IrVersion::V0,
         name,
         roles,
-        score,
+        final_call,
     })
 }
 
@@ -329,12 +334,15 @@ impl<'v> De<'v> {
         Self { value, ..self }
     }
 
-    // The body that `function` is, `visitor`'s map: its file's label, its name, and the
-    // arguments its caller gives, each positional parameter after the handle and the payload that
-    // is annotated `str`, `int` or `bool` (`crate::check` refuses any other).
+    // The body that `function` is, `visitor`'s map: its file's label, its name, and, if the type
+    // read `takes_arguments`, the arguments its caller gives, each positional parameter after the
+    // handle and the payload that is annotated `str`, `int` or `bool` (`crate::check` refuses any
+    // other). A body of a type without them has no caller, and `crate::check` refuses its
+    // parameters after the payload.
     fn body<'de, V: Visitor<'de>>(
         &self,
         function: &Function,
+        takes_arguments: bool,
         visitor: V,
     ) -> Result<V::Value, Error> {
         let def = &*function.def;
@@ -343,19 +351,21 @@ impl<'v> De<'v> {
         body.insert(String::from("file"), serde_json::Value::String(file));
         let name = def.name.text.clone();
         body.insert(String::from("def"), serde_json::Value::String(name));
-        let caller = (def.params.iter().zip(&function.defaults))
-            .take(def.positional)
-            .skip(2);
-        let mut arguments = BTreeMap::new();
-        for (param, default) in caller {
-            let Some(argument) = argument(param.annotation.as_ref(), default.as_ref()) else {
-                continue;
-            };
-            arguments.insert(param.name.text.clone(), argument);
-        }
-        if !arguments.is_empty() {
-            let arguments = serde_json::to_value(arguments).map_err(de::Error::custom)?;
-            body.insert(String::from("arguments"), arguments);
+        if takes_arguments {
+            let caller = (def.params.iter().zip(&function.defaults))
+                .take(def.positional)
+                .skip(2);
+            let mut arguments = BTreeMap::new();
+            for (param, default) in caller {
+                let Some(argument) = argument(param.annotation.as_ref(), default.as_ref()) else {
+                    continue;
+                };
+                arguments.insert(param.name.text.clone(), argument);
+            }
+            if !arguments.is_empty() {
+                let arguments = serde_json::to_value(arguments).map_err(de::Error::custom)?;
+                body.insert(String::from("arguments"), arguments);
+            }
         }
         let body = serde_json::Value::Object(body);
         de::Deserializer::deserialize_map(body, visitor).map_err(de::Error::custom)
@@ -391,7 +401,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
             Kind::Image(image) => visitor.visit_str(self.images[image.0].as_str()),
             Kind::List(items) | Kind::Tuple(items) => seq(self, items, visitor),
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(function) => self.body(function, visitor),
+            Kind::Function(function) => self.body(function, true, visitor),
             Kind::Builtin(_) | Kind::Module(_) | Kind::Hosted(_) => Err(self.mismatch("data")),
         }
     }
@@ -488,7 +498,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         match &self.value.kind {
             Kind::Dict(entries) => visitor.visit_map(Map::new(self, entries)),
-            Kind::Function(function) => self.body(function, visitor),
+            Kind::Function(function) => self.body(function, true, visitor),
             _ => Err(self.mismatch("a dict")),
         }
     }
@@ -496,10 +506,13 @@ impl<'de> de::Deserializer<'de> for De<'_> {
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         _name: &'static str,
-        _fields: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Error> {
-        self.deserialize_map(visitor)
+        match &self.value.kind {
+            Kind::Function(function) => self.body(function, fields.contains(&"arguments"), visitor),
+            _ => self.deserialize_map(visitor),
+        }
     }
 
     fn deserialize_enum<V: Visitor<'de>>(

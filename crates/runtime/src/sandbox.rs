@@ -27,9 +27,7 @@ use schema::sandbox::{
     Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
-use schema::workflow::{
-    ByProvider, ByRole, Holder, JudgeId, Placed, RoleId, RunnerId, TargetId, Workflow,
-};
+use schema::workflow::{ByProvider, ByRole, Holder, Placed, RoleId, RunnerId, TargetId, Workflow};
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
@@ -46,21 +44,20 @@ const PUMPKIN: Limits = Limits {
 
 /// The roles that `provider` hosts, in the phases that [`Provider::reserve`] takes: the work
 /// phase's roles (the agent, the target of each job function, and the runner of each session that
-/// the others hold), then the scorer's (the scorer and the runners it holds). The second starts
-/// only once the first has ended. A phase with no role on `provider` is left out.
+/// the others hold), then the final call's (its target and the runners it holds). The second
+/// starts only once the first has ended. A phase with no role on `provider` is left out.
 pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
     let workflow = placed.workflow();
-    let score = workflow.score().slot.judge();
-    let scorer = score.role();
+    let target = workflow.final_call().target;
     let runners = |last: bool| {
         (workflow.sessions())
-            .filter(move |(_, grant)| (grant.holder == Holder::Judge(score)) == last)
+            .filter(move |(_, grant)| (grant.holder == Holder::Target(target)) == last)
             .map(|(_, grant)| grant.runner.role())
     };
     let agent = iter::once(workflow.agent().role);
     let targets = (workflow.job_functions()).map(|(_, function)| function.target.role());
     let work: Vec<RoleId> = (agent.chain(targets)).chain(runners(false)).collect();
-    let last: Vec<RoleId> = iter::once(scorer).chain(runners(true)).collect();
+    let last: Vec<RoleId> = iter::once(target.role()).chain(runners(true)).collect();
     let on = |roles: Vec<RoleId>| -> Vec<Role> {
         (roles.into_iter())
             .filter(|&role| placed.placement(role).provider == *provider)
@@ -159,12 +156,10 @@ impl Meets<'_> {
     }
 }
 
-/// Whose sandbox: the agent's, the score's job's judge, a job function's call's target, or an
-/// instance of a lease's runner.
+/// Whose sandbox: the agent's, a call's target, or an instance of a lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
     Agent,
-    Job(JobId, JudgeId),
     Call(JobId, TargetId),
     Lease(LeaseId, RunnerId, u32),
 }
@@ -173,7 +168,6 @@ impl Which {
     fn role(self, workflow: &Workflow) -> RoleId {
         match self {
             Self::Agent => workflow.agent().role,
-            Self::Job(_, judge) => judge.role(),
             Self::Call(_, target) => target.role(),
             Self::Lease(_, runner, _) => runner.role(),
         }
@@ -181,7 +175,7 @@ impl Which {
 
     fn instance(self) -> u32 {
         match self {
-            Self::Agent | Self::Job(..) | Self::Call(..) => 0,
+            Self::Agent | Self::Call(..) => 0,
             Self::Lease(_, _, instance) => instance,
         }
     }
@@ -189,7 +183,6 @@ impl Which {
     pub(super) fn failed(self, reason: String) -> Event {
         match self {
             Self::Agent => Event::AgentFailed { reason },
-            Self::Job(job, _) => Event::JudgeFailed { job, reason },
             Self::Call(job, _) => Event::CallFailed { job, reason },
             Self::Lease(lease, ..) => Event::LeaseFailed { lease, reason },
         }
@@ -198,7 +191,7 @@ impl Which {
     pub(super) fn record_dir(self) -> String {
         match self {
             Self::Agent => "agent".to_owned(),
-            Self::Job(job, _) | Self::Call(job, _) => format!("jobs/{}", job.0),
+            Self::Call(job, _) => format!("jobs/{}", job.0),
             Self::Lease(lease, ..) => format!("leases/{}", lease.0),
         }
     }
@@ -206,7 +199,7 @@ impl Which {
     pub(super) fn noun(self) -> &'static str {
         match self {
             Self::Agent => "the agent's",
-            Self::Job(..) | Self::Call(..) => "the job's",
+            Self::Call(..) => "the job's",
             Self::Lease(..) => "the runner's",
         }
     }
@@ -216,7 +209,7 @@ impl Which {
     pub(super) fn name(self) -> Name {
         let name = match self {
             Self::Agent => SandboxName::Agent,
-            Self::Job(job, _) | Self::Call(job, _) => SandboxName::Job(job.0),
+            Self::Call(job, _) => SandboxName::Job(job.0),
             Self::Lease(lease, ..) => SandboxName::Lease(lease.0),
         };
         // A `Name` made of such parts, which couldn't fail, would be a `pub` item of the schema

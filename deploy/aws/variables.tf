@@ -47,17 +47,17 @@ variable "classes" {
     usd_per_hour  = optional(number)
   }))
   default = {
-    # Judges of up to 8 CPUs (AMD EPYC 7R13, Zen 3).
+    # Targets of up to 8 CPUs (AMD EPYC 7R13, Zen 3).
     judge = {
       instance_type = "c6a.2xlarge"
       cpu_features  = ["abm", "avx", "avx2", "bmi1", "bmi2", "cx16", "f16c", "fma", "lahf_lm", "movbe", "popcnt", "sse4_1", "sse4_2", "ssse3", "xsave"]
     }
-    # Agents and judges of up to 8 CPUs that need more memory than `judge` leaves them (Zen 3).
+    # Agents and targets of up to 8 CPUs that need more memory than `judge` leaves them (Zen 3).
     memory = {
       instance_type = "r6a.2xlarge"
       cpu_features  = ["abm", "avx", "avx2", "bmi1", "bmi2", "cx16", "f16c", "fma", "lahf_lm", "movbe", "popcnt", "sse4_1", "sse4_2", "ssse3", "xsave"]
     }
-    # Judges of 60 CPUs, and roles that need AVX-512 but no CPU model (AMD EPYC 9R14, Zen 4).
+    # Targets of 60 CPUs, and roles that need AVX-512 but no CPU model (AMD EPYC 9R14, Zen 4).
     judge_60 = {
       instance_type = "c7a.16xlarge"
       cpu_features  = ["abm", "avx", "avx2", "avx512bw", "avx512cd", "avx512dq", "avx512f", "avx512vl", "bmi1", "bmi2", "cx16", "f16c", "fma", "lahf_lm", "movbe", "popcnt", "sse4_1", "sse4_2", "ssse3", "xsave"]

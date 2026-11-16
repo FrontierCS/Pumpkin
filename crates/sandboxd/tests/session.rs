@@ -385,10 +385,10 @@ printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
 }
 
 #[test]
-fn judge() {
+fn puts_runs_and_collects() {
     check(
         Meeting::Socket,
-        judging,
+        put_run_collect,
         &expect![[r#"
             exited: Code(3)
             out/empty/
@@ -403,7 +403,7 @@ fn judge() {
     );
     check(
         Meeting::Tcp,
-        judging,
+        put_run_collect,
         &expect![[r#"
             exited: Code(3)
             out/empty/
@@ -418,7 +418,7 @@ fn judge() {
     );
     check(
         Meeting::Listen,
-        judging,
+        put_run_collect,
         &expect![[r#"
             exited: Code(3)
             out/empty/
@@ -433,13 +433,13 @@ fn judge() {
     );
 }
 
-fn judging(sandbox: &mut Sandbox) -> Vec<String> {
-    let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
+fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
+    let (dir, payload) = (relative("in/payload"), relative("in/payload/raw"));
     // Over two frames, and kept as evidence, so that it is put and collected in several.
     let raw = pattern(2 * MAX_BODY_BYTES + 12345);
     let root = absolute(&sandbox.root);
     let put = [
-        Put::Dir(slot, dir_mode()),
+        Put::Dir(dir, dir_mode()),
         Put::File(payload, file_mode(), &raw),
     ];
     sandbox.session.put(&root, put, hung()).unwrap();
@@ -451,8 +451,8 @@ fn judging(sandbox: &mut Sandbox) -> Vec<String> {
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
-    let judge = sandbox.session.start(launch, hung()).unwrap();
-    let exited = sandbox.exit(judge, Duration::from_secs(10)).unwrap();
+    let command = sandbox.session.start(launch, hung()).unwrap();
+    let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
     let mut lines = vec![format!("exited: {exited:?}")];
     sandbox.session.freeze(hung()).unwrap();
     lines.extend(sandbox.collect("out").unwrap());

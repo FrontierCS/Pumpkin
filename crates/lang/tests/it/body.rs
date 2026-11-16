@@ -121,6 +121,7 @@ fn check_within(
         let host_of_kind = match kind {
             BodyKind::Job => Host::Job(&mut host),
             BodyKind::Now => Host::Now(&mut host),
+            BodyKind::Final => Host::Final(&mut host),
         };
         let called = lang::call(&body, host_of_kind, &arguments, &mut sources, &args, bounds);
         match (checked, called) {
@@ -157,7 +158,7 @@ fn check_within(
 }
 
 #[test]
-fn job() {
+fn targets() {
     check(
         "train_call",
         BodyKind::Job,
@@ -182,6 +183,23 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
             run /opt/frontier/verifier ["--fast"]
             get /pumpkin/out/result.json
             returns raw_score=43.12 failure="slow" passed=7"#]],
+    );
+    check(
+        "final_call",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //lib/verify.star
+def final_call(target: Target, payload: Payload, *, mode: str = "final"):
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/frontier/verifier", mode])
+    return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
+"#,
+        &expect![[r#"
+            put the payload at /pumpkin/in/payload
+            run /opt/frontier/verifier ["final"]
+            get /pumpkin/out/result.json
+            returns score=43.12"#]],
     );
 }
 
@@ -309,13 +327,13 @@ fn refusals() {
         json!({}),
         r#"
 #- //lib/verify.star
-workflow(name = "verify", roles = [], score = None)
+workflow(name = "verify", roles = [], final = None)
 def train_call(target, payload):
     pass
 "#,
         &expect![[r#"
             lib/verify.star:1:1: `workflow()` is called while `//lib/verify.star` loads: call it in the entry file, which loads `//lib/verify.star`
-                1 | workflow(name = "verify", roles = [], score = None)
+                1 | workflow(name = "verify", roles = [], final = None)
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
@@ -384,7 +402,7 @@ def submit(target: Target, payload: str = "", finalize = False, *, mode: int, ex
             lib/submit.star:1:47: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
                 1 | def submit(target: Target, payload: str = "", finalize = False, *, mode: int, extra: str = ""):
                   |                                               ^^^^^^^^
-            lib/submit.star:1:68: `submit` takes the keyword `mode`, which the grant's `keywords` does not give: give it, or a default
+            lib/submit.star:1:68: `submit` takes the keyword `mode`, and a now function has no `keywords` to give it: give it a default, or make it a positional parameter after the payload, for its caller to give
                 1 | def submit(target: Target, payload: str = "", finalize = False, *, mode: int, extra: str = ""):
                   |                                                                    ^^^^"#]],
     );
@@ -412,6 +430,29 @@ def train_call(target, payload, *, metrics: list[str], deep: int = 0, ratio: int
             lib/verify.star:1:71: the grant's keyword `ratio` can't be `0.5`: `train_call` takes an int
                 1 | def train_call(target, payload, *, metrics: list[str], deep: int = 0, ratio: int = 1):
                   |                                                                       ^^^^^"#]],
+    );
+    check(
+        "final_call",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //lib/final.star
+def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
+    pass
+"#,
+        &expect![[r#"
+            lib/final.star:1:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
+                1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
+                  |                ^^^^^^
+            lib/final.star:1:38: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
+                1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
+                  |                                      ^^^^^
+            lib/final.star:1:50: `final_call`'s `mode` follows the payload, and the final call has no caller to give it: remove it
+                1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
+                  |                                                  ^^^^
+            lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
+                1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
+                  |                                                                 ^^^^^^"#]],
     );
     let deep = (0..129).fold(json!(1), |inner, _| json!([inner]));
     check(

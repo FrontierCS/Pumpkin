@@ -14,7 +14,7 @@ use crate::ir::{JsonPointer, Name};
 /// A rule an IR breaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseError {
-    /// Where in the IR, such as `/roles/0/runtime/agent/grants/0/judge/role`. It resolves in the
+    /// Where in the IR, such as `/roles/0/runtime/agent/grants/0/job/target`. It resolves in the
     /// JSON that the [`ir::Workflow`](crate::ir::Workflow) parsed serializes to.
     pub at: JsonPointer,
     pub message: String,

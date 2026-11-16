@@ -1,8 +1,8 @@
 //! The workflow IR, v0: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent, its judges, with their [`Slot`]s, and the runners
-//! they lease), the [`Grant`]s the agent holds and the lease grants its judges hold, and the
-//! [`Score`], which judges what the agent submits.
+//! A workflow is data: [`Role`]s (one agent, the targets its calls start, and the runners that
+//! sessions lease), the [`Grant`]s each role holds, and the [`Final`] call, which judges what the
+//! agent submits.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -19,6 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 pub mod argument;
+mod final_call;
 mod grant;
 mod job;
 mod label;
@@ -27,6 +28,7 @@ mod session;
 pub(crate) mod values;
 
 pub use argument::{Argument, ArgumentType, ArgumentValue};
+pub use final_call::{Final, FinalBody};
 pub use grant::{Body, Function, Grant};
 pub use job::JobFunction;
 pub use label::{Label, Root};
@@ -34,26 +36,27 @@ pub use now::NowFunction;
 pub use session::{NamedSession, Session};
 pub use values::{
     AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
-    Mode, ModelName, Models, Name, Returns, RolePath, Sha256Digest, Shows, WorkflowName,
+    Mode, ModelName, Models, Name, RolePath, Sha256Digest, WorkflowName,
 };
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
 ///
 /// A run has two phases. In the work phase, the run starts the agent, which works until it
-/// exits, ends its work or reaches its deadline, calls the judges its grants name and the now
-/// functions that select a payload, and leases runners. In the final phase, which starts once the
+/// exits, ends its work or reaches its deadline, calls its job functions and the now functions
+/// that select a payload, and leases runners. In the final phase, which starts once the
 /// agent's sandbox and every call and lease it made, and every lease its calls made, are gone,
-/// the [`Score`] judge judges the selection: the last payload selected. Only the run, which keeps
+/// the [`Final`] call judges the selection: the last payload selected. Only the run, which keeps
 /// the selection, lives through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
     pub ir_version: IrVersion,
     pub name: WorkflowName,
-    /// Exactly one of them has an agent runtime: the agent. The others are judges and runners.
+    /// Exactly one of them has an agent runtime: the agent. The others are targets and runners.
     pub roles: Vec<Role>,
     /// How the selected submission is judged.
-    pub score: Score,
+    #[serde(rename = "final")]
+    pub final_call: Final,
 }
 
 /// The IR's version. Each version serializes to its own string, so a consumer refuses an IR
@@ -148,10 +151,8 @@ pub const MILLIS_PER_CPU: u64 = 1000;
 pub enum Runtime {
     /// An agent harness.
     Agent(AgentRuntime),
-    /// A judge, whose command runs once per call in a fresh instance.
-    Judge(JudgeRuntime),
-    /// A target, which each call of the job function that names it starts afresh, and which runs
-    /// the commands the function's body sends ([`JobFunction`]).
+    /// A target, which each call that names it, a [`JobFunction`]'s or the [`Final`] call, starts
+    /// afresh, and which runs the commands the call's body sends.
     Target(TargetRuntime),
     /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
     /// lease ([`Session`]).
@@ -189,7 +190,7 @@ pub struct AgentRuntime {
     /// since the run's start, so the time the sandbox takes to start, which that startup bounds
     /// instead, doesn't count against it.
     /// Judging the selected submission comes after the deadline, bounded instead by the
-    /// score's [`timeout_seconds`](Score::timeout_seconds).
+    /// final call's [`timeout_seconds`](Final::timeout_seconds).
     pub deadline_seconds: NonZeroU64,
     /// How long the agent may keep running after a call of its ends its work. Its ops are
     /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
@@ -221,24 +222,6 @@ pub struct File {
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JudgeRuntime {
-    /// The command that the score's judge call runs.
-    pub command: Command,
-    /// Where inbound values land.
-    pub slots: Vec<Slot>,
-    /// What each call writes as its result.
-    pub result: ResultSpec,
-    /// The judge's routes out, open while its command runs, in each of its calls; absent, it has
-    /// none.
-    #[serde(default, skip_serializing_if = "Egress::is_empty")]
-    pub egress: Egress,
-    /// The sessions the judge may call while its command runs ([`NamedSession`]); absent, none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sessions: Vec<NamedSession>,
-}
-
 /// How a runner runs each command its lease's holder sends, as the role's user: as a
 /// [`Command`] would with the holder's argument vector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,8 +234,8 @@ pub struct RunnerRuntime {
     pub env: Env,
 }
 
-/// How a target runs each command a job function's body sends, as the role's user: as a
-/// [`Command`] would with the body's argument vector.
+/// How a target runs each command a call's body sends, as the role's user: as a [`Command`] would
+/// with the body's argument vector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetRuntime {
@@ -270,25 +253,6 @@ pub struct TargetRuntime {
     pub sessions: Vec<NamedSession>,
 }
 
-/// What a judge call writes as its result: the JSON file at
-/// [`result_file()`](crate::sandbox::result_file), of which its run shows the values
-/// [`shows`](Self::shows) names, and its caller's reply returns the fields
-/// [`returns`](Self::returns) names.
-///
-/// Once the judge's command exits, the result alone says how the call went, whatever the exit
-/// status.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResultSpec {
-    /// The values of the result that the run shows, of any JSON type. A value the result lacks
-    /// is left out; none is shown if this is absent.
-    #[serde(default, skip_serializing_if = "Shows::is_empty")]
-    pub shows: Shows,
-    /// The fields of the result that the caller's reply returns. A field the result lacks is
-    /// left out.
-    pub returns: Returns,
-}
-
 /// A process to start in a sandbox, as the role's user.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -302,17 +266,6 @@ pub struct Command {
     pub env: Env,
     /// The directory the command starts in.
     pub cwd: AbsolutePath,
-}
-
-/// A named place where an inbound value lands.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Slot {
-    pub name: Name,
-    /// The most bytes a payload into the slot may hold, at most
-    /// [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), since every payload
-    /// reaches its judge through an op. The [`Score`] slot's also caps every selection.
-    pub max_bytes: NonZeroU64,
 }
 
 /// The routes out of a sandbox beyond its own session, all served by the gateway.
@@ -478,17 +431,4 @@ impl fmt::Display for Api {
             Self::Messages => "messages",
         })
     }
-}
-
-/// The judge call that scores the selected submission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Score {
-    /// The judge role. No grant names a judge, so that the agent never calls the judge that scores
-    /// it.
-    pub role: Name,
-    /// The judge's slot that receives the submission.
-    pub slot: Name,
-    /// The call's timeout, counted from the start of the judge command.
-    pub timeout_seconds: NonZeroU64,
 }

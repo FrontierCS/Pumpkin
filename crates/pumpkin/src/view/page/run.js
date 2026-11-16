@@ -78,9 +78,10 @@ import { RowList } from "./rows.js";
  * @typedef {object} Lane a sandbox's lane: the agent's, a call's (`job <n>`) or a lease's
  * @property {string} lane
  * @property {string} [caller] the caller that the lane's trace is of, `agent` or `job-<n>`; none for a lease
- * @property {"agent" | "judge" | "target" | "runner"} kind
+ * @property {"agent" | "target" | "runner"} kind
  * @property {string | null} [role]
- * @property {string | null} [grant]
+ * @property {{ function: string } | "final"} [of] whose body a call's lane calls: a job function's, by its name, or the final call's
+ * @property {string | null} [grant] a lease's session
  * @property {string} [holder]
  * @property {{ place: string, asked: number, started: number | null, gone: number | null, deleted: boolean | null }} sandbox
  * @property {string} said
@@ -90,7 +91,7 @@ import { RowList } from "./rows.js";
  * @property {Work[] | null} [work]
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], edges: Edge[] }} Talk
- * @typedef {{ name: string, kind: string | null, place: string | null, routed: boolean, score: boolean, routes: Route[] | "unknown" }} Role
+ * @typedef {{ name: string, kind: string | null, place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown" }} Role
  * @typedef {{ api: string, upstream: string, models: Record<string, string> }} Route an entry of a role's model route: each model by the name the upstream takes it as
  * @typedef {{ from: string, to: string, kind: string, count: number, bytes: number | null, back_bytes: number | null }} Edge
  * @typedef {import("./records.js").LogRecord} LogRecord
@@ -110,6 +111,11 @@ const LABEL_MAX_CHARS = 48;
 const DRAW_EVERY_RECORDS = 2000;
 // How often a cancel under way is read.
 const CANCEL_POLL_MS = 1000;
+
+/** What a call's lane calls, as words. @param {{ function: string } | "final"} of */
+function calls(of) {
+  return of === "final" ? "the final call" : "job function " + of.function;
+}
 
 /** @param {Lane} lane @param {Run} data */
 function laneRole(lane, data) {
@@ -596,7 +602,7 @@ function drawAgain(node, data) {
 // A link to the trace of each caller with model answers: the agent, each call.
 /** @param {HTMLElement} node @param {Run} data */
 function drawTraces(node, data) {
-  const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "judge" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
+  const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
   fill(
     node,
     callers.length ? h("span", { class: "name" }, "Traces") : null,
@@ -655,7 +661,7 @@ function drawLanes(node, data, view, picked, change, inspect) {
     for (const answered of lane.answered || []) parts.push(h("div", { class: "tick" + (failed.has(answered) ? " failed" : ""), style: { left: at(answered) } }));
     const role = laneRole(lane, data);
     const { name, place } = labels[index];
-    const title = lane.lane + (role ? " of role " + role : "") + (lane.grant ? ", grant " + lane.grant : "") + ", on " + lane.sandbox.place;
+    const title = lane.lane + (role ? " of role " + role : "") + (lane.of ? ", " + calls(lane.of) : "") + (lane.grant ? ", grant " + lane.grant : "") + ", on " + lane.sandbox.place;
     const lit = view.lit;
     const classes = ["lane", lane.kind, picked === lane.lane ? "on" : "", lit && !lit.lanes.has(lane.lane) ? "dim" : "", lit && lit.here !== null && lit.lanes.has(lane.lane) ? "lit" : ""];
     const pick = () => (change({ lane: picked === lane.lane ? null : lane.lane, role: null, sel: null }), inspect(lane));
@@ -697,7 +703,7 @@ function drawLanes(node, data, view, picked, change, inspect) {
 }
 
 // Who talks to whom: the agent, with the model upstream under it, in the left column and the
-// targets and the judge, then the runners in the right one; a line for each pair that the log shows talking, one
+// targets then the runners in the right one; a line for each pair that the log shows talking, one
 // within a column bowed out past its side so that it passes no box, and below, what went between
 // them. What a selection lights is lit, the rest dim; a role picked lights the lines it has.
 /** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {(name: string) => void} pick */
@@ -705,14 +711,14 @@ function drawTalk(node, data, lit, picked, pick) {
   if (!data.talk) return fill(node, h("p", { class: "empty" }, "The record has no roles yet."));
   const { roles, edges } = data.talk;
   /** @type {Record<string, number>} */
-  const order = { agent: 0, target: 1, judge: 1, runner: 2 };
+  const order = { agent: 0, target: 1, runner: 2 };
   const shown = roles.map((role) => ({ ...role, column: role.kind === "agent" ? 0 : 1 }));
   if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === "model")) {
-    shown.push({ name: "model", kind: "model", place: "The route's upstream", routed: false, score: false, routes: [], column: 0 });
+    shown.push({ name: "model", kind: "model", place: "The route's upstream", routed: false, final_target: false, routes: [], column: 0 });
   }
   shown.sort((a, b) => a.column - b.column || (order[a.kind ?? ""] ?? 3) - (order[b.kind ?? ""] ?? 3));
   const [boxH, gapX, gapY, bow] = [34, 72, 12, 28];
-  const widthOf = (/** @type {Role} */ n) => Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.score ? 14 : 0), (n.place || "-").length * PLACE_CHAR_PX)) + 14;
+  const widthOf = (/** @type {Role} */ n) => Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.final_target ? 14 : 0), (n.place || "-").length * PLACE_CHAR_PX)) + 14;
   const columnW = [0, 1].map((column) => Math.max(0, ...shown.filter((n) => n.column === column).map(widthOf)));
   const xs = [bow, bow + columnW[0] + gapX];
   /** @typedef {Role & { column: number, x: number, y: number, w: number, row: number }} Box */
@@ -769,10 +775,10 @@ function drawTalk(node, data, lit, picked, pick) {
     svg(
       "g",
       { class: "node " + n.kind + (n.name === picked ? " on" : "") + (lit && !lit.roles.has(n.name) && !(lit.focus && touch(lit.focus, n.name)) ? " dim" : ""), transform: "translate(" + n.x + "," + n.y + ")", onclick: () => pick(n.name) },
-      svg("title", {}, n.name + (n.score ? " (the score)" : "") + (n.place ? " on " + n.place : "")),
+      svg("title", {}, n.name + (n.final_target ? " (the final call's target)" : "") + (n.place ? " on " + n.place : "")),
       svg("rect", { width: n.w, height: boxH, rx: 6 }),
-      n.score ? svg("rect", { class: "score", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
-      svg("text", { x: n.score ? 20 : 6, y: 14 }, n.name),
+      n.final_target ? svg("rect", { class: "final", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
+      svg("text", { x: n.final_target ? 20 : 6, y: 14 }, n.name),
       svg("text", { x: 6, y: 27, class: "place" }, n.place || "-"),
     ),
   );
@@ -838,7 +844,7 @@ function inspectRole(name, inspector, data) {
       {},
       h("dt", {}, "Place"),
       h("dd", {}, role.place || "-"),
-      role.score ? [h("dt", {}, "Score"), h("dd", {}, "The final judge, whose result is the run's")] : null,
+      role.final_target ? [h("dt", {}, "Final call"), h("dd", {}, "The final call's target, in which the body whose return is the run's result runs")] : null,
       h("dt", {}, "Model route"),
       routes(role),
     ),
@@ -855,6 +861,7 @@ function inspectLane(lane, inspector, nearest, data) {
   /** @type {Array<[string, string | null | undefined]>} */
   const named = [
     ["Role", lane.role],
+    ["Calls", lane.of && calls(lane.of)],
     ["Grant", lane.grant],
     ["Held by", lane.holder],
   ];

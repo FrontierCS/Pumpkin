@@ -130,7 +130,7 @@ impl Core<'_> {
                             JobOf::Function(function) => {
                                 self.workflow.job_function(function).target.role()
                             }
-                            JobOf::Score => self.workflow.score().slot.judge().role(),
+                            JobOf::Final => self.workflow.final_call().target.role(),
                         },
                         end: started.saturating_add(*timeout),
                     }),
@@ -267,15 +267,19 @@ impl Core<'_> {
     }
 
     fn own_job(&self, caller: Caller, number: u64) -> Result<StatusReply, String> {
-        // The agent asks only about its calls to job functions: the final score's job, and any job
-        // it didn't make, are refused as absent.
+        // The agent asks only about its calls to job functions: any job it didn't make is refused
+        // as absent.
         let job = JobId(number);
         let found = self
             .jobs
             .get(job)
             .and_then(|found| match (caller, found.call) {
                 (Caller::Agent, JobOf::Function(id)) => Some((found, id)),
-                (Caller::Agent, JobOf::Score) | (Caller::Job(_), _) => None,
+                (Caller::Agent, JobOf::Final) => unreachable!(
+                    "the agent's ops are refused once its work has ended, and the final call's \
+                     job is added after that"
+                ),
+                (Caller::Job(_), _) => None,
             });
         let Some((found, function)) = found else {
             return Err(format!(
@@ -293,8 +297,7 @@ impl Core<'_> {
 
     pub(super) fn held(&self, working: &Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
-        // A job's role, a judge or a target, holds sessions alone (`ir::JudgeRuntime`,
-        // `ir::TargetRuntime`).
+        // A call's target holds sessions alone (`ir::TargetRuntime`).
         let agent = match working {
             Working::Agent {
                 deadline, latest, ..

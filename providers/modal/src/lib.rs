@@ -18,7 +18,7 @@
 //! images.repository = "pumpkin/roles"
 //! images.role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
 //! dials_from = "203.0.113.7"
-//! classes.judge = { cpu_millis = 2000, memory_bytes = 4294967296, startup_seconds = 600 }
+//! classes.cpu = { cpu_millis = 2000, memory_bytes = 4294967296, startup_seconds = 600 }
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};

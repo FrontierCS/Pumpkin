@@ -3,51 +3,19 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use schema::ir::{Name, ResultSpec};
+use schema::ir::Name;
 use schema::sandbox::RESULT_MAX_DEPTH;
 use schema::sandbox::op::{JobState, Returned};
 use serde_json::Value;
 
-/// A call's result, parsed from a judge's `result.json` per its [`ResultSpec`], or a body's
-/// return: the values its run shows, and the fields its caller's reply returns.
+/// What a call's body returned: each name with its value, in the body's order.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JudgeResult {
+pub struct CallResult {
     values: Vec<(Name, Value)>,
-    returned: Returned,
 }
 
-impl JudgeResult {
-    /// Parses a `result.json` per `spec`.
-    ///
-    /// # Errors
-    ///
-    /// Fails, with the reason, if the file is not JSON or nests deeper than
-    /// [`RESULT_MAX_DEPTH`].
-    pub fn parse(spec: &ResultSpec, json: &[u8]) -> Result<Self, String> {
-        let ResultSpec { shows, returns } = spec;
-        let document: Value = serde_json::from_slice(json)
-            .map_err(|error| format!("result.json is not JSON: {error}"))?;
-        if depth(&document) > RESULT_MAX_DEPTH {
-            return Err(format!(
-                "result.json nests arrays and objects more than {RESULT_MAX_DEPTH} deep: nest \
-                 them at most that deep"
-            ));
-        }
-        let values = shows
-            .iter()
-            .filter_map(|(name, pointer)| Some((name.clone(), pointer.resolve(&document)?.clone())))
-            .collect();
-        let returned = returns
-            .iter()
-            .filter_map(|(key, pointer)| {
-                Some((key.to_owned(), pointer.resolve(&document)?.clone()))
-            })
-            .collect();
-        Ok(Self { values, returned })
-    }
-
-    /// A body's return: each name with its value, in the body's order, both as the values the
-    /// run shows and as the fields its caller's reply returns.
+impl CallResult {
+    /// A body's return: each name with its value, in the body's order.
     ///
     /// # Errors
     ///
@@ -61,32 +29,24 @@ impl JudgeResult {
                  deep, its dict included: nest them at most that deep"
             ));
         }
-        let fields = values
-            .iter()
-            .map(|(name, value)| (name.as_str().to_owned(), value.clone()));
-        let returned = fields.collect();
-        Ok(Self { values, returned })
+        Ok(Self { values })
     }
 
-    /// The values the run shows, each by its name, in the order of the judge's
-    /// [`ResultSpec::shows`]: those it names and the result has.
+    /// Each name with its value, in the order the body returned them.
     pub fn values(&self) -> &[(Name, Value)] {
         &self.values
     }
 
-    /// The fields the caller's reply returns, by key: those the judge's
-    /// [`ResultSpec::returns`] names and the result has.
-    pub fn returned(&self) -> &Returned {
-        &self.returned
+    /// The fields the caller's reply returns, by name.
+    pub fn returned(&self) -> Returned {
+        let fields = self.values.iter();
+        let fields = fields.map(|(name, value)| (name.as_str().to_owned(), value.clone()));
+        fields.collect()
     }
 
     pub(super) fn job_state(&self) -> JobState {
-        let Self {
-            values: _,
-            returned,
-        } = self;
         JobState::Completed {
-            returned: returned.clone(),
+            returned: self.returned(),
         }
     }
 }

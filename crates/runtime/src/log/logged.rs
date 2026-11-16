@@ -112,24 +112,6 @@ pub(super) enum Event {
         request: Request,
     },
     OpRefused,
-    JudgeStarted {
-        job: u64,
-    },
-    JudgeExited {
-        job: u64,
-    },
-    JudgeTimedOut {
-        job: u64,
-    },
-    JudgeCollected {
-        job: u64,
-        #[serde(flatten)]
-        collected: Collected,
-    },
-    JudgeFailed {
-        job: u64,
-        reason: String,
-    },
     CallStarted {
         job: u64,
     },
@@ -202,11 +184,6 @@ impl Event {
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
             | Self::OpRefused
-            | Self::JudgeStarted { .. }
-            | Self::JudgeExited { .. }
-            | Self::JudgeTimedOut { .. }
-            | Self::JudgeCollected { .. }
-            | Self::JudgeFailed { .. }
             | Self::CallStarted { .. }
             | Self::CallTimedOut { .. }
             | Self::CallReturned { .. }
@@ -227,12 +204,7 @@ impl Event {
 
     pub(super) fn job(&self) -> Option<u64> {
         match self {
-            Self::JudgeStarted { job }
-            | Self::JudgeExited { job }
-            | Self::JudgeTimedOut { job }
-            | Self::JudgeCollected { job, .. }
-            | Self::JudgeFailed { job, .. }
-            | Self::CallStarted { job }
+            Self::CallStarted { job }
             | Self::CallTimedOut { job }
             | Self::CallReturned { job, .. }
             | Self::CallFailed { job, .. } => Some(*job),
@@ -293,21 +265,7 @@ pub(super) enum Request {
     Other,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Collected {
-    Result(JudgeResult),
-    Invalid(String),
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct JudgeResult {
-    // A result that shows nothing has no `values`.
-    #[serde(default)]
-    pub(super) values: Vec<Shown>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Shown {
     pub(super) name: Name,
     pub(super) value: Value,
@@ -370,23 +328,31 @@ impl From<&Usage> for route::Usage {
     }
 }
 
+/// The payload that an action gives a call.
+#[derive(Debug, Deserialize)]
+pub(super) struct Payload {
+    pub(super) size: u64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Action {
     StartAgent,
     Reply,
-    StartJudge {
-        job: u64,
-        #[serde(deserialize_with = "nanos")]
-        timeout_ns: Duration,
-    },
     StartCall {
         job: u64,
         grant: String,
+        payload: Payload,
         #[serde(deserialize_with = "nanos")]
         timeout_ns: Duration,
     },
-    StopJudge {
+    StartFinalCall {
+        job: u64,
+        payload: Payload,
+        #[serde(deserialize_with = "nanos")]
+        timeout_ns: Duration,
+    },
+    StopCall {
         job: u64,
     },
     StartLease {
@@ -411,13 +377,13 @@ pub(super) enum Action {
 }
 
 impl Action {
-    pub(super) fn score_job(&self) -> Option<u64> {
+    pub(super) fn final_call(&self) -> Option<u64> {
         match self {
-            Self::StartJudge { job, .. } => Some(*job),
+            Self::StartFinalCall { job, .. } => Some(*job),
             Self::StartAgent
             | Self::Reply
             | Self::StartCall { .. }
-            | Self::StopJudge { .. }
+            | Self::StopCall { .. }
             | Self::StartLease { .. }
             | Self::RunCommand { .. }
             | Self::Transfer { .. }

@@ -54,7 +54,7 @@ const SECOND_TICKS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 
 const MARK_PX = 3;
 
 // The style's colours that the canvases draw with, and its face and size of their text.
-const COLOURS = ["--panel", "--select", "--line", "--line-soft", "--edge", "--dim", "--text", "--accent", "--model", "--runner", "--judge", "--agent", "--live", "--fail-bar", "--mark-bar"];
+const COLOURS = ["--panel", "--select", "--line", "--line-soft", "--edge", "--dim", "--text", "--accent", "--model", "--runner", "--target", "--agent", "--live", "--fail-bar", "--mark-bar"];
 const FACES = ["--mono", "--fs-mono"];
 
 /** @param {number} value @param {number} low @param {number} high */
@@ -463,7 +463,7 @@ export class Timeline {
       for (let n = 0; n < o.op.length; n++) {
         const [start, end] = this.opSpan(o, n);
         if (end < a || start > b) continue;
-        g.fillStyle = o.failed[n] ? k["--fail-bar"] : o.kind[n] === "call" ? k["--judge"] : o.kind[n] === "now" ? k["--agent"] : k["--runner"];
+        g.fillStyle = o.failed[n] ? k["--fail-bar"] : o.kind[n] === "call" ? k["--target"] : o.kind[n] === "now" ? k["--agent"] : k["--runner"];
         g.fillRect(x(start), ops.top + inset, Math.max(2, x(end) - x(start)), ops.height - 2 * inset);
       }
     }

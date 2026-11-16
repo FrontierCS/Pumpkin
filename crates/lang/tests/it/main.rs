@@ -385,29 +385,29 @@ fn refusals() {
 load("//lib/parts.star", "AGENT", "_DRAFT")
 
 ROLES = [AGENT]
-ROLES = [AGENT, JUDGE]
+ROLES = [AGENT, FINAL_TARGET]
 
-load("//lib/parts.star", "SCORE")
+load("//lib/parts.star", "FINAL")
 
-workflow(name = "neutral/names", roles = ROLES, score = SCROE)
+workflow(name = "neutral/names", roles = ROLES, final = FINLA)
 "#,
         &expect![[r#"
             bad/names/task.star:1:35: `_DRAFT` is private to `//lib/parts.star`: load a name that doesn't start with `_`
                 1 | load("//lib/parts.star", "AGENT", "_DRAFT")
                   |                                   ^^^^^^^^
             bad/names/task.star:4:1: `ROLES` is bound already: bind each global once
-                4 | ROLES = [AGENT, JUDGE]
+                4 | ROLES = [AGENT, FINAL_TARGET]
                   | ^^^^^
                 it is first bound at bad/names/task.star:3:1
-            bad/names/task.star:4:17: `JUDGE` is not defined: bind it in this file, or load it
-                4 | ROLES = [AGENT, JUDGE]
-                  |                 ^^^^^
+            bad/names/task.star:4:17: `FINAL_TARGET` is not defined: bind it in this file, or load it
+                4 | ROLES = [AGENT, FINAL_TARGET]
+                  |                 ^^^^^^^^^^^^
             bad/names/task.star:6:1: a `load` after other statements is not in Pumpkin's Starlark: put every `load` at the top of the file
-                6 | load("//lib/parts.star", "SCORE")
+                6 | load("//lib/parts.star", "FINAL")
                   | ^^^^
                 the first other statement is at bad/names/task.star:3:1
-            bad/names/task.star:8:57: `SCROE` is not defined: bind it in this file, or load it
-                8 | workflow(name = "neutral/names", roles = ROLES, score = SCROE)
+            bad/names/task.star:8:57: `FINLA` is not defined: bind it in this file, or load it
+                8 | workflow(name = "neutral/names", roles = ROLES, final = FINLA)
                   |                                                         ^^^^^"#]],
     );
     check(
@@ -514,31 +514,31 @@ DEEPER = {"deep": DEEP}
     check(
         r#"
 #- //bad/status/task.star
-load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 
 workflow(
     name = "neutral/status",
-    roles = [AGENT, JUDGE | {"status": "ready"}],
-    score = SCORE,
+    roles = [AGENT, FINAL_TARGET | {"status": "ready"}],
+    final = FINAL,
 )
 "#,
         &expect![[r#"
-            bad/status/task.star:5:30: `status` is no field of an element of `roles`: expected one of `name`, `image`, `user`, `needs`, `runtime`
-                5 |     roles = [AGENT, JUDGE | {"status": "ready"}],
-                  |                              ^^^^^^^^
+            bad/status/task.star:5:37: `status` is no field of an element of `roles`: expected one of `name`, `image`, `user`, `needs`, `runtime`
+                5 |     roles = [AGENT, FINAL_TARGET | {"status": "ready"}],
+                  |                                     ^^^^^^^^
                 the IR's /roles/1"#]],
     );
     check(
         r#"
 #- //bad/zero/task.star
-load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 
 CPU_MILLIS = 0
 
 workflow(
     name = "neutral/zero",
-    roles = [AGENT, JUDGE | {"needs": {"cpu_millis": CPU_MILLIS, "memory_bytes": 512 * MiB}}],
-    score = SCORE,
+    roles = [AGENT, FINAL_TARGET | {"needs": {"cpu_millis": CPU_MILLIS, "memory_bytes": 512 * MiB}}],
+    final = FINAL,
 )
 "#,
         &expect![[r#"
@@ -549,58 +549,54 @@ workflow(
     );
     check(
         r#"
-#- //bad/slot/task.star
-load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+#- //bad/payload/task.star
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
+load("//lib/submit.star", "submit")
 
-# Over the op payload limit, 64 MiB, which holds every slot.
-SLOT = {"name": "payload", "max_bytes": 65 * MiB}
+# Over the op payload limit, 64 MiB, which holds every payload.
+MAX_BYTES = 65 * MiB
 
-# Each judge that holds it is refused, at the place it is made.
-RUNTIME = {"judge": JUDGE["runtime"]["judge"] | {"slots": [SLOT]}}
+# Each part that takes it is refused, at the place it is made.
+GRANTS = [{"name": "final", "now": {"body": submit, "payload_max_bytes": MAX_BYTES}}]
 
 workflow(
-    name = "neutral/slot",
-    roles = [
-        AGENT,
-        JUDGE | {"name": "train_judge", "runtime": RUNTIME},
-        JUDGE | {"runtime": RUNTIME},
-    ],
-    score = SCORE,
+    name = "neutral/payload",
+    roles = [AGENT | {"runtime": {"agent": AGENT["runtime"]["agent"] | {"grants": GRANTS}}}, FINAL_TARGET],
+    final = FINAL | {"payload_max_bytes": MAX_BYTES},
 )
 "#,
         &expect![[r#"
-            bad/slot/task.star:4:41: slot `payload`'s `max_bytes` is 68157440, over the op payload limit of 67108864: give at most that
-                4 | SLOT = {"name": "payload", "max_bytes": 65 * MiB}
-                  |                                         ^^^^^^^^
-                the IR's /roles/1/runtime/judge/slots/0/max_bytes
-                the IR's /roles/2/runtime/judge/slots/0/max_bytes
-            bad/slot/task.star:13:9: `train_judge` is a judge that the score doesn't name: name it as the score's role
-                13 |         JUDGE | {"name": "train_judge", "runtime": RUNTIME},
-                   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                the IR's /roles/1"#]],
+            bad/payload/task.star:5:13: `final`'s `payload_max_bytes` is 68157440, over the op payload limit of 67108864: give at most that
+                5 | MAX_BYTES = 65 * MiB
+                  |             ^^^^^^^^
+                the IR's /roles/0/runtime/agent/grants/0/now/payload_max_bytes
+            bad/payload/task.star:5:13: the final call's `payload_max_bytes` is 68157440, over the op payload limit of 67108864: give at most that
+                5 | MAX_BYTES = 65 * MiB
+                  |             ^^^^^^^^
+                the IR's /final/payload_max_bytes"#]],
     );
     check(
         r#"
 #- //bad/keyword/task.star
-load("//lib/judged.star", "judged_task")
+load("//lib/neutral.star", "neutral_task")
 
-judged_task(
+neutral_task(
     task = "tasks/keyword",
     agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB},
     metric = ["solved"],
 )
 "#,
         &expect![[r#"
-            bad/keyword/task.star:6:5: `metric` is no parameter of `judged_task`: expected one of `task`, `agent`, `metrics`, `calls`, `judge`, `env`, `models`
+            bad/keyword/task.star:6:5: `metric` is no parameter of `neutral_task`: expected one of `task`, `agent`, `metrics`, `calls`, `judge`, `env`, `models`
                 6 |     metric = ["solved"],
                   |     ^^^^^^"#]],
     );
     check(
         r#"
 #- //bad/operand/task.star
-load("//lib/judged.star", "judged_task")
+load("//lib/neutral.star", "neutral_task")
 
-judged_task(
+neutral_task(
     task = "tasks/operand",
     agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB},
     metrics = ["solved"],
@@ -608,14 +604,14 @@ judged_task(
 )
 "#,
         &expect![[r#"
-            lib/judged.star:15:23: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
-                15 |     return [key + "=" + value for key, value in env.items()] + [
+            lib/neutral.star:16:23: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
+                16 |     return [key + "=" + value for key, value in env.items()] + [
                    |                       ^
-                the left operand, `"SEED="`, is made at lib/judged.star:15:13
+                the left operand, `"SEED="`, is made at lib/neutral.star:16:13
                 the right operand, `7`, is made at bad/operand/task.star:7:20
-                in `_env()`, called at lib/judged.star:27:63
-                in `_trainer()`, called at lib/judged.star:112:13
-                in `judged_task()`, called at bad/operand/task.star:3:1"#]],
+                in `_env()`, called at lib/neutral.star:28:63
+                in `_trainer()`, called at lib/neutral.star:111:13
+                in `neutral_task()`, called at bad/operand/task.star:3:1"#]],
     );
     check(
         r#"
@@ -1664,11 +1660,11 @@ Y = X.append(2)",
     );
     check(
         r#"
-load("//lib/parts.star", "SCORE")
-X = SCORE.update({})"#,
+load("//lib/parts.star", "FINAL")
+X = FINAL.update({})"#,
         &expect![[r#"
             text.star:2:11: `update`, which would change the dict, is not in Pumpkin's Starlark: make a new dict with `|`, as values never change
-                2 | X = SCORE.update({})
+                2 | X = FINAL.update({})
                   |           ^^^^^^"#]],
     );
     check(
@@ -2112,48 +2108,48 @@ _PRIVATE = "private to this file"
     check(
         r#"workflow(name = "")"#,
         &expect![[r#"
-            text.star:1:1: `workflow` lacks `roles`, `score`: give them
+            text.star:1:1: `workflow` lacks `roles`, `final`: give them
                 1 | workflow(name = "")
                   | ^^^^^^^^^^^^^^^^^^^"#]],
     );
     // Values the IR's types refuse, in the language's words.
     check(
-        r#"workflow(name = "n/x", roles = [1], score = None)"#,
+        r#"workflow(name = "n/x", roles = [1], final = None)"#,
         &expect![[r#"
             text.star:1:33: an element of `roles` can't be an int: expected a dict
-                1 | workflow(name = "n/x", roles = [1], score = None)
+                1 | workflow(name = "n/x", roles = [1], final = None)
                   |                                 ^
                 the IR's /roles/0"#]],
     );
     check(
-        r#"workflow(roles = [{"user": {"uid": -1}}], name = "", score = None)"#,
+        r#"workflow(roles = [{"user": {"uid": -1}}], name = "", final = None)"#,
         &expect![[r#"
             text.star:1:36: `uid` can't be `-1`: expected an int from 1 to 4294967295
-                1 | workflow(roles = [{"user": {"uid": -1}}], name = "", score = None)
+                1 | workflow(roles = [{"user": {"uid": -1}}], name = "", final = None)
                   |                                    ^^
                 the IR's /roles/0/user/uid"#]],
     );
     check(
-        r#"workflow(roles = [{"user": {"uid": 1.5}}], name = "", score = None)"#,
+        r#"workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None)"#,
         &expect![[r#"
             text.star:1:36: `uid` can't be a float: expected an int
-                1 | workflow(roles = [{"user": {"uid": 1.5}}], name = "", score = None)
+                1 | workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None)
                   |                                    ^^^
                 the IR's /roles/0/user/uid"#]],
     );
     check(
-        r#"workflow(roles = [{"runtime": "agent"}], name = "", score = None)"#,
+        r#"workflow(roles = [{"runtime": "agent"}], name = "", final = None)"#,
         &expect![[r#"
             text.star:1:31: `runtime` can't be `"agent"`: expected a dict that gives the kind its value, as `{"agent": …}`
-                1 | workflow(roles = [{"runtime": "agent"}], name = "", score = None)
+                1 | workflow(roles = [{"runtime": "agent"}], name = "", final = None)
                   |                               ^^^^^^^
                 the IR's /roles/0/runtime"#]],
     );
     check(
-        r#"workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", score = None)"#,
+        r#"workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None)"#,
         &expect![[r#"
             text.star:1:68: `finalize_grace_seconds` can't be `-1`: expected an int of 0 or more
-                1 | workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", score = None)
+                1 | workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None)
                   |                                                                    ^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds"#]],
     );
@@ -3000,11 +2996,11 @@ X = check(4)"#,
 load("//lib.star", "X")
 #- //lib.star
 def make():
-    workflow(name = "n/x", roles = [], score = None)
+    workflow(name = "n/x", roles = [], final = None)
 X = make()"#,
         &expect![[r#"
             lib.star:2:5: `workflow()` is called while `//lib.star` loads: call it in the entry file, which loads `//lib.star`
-                2 |     workflow(name = "n/x", roles = [], score = None)
+                2 |     workflow(name = "n/x", roles = [], final = None)
                   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `make()`, called at lib.star:3:5"#]],
     );
@@ -3153,10 +3149,10 @@ def f():
 load("//lib.star", "X")
 #- //lib.star
 def f():
-    load("//lib/parts.star", "SCORE")"#,
+    load("//lib/parts.star", "FINAL")"#,
         &expect![[r#"
             lib.star:2:5: a `load` stands only at a file's top level, above its other statements: move it there
-                2 |     load("//lib/parts.star", "SCORE")
+                2 |     load("//lib/parts.star", "FINAL")
                   |     ^^^^"#]],
     );
     check(
@@ -3627,6 +3623,15 @@ fn plans() {
             building 5 and 6
             building 6
             {
+              "final": {
+                "body": {
+                  "def": "final_call",
+                  "file": "//lib/images.star"
+                },
+                "payload_max_bytes": 65536,
+                "target": "final_judge",
+                "timeout_seconds": 120
+              },
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/images",
               "roles": [
@@ -3721,27 +3726,8 @@ fn plans() {
                     "memory_bytes": 536870912
                   },
                   "runtime": {
-                    "judge": {
-                      "command": {
-                        "argv": [
-                          "/opt/judge/run"
-                        ],
-                        "cwd": "/pumpkin/home"
-                      },
-                      "result": {
-                        "returns": [
-                          "/score"
-                        ],
-                        "shows": {
-                          "score": "/score"
-                        }
-                      },
-                      "slots": [
-                        {
-                          "max_bytes": 65536,
-                          "name": "payload"
-                        }
-                      ]
+                    "target": {
+                      "cwd": "/pumpkin/home"
                     }
                   },
                   "user": {
@@ -3749,12 +3735,7 @@ fn plans() {
                     "uid": 65532
                   }
                 }
-              ],
-              "score": {
-                "role": "final_judge",
-                "slot": "payload",
-                "timeout_seconds": 120
-              }
+              ]
             }"#]],
     );
     check(
@@ -3765,9 +3746,9 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:9:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
-                9 | DEADLINE = arg("deadline", int, default = 5 * 3600)
-                  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            lib/images.star:10:12: `--arg deadline` is `"1h"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
+                10 | DEADLINE = arg("deadline", int, default = 5 * 3600)
+                   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 `--arg mdoel` is given, and no `arg()` call before this one declares it"#]],
     );
     check(
@@ -3777,8 +3758,8 @@ fn plans() {
 {IMAGES}"
         ),
         &expect![[r#"
-            lib/images.star:10:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
-                10 | STRICT = arg("strict", bool, default = False)
+            lib/images.star:11:10: `--arg strict` is `"yes"`, which is no bool: give it `true` or `false`
+                11 | STRICT = arg("strict", bool, default = False)
                    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
@@ -3841,23 +3822,23 @@ images_task(agent = {"cpu_millis": 0, "memory_bytes": 8 * GiB})
                 59 |     agent_image = image("agent/Dockerfile", context = ".", mount = SHARED, contexts = built_on)
                    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:31:18: the stand-in check refuses `judge/Dockerfile`
-                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:25:18: the stand-in check refuses `judge/Dockerfile`
+                25 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_role()`, called at lib/images.star:63:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:31:18: the stand-in check refuses the mount at `shared`
-                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:25:18: the stand-in check refuses the mount at `shared`
+                25 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_role()`, called at lib/images.star:63:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:31:18: the stand-in check refuses `judge/Dockerfile`
-                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:25:18: the stand-in check refuses `judge/Dockerfile`
+                25 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_role()`, called at lib/images.star:64:9
                 in `images_task()`, called at bad/refused/task.star:5:1
-            lib/images.star:31:18: the stand-in check refuses the mount at `shared`
-                31 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
+            lib/images.star:25:18: the stand-in check refuses the mount at `shared`
+                25 |         "image": image("judge/Dockerfile", mount = SHARED, target = stage, args = BASE_ARGS),
                    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `_role()`, called at lib/images.star:64:9
                 in `images_task()`, called at bad/refused/task.star:5:1
@@ -4271,11 +4252,11 @@ fail("255 characters fit")"#,
     );
     check(
         r#"
-workflow(name = "neutral/twice", roles = [], score = None)
-workflow(name = "neutral/twice", roles = [], score = None)"#,
+workflow(name = "neutral/twice", roles = [], final = None)
+workflow(name = "neutral/twice", roles = [], final = None)"#,
         &expect![[r#"
             text.star:2:1: `workflow()` is called a second time: call it once
-                2 | workflow(name = "neutral/twice", roles = [], score = None)
+                2 | workflow(name = "neutral/twice", roles = [], final = None)
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 it is first called at text.star:1:1"#]],
     );
@@ -4866,10 +4847,10 @@ fn labels() {
     check(
         r#"
 #- //tasks/bench/task.star
-load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 load("@pumpkin//harness/agent.star", "agent")
 
-workflow(name = "neutral/library", roles = [AGENT | {"image": agent()}, JUDGE], score = SCORE)
+workflow(name = "neutral/library", roles = [AGENT | {"image": agent()}, FINAL_TARGET], final = FINAL)
 #- @pumpkin//harness/agent.star
 load("@pumpkin//harness/names.star", "NAME")
 
@@ -4883,6 +4864,15 @@ NAME = "one"
             image 1: @pumpkin//harness/one's Dockerfile, with @pumpkin//harness/two at m, with N="one", in pumpkin-library/harness/one
             building 1
             {
+              "final": {
+                "body": {
+                  "def": "final_call",
+                  "file": "//lib/parts.star"
+                },
+                "payload_max_bytes": 65536,
+                "target": "final_judge",
+                "timeout_seconds": 120
+              },
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/library",
               "roles": [
@@ -4937,28 +4927,8 @@ NAME = "one"
                     "memory_bytes": 536870912
                   },
                   "runtime": {
-                    "judge": {
-                      "command": {
-                        "argv": [
-                          "/opt/judge/run"
-                        ],
-                        "cwd": "/pumpkin/home"
-                      },
-                      "result": {
-                        "returns": [
-                          "/score",
-                          "/failure"
-                        ],
-                        "shows": {
-                          "score": "/score"
-                        }
-                      },
-                      "slots": [
-                        {
-                          "max_bytes": 65536,
-                          "name": "payload"
-                        }
-                      ]
+                    "target": {
+                      "cwd": "/pumpkin/home"
                     }
                   },
                   "user": {
@@ -4966,12 +4936,7 @@ NAME = "one"
                     "uid": 65532
                   }
                 }
-              ],
-              "score": {
-                "role": "final_judge",
-                "slot": "payload",
-                "timeout_seconds": 120
-              }
+              ]
             }"#]],
     );
     check(

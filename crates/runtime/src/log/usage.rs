@@ -12,6 +12,7 @@ use schema::ir::{Api, ApiRoute};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::call::CallOf;
 use super::progress::{ModelUse, Place, Progress, Sandbox, Tokens};
 use super::{logged, nanos};
 use crate::TokenPrices;
@@ -225,8 +226,8 @@ impl PlaceUse {
 /// `model_requests`; `tokens`, with `responses`, `input`, `output` and, if some response reported
 /// them, `cached`, `cache_write` and `reasoning`; `sandboxes`, one object a place, with `provider`,
 /// `class`, `count`, `lasted_ns`, `charged_ns` and `busy_ns` if a lease ran there, `undeleted` if
-/// some weren't deleted, and `usd_per_hour` and `usd` if its class is priced; `calls`, if a judge
-/// call made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; and `usd`
+/// some weren't deleted, and `usd_per_hour` and `usd` if its class is priced; `calls`, if a call
+/// made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; and `usd`
 /// with `unpriced_models` and `unreported_responses` ([`Cost`]), unless nothing is priced.
 pub(crate) fn usage_of(progress: &Progress) -> Value {
     let sandboxes = progress.sandboxes().into_iter().map(|(place, used)| {
@@ -258,9 +259,13 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
     let calls = progress.calls.iter().filter(|call| call.model.requests > 0);
     let calls: Vec<Value> = calls
         .map(|call| {
+            let grant = match &call.of {
+                CallOf::Function(function) => Some(function),
+                CallOf::Final => None,
+            };
             json!({
                 "job": call.job,
-                "grant": call.function,
+                "grant": grant,
                 "model_requests": call.model.requests,
                 "tokens": tokens_json(&call.model.tokens),
             })

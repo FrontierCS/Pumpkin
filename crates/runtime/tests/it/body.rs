@@ -13,6 +13,7 @@ use schema::ir::{self, AbsolutePath, Argv, Name};
 use schema::sandbox::RESULT_MAX_DEPTH;
 use serde_json::{Map, Value, json};
 
+use crate::execute::LEASING;
 use crate::sim;
 
 /// The tests' bodies, each by its `def`'s name: `check` puts the payload at `/work/payload`, runs
@@ -123,6 +124,44 @@ impl runtime::Bodies for Bodies<'_> {
         }
     }
 
+    /// `final_call` puts the payload at `/pumpkin/in/payload/raw`, runs `judge` on it, and returns
+    /// its result's `raw_score` as `score`; `routed` runs its keyword `argv`, and returns the
+    /// `raw_score` of the result that it wrote as `score` and `raw`; `leasing` puts the payload as
+    /// `final_call` does, runs [`LEASING`], and returns its result's `raw_score` as `score`.
+    fn final_call(
+        &self,
+        body: &ir::FinalBody,
+        keywords: &Map<String, Value>,
+        target: &mut dyn runtime::Target,
+    ) -> Result<Vec<(Name, Value)>, String> {
+        let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
+        match body.def.as_str() {
+            "final_call" => {
+                let payload = AbsolutePath::from_static("/pumpkin/in/payload/raw");
+                target.put(&payload)?;
+                target.run(&argv(&["judge", payload.as_str()]))?;
+                let score = raw_score(target)?;
+                Ok(vec![(Name::from_static("score"), score)])
+            }
+            "routed" => {
+                target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
+                let score = raw_score(target)?;
+                let raw = score.clone();
+                Ok(vec![
+                    (Name::from_static("score"), score),
+                    (Name::from_static("raw"), raw),
+                ])
+            }
+            "leasing" => {
+                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"))?;
+                target.run(&argv(&LEASING))?;
+                let score = raw_score(target)?;
+                Ok(vec![(Name::from_static("score"), score)])
+            }
+            def => Err(format!("the tests have no body `{def}`")),
+        }
+    }
+
     /// `submit` selects the payload and, given `finalize`, ends the work, once it has taken
     /// [`DEEP_BYTES`] of stack; what `deep` returns nests, its dict included, one deeper than
     /// [`RESULT_MAX_DEPTH`].
@@ -168,4 +207,10 @@ fn deep(frames: usize) -> u8 {
     } else {
         deep(frames - 1).wrapping_add(frame[1])
     }
+}
+
+fn raw_score(target: &mut dyn runtime::Target) -> Result<Value, String> {
+    let result = target.get(&AbsolutePath::from_static("/pumpkin/out/result.json"))?;
+    let mut result: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
+    Ok(result["raw_score"].take())
 }

@@ -203,85 +203,85 @@ fn refusals() {
             @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:85:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            task.star:6:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
-                6 | WORKSPACE = arg("workspace", str)
+            task.star:7:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
+                7 | WORKSPACE = arg("workspace", str)
                   |             ^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/command/cwd
             @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
                 79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:81:9: fail: `0` is not a number of tokens: give a positive int
                 81 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
-            task.star:15:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
-                15 |     None,
+                in `claude_code()`, called at task.star:15:9
+            task.star:16:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
+                16 |     None,
                    |     ^^^^
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two numbers, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `None`, is made at task.star:16:13
-                in `claude_code()`, called at task.star:14:9
+                the right operand, `None`, is made at task.star:17:13
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it a number or a string
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |                                                                     ^^^^^^
-                the argument, `None`, is made at task.star:17:14
-                in `claude_code()`, called at task.star:14:9
+                the argument, `None`, is made at task.star:18:14
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two numbers, two strings, two lists or two tuples
                 85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |                                                    ^
-                the left operand, `None`, is made at task.star:18:17
+                the left operand, `None`, is made at task.star:19:17
                 the right operand, `"/.claude-code"`, is made at @pumpkin//harness/claude_code/claude_code.star:85:54
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
                 79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:14:9
-            task.star:20:24: `deadline_seconds` can't be `None`: expected an int
-                20 |     deadline_seconds = None,
+                in `claude_code()`, called at task.star:15:9
+            task.star:21:24: `deadline_seconds` can't be `None`: expected an int
+                21 |     deadline_seconds = None,
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
-            task.star:21:30: `finalize_grace_seconds` can't be `None`: expected an int
-                21 |     finalize_grace_seconds = None,
+            task.star:22:30: `finalize_grace_seconds` can't be `None`: expected an int
+                22 |     finalize_grace_seconds = None,
                    |                              ^^^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds
             @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two numbers or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:22:25
+                the left operand, `None`, is made at task.star:23:25
                 the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
-                in `claude_code()`, called at task.star:14:9
+                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
                 97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
                    |                     ^
                 the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `5`, is made at task.star:16:13
-                in `claude_code()`, called at task.star:14:9
-            task.star:19:14: `stdin` can't be a list: expected a string
-                19 |     prompt = [PROMPT],
+                the right operand, `5`, is made at task.star:17:13
+                in `claude_code()`, called at task.star:15:9
+            task.star:20:14: `stdin` can't be a list: expected a string
+                20 |     prompt = [PROMPT],
                    |              ^^^^^^^^
                 the IR's /roles/0/runtime/agent/stdin
-            task.star:20:24: `deadline_seconds` can't be a string: expected an int
-                20 |     deadline_seconds = "60",
+            task.star:21:24: `deadline_seconds` can't be a string: expected an int
+                21 |     deadline_seconds = "60",
                    |                        ^^^^
                 the IR's /roles/0/runtime/agent/deadline_seconds
             @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two numbers or two strings
                 80 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `"128000"`, is made at task.star:22:25
+                the left operand, `"128000"`, is made at task.star:23:25
                 the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
-                in `claude_code()`, called at task.star:14:9"#]],
+                in `claude_code()`, called at task.star:15:9"#]],
     );
 }

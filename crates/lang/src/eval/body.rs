@@ -47,12 +47,17 @@ pub enum BodyKind {
     Job,
     /// A now function's body, which proposes effects on the run's state through its `Run`.
     Now,
+    /// The final call's body, which drives its target through its `Target`, and which no caller
+    /// gives an argument after the payload.
+    Final,
 }
 
-/// The host of a call, which the body's handle reaches: a job's target, or the run's state.
+/// The host of a call, which the body's handle reaches: a job's target, the run's state, or the
+/// final call's target.
 pub enum Host<'h> {
     Job(&'h mut dyn Target),
     Now(&'h mut dyn Run),
+    Final(&'h mut dyn Target),
 }
 
 impl Host<'_> {
@@ -60,6 +65,7 @@ impl Host<'_> {
         match self {
             Self::Job(_) => BodyKind::Job,
             Self::Now(_) => BodyKind::Now,
+            Self::Final(_) => BodyKind::Final,
         }
     }
 }
@@ -102,6 +108,32 @@ impl BodyKind {
         match self {
             Self::Job => "a job's body",
             Self::Now => "a now function's body",
+            Self::Final => "the final call's body",
+        }
+    }
+
+    // What gives a body of this kind its keywords, as a message names it.
+    fn keywords_from(self) -> &'static str {
+        match self {
+            Self::Job | Self::Now => "the grant's",
+            Self::Final => "the final call's",
+        }
+    }
+
+    // The refusal of `def`'s keyword-only parameter `keyword`, which has no default and which the
+    // call doesn't give.
+    fn ungiven(self, def: &str, keyword: &str) -> String {
+        match self {
+            Self::Job | Self::Final => format!(
+                "`{def}` takes the keyword `{keyword}`, which {} `keywords` does not give: give \
+                 it, or a default",
+                self.keywords_from()
+            ),
+            Self::Now => format!(
+                "`{def}` takes the keyword `{keyword}`, and a now function has no `keywords` to \
+                 give it: give it a default, or make it a positional parameter after the \
+                 payload, for its caller to give"
+            ),
         }
     }
 
@@ -109,7 +141,7 @@ impl BodyKind {
     // name that a message gives its parameter.
     fn handle(self) -> (Hosted, &'static str, &'static str) {
         match self {
-            Self::Job => (Hosted::Target, "Target", "target"),
+            Self::Job | Self::Final => (Hosted::Target, "Target", "target"),
             Self::Now => (Hosted::Run, "Run", "run"),
         }
     }
@@ -123,7 +155,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
             .map_err(|message| Vec::from([Problem::file(body.file, message)]))?;
         self.first(body.file, text)?;
         let function = self.defined(body)?;
-        let keywords = self.keywords(&function, body.keywords);
+        let keywords = self.keywords(&function, body.keywords, kind);
         let mut faults = parameters(&function, kind);
         match keywords {
             Ok(keywords) if faults.is_empty() => {
@@ -267,10 +299,12 @@ impl<L: Loader> Evaluation<'_, '_, L> {
         &self,
         function: &Function,
         given: &serde_json::Map<String, serde_json::Value>,
+        kind: BodyKind,
     ) -> Result<Vec<(Name, Value)>, Vec<Fault>> {
         let def = &*function.def;
         let name = &def.name.text;
         let at = def.name.span;
+        let from = kind.keywords_from();
         let mut faults = Vec::new();
         let keyword_only = def
             .params
@@ -279,11 +313,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
             .skip(def.positional);
         for (param, default) in keyword_only.clone() {
             if default.is_none() && !given.contains_key(&param.name.text) {
-                let message = format!(
-                    "`{name}` takes the keyword `{}`, which the grant's `keywords` does not give: \
-                     give it, or a default",
-                    param.name.text
-                );
+                let message = kind.ungiven(name, &param.name.text);
                 faults.push(Fault::new(param.name.span, message));
             }
         }
@@ -292,7 +322,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
             let Some((param, _)) = (keyword_only.clone()).find(|(p, _)| p.name.text == *keyword)
             else {
                 let message = format!(
-                    "the grant's `keywords` gives `{}`, which is no keyword-only parameter of \
+                    "{from} `keywords` gives `{}`, which is no keyword-only parameter of \
                      `{name}`: remove it",
                     keyword.escape_debug()
                 );
@@ -302,7 +332,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
             let value = match json::value_of(json, at, self.budget) {
                 Ok(value) => value,
                 Err(fault) => {
-                    faults.push(fault.note(format!("it is the grant's keyword `{keyword}`"), None));
+                    faults.push(fault.note(format!("it is {from} keyword `{keyword}`"), None));
                     continue;
                 }
             };
@@ -311,7 +341,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                     None => {}
                     Some(Misfit::Whole) => {
                         let message = format!(
-                            "the grant's keyword `{keyword}` can't be {}: `{name}` takes {}",
+                            "{from} keyword `{keyword}` can't be {}: `{name}` takes {}",
                             value.shown(),
                             annotation.describe()
                         );
@@ -319,7 +349,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                         continue;
                     }
                     Some(Misfit::Inside(inside)) => {
-                        let whole = format!("the grant's keyword `{keyword}`");
+                        let whole = format!("{from} keyword `{keyword}`");
                         faults.push(refusal_inside(&inside, &whole, param.name.span));
                         continue;
                     }
@@ -427,7 +457,14 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
         faults.push(Fault::new(second.name.span, message));
     }
     for param in caller {
-        if !matches!(param.annotation, Some(Type::Str | Type::Int | Type::Bool)) {
+        if let BodyKind::Final = kind {
+            let message = format!(
+                "`{name}`'s `{}` follows the payload, and the final call has no caller to give \
+                 it: remove it",
+                param.name.text
+            );
+            faults.push(Fault::new(param.name.span, message));
+        } else if !matches!(param.annotation, Some(Type::Str | Type::Int | Type::Bool)) {
             let message = format!(
                 "`{name}`'s `{}` follows the payload, so its caller gives it: annotate it `str`, \
                  `int` or `bool`",
@@ -469,11 +506,11 @@ pub(crate) fn method(
     let kind = match hosted {
         Hosted::Target => {
             let (_, method) = TARGET_METHODS.iter().find(|(has, _)| *has == name.text)?;
-            let Purpose::Call(Host::Job(target)) = purpose else {
+            let Purpose::Call(Host::Job(target) | Host::Final(target)) = purpose else {
                 unreachable!(
-                    "a `Target`'s method is called outside a call of a job's body, though only \
-                     that call makes a `Target`, and the value it is in lives no longer than its \
-                     evaluation"
+                    "a `Target`'s method is called outside a call of a job's or the final call's \
+                     body, though only such a call makes a `Target`, and the value it is in lives \
+                     no longer than its evaluation"
                 )
             };
             method(&mut **target, name, call)

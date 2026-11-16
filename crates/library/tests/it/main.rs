@@ -105,7 +105,7 @@ const SHARED: [(&str, &str); 6] = [
 
 /// A task's entry that calls `function`, the library's harness of that name, with each of
 /// `SHARED` and then `own`, and builds its agent on the image of `//images/Dockerfile`, which the
-/// judge runs on too.
+/// final call's target runs on too.
 fn entry(function: &str, own: &[(&str, &str)]) -> String {
     let arguments: Vec<&(&str, &str)> = SHARED.iter().chain(own).collect();
     let mut entry = String::new();
@@ -114,6 +114,7 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
         r#"load("@pumpkin//harness/{function}/{function}.star", "{function}")"#
     );
     let _ = writeln!(entry, r#"load("//submit.star", "submit")"#);
+    let _ = writeln!(entry, r#"load("//final.star", "final_call")"#);
     let _ = writeln!(entry);
     for (keyword, value) in &arguments {
         let _ = writeln!(entry, "{} = {value}", keyword.to_uppercase());
@@ -154,15 +155,19 @@ workflow(
             "image": BASE,
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["true"], "cwd": "/pumpkin/home"},
-                "slots": [{"name": "payload", "max_bytes": KiB}],
-                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
+    final = {"target": "judge", "body": final_call, "payload_max_bytes": KiB, "timeout_seconds": 60},
 )
+"#;
+
+/// The file that the entry loads the final call's body from.
+const FINAL_CALL: &str = r#"
+def final_call(target: Target, payload: Payload):
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["true"])
+    return {}
 "#;
 
 /// The arguments of `case`, a value for each of `SHARED` and then `own`, by their keywords, as
@@ -371,8 +376,8 @@ fn layer(agent: &ir::Role, images: &[String]) -> String {
     shown
 }
 
-/// Reads the entry, `//task.star`, from its text, and the standard library's files from the
-/// bundle.
+/// Reads the entry, `//task.star`, from its text, `//submit.star` from [`SUBMIT`], `//final.star`
+/// from [`FINAL_CALL`], and the standard library's files from the bundle.
 struct Bundled<'e>(&'e str);
 
 impl Loader for Bundled<'_> {
@@ -380,6 +385,7 @@ impl Loader for Bundled<'_> {
         match label.root() {
             Root::Task if label.path() == "task.star" => Ok(self.0.to_owned()),
             Root::Task if label.path() == "submit.star" => Ok(SUBMIT.to_owned()),
+            Root::Task if label.path() == "final.star" => Ok(FINAL_CALL.to_owned()),
             Root::Task => Err(format!("the test holds no `{label}`")),
             Root::Library => Ok(file(label.path())),
         }
