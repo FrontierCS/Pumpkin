@@ -17,15 +17,13 @@ use std::thread::{self, Scope};
 use std::time::Duration;
 use std::{fs, io};
 
-use decision::{
-    Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, PayloadRef, Request, lasts,
-};
+use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts};
 use gateway::{Arrival, Dialer, GrantListener, RefusedOp, Trees};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::ModelName;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{ByProvider, ByRole, JudgeCall, LeaseGrantId, Placed, RoleId, Workflow};
+use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
@@ -42,9 +40,10 @@ mod price;
 mod record;
 mod routes;
 mod sandbox;
+mod start;
 
 use agent::Agent;
-use child::{Child, Deadlines, Message, Report};
+use child::{Message, Report};
 use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
@@ -62,7 +61,7 @@ pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
 };
 use record::{Lock, Payloads};
-use sandbox::{Published, Sandboxes, Which};
+use sandbox::{Published, Sandboxes};
 
 // The longest the loop waits on its inbox before it looks for a signal: a stop that comes this
 // late goes unnoticed by the person who asked for it, and the loop wakes for it at most 20 times a
@@ -769,76 +768,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    fn start_judge<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        core: &Core<'_>,
-        job: JobId,
-        call: JudgeCall,
-        payload: &PayloadRef,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        let deadlines = self.judge_deadlines(core, call, timeout);
-        let slot = self.workflow().call_slot(call);
-        let call = judge::Call {
-            job,
-            slot,
-            payload: self.payloads.stored(payload),
-            timeout,
-        };
-        let which = Which::Job(job, slot.judge());
-        let run = move |mut child: Child<'r, H, OpReply>| judge::run(&call, &mut child);
-        let orders = self.start_child(scope, which, deadlines, run)?;
-        let collect = deadlines.collect;
-        let called = Called {
-            orders,
-            collect,
-            trees: None,
-            judge: slot.judge().role(),
-        };
-        self.jobs.insert(job, called);
-        Ok(())
-    }
-
-    fn start_lease<'s>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        core: &Core<'_>,
-        (lease, instance, start_by): (LeaseId, u32, Duration),
-        (holder, grant): (Caller, LeaseGrantId),
-    ) -> Result<(), String> {
-        let runner_id = self.workflow().lease_grant(grant).runner;
-        let runner = self.workflow().runner(runner_id);
-        let (start, collect) = match holder {
-            // A lease of the agent's ends with the work phase, which ends by the core's next end of
-            // a phase, and what it left is collected by the agent's teardown's end, as a judge
-            // call's is.
-            Caller::Agent => (core.phase_due(), self.teardown_end()),
-            // A call's ends with the call's command, and what it left is collected by when the
-            // call's is.
-            Caller::Job(job) => {
-                let collect = self.call(job).collect;
-                (collect, collect)
-            }
-        };
-        // A sandbox's start ends by when the lease must start and by the core's `start_by`.
-        let startup = (self.clock.now())
-            .saturating_add(self.placed.startup(runner_id.role()))
-            .min(start)
-            .min(start_by);
-        let deadlines = Deadlines {
-            startup,
-            start,
-            collect,
-        };
-        let which = Which::Lease(lease, runner_id, instance);
-        let run =
-            move |mut child: Child<'r, H, lease::Order>| lease::run(lease, runner, &mut child);
-        let orders = self.start_child(scope, which, deadlines, run)?;
-        self.leases.insert(lease, orders);
-        Ok(())
-    }
-
     fn stop_job(&mut self, job: JobId) {
         // A call whose thread has ended has nothing left to stop.
         let _ = self.call(job).orders.send(Message::Stop);
@@ -890,70 +819,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         // A lease whose thread has ended has run its last command, and the core hears of its end.
         let _ = orders.send(message);
-    }
-
-    fn start_child<'s, O: Send + 'static>(
-        &mut self,
-        scope: &'s Scope<'s, 'r>,
-        which: Which,
-        deadlines: Deadlines,
-        run: impl FnOnce(Child<'r, H, O>) + Send + 's,
-    ) -> Result<Sender<Message<O>>, String> {
-        let dir = self.dir.join(which.record_dir());
-        let parent = dir.parent().unwrap_or(self.dir);
-        fs::create_dir_all(parent).context(parent.display())?;
-        fs::create_dir(&dir).context(dir.display())?;
-        let inbox = self.clock.inbox();
-        let sender = inbox.sender();
-        let child = Child {
-            which,
-            deadlines,
-            hard_end: self.unix_hard_end,
-            dir,
-            sandboxes: self.sandboxes,
-            clock: self.clock.clone(),
-            inbox,
-            reports: self.inbox.sender(),
-        };
-        let spawned = thread::Builder::new()
-            .name(which.name().to_string())
-            .spawn_scoped(scope, move || run(child));
-        if let Err(error) = spawned {
-            // Reported as the child's thread would have, behind what reached the host before.
-            let reason = format!("{} thread didn't start: {error}", which.noun());
-            let failed = Report::Event(self.clock.now(), which.failed(reason));
-            // The inbox holds its receiver, so the send can't fail.
-            let _ = self.inbox.sender().send(Input::Child(failed));
-        }
-        Ok(sender)
-    }
-
-    fn judge_deadlines(&self, core: &Core<'_>, call: JudgeCall, timeout: Duration) -> Deadlines {
-        let judge = self.workflow().call_slot(call).judge().role();
-        let startup = self.clock.now().saturating_add(self.placed.startup(judge));
-        match call {
-            // A call of the agent's ends with the work phase, which ends by the core's next act of
-            // its own, and what it left is collected by the agent's teardown's end, which leaves
-            // the final judge its share of the hard end.
-            JudgeCall::Grant(_) => {
-                let start = startup.min(core.phase_due());
-                Deadlines {
-                    startup: start,
-                    start,
-                    collect: self.teardown_end(),
-                }
-            }
-            // The final judge's command starts in time to run its whole timeout before the hard
-            // end, by which what it left is collected.
-            JudgeCall::Score => {
-                let start = self.hard_end().saturating_sub(timeout);
-                Deadlines {
-                    startup: startup.min(start),
-                    start,
-                    collect: self.hard_end(),
-                }
-            }
-        }
     }
 
     fn stop_children(&self) {
