@@ -1,0 +1,15 @@
+<!-- python3 docs/logo.py writes this file: edit docs/logo.py, not this -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-76.09 -92.95 152.18 169.05" width="228" height="254" role="img" aria-labelledby="title desc">
+<title id="title">Pumpkin's logo</title>
+<desc id="desc">An open ring with an orange tile, turned 45 degrees, in the break at its top.</desc>
+<style>
+:root{--bg:#ffffff;--ink:#1f2328}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3}}
+.bg{fill:var(--bg)}
+.ring{fill:none;stroke:var(--ink);stroke-width:20.18;stroke-linecap:round}
+.tile{fill:#e8710a}
+</style>
+<rect class="bg" x="-76.09" y="-92.95" width="152.18" height="169.05"/>
+<path class="ring" d="M42.90 -25.68 A50 50 0 1 1 -42.90 -25.68"/>
+<rect class="tile" x="-22.02" y="-72.02" width="44.03" height="44.03" rx="10.09" transform="rotate(45 0 -50)"/>
+</svg>
