@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use stdx::Context;
 
 use super::logged::{self, Line};
-use super::progress::{Reading, Readout, Roles, Unread, json_file, readout};
+use super::progress::{Reading, Readout, Unread, json_file, readout};
+use super::roles::Roles;
 
 fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
     let path = dir.join("log.jsonl");

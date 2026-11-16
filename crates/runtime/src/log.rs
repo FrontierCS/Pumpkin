@@ -48,6 +48,7 @@ use super::{Clock, Durable, Host, record};
 mod fold;
 mod logged;
 mod progress;
+mod roles;
 mod usage;
 
 pub use fold::{LogFold, StartedOver, TakenLine};
