@@ -15,6 +15,9 @@ assertions, lints and errors.
   only for where the system keeps things, such as `HOME`, and for secrets that must stay out of
   `argv`
 - PREFER moving branches up to the caller and loops down into functions that take a batch
+- KEEP each file to one thing: put a new thing in a module of its own, and split a file that
+  holds several into modules that each hold one, in a pull request that only moves code;
+  `cargo xtask ci` caps a source file's lines
 - BOUND whatever input or time can grow, each queue, buffer, read, retry and recursion, by a
   limit from precedent or the protocol, named as a constant at its home; a loop meant never to
   end returns `!`
