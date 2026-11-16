@@ -488,6 +488,7 @@ impl Parser<'_> {
             TokenKind::Error(message) => return Fault::new(*span, message.clone()),
             TokenKind::Name(_)
             | TokenKind::Int(_)
+            | TokenKind::Float(_)
             | TokenKind::Keyword(_)
             | TokenKind::Punct(_) => {
                 format!("`{}`", &self.text[span.start..span.end])
@@ -565,7 +566,9 @@ fn left_out(kind: &TokenKind, at: At) -> Option<String> {
             format_args!("`{}`", punct.text()),
             "bind the result with `=`",
         ),
-        (TokenKind::Punct(Punct::Plus), At::Operand) => refusal("unary `+`", "write the int alone"),
+        (TokenKind::Punct(Punct::Plus), At::Operand) => {
+            refusal("unary `+`", "write the number alone")
+        }
         (TokenKind::Keyword(Keyword::Lambda), At::Operand) => refusal(
             "`lambda`",
             "write a `def` at a library's top level, and pass its name",
@@ -580,9 +583,6 @@ fn left_out(kind: &TokenKind, at: At) -> Option<String> {
             format_args!("`{}`, a bitwise operator,", punct.text()),
             "write the int it gives",
         ),
-        (TokenKind::Punct(Punct::Slash), At::Operator) => {
-            refusal("`/`, which divides into a float,", "divide with `//`")
-        }
         (TokenKind::Punct(Punct::StarStar), At::Operator) => String::from(
             "`**` is no operator of Starlark's: multiply, or use `KiB`, `MiB` or `GiB`",
         ),
@@ -641,6 +641,7 @@ fn target(expr: Expr) -> Result<Target, Fault> {
             return Err(Fault::new(span, message));
         }
         ExprKind::Int(_) => "an int",
+        ExprKind::Float(_) => "a float",
         ExprKind::Str(_) => "a string",
         ExprKind::Dict(_) => "a dict",
         ExprKind::ListComp { .. } | ExprKind::DictComp { .. } => "a comprehension",

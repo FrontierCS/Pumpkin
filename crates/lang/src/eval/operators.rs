@@ -1,15 +1,15 @@
 //! What operators make of their operands (spec.md, "Expressions"), but for what the subset
 //! refuses:
-//! - `+` joins two strings, two lists or two tuples, and `*` and `%` take two ints, since the
+//! - `+` joins two strings, two lists or two tuples, and `*` and `%` take two numbers, since the
 //!   subset repeats no sequence and formats no string;
-//! - an int operation that overflows 64 bits is refused, and one that divides by zero is an
-//!   error, at its operator;
+//! - an int operation that overflows 64 bits is refused, and a division by zero is an error, at
+//!   its operator;
 //!   `//` and `%` floor ("Arithmetic operations");
-//! - `<`, `<=`, `>` and `>=` order two ints or two strings, a string by its UTF-8 bytes, as
+//! - `<`, `<=`, `>` and `>=` order two numbers or two strings, a string by its UTF-8 bytes, as
 //!   Starlark's implementations in Go and in Rust do, and no bools, lists or tuples;
 //! - `|` merges two dicts ("Dictionaries"), and ORs no ints, as the subset has no bitwise
 //!   operators;
-//! - `in` finds an element of a list or a tuple, a key, a string or an int, of a dict, or a
+//! - `in` finds an element of a list or a tuple, a key, a string or a number, of a dict, or a
 //!   string in a string ("Membership tests");
 //! - an index of a list or a tuple of n is an int from -n to n - 1, and a dict's a key; and a
 //!   comprehension iterates over a list, a tuple or a dict's keys. A string is not indexed, as
@@ -25,7 +25,7 @@ use core::cmp::Ordering;
 use crate::builtins::origin;
 use crate::problem::{Fault, refusal};
 use crate::syntax::{Arithmetic, Operator};
-use crate::value::{Budget, Entry, Key, Kind, Span, Text, Value};
+use crate::value::{Budget, Entry, Key, Kind, Number, Span, Text, Value, floor, modulo};
 
 pub(super) fn binary(
     operator: Operator,
@@ -71,18 +71,20 @@ fn order(
     let unordered = |kinds: &str| {
         let message = refusal(
             format_args!("`{symbol}` of two {kinds}"),
-            "order two ints or two strings",
+            "order two numbers or two strings",
         );
         let fault = origin(Fault::new(at, message), "the left operand", operands.0);
         origin(fault, "the right operand", operands.1)
     };
     let ordering = match (&operands.0.kind, &operands.1.kind) {
-        (Kind::Int(left), Kind::Int(right)) => left.cmp(right),
         (Kind::Str(left), Kind::Str(right)) => left.as_bytes().cmp(right.as_bytes()),
         (Kind::Bool(_), Kind::Bool(_)) => return Err(unordered("bools")),
         (Kind::List(_), Kind::List(_)) => return Err(unordered("lists")),
         (Kind::Tuple(_), Kind::Tuple(_)) => return Err(unordered("tuples")),
-        _ => return Err(rejected(symbol, at, operands, "two ints or two strings")),
+        (left, right) => match (Number::of(left), Number::of(right)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => return Err(rejected(symbol, at, operands, "two numbers or two strings")),
+        },
     };
     Ok(test(ordering))
 }
@@ -110,6 +112,7 @@ fn contains(symbol: &str, at: Span, operands: (&Value, &Value)) -> Result<bool, 
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
@@ -145,8 +148,16 @@ fn arithmetic(
     operands: (&Value, &Value),
     budget: &Budget,
 ) -> Result<Kind, Fault> {
+    if let (Some(left), Some(right)) = (Number::of(&operands.0.kind), Number::of(&operands.1.kind))
+    {
+        return match (left, right) {
+            (Number::Int(left), Number::Int(right)) => int(operator, at, left, right),
+            (Number::Int(_), Number::Float(_)) | (Number::Float(_), _) => {
+                float(operator, at, left, right).map(Kind::Float)
+            }
+        };
+    }
     let kind = match (operator, &operands.0.kind, &operands.1.kind) {
-        (_, Kind::Int(left), Kind::Int(right)) => Kind::Int(int(operator, at, *left, *right)?),
         (Arithmetic::Add, Kind::Str(left), Kind::Str(right)) => {
             Kind::Str(Text::new(&[&**left, &**right].concat(), at, budget)?)
         }
@@ -174,11 +185,12 @@ fn arithmetic(
         }
         _ => {
             let takes = match operator {
-                Arithmetic::Add => "two ints, two strings, two lists or two tuples",
+                Arithmetic::Add => "two numbers, two strings, two lists or two tuples",
                 Arithmetic::Subtract
                 | Arithmetic::Multiply
+                | Arithmetic::Divide
                 | Arithmetic::FloorDivide
-                | Arithmetic::Modulo => "two ints",
+                | Arithmetic::Modulo => "two numbers",
             };
             return Err(rejected(operator.symbol(), at, operands, takes));
         }
@@ -187,12 +199,16 @@ fn arithmetic(
 }
 
 /// What `operator`, at `at`, makes of two ints, refusing what overflows 64 bits.
-fn int(operator: Arithmetic, at: Span, left: i64, right: i64) -> Result<i64, Fault> {
+fn int(operator: Arithmetic, at: Span, left: i64, right: i64) -> Result<Kind, Fault> {
     let symbol = operator.symbol();
     let result = match operator {
         Arithmetic::Add => left.checked_add(right),
         Arithmetic::Subtract => left.checked_sub(right),
         Arithmetic::Multiply => left.checked_mul(right),
+        Arithmetic::Divide => {
+            let quotient = float(operator, at, Number::Int(left), Number::Int(right))?;
+            return Ok(Kind::Float(quotient));
+        }
         Arithmetic::FloorDivide | Arithmetic::Modulo if right == 0 => {
             let message = format!("`{left} {symbol} 0` divides by zero: divide by another int");
             return Err(Fault::new(at, message));
@@ -211,13 +227,53 @@ fn int(operator: Arithmetic, at: Span, left: i64, right: i64) -> Result<i64, Fau
             remainder + if differs { right } else { 0 }
         }),
     };
-    result.ok_or_else(|| overflow(at, &format!("{left} {symbol} {right}")))
+    result
+        .map(Kind::Int)
+        .ok_or_else(|| overflow(at, &format!("{left} {symbol} {right}")))
+}
+
+fn float(operator: Arithmetic, at: Span, left: Number, right: Number) -> Result<f64, Fault> {
+    let (x, y) = (left.float(), right.float());
+    let result = match operator {
+        Arithmetic::Add => x + y,
+        Arithmetic::Subtract => x - y,
+        Arithmetic::Multiply => x * y,
+        Arithmetic::Divide | Arithmetic::FloorDivide | Arithmetic::Modulo if y == 0.0 => {
+            let message = format!(
+                "`{} {} {}` divides by zero: divide by another number",
+                left.literal(),
+                operator.symbol(),
+                right.literal()
+            );
+            return Err(Fault::new(at, message));
+        }
+        Arithmetic::Divide => x / y,
+        Arithmetic::FloorDivide => floor(x / y),
+        Arithmetic::Modulo => modulo(x, y),
+    };
+    Ok(result)
 }
 
 pub(super) fn negate(at: Span, operand: &Value) -> Result<Kind, Fault> {
-    let Kind::Int(int) = operand.kind else {
-        let message = format!("`-` can't take {}: give it an int", operand.kind.describe());
-        return Err(origin(Fault::new(at, message), "the operand", operand));
+    let int = match operand.kind {
+        Kind::Int(int) => int,
+        Kind::Float(float) => return Ok(Kind::Float(-float)),
+        Kind::None
+        | Kind::Bool(_)
+        | Kind::Str(_)
+        | Kind::List(_)
+        | Kind::Tuple(_)
+        | Kind::Dict(_)
+        | Kind::Function(_)
+        | Kind::Builtin(_)
+        | Kind::Image(_)
+        | Kind::Module(_) => {
+            let message = format!(
+                "`-` can't take {}: give it a number",
+                operand.kind.describe()
+            );
+            return Err(origin(Fault::new(at, message), "the operand", operand));
+        }
     };
     let negated = int
         .checked_neg()
@@ -286,6 +342,7 @@ pub(super) fn index(object: &Value, key: &Value, at: Span) -> Result<Value, Faul
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
@@ -307,6 +364,7 @@ pub(super) fn elements(items: &Value, at: Span) -> Result<Vec<Value>, Fault> {
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)

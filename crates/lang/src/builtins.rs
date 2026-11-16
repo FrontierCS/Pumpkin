@@ -2,17 +2,18 @@
 //! Pumpkin's own among them.
 //!
 //! Each does what the specification has it do, but for what the subset refuses:
-//! - `str`, `fail` and `format` format ints and strings only;
+//! - `str`, `fail` and `format` format numbers and strings only;
 //! - `len` takes no string, as Starlark's implementations count its elements differently;
-//! - `int` reads a string of decimal digits, after a sign or none, and takes no base;
-//! - `sorted` sorts a list, a tuple or a dict's keys, all ints or all strings, and takes no `key`
-//!   or `reverse`;
+//! - `int` reads a string of decimal digits, after a sign or none, takes no base, and truncates a
+//!   float within 64 bits only;
+//! - `sorted` sorts a list, a tuple or a dict's keys, all numbers or all strings, and takes no
+//!   `key` or `reverse`;
 //! - `bool` takes a value, `fail` one, its message, and a `format` field is `{}`, `{0}` or
 //!   `{name}`, with no conversion or format spec;
 //! - `split` takes a separator, `startswith` and `endswith` one string, and `replace` no count,
 //!   nor an empty string to replace, which Starlark's implementations place differently;
-//! - a dict's keys are strings or ints, as `crate::value::Key` has them, and no method changes a
-//!   value, as none does in the subset.
+//! - a dict's keys are strings or numbers, as `crate::value::Key` has them, and no method changes
+//!   a value, as none does in the subset.
 //!
 //! Each takes its arguments by position, but `format`, which takes keyword ones too.
 //!
@@ -35,7 +36,8 @@ pub(crate) use call::{Call, Keyword};
 use crate::problem::{self, Fault, list, refusal};
 use crate::syntax::{Def, Name, is_name};
 use crate::value::{
-    Budget, Builtin, Dict, Element, Entry, Key, Kind, Module, Nested, Span, Text, Value, escape,
+    Budget, Builtin, Dict, Element, Entry, Key, Kind, Module, Nested, Number, Span, Text, Value,
+    escape, float_of, float_text, truncated,
 };
 use crate::{json, pumpkin};
 
@@ -60,10 +62,10 @@ pub(crate) fn left_out(name: &str) -> Option<String> {
         "dict" | "enumerate" | "list" | "range" | "reversed" | "set" | "tuple" | "zip" => {
             ("", "write the value out, or build it with a comprehension")
         }
-        "abs" | "all" | "any" | "bytes" | "dir" | "float" | "getattr" | "hasattr" | "hash"
-        | "max" | "min" | "repr" | "type" => (
+        "abs" | "all" | "any" | "bytes" | "dir" | "getattr" | "hasattr" | "hash" | "max"
+        | "min" | "repr" | "type" => (
             "",
-            "compute the value with `bool`, `int`, `len`, `sorted` and `str`",
+            "compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`",
         ),
         _ => return None,
     };
@@ -150,6 +152,7 @@ pub(crate) fn called(def: &Def) -> String {
 pub(crate) enum Universal {
     Bool,
     Fail,
+    Float,
     Int,
     Len,
     Sorted,
@@ -157,9 +160,10 @@ pub(crate) enum Universal {
 }
 
 impl Universal {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Bool,
         Self::Fail,
+        Self::Float,
         Self::Int,
         Self::Len,
         Self::Sorted,
@@ -170,6 +174,7 @@ impl Universal {
         match self {
             Self::Bool => "bool",
             Self::Fail => "fail",
+            Self::Float => "float",
             Self::Int => "int",
             Self::Len => "len",
             Self::Sorted => "sorted",
@@ -179,7 +184,7 @@ impl Universal {
 
     fn takes(self) -> Takes {
         match self {
-            Self::Bool => Takes {
+            Self::Bool | Self::Float => Takes {
                 min: 0,
                 max: 1,
                 keywords: &[],
@@ -205,42 +210,50 @@ impl Universal {
 
     pub(crate) fn call(self, call: &Call<'_>) -> Result<Value, Fault> {
         let name = self.name();
-        let [argument] = positional::<1>(name, self.takes(), call)?;
-        let (_, value) = argument;
+        let one = || positional::<1>(name, self.takes(), call).map(|[argument]| argument);
         let kind = match self {
-            Self::Bool => Kind::Bool(value.truth()),
+            Self::Bool => Kind::Bool(one()?.1.truth()),
             Self::Fail => {
-                let message = format!("fail: {}", text(name, argument)?);
+                let message = format!("fail: {}", text(name, one()?)?);
                 return Err(Fault::new(call.at, message));
             }
-            Self::Int => Kind::Int(int(argument)?),
-            Self::Len => match &value.kind {
-                Kind::List(items) | Kind::Tuple(items) => Kind::Int(count(items.len())),
-                Kind::Dict(dict) => Kind::Int(count(dict.len())),
-                Kind::Str(_) => {
-                    let message = refusal(
-                        "`len` of a string, whose elements Starlark's implementations count \
-                         differently,",
-                        "give it a list, a tuple or a dict",
-                    );
-                    return Err(origin(
-                        Fault::new(argument.0, message),
-                        "the argument",
-                        value,
-                    ));
-                }
-                Kind::None
-                | Kind::Bool(_)
-                | Kind::Int(_)
-                | Kind::Function(_)
-                | Kind::Builtin(_)
-                | Kind::Image(_)
-                | Kind::Module(_) => {
-                    return Err(rejected(name, argument, "a list, a tuple or a dict"));
-                }
+            Self::Float => match optional(name, self.takes(), call)? {
+                Some(argument) => Kind::Float(float(argument)?),
+                None => Kind::Float(0.0),
             },
-            Self::Sorted => Kind::List(sorted(argument, call.budget)?),
-            Self::Str => Kind::Str(Text::new(&text(name, argument)?, call.at, call.budget)?),
+            Self::Int => Kind::Int(int(one()?)?),
+            Self::Len => {
+                let argument = one()?;
+                let (_, value) = argument;
+                match &value.kind {
+                    Kind::List(items) | Kind::Tuple(items) => Kind::Int(count(items.len())),
+                    Kind::Dict(dict) => Kind::Int(count(dict.len())),
+                    Kind::Str(_) => {
+                        let message = refusal(
+                            "`len` of a string, whose elements Starlark's implementations count \
+                             differently,",
+                            "give it a list, a tuple or a dict",
+                        );
+                        return Err(origin(
+                            Fault::new(argument.0, message),
+                            "the argument",
+                            value,
+                        ));
+                    }
+                    Kind::None
+                    | Kind::Bool(_)
+                    | Kind::Int(_)
+                    | Kind::Float(_)
+                    | Kind::Function(_)
+                    | Kind::Builtin(_)
+                    | Kind::Image(_)
+                    | Kind::Module(_) => {
+                        return Err(rejected(name, argument, "a list, a tuple or a dict"));
+                    }
+                }
+            }
+            Self::Sorted => Kind::List(sorted(one()?, call.budget)?),
+            Self::Str => Kind::Str(Text::new(&text(name, one()?)?, call.at, call.budget)?),
         };
         Ok(Value {
             kind,
@@ -315,6 +328,20 @@ fn positional<'c, const N: usize>(
     })
 }
 
+// The one argument by position that `function` takes, if the call gives any argument, or the fault
+// of a call that gives other.
+fn optional<'c>(
+    function: &str,
+    starlark: Takes,
+    call: &'c Call<'_>,
+) -> Result<Option<&'c (Span, Value)>, Fault> {
+    if call.positional.is_empty() && call.keywords().next().is_none() {
+        return Ok(None);
+    }
+    let [argument] = positional::<1>(function, starlark, call)?;
+    Ok(Some(argument))
+}
+
 fn arguments(n: usize) -> String {
     match n {
         0 => String::from("no argument"),
@@ -353,10 +380,11 @@ pub(crate) fn origin(fault: Fault, what: &str, value: &Value) -> Fault {
     fault.note(note, Some(value.span))
 }
 
-// What `str` makes of the argument: an int in decimal, or a string itself.
+// What `str` makes of the argument: a number as its literal, or a string itself.
 fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
     match &argument.1.kind {
         Kind::Int(int) => Ok(format!("{int}")),
+        Kind::Float(float) => Ok(float_text(*float)),
         Kind::Str(text) => Ok(String::from(&**text)),
         Kind::None
         | Kind::Bool(_)
@@ -366,8 +394,29 @@ fn text(function: &str, argument: &(Span, Value)) -> Result<String, Fault> {
         | Kind::Function(_)
         | Kind::Builtin(_)
         | Kind::Image(_)
-        | Kind::Module(_) => Err(narrowed(function, argument, "an int or a string")),
+        | Kind::Module(_) => Err(narrowed(function, argument, "a number or a string")),
     }
+}
+
+fn float(argument: &(Span, Value)) -> Result<f64, Fault> {
+    let (at, value) = argument;
+    let read = match &value.kind {
+        Kind::Int(int) => return Ok(Number::Int(*int).float()),
+        Kind::Float(float) => return Ok(*float),
+        Kind::Bool(bool) => return Ok(if *bool { 1.0 } else { 0.0 }),
+        Kind::Str(text) => float_of(text),
+        Kind::None
+        | Kind::List(_)
+        | Kind::Tuple(_)
+        | Kind::Dict(_)
+        | Kind::Function(_)
+        | Kind::Builtin(_)
+        | Kind::Image(_)
+        | Kind::Module(_) => {
+            return Err(rejected("float", argument, "a number, a bool or a string"));
+        }
+    };
+    read.map_err(|message| origin(Fault::new(*at, message), "the argument", value))
 }
 
 fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
@@ -375,6 +424,23 @@ fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
     let text = match &value.kind {
         Kind::Int(int) => return Ok(*int),
         Kind::Bool(bool) => return Ok(i64::from(*bool)),
+        Kind::Float(float) => {
+            if let Some(int) = truncated(*float) {
+                return Ok(int);
+            }
+            let message = if float.is_finite() {
+                refusal(
+                    format_args!("`int` of {}, outside -2^63 to 2^63 - 1,", value.shown()),
+                    "give it a smaller float, since ints are 64-bit",
+                )
+            } else {
+                format!(
+                    "`int` can't take {}, which is not finite: give it a finite float",
+                    value.shown()
+                )
+            };
+            return Err(origin(Fault::new(*at, message), "the argument", value));
+        }
         Kind::Str(text) => text,
         Kind::None
         | Kind::List(_)
@@ -387,7 +453,7 @@ fn int(argument: &(Span, Value)) -> Result<i64, Fault> {
             return Err(rejected(
                 "int",
                 argument,
-                "an int, a bool or a string of digits",
+                "a number, a bool or a string of digits",
             ));
         }
     };
@@ -415,6 +481,7 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
@@ -427,20 +494,20 @@ fn sorted(argument: &(Span, Value), budget: &Budget) -> Result<Nested<Value>, Fa
         .map(|element| Some((Key::of(&element).ok()?, element)))
         .collect();
     let one_kind = keyed.filter(|keyed| {
-        keyed.iter().all(|(key, _)| matches!(key, Key::Int(_)))
+        keyed.iter().all(|(key, _)| matches!(key, Key::Number(_)))
             || keyed.iter().all(|(key, _)| matches!(key, Key::Str(_)))
     });
     let Some(mut keyed) = one_kind else {
         let message = refusal(
             format_args!(
-                "`sorted` of {} of mixed or other values than ints or strings",
+                "`sorted` of {} of mixed or other values than numbers or strings",
                 value.kind.describe()
             ),
-            "give it only ints, or only strings",
+            "give it only numbers, or only strings",
         );
         return Err(origin(Fault::new(*at, message), "the argument", value));
     };
-    // Ints alone, or strings alone, compare as their keys do; the sort is stable.
+    // Numbers alone, or strings alone, compare as their keys do; the sort is stable.
     keyed.sort_by(|(left, _), (right, _)| left.cmp(right));
     let elements = keyed.into_iter().map(|(_, element)| element).collect();
     Nested::new(elements, *at, budget)
@@ -555,6 +622,7 @@ pub(crate) fn method(
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Tuple(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
@@ -685,6 +753,7 @@ fn join(name: &str, separator: &str, _: &(Span, Value), call: &Call<'_>) -> Resu
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)

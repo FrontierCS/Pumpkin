@@ -216,7 +216,7 @@ impl<'m> Uses<'m, '_> {
     fn expr(&mut self, expr: &'m Expr) {
         match &expr.kind {
             ExprKind::Name(name) => self.used(name, expr.span),
-            ExprKind::Int(_) | ExprKind::Str(_) => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) => {}
             ExprKind::List(items) | ExprKind::Tuple(items) => {
                 for item in items {
                     self.expr(item);

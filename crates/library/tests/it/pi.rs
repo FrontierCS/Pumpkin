@@ -195,13 +195,13 @@ fn refusals() {
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `pi()`, called at task.star:14:9
-            @pumpkin//harness/pi/pi.star:67:23: `<` can't take `None` and an int: give it two ints or two strings
+            @pumpkin//harness/pi/pi.star:67:23: `<` can't take `None` and an int: give it two numbers or two strings
                 67 |     if context_tokens < 1:
                    |                       ^
                 the left operand, `None`, is made at task.star:22:22
                 the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:67:25
                 in `pi()`, called at task.star:14:9
-            @pumpkin//harness/pi/pi.star:69:26: `<` can't take `None` and an int: give it two ints or two strings
+            @pumpkin//harness/pi/pi.star:69:26: `<` can't take `None` and an int: give it two numbers or two strings
                 69 |     if max_output_tokens < 1:
                    |                          ^
                 the left operand, `None`, is made at task.star:23:25

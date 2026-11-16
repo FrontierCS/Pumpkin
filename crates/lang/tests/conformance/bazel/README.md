@@ -6,6 +6,6 @@ under its `LICENSE`, Apache-2.0. The files are unchanged. Left out, as they test
 specification:
 - `bench_*.star`, which hold benchmarks, not tests;
 - `json.star`, which tests the `json` module: the file is one chunk, which the subset refuses
-  whole as it parses, for its floats and `lambda`s, so `lang`'s own `json` test takes each of its
-  cases that holds no float nor anything else the subset leaves out;
+  whole as it parses, so `lang`'s own `json` test takes each of its cases that holds nothing the
+  subset leaves out;
 - `fields.star`, which tests the `struct` values that Bazel's test runner provides.

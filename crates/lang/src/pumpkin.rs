@@ -283,11 +283,17 @@ impl Type {
                 Universal::Str => Some(Self::Str),
                 Universal::Int => Some(Self::Int),
                 Universal::Bool => Some(Self::Bool),
+                Universal::Float => {
+                    let message = "an arg can't be a float: give `arg`'s `type` as the builtin \
+                                   `str`, `int` or `bool`";
+                    return Err(Fault::new(value.span, String::from(message)));
+                }
                 Universal::Fail | Universal::Len | Universal::Sorted => None,
             },
             Kind::None
             | Kind::Bool(_)
             | Kind::Int(_)
+            | Kind::Float(_)
             | Kind::Str(_)
             | Kind::List(_)
             | Kind::Tuple(_)
@@ -454,7 +460,7 @@ fn keyed<'v>(
     };
     Ok(entries.iter().map(move |entry| match &entry.key {
         Key::Str(text) => Ok((&**text, entry)),
-        Key::Int(_) => {
+        Key::Number(_) => {
             let message = format!(
                 "{what} can't key a value by `{}`: key it by {key}, a string",
                 entry.key.literal()

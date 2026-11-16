@@ -192,13 +192,13 @@ fn refusals() {
                 64 |         fail("Qwen Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `qwen_code()`, called at task.star:15:9
-            @pumpkin//harness/qwen_code/qwen_code.star:65:23: `<` can't take `None` and an int: give it two ints or two strings
+            @pumpkin//harness/qwen_code/qwen_code.star:65:23: `<` can't take `None` and an int: give it two numbers or two strings
                 65 |     if context_tokens < 1:
                    |                       ^
                 the left operand, `None`, is made at task.star:23:22
                 the right operand, `1`, is made at @pumpkin//harness/qwen_code/qwen_code.star:65:25
                 in `qwen_code()`, called at task.star:15:9
-            @pumpkin//harness/qwen_code/qwen_code.star:67:26: `<` can't take `None` and an int: give it two ints or two strings
+            @pumpkin//harness/qwen_code/qwen_code.star:67:26: `<` can't take `None` and an int: give it two numbers or two strings
                 67 |     if max_output_tokens < 1:
                    |                          ^
                 the left operand, `None`, is made at task.star:24:25

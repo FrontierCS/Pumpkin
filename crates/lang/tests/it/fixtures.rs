@@ -560,7 +560,7 @@ fn bad() {
             == bad/stack/lib.star
 
             == bad/stack/task.star: 0 of 7 prefixes evaluate
-            bad/stack/lib.star:71:11: `+` can't take an int and a bool: give it two ints, two strings, two lists or two tuples
+            bad/stack/lib.star:71:11: `+` can't take an int and a bool: give it two numbers, two strings, two lists or two tuples
                 71 |         1 + (DEEP == DEEP)
                    |           ^
                 the left operand, `1`, is made at bad/stack/lib.star:71:9

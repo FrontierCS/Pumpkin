@@ -590,7 +590,7 @@ judged_task(
 )
 "#,
         &expect![[r#"
-            lib/judged.star:27:35: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
+            lib/judged.star:27:35: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
                 27 |                 "env": [key + "=" + value for key, value in env.items()] + [
                    |                                   ^
                 the left operand, `"SEED="`, is made at lib/judged.star:27:25
@@ -844,7 +844,7 @@ Y = 2
     check(
         "X = (1,) < (2,)",
         &expect![[r#"
-            text.star:1:10: `<` of two tuples is not in Pumpkin's Starlark: order two ints or two strings
+            text.star:1:10: `<` of two tuples is not in Pumpkin's Starlark: order two numbers or two strings
                 1 | X = (1,) < (2,)
                   |          ^
                 the left operand, a tuple, is made at text.star:1:5
@@ -867,7 +867,7 @@ Y = 2
     check(
         "X = +1",
         &expect![[r#"
-            text.star:1:5: unary `+` is not in Pumpkin's Starlark: write the int alone
+            text.star:1:5: unary `+` is not in Pumpkin's Starlark: write the number alone
                 1 | X = +1
                   |     ^"#]],
     );
@@ -970,18 +970,25 @@ Y = 2
                   |         ^"#]],
     );
     check(
-        "X = 1.5",
+        "X = 1e400",
         &expect![[r#"
-            text.star:1:5: `1.5`, a float, is not in Pumpkin's Starlark: write an int
-                1 | X = 1.5
+            text.star:1:5: `1e400` is too large for a float: write one of at most 1.7976931348623157e+308
+                1 | X = 1e400
+                  |     ^^^^^"#]],
+    );
+    check(
+        "X = 1e+",
+        &expect![[r#"
+            text.star:1:5: `1e+` has no digits in its exponent: write some after its `e`, as `1e3`
+                1 | X = 1e+
                   |     ^^^"#]],
     );
     check(
-        "X = .5",
+        "X = 1.5if True else 2",
         &expect![[r#"
-            text.star:1:5: `.5`, a float, is not in Pumpkin's Starlark: write an int
-                1 | X = .5
-                  |     ^^"#]],
+        text.star:1:5: `1.5if`, a number and then `if`, is not in Pumpkin's Starlark: put a space between them
+            1 | X = 1.5if True else 2
+              |     ^^^^^"#]],
     );
     check(
         r#"X = f"a""#,
@@ -1098,13 +1105,6 @@ Y = 2
                   |       ^^^"#]],
     );
     check(
-        "X = 1 / 2",
-        &expect![[r#"
-            text.star:1:7: `/`, which divides into a float, is not in Pumpkin's Starlark: divide with `//`
-                1 | X = 1 / 2
-                  |       ^"#]],
-    );
-    check(
         "X = len(x for x in [])",
         &expect![[r#"
             text.star:1:11: unexpected `for`: expected `,` or `)`
@@ -1181,7 +1181,7 @@ def f():
     check(
         "X = type(1)",
         &expect![[r#"
-            text.star:1:5: `type`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `int`, `len`, `sorted` and `str`
+            text.star:1:5: `type`, a builtin of Starlark's, is not in Pumpkin's Starlark: compute the value with `bool`, `float`, `int`, `len`, `sorted` and `str`
                 1 | X = type(1)
                   |     ^^^^"#]],
     );
@@ -1242,6 +1242,20 @@ Y = 1 or 1 // 0",
                   |       ^^"#]],
     );
     check(
+        "X = 1.5 / 0",
+        &expect![[r#"
+            text.star:1:9: `1.5 / 0` divides by zero: divide by another number
+                1 | X = 1.5 / 0
+                  |         ^"#]],
+    );
+    check(
+        "X = 7 // 0.0",
+        &expect![[r#"
+            text.star:1:7: `7 // 0.0` divides by zero: divide by another number
+                1 | X = 7 // 0.0
+                  |       ^^"#]],
+    );
+    check(
         "X, Y = [1, 2, 3]",
         &expect![[r#"
             text.star:1:1: a list of 3 values can't be unpacked into 2 names: give a list or a tuple of 2
@@ -1260,23 +1274,23 @@ Y = 1 or 1 // 0",
     check(
         "X = {[1]: 2}",
         &expect![[r#"
-            text.star:1:6: a list can't be a dict's key: key a dict with strings or ints
+            text.star:1:6: a list can't be a dict's key: key a dict with strings or numbers
                 1 | X = {[1]: 2}
                   |      ^^^"#]],
     );
     check(
         "X = {None: 1}",
         &expect![[r#"
-        text.star:1:6: `None` as a dict's key is not in Pumpkin's Starlark: key a dict with strings or ints
-            1 | X = {None: 1}
-              |      ^^^^"#]],
+            text.star:1:6: `None` as a dict's key is not in Pumpkin's Starlark: key a dict with strings or numbers
+                1 | X = {None: 1}
+                  |      ^^^^"#]],
     );
     check(
         "X = {(1, 2): 1}",
         &expect![[r#"
-        text.star:1:6: a tuple as a dict's key is not in Pumpkin's Starlark: key a dict with strings or ints
-            1 | X = {(1, 2): 1}
-              |      ^^^^^^"#]],
+            text.star:1:6: a tuple as a dict's key is not in Pumpkin's Starlark: key a dict with strings or numbers
+                1 | X = {(1, 2): 1}
+                  |      ^^^^^^"#]],
     );
     check(
         "X, Y = {1: 2, 3: 4}",
@@ -1296,14 +1310,14 @@ Y = 1 or 1 // 0",
     check(
         "X = {[x]: x for x in [1]}",
         &expect![[r#"
-            text.star:1:6: a list can't be a dict's key: key a dict with strings or ints
+            text.star:1:6: a list can't be a dict's key: key a dict with strings or numbers
                 1 | X = {[x]: x for x in [1]}
                   |      ^^^"#]],
     );
     check(
         r#"X = "N=" + 3"#,
         &expect![[r#"
-            text.star:1:10: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
+            text.star:1:10: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
                 1 | X = "N=" + 3
                   |          ^
                 the left operand, `"N="`, is made at text.star:1:5
@@ -1312,7 +1326,7 @@ Y = 1 or 1 // 0",
     check(
         r#"X = -"a""#,
         &expect![[r#"
-            text.star:1:5: `-` can't take a string: give it an int
+            text.star:1:5: `-` can't take a string: give it a number
                 1 | X = -"a"
                   |     ^
                 the operand, `"a"`, is made at text.star:1:6"#]],
@@ -1320,7 +1334,7 @@ Y = 1 or 1 // 0",
     check(
         r#"X = 1 < "a""#,
         &expect![[r#"
-            text.star:1:7: `<` can't take an int and a string: give it two ints or two strings
+            text.star:1:7: `<` can't take an int and a string: give it two numbers or two strings
                 1 | X = 1 < "a"
                   |       ^
                 the left operand, `1`, is made at text.star:1:5
@@ -1329,16 +1343,16 @@ Y = 1 or 1 // 0",
     check(
         "X = True < False",
         &expect![[r#"
-        text.star:1:10: `<` of two bools is not in Pumpkin's Starlark: order two ints or two strings
-            1 | X = True < False
-              |          ^
-            the left operand, `True`, is made at text.star:1:5
-            the right operand, `False`, is made at text.star:1:12"#]],
+            text.star:1:10: `<` of two bools is not in Pumpkin's Starlark: order two numbers or two strings
+                1 | X = True < False
+                  |          ^
+                the left operand, `True`, is made at text.star:1:5
+                the right operand, `False`, is made at text.star:1:12"#]],
     );
     check(
         "X = [1] < [2]",
         &expect![[r#"
-            text.star:1:9: `<` of two lists is not in Pumpkin's Starlark: order two ints or two strings
+            text.star:1:9: `<` of two lists is not in Pumpkin's Starlark: order two numbers or two strings
                 1 | X = [1] < [2]
                   |         ^
                 the left operand, a list, is made at text.star:1:5
@@ -1364,7 +1378,7 @@ Y = 1 or 1 // 0",
     check(
         "X = [1] in {}",
         &expect![[r#"
-            text.star:1:9: a list can't be a dict's key: key a dict with strings or ints
+            text.star:1:9: a list can't be a dict's key: key a dict with strings or numbers
                 1 | X = [1] in {}
                   |         ^^
                 the left operand, a list, is made at text.star:1:5"#]],
@@ -1409,9 +1423,16 @@ Y = 1 or 1 // 0",
                   |         ^^^"#]],
     );
     check(
+        "X = [1][0.0]",
+        &expect![[r#"
+            text.star:1:9: a float can't index a list: index it with an int
+                1 | X = [1][0.0]
+                  |         ^^^"#]],
+    );
+    check(
         r#"X = {"a": 1}[[1]]"#,
         &expect![[r#"
-            text.star:1:14: a list can't be a dict's key: key a dict with strings or ints
+            text.star:1:14: a list can't be a dict's key: key a dict with strings or numbers
                 1 | X = {"a": 1}[[1]]
                   |              ^^^"#]],
     );
@@ -1495,7 +1516,7 @@ Y = X()",
     check(
         "X = str([1])",
         &expect![[r#"
-            text.star:1:9: `str` of a list is not in Pumpkin's Starlark: give it an int or a string
+            text.star:1:9: `str` of a list is not in Pumpkin's Starlark: give it a number or a string
                 1 | X = str([1])
                   |         ^^^"#]],
     );
@@ -1523,21 +1544,63 @@ Y = X()",
     check(
         "X = int([])",
         &expect![[r#"
-            text.star:1:9: `int` can't take a list: give it an int, a bool or a string of digits
+            text.star:1:9: `int` can't take a list: give it a number, a bool or a string of digits
                 1 | X = int([])
                   |         ^^"#]],
     );
     check(
+        "X = float([])",
+        &expect![[r#"
+            text.star:1:11: `float` can't take a list: give it a number, a bool or a string
+                1 | X = float([])
+                  |           ^^"#]],
+    );
+    check(
+        "X = float(x = 1)",
+        &expect![[r#"
+        text.star:1:11: `float` takes no keyword argument `x`: give it 1 argument, by position
+            1 | X = float(x = 1)
+              |           ^"#]],
+    );
+    check(
+        r#"X = float("abc")"#,
+        &expect![[r#"
+            text.star:1:11: `float` can't read `"abc"`: give it a float's or an int's digits, or `inf` or `nan`, after `-` or `+` or neither
+                1 | X = float("abc")
+                  |           ^^^^^"#]],
+    );
+    check(
+        r#"X = float("1e400")"#,
+        &expect![[r#"
+            text.star:1:11: `float` of `"1e400"` is too large for a float: give it at most 1.7976931348623157e+308
+                1 | X = float("1e400")
+                  |           ^^^^^^^"#]],
+    );
+    check(
+        r#"X = int(float("nan"))"#,
+        &expect![[r#"
+            text.star:1:9: `int` can't take `nan`, which is not finite: give it a finite float
+                1 | X = int(float("nan"))
+                  |         ^^^^^^^^^^^^"#]],
+    );
+    check(
+        "X = int(1e30)",
+        &expect![[r#"
+            text.star:1:9: `int` of `1e+30`, outside -2^63 to 2^63 - 1, is not in Pumpkin's Starlark: give it a smaller float, since ints are 64-bit
+                1 | X = int(1e30)
+                  |         ^^^^"#]],
+    );
+    check(
         r#"X = sorted([1, "a"])"#,
         &expect![[r#"
-            text.star:1:12: `sorted` of a list of mixed or other values than ints or strings is not in Pumpkin's Starlark: give it only ints, or only strings
+            text.star:1:12: `sorted` of a list of mixed or other values than numbers or strings is not in Pumpkin's Starlark: give it only numbers, or only strings
                 1 | X = sorted([1, "a"])
                   |            ^^^^^^^^"#]],
     );
     check(
         "X = sorted([True])",
         &expect![[r#"
-            text.star:1:12: `sorted` of a list of mixed or other values than ints or strings is not in Pumpkin's Starlark: give it only ints, or only strings
+            text.star:1:12: `sorted` of a list of mixed or other values than numbers or strings is not in Pumpkin's Starlark: give it only numbers, or only strings
                 1 | X = sorted([True])
                   |            ^^^^^^"#]],
     );
@@ -1551,7 +1614,7 @@ Y = X()",
     check(
         "fail([1])",
         &expect![[r#"
-            text.star:1:6: `fail` of a list is not in Pumpkin's Starlark: give it an int or a string
+            text.star:1:6: `fail` of a list is not in Pumpkin's Starlark: give it a number or a string
                 1 | fail([1])
                   |      ^^^"#]],
     );
@@ -1691,7 +1754,7 @@ X = SCORE.update({})"#,
     check(
         "X = {(1, [2]): 1}",
         &expect![[r#"
-            text.star:1:6: a tuple that holds an unhashable value can't be a dict's key: key a dict with strings or ints
+            text.star:1:6: a tuple that holds an unhashable value can't be a dict's key: key a dict with strings or numbers
                 1 | X = {(1, [2]): 1}
                   |      ^^^^^^^^"#]],
     );
@@ -1834,24 +1897,24 @@ X = SCORE.update({})"#,
     check(
         "X = {}.get([1])",
         &expect![[r#"
-            text.star:1:12: a list can't be a dict's key: key a dict with strings or ints
+            text.star:1:12: a list can't be a dict's key: key a dict with strings or numbers
                 1 | X = {}.get([1])
                   |            ^^^"#]],
     );
     check(
         "X = {}.get(True)",
         &expect![[r#"
-        text.star:1:12: a bool as a dict's key is not in Pumpkin's Starlark: key a dict with strings or ints
-            1 | X = {}.get(True)
-              |            ^^^^"#]],
+            text.star:1:12: a bool as a dict's key is not in Pumpkin's Starlark: key a dict with strings or numbers
+                1 | X = {}.get(True)
+                  |            ^^^^"#]],
     );
     check(
         "X = None in {}",
         &expect![[r#"
-        text.star:1:10: `None` as a dict's key is not in Pumpkin's Starlark: key a dict with strings or ints
-            1 | X = None in {}
-              |          ^^
-            the left operand, `None`, is made at text.star:1:5"#]],
+            text.star:1:10: `None` as a dict's key is not in Pumpkin's Starlark: key a dict with strings or numbers
+                1 | X = None in {}
+                  |          ^^
+                the left operand, `None`, is made at text.star:1:5"#]],
     );
     check(
         "X = {}.get()",
@@ -1950,14 +2013,14 @@ X = SCORE.update({})"#,
     check(
         r#"X = "{}".format([1])"#,
         &expect![[r#"
-            text.star:1:17: `format` of a list is not in Pumpkin's Starlark: give it an int or a string
+            text.star:1:17: `format` of a list is not in Pumpkin's Starlark: give it a number or a string
                 1 | X = "{}".format([1])
                   |                 ^^^"#]],
     );
     check(
         r#"X = "0123456789012345678901234567890123456789012345678901234567890123" + 1"#,
         &expect![[r#"
-            text.star:1:72: `+` can't take a string and an int: give it two ints, two strings, two lists or two tuples
+            text.star:1:72: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
                 1 | X = "0123456789012345678901234567890123456789012345678901234567890123" + 1
                   |                                                                        ^
                 the left operand, `"012345678901234567890123456789012345678901234567890123456789…"`, is made at text.star:1:5
@@ -1995,6 +2058,14 @@ X = {1: DEEP[0]}.items()"#,
         &expect![[r#"
             text.star:1:14: `"a"` is a key of this dict already: give each key once
                 1 | X = {"a": 1, "a": 2}
+                  |              ^^^
+                it is first given at text.star:1:6"#]],
+    );
+    check(
+        r#"X = {1: "a", 1.0: "b"}"#,
+        &expect![[r#"
+            text.star:1:14: `1.0` is a key of this dict already: give each key once
+                1 | X = {1: "a", 1.0: "b"}
                   |              ^^^
                 it is first given at text.star:1:6"#]],
     );
@@ -2041,6 +2112,14 @@ _PRIVATE = "private to this file"
             text.star:1:36: `uid` can't be `-1`: expected an int from 1 to 4294967295
                 1 | workflow(roles = [{"user": {"uid": -1}}], name = "", score = None)
                   |                                    ^^
+                the IR's /roles/0/user/uid"#]],
+    );
+    check(
+        r#"workflow(roles = [{"user": {"uid": 1.5}}], name = "", score = None)"#,
+        &expect![[r#"
+            text.star:1:36: `uid` can't be a float: expected an int
+                1 | workflow(roles = [{"user": {"uid": 1.5}}], name = "", score = None)
+                  |                                    ^^^
                 the IR's /roles/0/user/uid"#]],
     );
     check(
@@ -2245,6 +2324,57 @@ X = [y for y in [1] for z in w for w in [[1]]]",
             text.star:2:30: `w` is used before it is bound: bind it above this use
                 2 | X = [y for y in [1] for z in w for w in [[1]]]
                   |                              ^"#]],
+    );
+    check(
+        r#"
+fail(" ".join([str(x) for x in [1.5, .5, 1., 01.5, 1e3, 0.0, -0.0, 123456.7, 1e6, 1.2345678e7, 1e-5, 9e-6, 1e-7, 5e-324, 1e100, 0.1 + 0.2, 1e308 * 10, -1e308 * 10]]))"#,
+        &expect![[r#"
+            text.star:1:1: fail: 1.5 0.5 1.0 1.5 1000.0 0.0 -0.0 123456.7 1e+06 1.2345678e+07 0.00001 9e-06 1e-07 5e-324 1e+100 0.30000000000000004 +inf -inf
+                1 | fail(" ".join([str(x) for x in [1.5, .5, 1., 01.5, 1e3, 0.0, -0.0, 123456.7, 1e6, 1.2345678e7, 1e-5, 9e-6, 1e-7, 5e-324, 1e100, 0.1 + 0.2, 1e308 * 10, -1e308 * 10]]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+fail(" ".join([str(x) for x in [1 / 2, 7 / 7, 2 * 1.5, 1 + 0.5, 3 - 0.5, 7 // 2.0, -7.5 // 2, -7.5 % 2, 7.5 % -2, -4.0 % 2, 5 % float("inf"), -5 % float("inf"), -(1.5), -0.0 // 1]]))"#,
+        &expect![[r#"
+            text.star:1:1: fail: 0.5 1.0 3.0 1.5 2.5 3.0 -4.0 0.5 -0.5 0.0 5.0 +inf -1.5 -0.0
+                1 | fail(" ".join([str(x) for x in [1 / 2, 7 / 7, 2 * 1.5, 1 + 0.5, 3 - 0.5, 7 // 2.0, -7.5 // 2, -7.5 % 2, 7.5 % -2, -4.0 % 2, 5 % float("inf"), -5 % float("inf"), -(1.5), -0.0 // 1]]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+X = [1 == 1.0, 1.0 != 1, 9007199254740993 > 9007199254740992.0, 9007199254740993 == 9007199254740992.0, 9007199254740992 == 9007199254740992.0, 1.5 < 2, 2 <= 1.5, -0.5 < 0, -0.0 == 0, 9223372036854775807 < 9223372036854775808.0, -9223372036854775807 - 1 == -9223372036854775808.0, 1e19 > 9223372036854775807, float("-inf") < -9223372036854775807, float("nan") == float("nan"), float("nan") > float("inf"), float("nan") > 9223372036854775807, 1.0 in [1], [1, 2.0] == [1.0, 2], bool(0.0), bool(-0.0), bool(float("nan"))]
+fail(" ".join([str(int(x)) for x in X]))"#,
+        &expect![[r#"
+            text.star:2:1: fail: 1 0 1 0 1 1 0 1 1 1 1 1 1 1 1 1 1 1 0 0 1
+                2 | fail(" ".join([str(int(x)) for x in X]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+D = {1: "a"} | {1.0: "b"}
+X = [{1.0: "x"}[1], {0: "z"}[-0.0], str(int(float("nan") in {float("nan"): 1})), D[1], str(D.keys()[0]), str({1.0: "y"}.keys()[0])]
+fail(" ".join(X))"#,
+        &expect![[r#"
+            text.star:3:1: fail: x z 1 b 1 1.0
+                3 | fail(" ".join(X))
+                  | ^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+fail(" ".join([str(x) for x in sorted([3, 1.5, float("nan"), -0.0, 0, float("-inf"), 2])]))"#,
+        &expect![[r#"
+            text.star:1:1: fail: -inf -0.0 0 1.5 2 3 nan
+                1 | fail(" ".join([str(x) for x in sorted([3, 1.5, float("nan"), -0.0, 0, float("-inf"), 2])]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+    );
+    check(
+        r#"
+fail(" ".join([str(x) for x in [float(), float(3), float(True), float(1.5), float("1e3"), float("-inf"), float("+Infinity"), float("nan"), float(9007199254740993), int(43.12), int(-2.5), int(-9223372036854775808.0), int(9223372036854774784.0)]]))"#,
+        &expect![[r#"
+            text.star:1:1: fail: 0.0 3.0 1.0 1.5 1000.0 -inf +inf nan 9.007199254740992e+15 43 -2 -9223372036854775808 9223372036854774784
+                1 | fail(" ".join([str(x) for x in [float(), float(3), float(True), float(1.5), float("1e3"), float("-inf"), float("+Infinity"), float("nan"), float(9007199254740993), int(43.12), int(-2.5), int(-9223372036854775808.0), int(9223372036854774784.0)]]))
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
 }
 
@@ -3594,6 +3724,13 @@ B = arg("n", int, default = 0)"#,
                   |              ^^^^^"#]],
     );
     check(
+        r#"X = arg("n", float)"#,
+        &expect![[r#"
+        text.star:1:14: an arg can't be a float: give `arg`'s `type` as the builtin `str`, `int` or `bool`
+            1 | X = arg("n", float)
+              |              ^^^^^"#]],
+    );
+    check(
         r#"X = arg("a b", str)"#,
         &expect![[r#"
             text.star:1:9: `a b` is no arg's name: name it as Starlark names a value, with ASCII letters, digits and `_`, not starting with a digit
@@ -3848,6 +3985,14 @@ fail(" ".join([X, Y, str(int(json.encode(Z) == '"' + Z + '"'))]))"#,
                 4 | fail(" ".join([X, Y, str(int(json.encode(Z) == '"' + Z + '"'))]))
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
+    check(
+        r#"X = json.encode({"a": [float("-inf")]})"#,
+        &expect![[r#"
+            text.star:1:17: `json.encode` can't encode `-inf`, as JSON has no NaN or infinity: give it finite floats
+                1 | X = json.encode({"a": [float("-inf")]})
+                  |                 ^^^^^^^^^^^^^^^^^^^^^^
+                the value, `-inf`, is made at text.star:1:24"#]],
+    );
     // An object's keys in the order the text gives them, as Starlark's `dict` keeps them.
     check(
         r#"
@@ -3867,8 +4012,8 @@ fail(str(int(json.decode(json.encode(V)) == V)) + str(int(json.decode("[]") == [
                 2 | fail(str(int(json.decode(json.encode(V)) == V)) + str(int(json.decode("[]") == [])))
                   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
-    // The cases of Bazel's and starlark-go's `json.star` that hold no float, nor anything else
-    // the subset leaves out, and that the other cases here don't take.
+    // The cases of Bazel's and starlark-go's `json.star` that hold nothing the subset leaves out
+    // and no other case takes, but Bazel's `1e999` and `-1e999`, which starlark-rust refuses too.
     check(
         r#"
 X = [
@@ -3885,11 +4030,21 @@ X = [
     json.encode((1, 2, 3)) == "[1,2,3]",
     json.encode(["'", "/", "", "¼Δ", "😹"]) == '["\'","/","","¼Δ","😹"]',
     json.decode(json.encode(["😿", "🐱‍👤"])) == ["😿", "🐱‍👤"],
+    json.encode(12.345e67) == "1.2345e+68",
+    json.decode("3.539537889086625e+24") == 3.539537889086625e+24,
+    json.decode("0e+1") == 0,
+    str(json.decode("-0.0")) == "-0.0",
+    json.decode("-0.000000000000000000000000000000000000000000000000000000000000000000000000000001") == -0.000000000000000000000000000000000000000000000000000000000000000000000000000001,
+    json.decode("5e-1") == 0.5,
+    json.decode("5e1") == 50.0,
+    json.decode("5.0e1") == 50.0,
+    str(json.decode(json.encode(1.0))) == "1.0",
+    json.decode(json.encode(-1.23e-45)) == -1.23e-45,
 ]
 fail("".join([str(int(x)) for x in X]))"#,
         &expect![[r#"
-            text.star:16:1: fail: 1111111111111
-                16 | fail("".join([str(int(x)) for x in X]))
+            text.star:26:1: fail: 11111111111111111111111
+                26 | fail("".join([str(int(x)) for x in X]))
                    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     let bytes = |bytes| Bounds {
@@ -4073,7 +4228,7 @@ X = json.encode({H: len})"#;
 L = [1, {"x": len}]
 X = json.encode(L)"#,
         &expect![[r#"
-            text.star:2:17: `json.encode` can't encode a function: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
+            text.star:2:17: `json.encode` can't encode a function: give it `None`, bools, numbers and strings, and lists, tuples and dicts of them
                 2 | X = json.encode(L)
                   |                 ^
                 the value, a function, is made at text.star:1:15"#]],
@@ -4081,16 +4236,16 @@ X = json.encode(L)"#,
     check(
         r#"X = json.encode(image("Dockerfile", context = "//images"))"#,
         &expect![[r#"
-            text.star:1:17: `json.encode` can't encode an image: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
+            text.star:1:17: `json.encode` can't encode an image: give it `None`, bools, numbers and strings, and lists, tuples and dicts of them
                 1 | X = json.encode(image("Dockerfile", context = "//images"))
                   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         "X = json.encode(json)",
         &expect![[r#"
-        text.star:1:17: `json.encode` can't encode the module `json`: give it `None`, bools, ints and strings, and lists, tuples and dicts of them
-            1 | X = json.encode(json)
-              |                 ^^^^"#]],
+            text.star:1:17: `json.encode` can't encode the module `json`: give it `None`, bools, numbers and strings, and lists, tuples and dicts of them
+                1 | X = json.encode(json)
+                  |                 ^^^^"#]],
     );
     check(
         "X = json.encode(x = 1)",
@@ -4132,9 +4287,9 @@ X = json.encode(L)"#,
     check(
         "X = {json: 1}",
         &expect![[r#"
-        text.star:1:6: the module `json` can't be a dict's key: key a dict with strings or ints
-            1 | X = {json: 1}
-              |      ^^^^"#]],
+            text.star:1:6: the module `json` can't be a dict's key: key a dict with strings or numbers
+                1 | X = {json: 1}
+                  |      ^^^^"#]],
     );
     check(
         "X = json.decode(\"1\", None)",
@@ -4167,8 +4322,7 @@ X = json.encode(L)"#,
         r#""+1""#,
         r#""NaN""#,
         r#""-Infinity""#,
-        r#""1.5""#,
-        r#""1e3""#,
+        r#""1e999""#,
         r#""-""#,
         r#""00""#,
         r#""-01""#,
@@ -4241,25 +4395,22 @@ X = json.encode(L)"#,
         text.star:1:17: `json.decode` reads `N` at offset 0 of its text, where JSON has a value: give it JSON text
             1 | X = json.decode("NaN")
               |                 ^^^^^
-        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-Infinity")
               |                 ^^^^^^^^^^^
-        text.star:1:17: `json.decode` of `1.5`, at offset 0, a float, is not in Pumpkin's Starlark: give ints
-            1 | X = json.decode("1.5")
-              |                 ^^^^^
-        text.star:1:17: `json.decode` of `1e3`, at offset 0, a float, is not in Pumpkin's Starlark: give ints
-            1 | X = json.decode("1e3")
-              |                 ^^^^^
-        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `1e999` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
+            1 | X = json.decode("1e999")
+              |                 ^^^^^^^
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-")
               |                 ^^^
-        text.star:1:17: `json.decode` reads `00` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `00` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("00")
               |                 ^^^^
-        text.star:1:17: `json.decode` reads `-01` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-01` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-01")
               |                 ^^^^^
-        text.star:1:17: `json.decode` reads `1.2.3` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `1.2.3` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("1.2.3")
               |                 ^^^^^^^
         text.star:1:17: `json.decode` of `9223372036854775808`, at offset 0, outside -2^63 to 2^63 - 1, is not in Pumpkin's Starlark: give smaller ints, since ints are 64-bit
@@ -4307,28 +4458,28 @@ X = json.encode(L)"#,
         text.star:1:17: `json.decode` reads `\t` at offset 2 of its text, where JSON has a character of the string, or an escape for it: give it JSON text
             1 | X = json.decode('"a\tb"')
               |                 ^^^^^^^^
-        text.star:1:17: `json.decode` reads `--1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `--1` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("--1")
               |                 ^^^^^
-        text.star:1:17: `json.decode` reads `-+1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-+1` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-+1")
               |                 ^^^^^
-        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-abc")
               |                 ^^^^^^
-        text.star:1:17: `json.decode` reads `-00` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-00` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-00")
               |                 ^^^^^
-        text.star:1:17: `json.decode` reads `0123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `0123` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("0123")
               |                 ^^^^^^
-        text.star:1:17: `json.decode` reads `-0123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-0123` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-0123")
               |                 ^^^^^^^
-        text.star:1:17: `json.decode` reads `000.123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `000.123` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("000.123")
               |                 ^^^^^^^^^
-        text.star:1:17: `json.decode` reads `-000.123` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `-000.123` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("-000.123")
               |                 ^^^^^^^^^^
         text.star:1:17: `json.decode` reads `x` at offset 1 of its text, where JSON has the end of the text: give it JSON text
@@ -4340,19 +4491,19 @@ X = json.encode(L)"#,
         text.star:1:17: `json.decode` reads `.` at offset 0 of its text, where JSON has a value: give it JSON text
             1 | X = json.decode(".5e1")
               |                 ^^^^^^
-        text.star:1:17: `json.decode` reads `5.` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `5.` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("5.")
               |                 ^^^^
-        text.star:1:17: `json.decode` reads `5.e1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `5.e1` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("5.e1")
               |                 ^^^^^^
-        text.star:1:17: `json.decode` reads `5e` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `5e` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("5e")
               |                 ^^^^
-        text.star:1:17: `json.decode` reads `5ee1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `5ee1` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("5ee1")
               |                 ^^^^^^
-        text.star:1:17: `json.decode` reads `1e1e1` at offset 0 of its text, which is no JSON number: write an int as decimal digits, after `-` or none, with no leading `0`
+        text.star:1:17: `json.decode` reads `1e1e1` at offset 0 of its text, which is no JSON number a float holds: write a number as JSON does, of at most 1.7976931348623157e+308
             1 | X = json.decode("1e1e1")
               |                 ^^^^^^^
         text.star:1:17: `json.decode` reads the text's end at offset 6 of its text, where JSON has `,` or `]`: give it JSON text
@@ -4517,7 +4668,7 @@ load("@pumpkin//harness/agent.star", "AGENT")
 AGENT = 1 + "a"
 "#,
         &expect![[r#"
-            @pumpkin//harness/agent.star:1:11: `+` can't take an int and a string: give it two ints, two strings, two lists or two tuples
+            @pumpkin//harness/agent.star:1:11: `+` can't take an int and a string: give it two numbers, two strings, two lists or two tuples
                 1 | AGENT = 1 + "a"
                   |           ^
                 the left operand, `1`, is made at @pumpkin//harness/agent.star:1:9

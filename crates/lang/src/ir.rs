@@ -4,8 +4,9 @@
 //!
 //! The kinds map one to one: a dict to a struct, or to an enum as its one key, the kind, and
 //! that key's value (`{"judge": {…}}`); a list or a tuple to a sequence; a string to a string,
-//! which the IR's types check; an int to an integer, which they range-check; a bool to a bool;
-//! `None` to an absent option; and an image to the string of its ID. A function is no data.
+//! which the IR's types check; an int to an integer, which they range-check; a float to a float;
+//! a bool to a bool; `None` to an absent option; and an image to the string of its ID. A function
+//! is no data.
 //! Messages say what `serde` names in the language's words: an int type, for one, by the ints it
 //! holds.
 //!
@@ -105,6 +106,7 @@ fn child<'v>(value: &'v Value, token: &str) -> Option<&'v Value> {
         Kind::None
         | Kind::Bool(_)
         | Kind::Int(_)
+        | Kind::Float(_)
         | Kind::Str(_)
         | Kind::Function(_)
         | Kind::Builtin(_)
@@ -340,6 +342,7 @@ impl<'de> de::Deserializer<'de> for De<'_> {
             Kind::None => visitor.visit_unit(),
             Kind::Bool(bool) => visitor.visit_bool(*bool),
             Kind::Int(int) => visitor.visit_i64(*int),
+            Kind::Float(float) => visitor.visit_f64(*float),
             Kind::Str(text) => visitor.visit_str(text),
             Kind::Image(image) => visitor.visit_str(self.images[image.0].as_str()),
             Kind::List(items) | Kind::Tuple(items) => seq(self, items, visitor),
@@ -577,8 +580,11 @@ impl<'de> MapAccess<'de> for Map<'_> {
 fn name<'v>(entry: &'v Entry, what: &str) -> Result<&'v str, Error> {
     match &entry.key {
         Key::Str(key) => Ok(key),
-        Key::Int(int) => {
-            let message = format!("`{int}` names no {what}: name it with a string");
+        Key::Number(number) => {
+            let message = format!(
+                "`{}` names no {what}: name it with a string",
+                number.literal()
+            );
             Err(Error::new(Message::Whole(message)).at_key(entry.key_span))
         }
     }

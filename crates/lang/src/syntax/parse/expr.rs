@@ -209,6 +209,7 @@ impl Parser<'_> {
             TokenKind::Punct(Punct::Plus) => arithmetic(Arithmetic::Add, SUM),
             TokenKind::Punct(Punct::Minus) => arithmetic(Arithmetic::Subtract, SUM),
             TokenKind::Punct(Punct::Star) => arithmetic(Arithmetic::Multiply, PRODUCT),
+            TokenKind::Punct(Punct::Slash) => arithmetic(Arithmetic::Divide, PRODUCT),
             TokenKind::Punct(Punct::SlashSlash) => arithmetic(Arithmetic::FloorDivide, PRODUCT),
             TokenKind::Punct(Punct::Percent) => arithmetic(Arithmetic::Modulo, PRODUCT),
             _ => {
@@ -422,6 +423,7 @@ impl Parser<'_> {
         let kind = match &self.peek().kind {
             TokenKind::Name(name) => ExprKind::Name(name.clone()),
             TokenKind::Int(int) => ExprKind::Int(*int),
+            TokenKind::Float(float) => ExprKind::Float(*float),
             TokenKind::Str(text) => ExprKind::Str(text.clone()),
             TokenKind::Punct(Punct::LeftBracket) => return self.bracketed(Self::list),
             TokenKind::Punct(Punct::LeftBrace) => return self.bracketed(Self::dict),
