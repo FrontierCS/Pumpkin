@@ -18,8 +18,12 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
+mod grant;
+mod session;
 pub(crate) mod values;
 
+pub use grant::{Function, Grant};
+pub use session::{NamedSession, Session};
 pub use values::{
     AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
     Mode, ModelName, Models, Name, Returns, RolePath, Sha256Digest, Shows, WorkflowName,
@@ -139,7 +143,7 @@ pub enum Runtime {
     /// A judge, whose command runs once per call in a fresh instance.
     Judge(JudgeRuntime),
     /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
-    /// lease ([`LeaseGrant`]).
+    /// lease ([`Session`]).
     Runner(RunnerRuntime),
 }
 
@@ -184,8 +188,8 @@ pub struct AgentRuntime {
     /// The agent's routes out, open while it works; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The ops the agent may use while it works: judge calls, leases and submit grants, of which
-    /// [`Workflow::parse`](crate::workflow::Workflow::parse) takes exactly one.
+    /// The functions the agent may call while it works: judge grants, sessions and submit grants,
+    /// of which [`Workflow::parse`](crate::workflow::Workflow::parse) takes exactly one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<Grant>,
 }
@@ -220,9 +224,9 @@ pub struct JudgeRuntime {
     /// none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The leases the judge may make while its command runs ([`LeaseGrant`]); absent, none.
+    /// The sessions the judge may call while its command runs ([`NamedSession`]); absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lease_grants: Vec<LeaseGrant>,
+    pub sessions: Vec<NamedSession>,
 }
 
 /// How a runner runs each command its lease's holder sends, as the role's user: as a
@@ -448,26 +452,6 @@ impl fmt::Display for Api {
     }
 }
 
-/// Permission for the agent to use an op while it works.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Grant {
-    Judge(JudgeGrant),
-    Lease(LeaseGrant),
-    Submit(SubmitGrant),
-}
-
-impl Grant {
-    /// The name the agent uses the grant by. Unique among its grants.
-    pub fn name(&self) -> &Name {
-        match self {
-            Self::Judge(JudgeGrant { name, .. })
-            | Self::Lease(LeaseGrant { name, .. })
-            | Self::Submit(SubmitGrant { name }) => name,
-        }
-    }
-}
-
 /// Runs a payload in a fresh instance of a judge role and collects its result.
 ///
 /// The grant runs one call at a time: a call made while one of its calls is queued or running
@@ -475,7 +459,6 @@ impl Grant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeGrant {
-    pub name: Name,
     /// The judge role, which no other judge grant names, so that the judge, like the grant,
     /// runs one call at a time.
     pub role: Name,
@@ -493,45 +476,11 @@ pub struct JudgeGrant {
     pub call_timeout_seconds: NonZeroU64,
 }
 
-/// Leases runners of one role, each a fresh instance of the role, which runs the commands its
-/// holder sends.
-///
-/// A lease runs one command at a time, until the holder closes it, its time runs out, or the
-/// holder's work ends: the work phase, for the agent; its command, for a judge's call. Its time
-/// runs from when its runner is ready until it ends. A judge's limits are each call's: a call
-/// starts with all of them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LeaseGrant {
-    pub name: Name,
-    /// The runner role, which no other lease grant names. An agent's runner has an image that no
-    /// judge has: a judge's files are in its image alone, so a runner that a judge trusts with
-    /// them runs that image, and any other runner a judge leases may share the agent's runner's.
-    pub role: Name,
-    /// The most leases open at once, each until its runner is gone.
-    pub instances: NonZeroU32,
-    /// The most time each lease may last.
-    pub instance_seconds: NonZeroU64,
-    /// The most time the grant's leases may last in all, each lease open at once counting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cumulative_seconds: Option<NonZeroU64>,
-    /// The most commands the grant's leases may run in all, each transfer of a tree to or from
-    /// a lease's runner counting as one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commands: Option<NonZeroU64>,
-    /// The most bytes of files each transfer may move, at most
-    /// [`MAX_TRANSFER_BYTES`](crate::sandbox::MAX_TRANSFER_BYTES): a tree that holds more is
-    /// refused as it is collected.
-    pub transfer_bytes: NonZeroU64,
-}
-
 /// Stores submissions, of which the [`Score`] judges the one selected. A submission may hold as
 /// many bytes as the [`Score`] slot takes, its [`max_bytes`](Slot::max_bytes).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubmitGrant {
-    pub name: Name,
-}
+pub struct SubmitGrant {}
 
 /// The judge call that scores the selected submission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

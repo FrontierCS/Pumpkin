@@ -35,8 +35,8 @@
           },
           "grants": [
             {
+              "name": "train",
               "judge": {
-                "name": "train",
                 "role": "train_judge",
                 "slot": "payload",
                 "calls": 100,
@@ -44,7 +44,7 @@
                 "call_timeout_seconds": 12000
               }
             },
-            { "submit": { "name": "submit" } }
+            { "name": "submit", "submit": {} }
           ]
         }
       }

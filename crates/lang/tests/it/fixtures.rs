@@ -136,15 +136,14 @@ fn tasks() {
                           "judge": {
                             "call_timeout_seconds": 600,
                             "calls": 20,
-                            "name": "train",
                             "role": "train_judge",
                             "slot": "payload"
-                          }
+                          },
+                          "name": "train"
                         },
                         {
-                          "submit": {
-                            "name": "final"
-                          }
+                          "name": "final",
+                          "submit": {}
                         }
                       ],
                       "stdin": "Solve judged_neutral, scored by 3 metrics: solved, _internal, rejected.\n"
@@ -255,7 +254,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 577 prefixes evaluate
+            == tasks/literal/task.star: 2 of 569 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -315,15 +314,14 @@ fn tasks() {
                           "judge": {
                             "call_timeout_seconds": 600,
                             "calls": 100,
-                            "name": "train",
                             "role": "train_judge",
                             "slot": "payload"
-                          }
+                          },
+                          "name": "train"
                         },
                         {
-                          "submit": {
-                            "name": "final"
-                          }
+                          "name": "final",
+                          "submit": {}
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n"
@@ -447,9 +445,8 @@ fn tasks() {
                       "finalize_grace_seconds": 0,
                       "grants": [
                         {
-                          "submit": {
-                            "name": "final"
-                          }
+                          "name": "final",
+                          "submit": {}
                         }
                       ],
                       "stdin": "Solve the task in /task/README.md.\n"
@@ -586,10 +583,10 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 505 prefixes evaluate
+            == lib/images.star: 0 of 500 prefixes evaluate
 
-            == lib/judged.star: 0 of 570 prefixes evaluate
+            == lib/judged.star: 0 of 564 prefixes evaluate
 
-            == lib/parts.star: 0 of 224 prefixes evaluate"#]],
+            == lib/parts.star: 0 of 226 prefixes evaluate"#]],
     );
 }

@@ -56,14 +56,13 @@ def images_task(*, agent):
                     "finalize_grace_seconds": 0 if STRICT else 60,
                     "egress": {"model": [{"api": "responses", "models": [MODEL]}]},
                     "grants": [
-                        {"judge": {
-                            "name": "train",
+                        {"name": "train", "judge": {
                             "role": "train_judge",
                             "slot": "payload",
                             "calls": 10,
                             "call_timeout_seconds": 600,
                         }},
-                        {"submit": {"name": "final"}},
+                        {"name": "final", "submit": {}},
                     ],
                 }},
             },

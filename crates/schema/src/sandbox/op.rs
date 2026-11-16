@@ -9,12 +9,12 @@
 //! | `sandboxctl judge <grant> <file>` | [`OpCall::Judge`] | [`JudgeReply`] |
 //! | `sandboxctl submit <grant> <file> [--finalize]` | [`OpCall::Submit`] | [`SubmitReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
-//! | `sandboxctl lease open <grant> [--seconds <n>]` | [`OpCall::LeaseOpen`] | [`LeaseReply`] |
-//! | `sandboxctl lease run <lease> [--timeout <s>] -- <argv>…` | [`OpCall::LeaseRun`] | [`LeaseReply`] |
-//! | `sandboxctl lease put <lease> <tree> <to> [--replace]` | [`OpCall::LeasePut`] | [`LeaseReply`] |
-//! | `sandboxctl lease get <lease> <from> <to>` | [`OpCall::LeaseGet`] | [`LeaseReply`] |
-//! | `sandboxctl lease status <lease>` | [`OpCall::LeaseStatus`] | [`LeaseStatusReply`] |
-//! | `sandboxctl lease close <lease>` | [`OpCall::LeaseClose`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.run <lease> [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.put <lease> <tree> <to> [--replace]` | [`SessionOp::Put`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.get <lease> <from> <to>` | [`SessionOp::Get`] | [`LeaseReply`] |
+//! | `sandboxctl call <session>.status <lease>` | [`SessionOp::Status`] | [`LeaseStatusReply`] |
+//! | `sandboxctl call <session>.close <lease>` | [`SessionOp::Close`] | [`LeaseReply`] |
 //!
 //! A payload is read from its file when its caller's turn comes, so leave the file be until the
 //! call returns.
@@ -83,17 +83,24 @@ pub enum OpCall {
     Submit { grant: Name, finalize: bool },
     /// Asks how job `job`, which an earlier judge call started, is doing.
     Status { job: u64 },
-    /// Opens a lease of the lease grant named `grant`: a runner, which starts in the background,
-    /// and lasts `instance_seconds` from when it is ready, if given, which is at most the grant's
-    /// own; without one, the grant's.
-    LeaseOpen {
-        grant: Name,
+    /// Calls `op`, one of the functions of the session named `grant` that the caller's role holds.
+    Session { grant: Name, op: SessionOp },
+}
+
+/// One of a session's functions, over the session's leases, each of which is named by the number
+/// that the session's `open` returned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionOp {
+    /// Opens a lease: a runner, which starts in the background, and lasts `instance_seconds` from
+    /// when it is ready, if given, which is at most the session's own; without one, the session's.
+    Open {
         instance_seconds: Option<NonZeroU64>,
     },
     /// Runs `argv` in lease `lease`'s runner, once it is ready and runs no other command, killing
     /// it once it has run for `timeout_seconds`, if given, which is at most what the lease has
     /// left; without one, it may run until the lease ends.
-    LeaseRun {
+    Run {
         lease: u64,
         argv: Argv,
         timeout_seconds: Option<NonZeroU64>,
@@ -101,23 +108,23 @@ pub enum OpCall {
     /// Copies the tree in the caller's directory `tree` to `to` in lease `lease`'s runner, once it
     /// is ready and runs nothing else: the tree's root becomes `to`, which must not exist, or, if
     /// `replace`, which is removed first, whatever it is.
-    LeasePut {
+    Put {
         lease: u64,
         tree: AbsolutePath,
         to: AbsolutePath,
         replace: bool,
     },
     /// Copies the tree in lease `lease`'s runner's directory `from` to `to` in the caller's
-    /// sandbox, as [`OpCall::LeasePut`] copies one the other way.
-    LeaseGet {
+    /// sandbox, as [`SessionOp::Put`] copies one the other way.
+    Get {
         lease: u64,
         from: AbsolutePath,
         to: AbsolutePath,
     },
-    /// Asks how lease `lease`, which an earlier `lease_open` opened, is doing.
-    LeaseStatus { lease: u64 },
+    /// Asks how lease `lease` is doing.
+    Status { lease: u64 },
     /// Closes lease `lease`, ending its runner with whatever runs in it.
-    LeaseClose { lease: u64 },
+    Close { lease: u64 },
 }
 
 impl OpCall {
@@ -126,14 +133,7 @@ impl OpCall {
     pub fn takes_payload(&self) -> bool {
         match self {
             Self::Judge { .. } | Self::Submit { .. } => true,
-            Self::Ops
-            | Self::Status { .. }
-            | Self::LeaseOpen { .. }
-            | Self::LeaseRun { .. }
-            | Self::LeasePut { .. }
-            | Self::LeaseGet { .. }
-            | Self::LeaseStatus { .. }
-            | Self::LeaseClose { .. } => false,
+            Self::Ops | Self::Status { .. } | Self::Session { .. } => false,
         }
     }
 }
@@ -172,7 +172,7 @@ pub struct OpsReply {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Grant {
     Judge(JudgeGrant),
-    Lease(LeaseGrant),
+    Session(SessionGrant),
     Submit(SubmitGrant),
 }
 
@@ -191,9 +191,9 @@ pub struct JudgeGrant {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// A grant that [`OpCall::LeaseOpen`] opens leases of; see
-/// [`ir::LeaseGrant`](crate::ir::LeaseGrant) for its limits.
-pub struct LeaseGrant {
+/// A session, whose functions [`OpCall::Session`] calls; see [`ir::Session`](crate::ir::Session)
+/// for its limits.
+pub struct SessionGrant {
     pub name: Name,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -310,9 +310,9 @@ pub enum FailureCode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// The reply to [`OpCall::LeaseOpen`], [`OpCall::LeaseRun`], [`OpCall::LeasePut`],
-/// [`OpCall::LeaseGet`] and [`OpCall::LeaseClose`]: the lease, and what it and its grant have left
-/// now that the op counts against them.
+/// The reply to [`SessionOp::Open`], [`SessionOp::Run`], [`SessionOp::Put`], [`SessionOp::Get`]
+/// and [`SessionOp::Close`]: the lease, and what it and its session have left now that the op
+/// counts against them.
 pub struct LeaseReply {
     pub lease: u64,
     pub remaining: LeaseRemaining,
@@ -320,23 +320,23 @@ pub struct LeaseReply {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// What a lease and its grant have left of their limits, each time in whole seconds rounded down,
-/// and `None` for a limit the grant doesn't set.
+/// What a lease and its session have left of their limits, each time in whole seconds rounded down,
+/// and `None` for a limit the session doesn't set.
 pub struct LeaseRemaining {
-    /// How many more of the grant's leases may be open now.
+    /// How many more of the session's leases may be open now.
     pub instances: u32,
     /// The lease's own time left: all of it until its runner is ready, none once it has ended.
     pub instance_seconds: u64,
-    /// The grant's time left, which each of its leases open at once spends.
+    /// The session's time left, which each of its leases open at once spends.
     pub cumulative_seconds: Option<u64>,
-    /// The grant's commands left, a transfer counting as one.
+    /// The session's commands left, a transfer counting as one.
     pub commands: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// The reply to [`OpCall::LeaseStatus`]: how a lease is doing, its last command or transfer, and
-/// what it and its grant have left.
+/// The reply to [`SessionOp::Status`]: how a lease is doing, its last command or transfer, and
+/// what it and its session have left.
 ///
 /// It carries the ends of its commands' output, so it goes to the lease's holder alone.
 pub struct LeaseStatusReply {
@@ -377,11 +377,11 @@ pub enum LeaseState {
     /// it.
     Running,
     /// It was closed, or its time ran out, and its runner is being removed, until which it holds
-    /// its instance of its grant's `instances`; then it is `closed` or `expired`.
+    /// its instance of its session's `instances`; then it is `closed` or `expired`.
     Closing,
     /// It was closed, as its holder asked or as its holder's work ended.
     Closed,
-    /// Its time, or its grant's, ran out.
+    /// Its time, or its session's, ran out.
     Expired,
     /// Its runner failed to start, as when its provider had no room, or failed as it ran: no fault
     /// of its holder's, which may open another.

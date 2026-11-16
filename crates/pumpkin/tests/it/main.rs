@@ -506,10 +506,9 @@ fn masked(ran: &str, ids: &str) -> String {
 fn lease_task() -> Value {
     let gpu = json!({ "count": 1, "model": "NVIDIA A100-SXM4-80GB" });
     let lease = |name: &str, seconds: u64| {
-        json!({
-            "name": name, "role": name, "instances": 1, "instance_seconds": seconds,
-            "transfer_bytes": 4096,
-        })
+        json!({ "name": name, "session": {
+            "runner": name, "instances": 1, "instance_seconds": seconds, "transfer_bytes": 4096,
+        } })
     };
     let command = json!({ "argv": ["/bin/true"], "cwd": "/work" });
     let judge = |extra: Value| {
@@ -548,16 +547,15 @@ fn lease_task() -> Value {
                 "finalize_grace_seconds": 0,
                 "egress": { "model": route },
                 "grants": [
-                    { "judge": {
-                        "name": "train", "role": "trainer", "slot": "payload",
-                        "call_timeout_seconds": 60,
+                    { "name": "train", "judge": {
+                        "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
                     } },
-                    { "lease": lease("gpu", 60) },
-                    { "lease": lease("cpu", 1800) },
-                    { "submit": { "name": "final" } },
+                    lease("gpu", 60),
+                    lease("cpu", 1800),
+                    { "name": "final", "submit": {} },
                 ],
             } })),
-            role("trainer", true, judge(json!({ "lease_grants": [lease("box", 60)] }))),
+            role("trainer", true, judge(json!({ "sessions": [lease("box", 60)] }))),
             role("scorer", true, judge(json!({ "egress": { "model": route } }))),
             role("gpu", true, runner.clone()),
             role("cpu", false, runner.clone()),

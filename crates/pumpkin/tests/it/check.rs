@@ -127,15 +127,14 @@ def bench_task(
                 "needs": agent,
                 "runtime": {"agent": codex_agent["runtime"]["agent"] | {
                     "grants": [
-                        {"judge": {
-                            "name": "train",
+                        {"name": "train", "judge": {
                             "role": "train_judge",
                             "slot": "payload",
                             "calls": train_calls,
                             "cumulative_seconds": train_seconds,
                             "call_timeout_seconds": TRAIN_TIMEOUT,
                         }},
-                        {"submit": {"name": "final"}},
+                        {"name": "final", "submit": {}},
                     ],
                 }},
             },
@@ -541,29 +540,29 @@ def _helper():
             tasks/bench/task.star:3:41: this name is loaded, but never used: drop it from the `load`
                 3 | load("//lib/bench.star", "bench_task", "sometimes")
                   |                                         ^^^^^^^^^
-            lib/bench.star:128:1: this function returns a value on some paths, but not on others: return one on every path, or on none
-                128 | def sometimes(x):
+            lib/bench.star:127:1: this function returns a value on some paths, but not on others: return one on every path, or on none
+                127 | def sometimes(x):
                     | ^^^^^^^^^^^^^^^^^
-            lib/bench.star:134:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
-                134 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:133:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
+                133 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:134:5: this docstring doesn't say what the function returns: say it under `Returns:`
-                134 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:133:5: this docstring doesn't say what the function returns: say it under `Returns:`
+                133 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:135:5: this is bound, but never used: use it, or drop it
-                135 |     unused = calls
+            lib/bench.star:134:5: this is bound, but never used: use it, or drop it
+                134 |     unused = calls
                     |     ^^^^^^
-            lib/bench.star:136:5: this expression's value is never used: use it, or drop the statement
-                136 |     calls == 100
+            lib/bench.star:135:5: this expression's value is never used: use it, or drop the statement
+                135 |     calls == 100
                     |     ^^^^^^^^^^^^
-            lib/bench.star:139:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
-                139 |     return bound
+            lib/bench.star:138:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
+                138 |     return bound
                     |            ^^^^^
-            lib/bench.star:140:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
-                140 |     fail("never")
+            lib/bench.star:139:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
+                139 |     fail("never")
                     |     ^^^^^^^^^^^^^
-            lib/bench.star:142:1: this is bound, but never used: use it, or drop it
-                142 | def _helper():
+            lib/bench.star:141:1: this is bound, but never used: use it, or drop it
+                141 | def _helper():
                     | ^^^^^^^^^^^^^^
             pumpkin: tasks/bench/task.star: the task has 9 problems
             pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/bench/task.star"#]],

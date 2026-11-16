@@ -55,7 +55,6 @@ impl Unanswered {
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "one arm per op")]
 pub(crate) fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     // The request takes the op's fields, and what stays of the op only answers it.
     let (request, call) = match mem::replace(&mut incoming.op, Op::Ops) {
@@ -82,45 +81,7 @@ pub(crate) fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
         }
         Op::Ops => (Request::Ops, None),
         Op::Status { job } => (Request::Status { job }, None),
-        Op::LeaseOpen {
-            grant,
-            instance_seconds,
-        } => (
-            Request::LeaseOpen {
-                grant,
-                instance_seconds,
-            },
-            None,
-        ),
-        Op::LeaseRun {
-            lease,
-            argv,
-            timeout_seconds,
-        } => (
-            Request::LeaseRun {
-                lease,
-                argv,
-                timeout_seconds,
-            },
-            None,
-        ),
-        Op::LeasePut {
-            lease,
-            tree,
-            to,
-            replace,
-        } => (
-            Request::LeasePut {
-                lease,
-                tree,
-                to,
-                replace,
-            },
-            None,
-        ),
-        Op::LeaseGet { lease, from, to } => (Request::LeaseGet { lease, from, to }, None),
-        Op::LeaseStatus { lease } => (Request::LeaseStatus { lease }, None),
-        Op::LeaseClose { lease } => (Request::LeaseClose { lease }, None),
+        Op::Session { grant, op } => (Request::Session { grant, op }, None),
     };
     let unanswered = match call {
         Some((payload, reference)) => Unanswered::Call {

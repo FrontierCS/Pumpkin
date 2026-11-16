@@ -9,9 +9,10 @@
 //! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`;
 //! - `ops`, `judge <grant> <bytes>`, `submit <grant> <bytes> [final]` and `status <job>`,
 //!   each an op from the agent, whose payload is named by the op's number;
-//! - `lease_open <grant> [<seconds>]`, `lease_run <lease> <seconds>|- <argv>...`, `lease_put
-//!   <lease> <tree> <to> [replace]`, `lease_get <lease> <from> <to>`, `lease_status <lease>` and
-//!   `lease_close <lease>`, each an op from the agent, `-` for a command without a timeout;
+//! - `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, `<session>.put
+//!   <lease> <tree> <to> [replace]`, `<session>.get <lease> <from> <to>`, `<session>.status
+//!   <lease>` and `<session>.close <lease>`, each an op from the agent, `-` for a command without a
+//!   timeout;
 //! - any op after `@<job>`, from that job's call instead;
 //! - `judge_started <job>`, `judge_exited <job> [<code>]`, `judge_timed_out <job>`,
 //!   `collected <job> <result.json>`, `judge_failed <job> <reason>`;
@@ -39,7 +40,7 @@ use decision::{
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, Argv, CpuModel, Name, Sha256Digest};
-use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, TransferEnd};
+use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_DEPTH};
 use schema::workflow::{Class, JudgeCall, Offers, Workflow};
 use serde_json::{Value, json};
@@ -157,6 +158,11 @@ impl Run<'_> {
         let words: Vec<&str> = event.splitn(3, ' ').collect();
         let job = || JobId(words[1].parse().unwrap());
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
+        if let Some((grant, op)) = words[0].split_once('.') {
+            let grant = Name::try_from(grant.to_owned()).unwrap();
+            let op = session_op(op, &words);
+            return self.op(Request::Session { grant, op });
+        }
         match words[0] {
             "agent_started" => Event::AgentStarted,
             "agent_exited" => Event::AgentExited {
@@ -199,104 +205,9 @@ impl Run<'_> {
                 job: job(),
                 reason: words[2].to_owned(),
             },
-            kind if kind.starts_with("lease_") || kind.ends_with("_ended") => {
-                self.lease_event(&words)
-            }
+            kind if kind.starts_with("lease_") || kind.ends_with("_ended") => lease_event(&words),
             "tick" => Event::Tick,
             other => panic!("no event is named `{other}`"),
-        }
-    }
-
-    fn lease_event(&mut self, words: &[&str]) -> Event {
-        let lease = || LeaseId(words[1].parse().unwrap());
-        let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
-        match words[0] {
-            "lease_open" => self.op(Request::LeaseOpen {
-                grant: Name::try_from(words[1].to_owned()).unwrap(),
-                instance_seconds: words.get(2).map(|seconds| seconds.parse().unwrap()),
-            }),
-            "lease_run" => {
-                let (timeout, argv) = words[2].split_once(' ').unwrap();
-                let argv = argv.split(' ').map(str::to_owned).collect::<Vec<_>>();
-                self.op(Request::LeaseRun {
-                    lease: words[1].parse().unwrap(),
-                    argv: Argv::try_from(argv).unwrap(),
-                    timeout_seconds: timeout.parse().ok(),
-                })
-            }
-            "lease_put" | "lease_get" | "transfer_ended" => self.transfer_event(words),
-            "lease_status" => self.op(Request::LeaseStatus {
-                lease: words[1].parse().unwrap(),
-            }),
-            "lease_close" => self.op(Request::LeaseClose {
-                lease: words[1].parse().unwrap(),
-            }),
-            "lease_ready" => Event::LeaseReady { lease: lease() },
-            "command_ended" => {
-                let mut ended = words[2].splitn(3, ' ');
-                let command = ended.next().unwrap().parse().unwrap();
-                let end = match ended.next().unwrap() {
-                    "timed_out" => CommandEnd::TimedOut,
-                    "unstarted" => CommandEnd::Unstarted,
-                    exited => CommandEnd::Exited(code(exited)),
-                };
-                Event::CommandEnded {
-                    lease: lease(),
-                    command,
-                    end,
-                    stdout: ended.next().unwrap_or_default().to_owned(),
-                    stderr: String::new(),
-                }
-            }
-            "lease_ended" => Event::LeaseEnded { lease: lease() },
-            "lease_failed" => Event::LeaseFailed {
-                lease: lease(),
-                reason: words[2].to_owned(),
-            },
-            other => panic!("no lease event is named `{other}`"),
-        }
-    }
-
-    fn transfer_event(&mut self, words: &[&str]) -> Event {
-        let lease = || LeaseId(words[1].parse().unwrap());
-        match words[0] {
-            "lease_put" | "lease_get" => {
-                let (from, to) = words[2].split_once(' ').unwrap();
-                let (to, replace) = to.split_once(' ').unwrap_or((to, ""));
-                let (from, to) = (path(from), path(to));
-                let lease = words[1].parse().unwrap();
-                self.op(if words[0] == "lease_put" {
-                    Request::LeasePut {
-                        lease,
-                        tree: from,
-                        to,
-                        replace: replace == "replace",
-                    }
-                } else {
-                    Request::LeaseGet { lease, from, to }
-                })
-            }
-            "transfer_ended" => {
-                let mut ended = words[2].splitn(3, ' ');
-                let transfer = ended.next().unwrap().parse().unwrap();
-                let end = match (ended.next().unwrap(), ended.next().unwrap()) {
-                    ("moved", sizes) => {
-                        let (entries, bytes) = sizes.split_once(' ').unwrap();
-                        TransferEnd::Moved {
-                            entries: entries.parse().unwrap(),
-                            bytes: bytes.parse().unwrap(),
-                        }
-                    }
-                    ("failed", reason) => TransferEnd::Failed(reason.to_owned()),
-                    (other, _) => panic!("no transfer ends `{other}`"),
-                };
-                Event::TransferEnded {
-                    lease: lease(),
-                    transfer,
-                    end,
-                }
-            }
-            other => panic!("no transfer event is named `{other}`"),
         }
     }
 
@@ -386,7 +297,7 @@ impl Run<'_> {
             } => format!(
                 "open lease {} of {}{}, as instance {instance}, started by {}",
                 lease.0,
-                self.workflow.lease_grant(*grant).name,
+                self.workflow.session(*grant).name,
                 holder_text(*holder),
                 start_by.as_millis()
             ),
@@ -447,6 +358,96 @@ fn transfer_text(
         lease.0,
         holder_text(holder)
     )
+}
+
+fn lease_event(words: &[&str]) -> Event {
+    let lease = || LeaseId(words[1].parse().unwrap());
+    let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
+    match words[0] {
+        "transfer_ended" => {
+            let mut ended = words[2].splitn(3, ' ');
+            let transfer = ended.next().unwrap().parse().unwrap();
+            let end = match (ended.next().unwrap(), ended.next().unwrap()) {
+                ("moved", sizes) => {
+                    let (entries, bytes) = sizes.split_once(' ').unwrap();
+                    TransferEnd::Moved {
+                        entries: entries.parse().unwrap(),
+                        bytes: bytes.parse().unwrap(),
+                    }
+                }
+                ("failed", reason) => TransferEnd::Failed(reason.to_owned()),
+                (other, _) => panic!("no transfer ends `{other}`"),
+            };
+            Event::TransferEnded {
+                lease: lease(),
+                transfer,
+                end,
+            }
+        }
+        "lease_ready" => Event::LeaseReady { lease: lease() },
+        "command_ended" => {
+            let mut ended = words[2].splitn(3, ' ');
+            let command = ended.next().unwrap().parse().unwrap();
+            let end = match ended.next().unwrap() {
+                "timed_out" => CommandEnd::TimedOut,
+                "unstarted" => CommandEnd::Unstarted,
+                exited => CommandEnd::Exited(code(exited)),
+            };
+            Event::CommandEnded {
+                lease: lease(),
+                command,
+                end,
+                stdout: ended.next().unwrap_or_default().to_owned(),
+                stderr: String::new(),
+            }
+        }
+        "lease_ended" => Event::LeaseEnded { lease: lease() },
+        "lease_failed" => Event::LeaseFailed {
+            lease: lease(),
+            reason: words[2].to_owned(),
+        },
+        other => panic!("no lease event is named `{other}`"),
+    }
+}
+
+fn session_op(op: &str, words: &[&str]) -> SessionOp {
+    let lease = || words[1].parse().unwrap();
+    match op {
+        "open" => SessionOp::Open {
+            instance_seconds: words.get(1).map(|seconds| seconds.parse().unwrap()),
+        },
+        "run" => {
+            let (timeout, argv) = words[2].split_once(' ').unwrap();
+            let argv = argv.split(' ').map(str::to_owned).collect::<Vec<_>>();
+            SessionOp::Run {
+                lease: lease(),
+                argv: Argv::try_from(argv).unwrap(),
+                timeout_seconds: timeout.parse().ok(),
+            }
+        }
+        "put" | "get" => {
+            let (from, to) = words[2].split_once(' ').unwrap();
+            let (to, replace) = to.split_once(' ').unwrap_or((to, ""));
+            let (from, to) = (path(from), path(to));
+            if op == "put" {
+                SessionOp::Put {
+                    lease: lease(),
+                    tree: from,
+                    to,
+                    replace: replace == "replace",
+                }
+            } else {
+                SessionOp::Get {
+                    lease: lease(),
+                    from,
+                    to,
+                }
+            }
+        }
+        "status" => SessionOp::Status { lease: lease() },
+        "close" => SessionOp::Close { lease: lease() },
+        other => panic!("no session op is named `{other}`"),
+    }
 }
 
 fn path(path: &str) -> AbsolutePath {
@@ -1513,8 +1514,8 @@ fn leasing(ir: &mut Value) {
     runner["image"] = json!(format!("sha256:{}", "3".repeat(64)));
     runner["runtime"] = json!({ "runner": { "cwd": "/work" } });
     ir["roles"].as_array_mut().unwrap().push(runner);
-    let grant = json!({ "lease": {
-        "name": "gpu", "role": "gpu_runner", "instances": 2, "instance_seconds": 900,
+    let grant = json!({ "name": "gpu", "session": {
+        "runner": "gpu_runner", "instances": 2, "instance_seconds": 900,
         "cumulative_seconds": 1200, "commands": 3, "transfer_bytes": 4096,
     } });
     ir["roles"][0]["runtime"]["agent"]["grants"]
@@ -1531,25 +1532,25 @@ fn leases() {
         r"
         0 agent_started
         1000 ops
-        2000 lease_open gpu
-        2100 lease_status 0
-        2200 lease_run 0 - nvidia-smi
+        2000 gpu.open
+        2100 gpu.status 0
+        2200 gpu.run 0 - nvidia-smi
         3000 lease_ready 0
-        4000 lease_run 0 - nvidia-smi -L
-        4100 lease_run 0 - true
-        4200 lease_status 0
+        4000 gpu.run 0 - nvidia-smi -L
+        4100 gpu.run 0 - true
+        4200 gpu.status 0
         6000 command_ended 0 0 0 GPU 0
-        7000 lease_status 0
-        8000 lease_run 0 899 echo it's
-        8100 lease_run 0 894 sleep 1000
+        7000 gpu.status 0
+        8000 gpu.run 0 899 echo it's
+        8100 gpu.run 0 894 sleep 1000
         9000 command_ended 0 1 timed_out
         9100 command_ended 0 0 1
-        10000 lease_close 0
-        10100 lease_status 0
-        10200 lease_close 0
-        10300 lease_run 0 - true
+        10000 gpu.close 0
+        10100 gpu.status 0
+        10200 gpu.close 0
+        10300 gpu.run 0 - true
         11000 lease_ended 0
-        11100 lease_status 0
+        11100 gpu.status 0
         ",
         &expect![[r#"
             start
@@ -1558,45 +1559,45 @@ fn leases() {
             0 agent_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"lease","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
-            2000 lease_open gpu
+              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+            2000 gpu.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            2100 lease_status 0
+            2100 gpu.status 0
               reply to op 3: {"kind":"lease_status","lease":0,"state":"starting","elapsed_seconds":0,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
-            2200 lease_run 0 - nvidia-smi
-              refuse op 4: lease 0 is still starting: run a command once `lease status` says it is ready
+            2200 gpu.run 0 - nvidia-smi
+              refuse op 4: lease 0 is still starting: run a command once `gpu.status` says it is ready
             3000 lease_ready 0
               (tick due at 903000)
-            4000 lease_run 0 - nvidia-smi -L
+            4000 gpu.run 0 - nvidia-smi -L
               reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["nvidia-smi","-L"], with a timeout of None
-            4100 lease_run 0 - true
-              refuse op 6: lease 0 runs command 0, one at a time: run a command once `lease status` says it has ended
-            4200 lease_status 0
+            4100 gpu.run 0 - true
+              refuse op 6: lease 0 runs command 0, one at a time: run a command once `gpu.status` says it has ended
+            4200 gpu.status 0
               reply to op 7: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":2}}
             6000 command_ended 0 0 0 GPU 0
-            7000 lease_status 0
+            7000 gpu.status 0
               reply to op 8: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":5,"busy_seconds":2,"idle_seconds":2,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"GPU 0","stderr":""},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":2}}
-            8000 lease_run 0 899 echo it's
-              refuse op 9: the timeout of 899 s is longer than lease 0 has left, 895 s: run it again as `sandboxctl lease run 0 --timeout 895 -- echo 'it'\''s'`
-            8100 lease_run 0 894 sleep 1000
+            8000 gpu.run 0 899 echo it's
+              refuse op 9: the timeout of 899 s is longer than lease 0 has left, 895 s: run it again as `sandboxctl call gpu.run 0 --timeout 895 -- echo 'it'\''s'`
+            8100 gpu.run 0 894 sleep 1000
               reply to op 10: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":894,"cumulative_seconds":1194,"commands":1}}
               run command 1 of lease 0, ["sleep","1000"], with a timeout of Some(894s)
             9000 command_ended 0 1 timed_out
             9100 command_ended 0 0 1
-            10000 lease_close 0
+            10000 gpu.close 0
               reply to op 11: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
               close lease 0
               (tick due at 18000000)
-            10100 lease_status 0
+            10100 gpu.status 0
               reply to op 12: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":8,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
-            10200 lease_close 0
+            10200 gpu.close 0
               reply to op 13: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
-            10300 lease_run 0 - true
+            10300 gpu.run 0 - true
               refuse op 14: lease 0 has ended: open another
             11000 lease_ended 0
-            11100 lease_status 0
+            11100 gpu.status 0
               reply to op 15: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":9,"busy_seconds":2,"idle_seconds":4,"failure":null,"last":{"kind":"command","command":1,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1193,"commands":1}}
         "#]],
     );
@@ -1609,30 +1610,30 @@ fn lease_quotas() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open gpu
-        1200 lease_open gpu
-        1300 lease_status 2
-        1400 lease_run 7 - true
-        1500 lease_close 9
+        1000 gpu.open
+        1100 gpu.open
+        1200 gpu.open
+        1300 gpu.status 2
+        1400 gpu.run 7 - true
+        1500 gpu.close 9
         1600 judge gpu 10
         1700 submit gpu 10
-        1800 lease_open train
-        1900 lease_open submit
-        2000 lease_open nothing
-        3000 lease_close 0
+        1800 train.open
+        1900 submit.open
+        2000 nothing.open
+        3000 gpu.close 0
         3500 lease_ready 0
         4000 lease_ended 0
-        4100 lease_open gpu
+        4100 gpu.open
         5000 lease_ready 1
-        5100 lease_run 1 - a
+        5100 gpu.run 1 - a
         5200 command_ended 1 0 unstarted
-        5300 lease_run 1 - b
+        5300 gpu.run 1 - b
         5400 command_ended 1 1 1
-        5500 lease_run 1 - c
+        5500 gpu.run 1 - c
         5600 command_ended 1 2 0
-        5700 lease_run 1 - d
-        5800 lease_status 1
+        5700 gpu.run 1 - d
+        5800 gpu.status 1
         ",
         &expect![[r#"
             start
@@ -1640,55 +1641,55 @@ fn lease_quotas() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open gpu
+            1100 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
-            1200 lease_open gpu
-              refuse op 3: `gpu` has 2 leases open, as many as it allows at once: open another once `lease status` says one has ended
-            1300 lease_status 2
-              refuse op 4: you have no lease 2: name one that `lease open` returned
-            1400 lease_run 7 - true
-              refuse op 5: you have no lease 7: name one that `lease open` returned
-            1500 lease_close 9
-              refuse op 6: you have no lease 9: name one that `lease open` returned
+            1200 gpu.open
+              refuse op 3: `gpu` has 2 leases open, as many as it allows at once: open another once `gpu.status` says one has ended
+            1300 gpu.status 2
+              refuse op 4: you have no lease 2: name one that `gpu.open` returned
+            1400 gpu.run 7 - true
+              refuse op 5: you have no lease 7: name one that `gpu.open` returned
+            1500 gpu.close 9
+              refuse op 6: you have no lease 9: name one that `gpu.open` returned
             1600 judge gpu 10
-              refuse op 7: `gpu` is a lease grant, not a judge grant: open leases of it instead
+              refuse op 7: `gpu` is a session, not a judge grant: call its functions, as `gpu.open`, instead
             1700 submit gpu 10
-              refuse op 8: `gpu` is a lease grant, not a submit grant: open leases of it instead
-            1800 lease_open train
-              refuse op 9: `train` is a judge grant, not a lease grant: judge with it instead
-            1900 lease_open submit
-              refuse op 10: `submit` is a submit grant, not a lease grant: submit to it instead
-            2000 lease_open nothing
+              refuse op 8: `gpu` is a session, not a submit grant: call its functions, as `gpu.open`, instead
+            1800 train.open
+              refuse op 9: `train` is a judge grant, not a session: judge with it instead
+            1900 submit.open
+              refuse op 10: `submit` is a submit grant, not a session: submit to it instead
+            2000 nothing.open
               refuse op 11: you hold no grant named `nothing`: call one that `ops` lists
-            3000 lease_close 0
+            3000 gpu.close 0
               reply to op 12: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
               close lease 0
             3500 lease_ready 0
             4000 lease_ended 0
-            4100 lease_open gpu
+            4100 gpu.open
               reply to op 13: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 0, started by 18000000
             5000 lease_ready 1
               (tick due at 905000)
-            5100 lease_run 1 - a
+            5100 gpu.run 1 - a
               reply to op 14: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 1, ["a"], with a timeout of None
             5200 command_ended 1 0 unstarted
-            5300 lease_run 1 - b
+            5300 gpu.run 1 - b
               reply to op 15: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":1}}
               run command 1 of lease 1, ["b"], with a timeout of None
             5400 command_ended 1 1 1
-            5500 lease_run 1 - c
+            5500 gpu.run 1 - c
               reply to op 16: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":0}}
               run command 2 of lease 1, ["c"], with a timeout of None
             5600 command_ended 1 2 0
-            5700 lease_run 1 - d
+            5700 gpu.run 1 - d
               refuse op 17: `gpu` has no commands left of the 3 it allows, a transfer counting as one: run and move no more
-            5800 lease_status 1
+            5800 gpu.status 1
               reply to op 18: {"kind":"lease_status","lease":1,"state":"ready","elapsed_seconds":4,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":2,"end":{"exited":{"code":0}},"stdout":"","stderr":""},"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":0}}
         "#]],
     );
@@ -1700,18 +1701,18 @@ fn lease_own_time() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open gpu
+        1000 gpu.open
+        1100 gpu.open
         1200 lease_failed 1 the runner's sandbox didn't start
         2000 lease_ready 0
-        3000 lease_open gpu
+        3000 gpu.open
         4000 lease_ready 2
         5000 lease_failed 2 the runner's session ended
-        5100 lease_status 2
-        901500 lease_run 0 1 true
+        5100 gpu.status 2
+        901500 gpu.run 0 1 true
         901999 tick
         902000 tick
-        902100 lease_status 0
+        902100 gpu.status 0
         ",
         &expect![[r#"
             start
@@ -1719,31 +1720,31 @@ fn lease_own_time() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open gpu
+            1100 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
             1200 lease_failed 1 the runner's sandbox didn't start
             2000 lease_ready 0
               (tick due at 902000)
-            3000 lease_open gpu
+            3000 gpu.open
               reply to op 3: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1199,"commands":3}}
               open lease 2 of gpu, as instance 1, started by 18000000
             4000 lease_ready 2
               (tick due at 603000)
             5000 lease_failed 2 the runner's session ended
               (tick due at 902000)
-            5100 lease_status 2
+            5100 gpu.status 2
               reply to op 4: {"kind":"lease_status","lease":2,"state":"failed","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":1,"failure":"the runner's session ended","last":null,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1195,"commands":3}}
-            901500 lease_run 0 1 true
-              refuse op 5: the timeout of 1 s is longer than lease 0 has left, 0 s: run it again as `sandboxctl lease run 0 -- true`
+            901500 gpu.run 0 1 true
+              refuse op 5: the timeout of 1 s is longer than lease 0 has left, 0 s: run it again as `sandboxctl call gpu.run 0 -- true`
             901999 tick
             902000 tick
               close lease 0
               (tick due at 18000000)
-            902100 lease_status 0
+            902100 gpu.status 0
               reply to op 6: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":901,"busy_seconds":0,"idle_seconds":900,"failure":null,"last":null,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":299,"commands":3}}
         "#]],
     );
@@ -1755,12 +1756,12 @@ fn lease_asked_time() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu 901
-        1100 lease_open gpu 300
-        1200 lease_open gpu 900
+        1000 gpu.open 901
+        1100 gpu.open 300
+        1200 gpu.open 900
         2000 lease_ready 0
-        2100 lease_run 0 301 true
-        2200 lease_status 0
+        2100 gpu.run 0 301 true
+        2200 gpu.status 0
         301999 tick
         302000 tick
         ",
@@ -1770,19 +1771,19 @@ fn lease_asked_time() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu 901
-              refuse op 1: the time of 901 s is longer than `gpu` lets a lease last, 900 s: open it again as `sandboxctl lease open gpu --seconds 900`
-            1100 lease_open gpu 300
+            1000 gpu.open 901
+              refuse op 1: the time of 901 s is longer than `gpu` lets a lease last, 900 s: open it again as `sandboxctl call gpu.open --seconds 900`
+            1100 gpu.open 300
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":300,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1200 lease_open gpu 900
+            1200 gpu.open 900
               reply to op 3: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
             2000 lease_ready 0
               (tick due at 302000)
-            2100 lease_run 0 301 true
-              refuse op 4: the timeout of 301 s is longer than lease 0 has left, 299 s: run it again as `sandboxctl lease run 0 --timeout 299 -- true`
-            2200 lease_status 0
+            2100 gpu.run 0 301 true
+              refuse op 4: the timeout of 301 s is longer than lease 0 has left, 299 s: run it again as `sandboxctl call gpu.run 0 --timeout 299 -- true`
+            2200 gpu.status 0
               reply to op 5: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":1,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":0,"instance_seconds":299,"cumulative_seconds":1199,"commands":3}}
             301999 tick
             302000 tick
@@ -1798,17 +1799,17 @@ fn lease_times() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
+        1000 gpu.open
         2000 lease_ready 0
-        3300 lease_open gpu
+        3300 gpu.open
         4000 lease_ready 1
         602999 tick
         603000 tick
-        603100 lease_status 0
-        603200 lease_status 1
+        603100 gpu.status 0
+        603200 gpu.status 1
         604000 lease_ended 0
         604100 lease_ended 1
-        604200 lease_open gpu
+        604200 gpu.open
         ",
         &expect![[r#"
             start
@@ -1816,12 +1817,12 @@ fn lease_times() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
             2000 lease_ready 0
               (tick due at 902000)
-            3300 lease_open gpu
+            3300 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
             4000 lease_ready 1
@@ -1831,13 +1832,13 @@ fn lease_times() {
               close lease 0
               close lease 1
               (tick due at 18000000)
-            603100 lease_status 0
+            603100 gpu.status 0
               reply to op 3: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":602,"busy_seconds":0,"idle_seconds":601,"failure":null,"last":null,"remaining":{"instances":0,"instance_seconds":0,"cumulative_seconds":0,"commands":3}}
-            603200 lease_status 1
+            603200 gpu.status 1
               reply to op 4: {"kind":"lease_status","lease":1,"state":"closing","elapsed_seconds":599,"busy_seconds":0,"idle_seconds":599,"failure":null,"last":null,"remaining":{"instances":0,"instance_seconds":0,"cumulative_seconds":0,"commands":3}}
             604000 lease_ended 0
             604100 lease_ended 1
-            604200 lease_open gpu
+            604200 gpu.open
               refuse op 5: `gpu` has no time left of the 1200 s it allows: open no more leases of it
         "#]],
     );
@@ -1849,15 +1850,15 @@ fn leases_end_with_work() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open gpu
+        1000 gpu.open
+        1100 gpu.open
         2000 lease_ready 0
-        3000 lease_run 0 - train
+        3000 gpu.run 0 - train
         4000 submit submit 10
         5000 agent_exited 0
         6000 lease_ended 1
         7000 lease_failed 0 the runner's session ended
-        7100 lease_status 0
+        7100 gpu.status 0
         8000 judge_started 0
         ",
         &expect![[r#"
@@ -1866,15 +1867,15 @@ fn leases_end_with_work() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open gpu
+            1100 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
             2000 lease_ready 0
               (tick due at 902000)
-            3000 lease_run 0 - train
+            3000 gpu.run 0 - train
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["train"], with a timeout of None
             4000 submit submit 10
@@ -1887,7 +1888,7 @@ fn leases_end_with_work() {
             6000 lease_ended 1
             7000 lease_failed 0 the runner's session ended
               start job 0 of score on op 4's payload of 10 bytes, with a timeout of 120s
-            7100 lease_status 0
+            7100 gpu.status 0
               refuse op 5: the work phase has ended: make no more ops
             8000 judge_started 0
         "#]],
@@ -1899,13 +1900,13 @@ fn lease_shares() {
     check(
         |ir| {
             leasing(ir);
-            ir["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["instances"] = json!(3);
+            ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["instances"] = json!(3);
         },
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open gpu
-        1200 lease_open gpu
+        1000 gpu.open
+        1100 gpu.open
+        1200 gpu.open
         2000 lease_ready 0
         3000 lease_ready 1
         4001 lease_ready 2
@@ -1918,13 +1919,13 @@ fn lease_shares() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open gpu
+            1100 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
-            1200 lease_open gpu
+            1200 gpu.open
               reply to op 3: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 2, started by 18000000
             2000 lease_ready 0
@@ -1944,7 +1945,7 @@ fn lease_shares() {
 }
 
 #[test]
-fn lease_grants_apart() {
+fn sessions_apart() {
     check(
         |ir| {
             leasing(ir);
@@ -1952,9 +1953,9 @@ fn lease_grants_apart() {
             runner["name"] = json!("cpu_runner");
             ir["roles"].as_array_mut().unwrap().push(runner);
             let mut cpu = ir["roles"][0]["runtime"]["agent"]["grants"][1].clone();
-            cpu["lease"]["name"] = json!("cpu");
-            cpu["lease"]["role"] = json!("cpu_runner");
-            cpu["lease"]["instances"] = json!(1);
+            cpu["name"] = json!("cpu");
+            cpu["session"]["runner"] = json!("cpu_runner");
+            cpu["session"]["instances"] = json!(1);
             ir["roles"][0]["runtime"]["agent"]["grants"]
                 .as_array_mut()
                 .unwrap()
@@ -1962,9 +1963,10 @@ fn lease_grants_apart() {
         },
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open cpu
-        1200 lease_open gpu
+        1000 gpu.open
+        1100 cpu.open
+        1200 gpu.open
+        1300 cpu.close 0
         ",
         &expect![[r#"
             start
@@ -1972,15 +1974,17 @@ fn lease_grants_apart() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open cpu
+            1100 cpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of cpu, as instance 0, started by 18000000
-            1200 lease_open gpu
+            1200 gpu.open
               reply to op 3: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 1, started by 18000000
+            1300 cpu.close 0
+              refuse op 4: lease 0 is `gpu`'s, not `cpu`'s: call `gpu`'s functions for it
         "#]],
     );
 }
@@ -1991,18 +1995,18 @@ fn lease_start_bounds() {
         judges_leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_close 0
-        1200 lease_status 0
+        1000 gpu.open
+        1100 gpu.close 0
+        1200 gpu.status 0
         1300 lease_failed 0 the runner's sandbox didn't start: it was given up
-        1400 lease_status 0
+        1400 gpu.status 0
         2000 judge train 10
         3000 judge_started 0
-        3100 @0 lease_open box
+        3100 @0 box.open
         53000 judge_timed_out 0
         53000 lease_failed 1 the runner's sandbox didn't start: it was given up
         53100 judge_failed 0 the judge ran past its timeout
-        54000 lease_open gpu
+        54000 gpu.open
         18000000 tick
         18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
         ",
@@ -2012,29 +2016,29 @@ fn lease_start_bounds() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_close 0
+            1100 gpu.close 0
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
               close lease 0
-            1200 lease_status 0
+            1200 gpu.status 0
               reply to op 3: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":0,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
             1300 lease_failed 0 the runner's sandbox didn't start: it was given up
-            1400 lease_status 0
+            1400 gpu.status 0
               reply to op 4: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":0,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
             2000 judge train 10
               reply to op 5: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
               start job 0 of train on op 5's payload of 10 bytes, with a timeout of 50s
             3000 judge_started 0
-            3100 @0 lease_open box
+            3100 @0 box.open
               reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 1 of box for job 0, as instance 0, started by 53000
             53000 judge_timed_out 0
               close lease 1
             53000 lease_failed 1 the runner's sandbox didn't start: it was given up
             53100 judge_failed 0 the judge ran past its timeout
-            54000 lease_open gpu
+            54000 gpu.open
               reply to op 7: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 0, started by 18000000
             18000000 tick
@@ -2053,22 +2057,22 @@ fn lease_busy() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
+        1000 gpu.open
         11000 lease_ready 0
-        21000 lease_run 0 - make
-        31000 lease_status 0
+        21000 gpu.run 0 - make
+        31000 gpu.status 0
         41000 command_ended 0 0 0
-        51000 lease_status 0
-        61000 lease_put 0 /workspace/repo /work/repo
-        71000 lease_close 0
+        51000 gpu.status 0
+        61000 gpu.put 0 /workspace/repo /work/repo
+        71000 gpu.close 0
         81000 transfer_ended 0 1 moved 1 1
         91000 lease_ended 0
-        92000 lease_status 0
-        93000 lease_open gpu
+        92000 gpu.status 0
+        93000 gpu.open
         94000 lease_ready 1
-        95000 lease_run 1 - make
+        95000 gpu.run 1 - make
         96000 lease_failed 1 the runner's session ended
-        97000 lease_status 1
+        97000 gpu.status 1
         ",
         &expect![[r#"
             start
@@ -2076,41 +2080,41 @@ fn lease_busy() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
             11000 lease_ready 0
               (tick due at 911000)
-            21000 lease_run 0 - make
+            21000 gpu.run 0 - make
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":890,"cumulative_seconds":1190,"commands":2}}
               run command 0 of lease 0, ["make"], with a timeout of None
-            31000 lease_status 0
+            31000 gpu.status 0
               reply to op 3: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":30,"busy_seconds":10,"idle_seconds":10,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":880,"cumulative_seconds":1180,"commands":2}}
             41000 command_ended 0 0 0
-            51000 lease_status 0
+            51000 gpu.status 0
               reply to op 4: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":50,"busy_seconds":20,"idle_seconds":20,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":860,"cumulative_seconds":1160,"commands":2}}
-            61000 lease_put 0 /workspace/repo /work/repo
+            61000 gpu.put 0 /workspace/repo /work/repo
               reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":850,"cumulative_seconds":1150,"commands":1}}
               put /workspace/repo to /work/repo as transfer 1 of lease 0, of at most 4096 bytes
-            71000 lease_close 0
+            71000 gpu.close 0
               reply to op 6: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1140,"commands":1}}
               close lease 0
               (tick due at 18000000)
             81000 transfer_ended 0 1 moved 1 1
             91000 lease_ended 0
-            92000 lease_status 0
+            92000 gpu.status 0
               reply to op 7: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":91,"busy_seconds":30,"idle_seconds":30,"failure":null,"last":{"kind":"transfer","transfer":1,"end":{"moved":{"entries":1,"bytes":1}}},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1140,"commands":1}}
-            93000 lease_open gpu
+            93000 gpu.open
               reply to op 8: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1140,"commands":1}}
               open lease 1 of gpu, as instance 0, started by 18000000
             94000 lease_ready 1
               (tick due at 994000)
-            95000 lease_run 1 - make
+            95000 gpu.run 1 - make
               reply to op 9: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1139,"commands":0}}
               run command 0 of lease 1, ["make"], with a timeout of None
             96000 lease_failed 1 the runner's session ended
               (tick due at 18000000)
-            97000 lease_status 1
+            97000 gpu.status 1
               reply to op 10: {"kind":"lease_status","lease":1,"state":"failed","elapsed_seconds":4,"busy_seconds":1,"idle_seconds":1,"failure":"the runner's session ended","last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1138,"commands":0}}
         "#]],
     );
@@ -2124,9 +2128,9 @@ fn lease_failure() {
         &format!(
             "
             0 agent_started
-            1000 lease_open gpu
+            1000 gpu.open
             2000 lease_failed 0 {reason}
-            2100 lease_status 0
+            2100 gpu.status 0
             "
         ),
         &expect![[r#"
@@ -2135,11 +2139,11 @@ fn lease_failure() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
             2000 lease_failed 0 aéééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé
-            2100 lease_status 0
+            2100 gpu.status 0
               reply to op 2: {"kind":"lease_status","lease":0,"state":"failed","elapsed_seconds":1,"busy_seconds":0,"idle_seconds":0,"failure":"aééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé","last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
         "#]],
     );
@@ -2154,29 +2158,29 @@ fn lease_transfers() {
         &format!(
             "
             0 agent_started
-            1000 lease_open gpu
-            1100 lease_put 0 /workspace/repo /work/repo
+            1000 gpu.open
+            1100 gpu.put 0 /workspace/repo /work/repo
             2000 lease_ready 0
-            3000 lease_put 0 /workspace/repo /work/repo replace
-            3100 lease_run 0 - make
-            3200 lease_get 0 /work/out /workspace/out
-            3300 lease_status 0
+            3000 gpu.put 0 /workspace/repo /work/repo replace
+            3100 gpu.run 0 - make
+            3200 gpu.get 0 /work/out /workspace/out
+            3300 gpu.status 0
             3400 command_ended 0 0 0
             4000 transfer_ended 0 0 moved 3 2048
-            4100 lease_status 0
-            5000 lease_run 0 - make
+            4100 gpu.status 0
+            5000 gpu.run 0 - make
             5100 transfer_ended 0 1 moved 1 1
-            5200 lease_status 0
+            5200 gpu.status 0
             6000 command_ended 0 1 0
-            6100 lease_get 0 /work/out /workspace/out
-            6200 lease_close 0
-            6300 lease_status 0
+            6100 gpu.get 0 /work/out /workspace/out
+            6200 gpu.close 0
+            6300 gpu.status 0
             7000 transfer_ended 0 2 failed {reason}
-            7100 lease_status 0
-            7200 lease_put 0 /a /b
-            7300 lease_open gpu
+            7100 gpu.status 0
+            7200 gpu.put 0 /a /b
+            7300 gpu.open
             8000 lease_ready 1
-            8100 lease_put 1 /a /b
+            8100 gpu.put 1 /a /b
             "
         ),
         &expect![[r#"
@@ -2185,53 +2189,53 @@ fn lease_transfers() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_put 0 /workspace/repo /work/repo
-              refuse op 2: lease 0 is still starting: put a tree once `lease status` says it is ready
+            1100 gpu.put 0 /workspace/repo /work/repo
+              refuse op 2: lease 0 is still starting: put a tree once `gpu.status` says it is ready
             2000 lease_ready 0
               (tick due at 902000)
-            3000 lease_put 0 /workspace/repo /work/repo replace
+            3000 gpu.put 0 /workspace/repo /work/repo replace
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               replace with /workspace/repo to /work/repo as transfer 0 of lease 0, of at most 4096 bytes
-            3100 lease_run 0 - make
-              refuse op 4: lease 0 runs transfer 0, one at a time: run a command once `lease status` says it has ended
-            3200 lease_get 0 /work/out /workspace/out
-              refuse op 5: lease 0 runs transfer 0, one at a time: get a tree once `lease status` says it has ended
-            3300 lease_status 0
+            3100 gpu.run 0 - make
+              refuse op 4: lease 0 runs transfer 0, one at a time: run a command once `gpu.status` says it has ended
+            3200 gpu.get 0 /work/out /workspace/out
+              refuse op 5: lease 0 runs transfer 0, one at a time: get a tree once `gpu.status` says it has ended
+            3300 gpu.status 0
               reply to op 6: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":1,"failure":null,"last":{"kind":"transfer","transfer":0,"end":null},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":2}}
             3400 command_ended 0 0 0
             4000 transfer_ended 0 0 moved 3 2048
-            4100 lease_status 0
+            4100 gpu.status 0
               reply to op 7: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":3,"busy_seconds":1,"idle_seconds":1,"failure":null,"last":{"kind":"transfer","transfer":0,"end":{"moved":{"entries":3,"bytes":2048}}},"remaining":{"instances":1,"instance_seconds":897,"cumulative_seconds":1197,"commands":2}}
-            5000 lease_run 0 - make
+            5000 gpu.run 0 - make
               reply to op 8: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":897,"cumulative_seconds":1197,"commands":1}}
               run command 1 of lease 0, ["make"], with a timeout of None
             5100 transfer_ended 0 1 moved 1 1
-            5200 lease_status 0
+            5200 gpu.status 0
               reply to op 9: {"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":4,"busy_seconds":1,"idle_seconds":2,"failure":null,"last":{"kind":"command","command":1,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":1}}
             6000 command_ended 0 1 0
-            6100 lease_get 0 /work/out /workspace/out
+            6100 gpu.get 0 /work/out /workspace/out
               reply to op 10: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":895,"cumulative_seconds":1195,"commands":0}}
               get /work/out to /workspace/out as transfer 2 of lease 0, of at most 4096 bytes
-            6200 lease_close 0
+            6200 gpu.close 0
               reply to op 11: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1195,"commands":0}}
               close lease 0
               (tick due at 18000000)
-            6300 lease_status 0
+            6300 gpu.status 0
               reply to op 12: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":5,"busy_seconds":2,"idle_seconds":2,"failure":null,"last":{"kind":"transfer","transfer":2,"end":null},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1195,"commands":0}}
             7000 transfer_ended 0 2 failed aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabc
-            7100 lease_status 0
+            7100 gpu.status 0
               reply to op 13: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":6,"busy_seconds":2,"idle_seconds":2,"failure":null,"last":{"kind":"transfer","transfer":2,"end":{"failed":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1195,"commands":0}}
-            7200 lease_put 0 /a /b
+            7200 gpu.put 0 /a /b
               refuse op 14: lease 0 has ended: open another
-            7300 lease_open gpu
+            7300 gpu.open
               reply to op 15: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1195,"commands":0}}
               open lease 1 of gpu, as instance 1, started by 18000000
             8000 lease_ready 1
               (tick due at 908000)
-            8100 lease_put 1 /a /b
+            8100 gpu.put 1 /a /b
               refuse op 16: `gpu` has no commands left of the 3 it allows, a transfer counting as one: run and move no more
         "#]],
     );
@@ -2243,18 +2247,18 @@ fn lease_slots() {
         leasing,
         r"
         0 agent_started
-        1000 lease_open gpu
-        1100 lease_open gpu
+        1000 gpu.open
+        1100 gpu.open
         2000 lease_ready 0
-        3000 lease_run 0 - train
-        4000 lease_close 0
-        4100 lease_status 0
-        4200 lease_open gpu
+        3000 gpu.run 0 - train
+        4000 gpu.close 0
+        4100 gpu.status 0
+        4200 gpu.open
         4300 ops
         5000 lease_ended 0
-        5100 lease_status 0
+        5100 gpu.status 0
         5200 ops
-        5300 lease_open gpu
+        5300 gpu.open
         ",
         &expect![[r#"
             start
@@ -2262,33 +2266,33 @@ fn lease_slots() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 lease_open gpu
+            1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
-            1100 lease_open gpu
+            1100 gpu.open
               reply to op 2: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 1, started by 18000000
             2000 lease_ready 0
               (tick due at 902000)
-            3000 lease_run 0 - train
+            3000 gpu.run 0 - train
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["train"], with a timeout of None
-            4000 lease_close 0
+            4000 gpu.close 0
               reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":0,"cumulative_seconds":1198,"commands":2}}
               close lease 0
               (tick due at 18000000)
-            4100 lease_status 0
+            4100 gpu.status 0
               reply to op 5: {"kind":"lease_status","lease":0,"state":"closing","elapsed_seconds":3,"busy_seconds":1,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":0,"instance_seconds":0,"cumulative_seconds":1198,"commands":2}}
-            4200 lease_open gpu
-              refuse op 6: `gpu` has 2 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `lease status` says one has ended
+            4200 gpu.open
+              refuse op 6: `gpu` has 2 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `gpu.status` says one has ended
             4300 ops
-              reply to op 7: {"kind":"ops","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"lease","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 7: {"kind":"ops","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             5000 lease_ended 0
-            5100 lease_status 0
+            5100 gpu.status 0
               reply to op 8: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":4,"busy_seconds":1,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1198,"commands":2}}
             5200 ops
-              reply to op 9: {"kind":"ops","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"lease","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
-            5300 lease_open gpu
+              reply to op 9: {"kind":"ops","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+            5300 gpu.open
               reply to op 10: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}}
               open lease 2 of gpu, as instance 0, started by 18000000
         "#]],
@@ -2308,14 +2312,14 @@ fn judges_leasing(ir: &mut Value) {
         runner["name"] = json!(name);
         runner["image"] = json!(format!("sha256:{}", image.repeat(64)));
         ir["roles"].as_array_mut().unwrap().push(runner);
-        let mut grant = json!({
-            "name": "box", "role": name, "instances": 1, "instance_seconds": seconds,
+        let mut grant = json!({ "name": "box", "session": {
+            "runner": name, "instances": 1, "instance_seconds": seconds,
             "transfer_bytes": 4096,
-        });
+        } });
         if judge == 1 {
-            grant["commands"] = json!(2);
+            grant["session"]["commands"] = json!(2);
         }
-        ir["roles"][judge]["runtime"]["judge"]["lease_grants"] = json!([grant]);
+        ir["roles"][judge]["runtime"]["judge"]["sessions"] = json!([grant]);
     }
 }
 
@@ -2434,25 +2438,25 @@ fn judge_leases() {
         1100 @0 ops
         2000 judge_started 0
         2100 @0 ops
-        2200 @0 lease_open box
-        2300 @0 lease_open gpu
+        2200 @0 box.open
+        2300 @0 gpu.open
         2400 @0 status 0
         2500 @0 submit submit 10
         2600 @0 judge train 10
-        2700 lease_status 0
-        2800 lease_open gpu
-        2900 @0 lease_status 1
-        3000 @0 lease_run 1 - true
-        3100 @0 lease_close 1
+        2700 gpu.status 0
+        2800 gpu.open
+        2900 @0 box.status 1
+        3000 @0 box.run 1 - true
+        3100 @0 box.close 1
         3200 @7 ops
         4000 lease_ready 0
-        4100 @0 lease_run 0 - check
+        4100 @0 box.run 0 - check
         4200 command_ended 0 0 0 7
-        4300 @0 lease_status 0
-        4400 @0 lease_put 0 /pumpkin/in /work/in
+        4300 @0 box.status 0
+        4400 @0 box.put 0 /pumpkin/in /work/in
         4500 transfer_ended 0 1 moved 2 10
-        4600 lease_get 0 /work/in /in
-        4700 @0 lease_get 0 /work/in /in
+        4600 gpu.get 0 /work/in /in
+        4700 @0 box.get 0 /work/in /in
         "#,
         &expect![[r#"
             start
@@ -2467,11 +2471,11 @@ fn judge_leases() {
               refuse op 2: the call's command has ended: make no more ops
             2000 judge_started 0
             2100 @0 ops
-              reply to op 3: {"kind":"ops","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"lease","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
-            2200 @0 lease_open box
+              reply to op 3: {"kind":"ops","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
+            2200 @0 box.open
               reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 0 of box for job 0, as instance 0, started by 52000
-            2300 @0 lease_open gpu
+            2300 @0 gpu.open
               refuse op 5: you hold no grant named `gpu`: call one that `ops` lists
             2400 @0 status 0
               refuse op 6: you have no job 0: ask about a job that one of your calls returned
@@ -2479,34 +2483,34 @@ fn judge_leases() {
               refuse op 7: you hold no grant named `submit`: call one that `ops` lists
             2600 @0 judge train 10
               refuse op 8: you hold no grant named `train`: call one that `ops` lists
-            2700 lease_status 0
-              refuse op 9: you have no lease 0: name one that `lease open` returned
-            2800 lease_open gpu
+            2700 gpu.status 0
+              refuse op 9: you have no lease 0: name one that `gpu.open` returned
+            2800 gpu.open
               reply to op 10: {"kind":"lease","lease":1,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 1 of gpu, as instance 0, started by 18000000
-            2900 @0 lease_status 1
-              refuse op 11: you have no lease 1: name one that `lease open` returned
-            3000 @0 lease_run 1 - true
-              refuse op 12: you have no lease 1: name one that `lease open` returned
-            3100 @0 lease_close 1
-              refuse op 13: you have no lease 1: name one that `lease open` returned
+            2900 @0 box.status 1
+              refuse op 11: you have no lease 1: name one that `box.open` returned
+            3000 @0 box.run 1 - true
+              refuse op 12: you have no lease 1: name one that `box.open` returned
+            3100 @0 box.close 1
+              refuse op 13: you have no lease 1: name one that `box.open` returned
             3200 @7 ops
               refuse op 14: the call's command has ended: make no more ops
             4000 lease_ready 0
               (tick due at 104000)
-            4100 @0 lease_run 0 - check
+            4100 @0 box.run 0 - check
               reply to op 15: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
               run command 0 of lease 0, ["check"], with a timeout of None
             4200 command_ended 0 0 0 7
-            4300 @0 lease_status 0
+            4300 @0 box.status 0
               reply to op 16: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":2,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"7","stderr":""},"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
-            4400 @0 lease_put 0 /pumpkin/in /work/in
+            4400 @0 box.put 0 /pumpkin/in /work/in
               reply to op 17: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":0}}
               put /pumpkin/in to /work/in as transfer 1 of lease 0 for job 0, of at most 4096 bytes
             4500 transfer_ended 0 1 moved 2 10
-            4600 lease_get 0 /work/in /in
-              refuse op 18: you have no lease 0: name one that `lease open` returned
-            4700 @0 lease_get 0 /work/in /in
+            4600 gpu.get 0 /work/in /in
+              refuse op 18: you have no lease 0: name one that `gpu.open` returned
+            4700 @0 box.get 0 /work/in /in
               refuse op 19: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
         "#]],
     );
@@ -2521,17 +2525,17 @@ fn call_leases() {
         0 agent_started
         1000 judge train 10
         2000 judge_started 0
-        2100 @0 lease_open box
-        2200 @0 lease_open box
+        2100 @0 box.open
+        2200 @0 box.open
         3000 lease_ready 0
-        3100 @0 lease_run 0 49 a
-        3200 @0 lease_run 0 47 a
+        3100 @0 box.run 0 49 a
+        3200 @0 box.run 0 47 a
         3300 command_ended 0 0 0
-        3400 @0 lease_run 0 - b
+        3400 @0 box.run 0 - b
         3500 command_ended 0 1 0
-        3600 @0 lease_run 0 - c
+        3600 @0 box.run 0 - c
         4000 judge_exited 0
-        4100 @0 lease_status 0
+        4100 @0 box.status 0
         4200 collected 0 {"raw_score": 1}
         4300 status 0
         4400 judge train 10
@@ -2539,14 +2543,14 @@ fn call_leases() {
         5100 status 0
         5200 judge train 10
         6000 judge_started 1
-        6100 @1 lease_open box
+        6100 @1 box.open
         6200 lease_ready 1
-        6300 @1 lease_run 1 - a
+        6300 @1 box.run 1 - a
         7000 judge_failed 1 the judge's session ended
         8000 lease_ended 1
         8100 judge train 10
         9000 judge_started 2
-        9100 @2 lease_open box
+        9100 @2 box.open
         9200 lease_ready 2
         9250 submit submit 10
         9300 agent_exited 0
@@ -2563,29 +2567,29 @@ fn call_leases() {
               reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
               start job 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
             2000 judge_started 0
-            2100 @0 lease_open box
+            2100 @0 box.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 0 of box for job 0, as instance 0, started by 52000
-            2200 @0 lease_open box
-              refuse op 3: `box` has 1 leases open, as many as it allows at once: open another once `lease status` says one has ended
+            2200 @0 box.open
+              refuse op 3: `box` has 1 leases open, as many as it allows at once: open another once `box.status` says one has ended
             3000 lease_ready 0
               (tick due at 103000)
-            3100 @0 lease_run 0 49 a
-              refuse op 4: the timeout of 49 s is longer than lease 0 has left, 48 s: run it again as `sandboxctl lease run 0 --timeout 48 -- a`
-            3200 @0 lease_run 0 47 a
+            3100 @0 box.run 0 49 a
+              refuse op 4: the timeout of 49 s is longer than lease 0 has left, 48 s: run it again as `sandboxctl call box.run 0 --timeout 48 -- a`
+            3200 @0 box.run 0 47 a
               reply to op 5: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
               run command 0 of lease 0, ["a"], with a timeout of Some(47s)
             3300 command_ended 0 0 0
-            3400 @0 lease_run 0 - b
+            3400 @0 box.run 0 - b
               reply to op 6: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":0}}
               run command 1 of lease 0, ["b"], with a timeout of None
             3500 command_ended 0 1 0
-            3600 @0 lease_run 0 - c
+            3600 @0 box.run 0 - c
               refuse op 7: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
             4000 judge_exited 0
               close lease 0
               (tick due at 18000000)
-            4100 @0 lease_status 0
+            4100 @0 box.status 0
               refuse op 8: the call's command has ended: make no more ops
             4200 collected 0 {"raw_score": 1}
             4300 status 0
@@ -2599,12 +2603,12 @@ fn call_leases() {
               reply to op 12: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11998}}
               start job 1 of train on op 12's payload of 10 bytes, with a timeout of 50s
             6000 judge_started 1
-            6100 @1 lease_open box
+            6100 @1 box.open
               reply to op 13: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 1 of box for job 1, as instance 0, started by 56000
             6200 lease_ready 1
               (tick due at 106200)
-            6300 @1 lease_run 1 - a
+            6300 @1 box.run 1 - a
               reply to op 14: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
               run command 0 of lease 1, ["a"], with a timeout of None
             7000 judge_failed 1 the judge's session ended
@@ -2615,7 +2619,7 @@ fn call_leases() {
               reply to op 15: {"kind":"judge","job":2,"remaining":{"calls":97,"seconds":11997}}
               start job 2 of train on op 15's payload of 10 bytes, with a timeout of 50s
             9000 judge_started 2
-            9100 @2 lease_open box
+            9100 @2 box.open
               reply to op 16: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 2 of box for job 2, as instance 0, started by 59000
             9200 lease_ready 2
@@ -2644,13 +2648,13 @@ fn score_leases() {
         2000 agent_exited 0
         3000 judge_started 0
         3100 @0 ops
-        3200 @0 lease_open box
+        3200 @0 box.open
         4000 lease_ready 0
-        4100 @0 lease_run 0 - check
+        4100 @0 box.run 0 - check
         34000 tick
-        34100 @0 lease_open box
+        34100 @0 box.open
         34200 lease_ended 0
-        34300 @0 lease_open box
+        34300 @0 box.open
         35000 judge_exited 0
         35100 collected 0 {"raw_score": 7}
         36000 lease_ended 1
@@ -2669,22 +2673,22 @@ fn score_leases() {
               (tick due at 18210000)
             3000 judge_started 0
             3100 @0 ops
-              reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"lease","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
-            3200 @0 lease_open box
+              reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
+            3200 @0 box.open
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
               open lease 0 of box for job 0, as instance 0, started by 123000
             4000 lease_ready 0
               (tick due at 34000)
-            4100 @0 lease_run 0 - check
+            4100 @0 box.run 0 - check
               reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":29,"cumulative_seconds":null,"commands":null}}
               run command 0 of lease 0, ["check"], with a timeout of None
             34000 tick
               close lease 0
               (tick due at 18210000)
-            34100 @0 lease_open box
-              refuse op 5: `box` has 1 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `lease status` says one has ended
+            34100 @0 box.open
+              refuse op 5: `box` has 1 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `box.status` says one has ended
             34200 lease_ended 0
-            34300 @0 lease_open box
+            34300 @0 box.open
               reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
               open lease 1 of box for job 0, as instance 0, started by 123000
             35000 judge_exited 0

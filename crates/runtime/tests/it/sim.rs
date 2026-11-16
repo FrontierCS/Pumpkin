@@ -40,7 +40,7 @@ use provider::{
 };
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
 use schema::sandbox::op::{
-    JobState, Last, LeaseStatusReply, OpCall, OpReply, StatusReply, TransferStatus,
+    JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
 };
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, Listening, PROTOCOL_VERSION,
@@ -1036,7 +1036,7 @@ enum Step {
         payload: Vec<u8>,
         less: Option<u64>,
     },
-    /// A `status` or a `lease_status` made until its reply gives `state`.
+    /// A `status` or a session's `status` made until its reply gives `state`.
     Await { call: OpCall, state: String },
     /// A model request, whose response's part or end the next step waits for.
     Model {
@@ -1365,15 +1365,15 @@ fn state_name(reply: &OpReply) -> String {
 // A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `judge
 // <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
 // submission, where a payload that is a number is that many bytes of `x`, and any other is its
-// own bytes; `lease_open <grant> [<seconds>]`, `lease_run <lease> <seconds>|- <argv>...`, without
-// a timeout for `-`, `lease_status <lease>` or `lease_close <lease>`; `lease_put <lease> <tree>
-// <to> [replace]` or `lease_get <lease> <from> <to>`. An op is made once the one before it is
-// answered. `ops at least <seconds> less` exits 1 unless the reply's remaining seconds fell by
-// `seconds` since an earlier ops reply.
+// own bytes; `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, without
+// a timeout for `-`, `<session>.status <lease>` or `<session>.close <lease>`; `<session>.put
+// <lease> <tree> <to> [replace]` or `<session>.get <lease> <from> <to>`. An op is made once the one
+// before it is answered. `ops at least <seconds> less` exits 1 unless the reply's remaining seconds
+// fell by `seconds` since an earlier ops reply.
 //
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
-// <lease> <state>` likewise with `lease_status <lease>`; `await_transfer <lease> moved|failed`
-// until its last transfer ended so.
+// <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
+// <lease> moved|failed` until its last transfer ended so.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -1418,18 +1418,17 @@ fn step(arg: &str) -> Step {
             );
             return Step::Await { call, state };
         }
-        [
-            "lease_open" | "lease_run" | "lease_put" | "lease_get" | "lease_status" | "lease_close",
-            ..,
-        ] => (lease_call(&words), Vec::new(), None),
-        ["await_lease", lease, state] => {
-            let lease = lease.parse().unwrap();
-            let (call, state) = (OpCall::LeaseStatus { lease }, state.to_owned());
-            return Step::Await { call, state };
+        [function, ..] if function.contains('.') => (session_call(&words), Vec::new(), None),
+        ["await_lease", grant, lease, state] => {
+            let call = lease_status(grant, lease);
+            return Step::Await {
+                call,
+                state: (*state).to_owned(),
+            };
         }
-        ["await_transfer", lease, end] => {
-            let lease = lease.parse().unwrap();
-            let (call, state) = (OpCall::LeaseStatus { lease }, format!("transfer {end}"));
+        ["await_transfer", grant, lease, end] => {
+            let call = lease_status(grant, lease);
+            let state = format!("transfer {end}");
             return Step::Await { call, state };
         }
         [kind @ ("model" | "chat" | "ask"), model, _, ..] => {
@@ -1466,41 +1465,54 @@ fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
     }
 }
 
-fn lease_call(words: &[&str]) -> OpCall {
+fn lease_status(grant: &str, lease: &str) -> OpCall {
+    OpCall::Session {
+        grant: Name::try_from(grant.to_owned()).unwrap(),
+        op: SessionOp::Status {
+            lease: lease.parse().unwrap(),
+        },
+    }
+}
+
+fn session_call(words: &[&str]) -> OpCall {
+    let (grant, op) = words[0].split_once('.').unwrap();
     let lease = || words[1].parse().unwrap();
-    match words {
-        ["lease_open", grant, seconds @ ..] => OpCall::LeaseOpen {
-            grant: Name::try_from((*grant).to_owned()).unwrap(),
+    let op = match (op, &words[1..]) {
+        ("open", seconds) => SessionOp::Open {
             instance_seconds: seconds.first().map(|seconds| seconds.parse().unwrap()),
         },
-        ["lease_run", _, timeout, command @ ..] => {
+        ("run", [_, timeout, command @ ..]) => {
             let command = command
                 .iter()
                 .map(|&arg| arg.to_owned())
                 .collect::<Vec<_>>();
-            OpCall::LeaseRun {
+            SessionOp::Run {
                 lease: lease(),
                 argv: Argv::try_from(command).unwrap(),
                 timeout_seconds: timeout.parse().ok(),
             }
         }
-        ["lease_put", _, tree, to, replace @ ..] => OpCall::LeasePut {
+        ("put", [_, tree, to, replace @ ..]) => SessionOp::Put {
             lease: lease(),
             tree: AbsolutePath::try_from((*tree).to_owned()).unwrap(),
             to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
             replace: replace == ["replace"],
         },
-        ["lease_get", _, from, to] => OpCall::LeaseGet {
+        ("get", [_, from, to]) => SessionOp::Get {
             lease: lease(),
             from: AbsolutePath::try_from((*from).to_owned()).unwrap(),
             to: AbsolutePath::try_from((*to).to_owned()).unwrap(),
         },
-        ["lease_status", _] => OpCall::LeaseStatus { lease: lease() },
-        ["lease_close", _] => OpCall::LeaseClose { lease: lease() },
+        ("status", [_]) => SessionOp::Status { lease: lease() },
+        ("close", [_]) => SessionOp::Close { lease: lease() },
         _ => panic!(
-            "`{}` is no lease op of the simulated sandboxd's",
+            "`{}` is no session op of the simulated sandboxd's",
             words.join(" ")
         ),
+    };
+    OpCall::Session {
+        grant: Name::try_from(grant.to_owned()).unwrap(),
+        op,
     }
 }
 

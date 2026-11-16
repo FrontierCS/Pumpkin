@@ -32,8 +32,8 @@ use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use schema::sandbox::op::{
     CommandEnd, CommandStatus, Failure, FailureCode, JobState, JudgeReply, Last, LeaseRemaining,
-    LeaseReply, LeaseState, LeaseStatusReply, OpReply, OpsReply, Remaining, Returned, StatusReply,
-    SubmitReply, SubmitState,
+    LeaseReply, LeaseState, LeaseStatusReply, OpReply, OpsReply, Remaining, Returned, SessionOp,
+    StatusReply, SubmitReply, SubmitState,
 };
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -1007,19 +1007,19 @@ fn ops() {
                 ctl status 2
                 ctl status 3
                 ctl judge train big
-                ctl lease open gpu
-                ctl lease open gpu --seconds 30
-                ctl lease open gpu --seconds 0
-                ctl lease run 0 --timeout 5 -- echo -n hi
-                ctl lease run 0 -- sh -c true
-                ctl lease status 0
-                ctl lease put 0 payload /work/in
-                ctl lease put 0 payload /work/in --replace
-                ctl lease get 0 /work/out ../got
-                ctl lease put 0 payload work
-                ctl lease close 0
-                ctl lease run 0
-                ctl lease close
+                ctl call gpu.open
+                ctl call gpu.open --seconds 30
+                ctl call gpu.open --seconds 0
+                ctl call gpu.run 0 --timeout 5 -- echo -n hi
+                ctl call gpu.run 0 -- sh -c true
+                ctl call gpu.status 0
+                ctl call gpu.put 0 payload /work/in
+                ctl call gpu.put 0 payload /work/in --replace
+                ctl call gpu.get 0 /work/out ../got
+                ctl call gpu.put 0 payload work
+                ctl call gpu.close 0
+                ctl call gpu.run 0
+                ctl call gpu.close
                 echo "control socket's directory: $(ls -ld /pumpkin/sandboxctl | cut -c1-10); TCP listeners: $(awk '$4 == "0A"' /proc/net/tcp /proc/net/tcp6 | wc -l)"
                 echo > /.pumpkin/bin/sandboxctl"#
             );
@@ -1051,32 +1051,32 @@ fn ops() {
               {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
             $ sandboxctl judge train big: exit 1
               {"kind":"refused","message":"the payload is 2621441 bytes, more than the limit of 2621440: send at most 2621440"}
-            $ sandboxctl lease open gpu: exit 0
+            $ sandboxctl call gpu.open: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease open gpu --seconds 30: exit 0
+            $ sandboxctl call gpu.open --seconds 30: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease open gpu --seconds 0: exit 1
+            $ sandboxctl call gpu.open --seconds 0: exit 1
               sandboxctl: `0` is not a lease's time: give a whole number of seconds, 1 or more
-            $ sandboxctl lease run 0 --timeout 5 -- echo -n hi: exit 0
+            $ sandboxctl call gpu.run 0 --timeout 5 -- echo -n hi: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease run 0 -- sh -c true: exit 0
+            $ sandboxctl call gpu.run 0 -- sh -c true: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease status 0: exit 0
+            $ sandboxctl call gpu.status 0: exit 0
               {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":5,"busy_seconds":3,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":{"exited":{"code":0}},"stdout":"hi","stderr":""},"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease put 0 payload /work/in: exit 0
+            $ sandboxctl call gpu.put 0 payload /work/in: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease put 0 payload /work/in --replace: exit 0
+            $ sandboxctl call gpu.put 0 payload /work/in --replace: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease get 0 /work/out ../got: exit 0
+            $ sandboxctl call gpu.get 0 /work/out ../got: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease put 0 payload work: exit 1
+            $ sandboxctl call gpu.put 0 payload work: exit 1
               sandboxctl: `work` is a path in the runner, which needs a whole one: start it with `/`
-            $ sandboxctl lease close 0: exit 0
+            $ sandboxctl call gpu.close 0: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
-            $ sandboxctl lease run 0: exit 1
-              sandboxctl: `lease run 0` is no lease op: give `open <grant> [--seconds <seconds>]`, `run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `put <lease> <tree> <to> [--replace]`, `get <lease> <from> <to>`, `status <lease>` or `close <lease>`
-            $ sandboxctl lease close: exit 1
-              sandboxctl: `lease close` is no lease op: give `open <grant> [--seconds <seconds>]`, `run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `put <lease> <tree> <to> [--replace]`, `get <lease> <from> <to>`, `status <lease>` or `close <lease>`
+            $ sandboxctl call gpu.run 0: exit 1
+              sandboxctl: `gpu.run 0` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
+            $ sandboxctl call gpu.close: exit 1
+              sandboxctl: `gpu.close` is no session op: give `gpu.open [--seconds <seconds>]`, `gpu.run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `gpu.put <lease> <tree> <to> [--replace]`, `gpu.get <lease> <from> <to>`, `gpu.status <lease>` or `gpu.close <lease>`
             control socket's directory: drwx------; TCP listeners: 0
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
@@ -1089,15 +1089,15 @@ fn ops() {
             owner: status 2
             owner: status 3
             owner: refused Judge { grant: Name("train") }, over 2621440 bytes
-            owner: lease open gpu, None
-            owner: lease open gpu, Some(30)
-            owner: lease run 0: ["echo","-n","hi"], Some(5)
-            owner: lease run 0: ["sh","-c","true"], None
-            owner: lease status 0
-            owner: lease put 0: /pumpkin/home/payload to /work/in, replace false
-            owner: lease put 0: /pumpkin/home/payload to /work/in, replace true
-            owner: lease get 0: /work/out to /pumpkin/got
-            owner: lease close 0"#]],
+            owner: gpu.open None
+            owner: gpu.open Some(30)
+            owner: gpu.run 0: ["echo","-n","hi"], Some(5)
+            owner: gpu.run 0: ["sh","-c","true"], None
+            owner: gpu.status 0
+            owner: gpu.put 0: /pumpkin/home/payload to /work/in, replace false
+            owner: gpu.put 0: /pumpkin/home/payload to /work/in, replace true
+            owner: gpu.get 0: /work/out to /pumpkin/got
+            owner: gpu.close 0"#]],
     );
 }
 
@@ -1172,7 +1172,7 @@ fn refused_calls() {
             $ sandboxctl status soon: exit 1
               sandboxctl: `soon` is not a job: name one by the number a judge call returned
             $ sandboxctl call train huge: exit 1
-              sandboxctl: unexpected argument: "call": see `sandboxctl --help`
+              sandboxctl: `train` names no session's op: give the session's name, as `ops` lists it, a dot and the op, as `<session>.open`
             $ sandboxctl status 1: exit 0
               {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
@@ -1509,50 +1509,42 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
             (asked, OpReply::Submit(submitted))
         }
         &Op::Status { job } => (format!("status {job}"), status(job, remaining)),
-        lease @ (Op::LeaseOpen { .. }
-        | Op::LeaseRun { .. }
-        | Op::LeasePut { .. }
-        | Op::LeaseGet { .. }
-        | Op::LeaseStatus { .. }
-        | Op::LeaseClose { .. }) => lease_reply(lease),
+        Op::Session { grant, op } => session_reply(grant, op),
     };
     session.reply(incoming, answer, hung()).unwrap();
     asked
 }
 
-fn lease_reply(op: &Op) -> (String, OpReply) {
+fn session_reply(grant: &Name, op: &SessionOp) -> (String, OpReply) {
     match op {
-        Op::LeaseOpen {
-            grant,
-            instance_seconds,
-        } => (
-            format!("lease open {grant}, {instance_seconds:?}"),
-            leased(0),
-        ),
-        Op::LeaseRun {
+        SessionOp::Open { instance_seconds } => {
+            (format!("{grant}.open {instance_seconds:?}"), leased(0))
+        }
+        SessionOp::Run {
             lease,
             argv,
             timeout_seconds,
         } => {
             let asked = format!(
-                "lease run {lease}: {}, {timeout_seconds:?}",
+                "{grant}.run {lease}: {}, {timeout_seconds:?}",
                 serde_json::json!(argv)
             );
             (asked, leased(*lease))
         }
-        Op::LeasePut {
+        SessionOp::Put {
             lease,
             tree,
             to,
             replace,
         } => (
-            format!("lease put {lease}: {tree} to {to}, replace {replace}"),
+            format!("{grant}.put {lease}: {tree} to {to}, replace {replace}"),
             leased(*lease),
         ),
-        Op::LeaseGet { lease, from, to } => {
-            (format!("lease get {lease}: {from} to {to}"), leased(*lease))
-        }
-        &Op::LeaseStatus { lease } => {
+        SessionOp::Get { lease, from, to } => (
+            format!("{grant}.get {lease}: {from} to {to}"),
+            leased(*lease),
+        ),
+        &SessionOp::Status { lease } => {
             let command = CommandStatus {
                 command: 0,
                 end: Some(CommandEnd::Exited(ExitStatus::Code(0))),
@@ -1570,12 +1562,11 @@ fn lease_reply(op: &Op) -> (String, OpReply) {
                 remaining: LEASE_LEFT,
             };
             (
-                format!("lease status {lease}"),
+                format!("{grant}.status {lease}"),
                 OpReply::LeaseStatus(status),
             )
         }
-        &Op::LeaseClose { lease } => (format!("lease close {lease}"), leased(lease)),
-        other => panic!("{other:?} is no lease op"),
+        &SessionOp::Close { lease } => (format!("{grant}.close {lease}"), leased(lease)),
     }
 }
 

@@ -27,7 +27,7 @@ use schema::sandbox::{
     Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
-use schema::workflow::{ByProvider, ByRole, JudgeId, Placed, RoleId, RunnerId, Workflow};
+use schema::workflow::{ByProvider, ByRole, Holder, JudgeId, Placed, RoleId, RunnerId, Workflow};
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
@@ -43,16 +43,17 @@ const PUMPKIN: Limits = Limits {
 };
 
 /// The roles that `provider` hosts, in the phases that [`Provider::reserve`] takes: the work
-/// phase's roles (the agent, the judge of each judge grant, and the runner of each lease grant
+/// phase's roles (the agent, the judge of each judge grant, and the runner of each session
 /// that the others hold), then the scorer's (the scorer and the runners it holds). The second
 /// starts only once the first has ended. A phase with no role on `provider` is left out.
 pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
     let workflow = placed.workflow();
-    let scorer = workflow.score().slot.judge().role();
+    let score = workflow.score().slot.judge();
+    let scorer = score.role();
     let judges = (workflow.judge_grants()).map(|(_, grant)| grant.judge().role());
     let runners = |last: bool| {
-        (workflow.lease_grants())
-            .filter(move |(_, grant)| (grant.holder == scorer) == last)
+        (workflow.sessions())
+            .filter(move |(_, grant)| (grant.holder == Holder::Judge(score)) == last)
             .map(|(_, grant)| grant.runner.role())
     };
     let agent = iter::once(workflow.agent().role);
@@ -74,7 +75,7 @@ pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
 // role's, one.
 fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
     let sandbox = workflow.sandbox(role);
-    let leased = (workflow.lease_grants()).find(|(_, grant)| grant.runner.role() == role);
+    let leased = (workflow.sessions()).find(|(_, grant)| grant.runner.role() == role);
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,

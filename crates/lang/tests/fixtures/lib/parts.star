@@ -11,7 +11,7 @@ AGENT = {
         "stdin": "Solve the task in /task/README.md.\n",
         "deadline_seconds": 3600,
         "finalize_grace_seconds": 0,
-        "grants": [{"submit": {"name": "final"}}],
+        "grants": [{"name": "final", "submit": {}}],
     }},
 }
 

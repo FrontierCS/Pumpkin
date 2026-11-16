@@ -1526,7 +1526,7 @@ fn interrupted_lease_start() {
     // Once a lease's runner is created, of an image whose `sandboxd` never dials, while the agent
     // awaits the lease, it ends the runner's start; the run log records the runner's delete after
     // the interruption, as it does the agent's.
-    let argv = ["ops", "lease_open gpu", "await_lease 0 ready"];
+    let argv = ["ops", "gpu.open", "await_lease gpu 0 ready"];
     let image = sim::image(HUNG);
     interrupted(
         "lease-start",
@@ -2037,7 +2037,7 @@ fn watches_each_provider() {
     ir["roles"].as_array_mut().unwrap().push(near);
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let mut grant = grants[0].clone();
-    grant["judge"]["name"] = json!("near");
+    grant["name"] = json!("near");
     grant["judge"]["role"] = json!("near_judge");
     grants.as_array_mut().unwrap().push(grant);
     // A simulated sandbox that never dials waits on nothing but its start's deadline, so the near
@@ -3449,8 +3449,8 @@ fn lease_workflow(argv: &[&str], deadline: u64, image: &str) -> Value {
     runner["image"] = json!(image);
     runner["runtime"] = json!({ "runner": { "cwd": "/work", "env": ["CUDA=1"] } });
     ir["roles"].as_array_mut().unwrap().push(runner);
-    let grant = json!({ "lease": {
-        "name": "gpu", "role": "gpu_runner", "instances": 2,
+    let grant = json!({ "name": "gpu", "session": {
+        "runner": "gpu_runner", "instances": 2,
         "instance_seconds": 600, "commands": 4, "transfer_bytes": 64,
     } });
     ir["roles"][0]["runtime"]["agent"]["grants"]
@@ -3466,23 +3466,23 @@ const RUNNER: &str = "sha256:333333333333333333333333333333333333333333333333333
 fn leases() {
     let argv = [
         "ops",
-        "lease_open gpu",
+        "gpu.open",
         // Once its runner is ready, which a thread of its own reports, so that the ready comes
         // before these ops in the log, not as the threads happen to run.
-        "await_lease 0 ready",
-        "lease_status 7",
-        "lease_open train",
-        "lease_run 0 - print one",
-        "await_lease 0 ready",
-        "lease_run 0 - fill 30000 two",
-        "await_lease 0 ready",
-        "lease_run 0 1 sleep",
-        "await_lease 0 ready",
-        "lease_close 0",
+        "await_lease gpu 0 ready",
+        "gpu.status 7",
+        "train.open",
+        "gpu.run 0 - print one",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - fill 30000 two",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 1 sleep",
+        "await_lease gpu 0 ready",
+        "gpu.close 0",
         // The lease's end and the agent's ops reach the run's loop from different threads;
         // `closed` is said only once the loop has taken the end, so it comes before the next op.
-        "await_lease 0 closed",
-        "lease_run 0 - print three",
+        "await_lease gpu 0 closed",
+        "gpu.run 0 - print three",
         "finalize submit 6",
     ];
     check_polls(
@@ -3493,7 +3493,7 @@ fn leases() {
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=6]
-            a poll, {"kind":"lease_status","lease":0}, is answered {"kind":"lease_status"}
+            a poll, {"grant":"gpu","kind":"lease_status","lease":0}, is answered {"kind":"lease_status"}
             payloads hold: ["xxxxxx"]
             outcome.json: {"verdict":{"kind":"judged","result":{"returned":{"raw_score":6},"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
@@ -3501,18 +3501,18 @@ fn leases() {
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"you have no lease 7: name one that `lease open` returned"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_status","lease":7}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"`train` is a judge grant, not a lease grant: judge with it instead"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"grant":"train","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"argv":["print","one"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"you have no lease 7: name one that `gpu.open` returned"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"gpu","kind":"lease_status","lease":7}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"`train` is a judge grant, not a session: judge with it instead"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"grant":"train","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":5}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"argv":["print","one"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":7}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"argv":["fill","30000","two"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"argv":["fill","30000","two"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":2,"kind":"run_command","lease":0,"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"argv":["sleep"],"kind":"lease_run","lease":0,"timeout_seconds":1}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":2,"kind":"run_command","lease":0,"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"argv":["sleep"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":1}},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"command":2,"end":"timed_out","kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":11}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":12}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"grant":"gpu","kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":14}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 has ended: open another"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"argv":["print","three"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"lease 0 has ended: open another"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"argv":["print","three"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":15}
             {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":16}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":0,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":18}
@@ -3529,15 +3529,15 @@ fn leases() {
 fn lease_ends() {
     let argv = [
         "ops",
-        "lease_open gpu 1",
-        "await_lease 0 ready",
-        "lease_run 0 - sleep",
+        "gpu.open 1",
+        "await_lease gpu 0 ready",
+        "gpu.run 0 - sleep",
         // A lease is `expired` only once its runner is gone, so its end comes before the next
         // lease's events.
-        "await_lease 0 expired",
-        "lease_open gpu",
-        "await_lease 1 ready",
-        "lease_run 1 - sleep",
+        "await_lease gpu 0 expired",
+        "gpu.open",
+        "await_lease gpu 1 ready",
+        "gpu.run 1 - sleep",
         "submit submit 6",
         "exit",
     ];
@@ -3556,13 +3556,13 @@ fn lease_ends() {
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":1,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"argv":["sleep"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":4}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"argv":["sleep"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":4}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"kind":"tick"},"observed_ns":"<ns>","seq":5}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":7}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":1,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":1,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":1},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":1,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":1,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"argv":["sleep"],"kind":"lease_run","lease":1,"timeout_seconds":null}},"observed_ns":"<ns>","seq":10}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":1,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":0,"kind":"run_command","lease":1,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"argv":["sleep"],"grant":"gpu","kind":"lease_run","lease":1,"timeout_seconds":null}},"observed_ns":"<ns>","seq":10}
             {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"stored"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"finalize":false,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":11}
             {"actions":[{"kind":"close_lease","lease":1},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":12}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
@@ -3583,11 +3583,11 @@ fn lease_ends() {
 fn lease_unstarted() {
     let argv = [
         "ops",
-        "lease_open gpu",
-        "await_lease 0 failed",
-        "lease_status 0",
-        "lease_open gpu",
-        "await_lease 1 failed",
+        "gpu.open",
+        "await_lease gpu 0 failed",
+        "gpu.status 0",
+        "gpu.open",
+        "await_lease gpu 1 failed",
         "finalize submit 6",
     ];
     let image = sim::image(LOST);
@@ -3629,28 +3629,28 @@ fn lease_unstarted() {
 fn lease_transfers() {
     let argv = [
         "ops",
-        "lease_open gpu",
-        "await_lease 0 ready",
-        "lease_put 0 /workspace/.codex /work/in",
-        "await_transfer 0 moved",
-        "lease_run 0 - list /work/in",
-        "await_lease 0 ready",
-        "lease_put 0 /workspace/.codex /work/in",
-        "await_transfer 0 failed",
-        "lease_get 0 /pumpkin/log/1 /pumpkin/out/got",
-        "await_transfer 0 moved",
-        "lease_get 0 /work/in /pumpkin/out/back",
-        "await_transfer 0 moved",
-        "lease_put 0 /pumpkin/log /work/in replace",
-        "await_transfer 0 moved",
-        "lease_get 0 /work/in /pumpkin/out/replaced",
-        "await_transfer 0 moved",
-        "lease_put 0 /workspace/big /work/big",
-        "await_transfer 0 failed",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.put 0 /workspace/.codex /work/in",
+        "await_transfer gpu 0 moved",
+        "gpu.run 0 - list /work/in",
+        "await_lease gpu 0 ready",
+        "gpu.put 0 /workspace/.codex /work/in",
+        "await_transfer gpu 0 failed",
+        "gpu.get 0 /pumpkin/log/1 /pumpkin/out/got",
+        "await_transfer gpu 0 moved",
+        "gpu.get 0 /work/in /pumpkin/out/back",
+        "await_transfer gpu 0 moved",
+        "gpu.put 0 /pumpkin/log /work/in replace",
+        "await_transfer gpu 0 moved",
+        "gpu.get 0 /work/in /pumpkin/out/replaced",
+        "await_transfer gpu 0 moved",
+        "gpu.put 0 /workspace/big /work/big",
+        "await_transfer gpu 0 failed",
         "finalize submit 6",
     ];
     let mut ir = lease_workflow(&argv, 30, RUNNER);
-    let lease = &mut ir["roles"][0]["runtime"]["agent"]["grants"][1]["lease"];
+    let lease = &mut ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"];
     lease["commands"] = json!(8);
     lease["transfer_bytes"] = json!(256);
     let blob = json!({ "path": "/workspace/big/blob", "mode": "0644", "content": "x".repeat(256) });
@@ -3681,21 +3681,21 @@ fn lease_transfers() {
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
         {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":8,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":7,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":4}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":5}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"argv":["list","/work/in"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":6,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"argv":["list","/work/in"],"grant":"gpu","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
         {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":7}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":2}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":8}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":5,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":2}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/.codex"}},"observed_ns":"<ns>","seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"putting the tree at /work/in in the runner failed: /work/in: File exists (os error 17): the tree's root becomes /work/in, which must not exist: give `--replace` to replace it"},"kind":"transfer_ended","lease":0,"transfer":2},"observed_ns":"<ns>","seq":9}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":3}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"from":"/pumpkin/log/1","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"<ns>","seq":10}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":3}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"from":"/pumpkin/log/1","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/got"}},"observed_ns":"<ns>","seq":10}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":145,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":3},"observed_ns":"<ns>","seq":11}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":4}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/back"}},"observed_ns":"<ns>","seq":12}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":4}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"from":"/work/in","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/back"}},"observed_ns":"<ns>","seq":12}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":38,"entries":7}},"kind":"transfer_ended","lease":0,"transfer":4},"observed_ns":"<ns>","seq":13}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"replace","kind":"transfer","lease":0,"max_bytes":256,"transfer":5}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"kind":"lease_put","lease":0,"replace":true,"to":"/work/in","tree":"/pumpkin/log"}},"observed_ns":"<ns>","seq":14}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":2,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"replace","kind":"transfer","lease":0,"max_bytes":256,"transfer":5}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":6,"request":{"grant":"gpu","kind":"lease_put","lease":0,"replace":true,"to":"/work/in","tree":"/pumpkin/log"}},"observed_ns":"<ns>","seq":14}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":5},"observed_ns":"<ns>","seq":15}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":6}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"from":"/work/in","kind":"lease_get","lease":0,"to":"/pumpkin/out/replaced"}},"observed_ns":"<ns>","seq":16}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":1,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"get","kind":"transfer","lease":0,"max_bytes":256,"transfer":6}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":7,"request":{"from":"/work/in","grant":"gpu","kind":"lease_get","lease":0,"to":"/pumpkin/out/replaced"}},"observed_ns":"<ns>","seq":16}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":9,"entries":1}},"kind":"transfer_ended","lease":0,"transfer":6},"observed_ns":"<ns>","seq":17}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":7}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/big","tree":"/workspace/big"}},"observed_ns":"<ns>","seq":18}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":0,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":256,"transfer":7}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":8,"request":{"grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/big","tree":"/workspace/big"}},"observed_ns":"<ns>","seq":18}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"collecting /workspace/big failed: the tree's files hold more than 256 bytes"},"kind":"transfer_ended","lease":0,"transfer":7},"observed_ns":"<ns>","seq":19}
         {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":9,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":20}
         {"actions":[{"kind":"close_lease","lease":0},{"kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":21}
@@ -3717,20 +3717,20 @@ fn lease_transfers() {
 fn transfer_cut() {
     let argv = [
         "ops",
-        "lease_open gpu",
-        "await_lease 0 ready",
-        "lease_put 0 /workspace/held /work/in",
+        "gpu.open",
+        "await_lease gpu 0 ready",
+        "gpu.put 0 /workspace/held /work/in",
         "ops",
-        "lease_close 0",
+        "gpu.close 0",
         // The close's reply comes before its stop reaches the lease, and an op's reply after the
         // actions of the op before, so that the tree arrives only once the stop has, not as the
         // threads happen to run.
-        "lease_status 0",
+        "gpu.status 0",
         "release",
-        "await_transfer 0 failed",
+        "await_transfer gpu 0 failed",
         // The lease's end and the agent's exit reach the run's loop from different threads;
         // `closed` is said only once the loop has taken the end, so the end comes before the exit.
-        "await_lease 0 closed",
+        "await_lease gpu 0 closed",
         "finalize submit 6",
     ];
     let shown = executed(
@@ -3751,9 +3751,9 @@ fn transfer_cut() {
         {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
         {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":4,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"grant":"gpu","holder":"agent","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"gpu","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":2}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":3}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/held"}},"observed_ns":"<ns>","seq":4}
-        {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":2,"kind":"lease","name":"gpu","remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1},"transfer_bytes":64},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":5}
-        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":6}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"grant":"gpu","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/workspace/held"}},"observed_ns":"<ns>","seq":4}
+        {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"judge","max_bytes":8,"name":"train"},{"commands":4,"cumulative_seconds":null,"instance_seconds":600,"instances":2,"kind":"session","name":"gpu","remaining":{"commands":3,"cumulative_seconds":null,"instance_seconds":600,"instances":1},"transfer_bytes":64},{"kind":"submit","max_bytes":16,"name":"submit"}],"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"kind":"ops"}},"observed_ns":"<ns>","seq":5}
+        {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":3,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":1}}},{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"grant":"gpu","kind":"lease_close","lease":0}},"observed_ns":"<ns>","seq":6}
         {"actions":[],"at_ns":"<ns>","event":{"end":{"failed":"the lease's end cut the transfer short: collecting /workspace/held failed: stopped before the tree was whole"},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":7}
         {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":8}
         {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":9}
@@ -3778,32 +3778,31 @@ fn judge_lease_workflow(argv: &[&str], judge: usize, judge_argv: &[&str]) -> Val
     runner["image"] = json!(sim::image(DAWDLING));
     runner["runtime"] = json!({ "runner": { "cwd": "/work" } });
     ir["roles"].as_array_mut().unwrap().push(runner);
-    ir["roles"][judge]["runtime"]["judge"]["lease_grants"] = json!([{
-        "name": "box", "role": "box", "instances": 1, "instance_seconds": 60,
-        "transfer_bytes": 64,
-    }]);
+    ir["roles"][judge]["runtime"]["judge"]["sessions"] = json!([{ "name": "box", "session": {
+        "runner": "box", "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
+    } }]);
     ir
 }
 
 const LEASING_JUDGE: [&str; 8] = [
     "ops",
-    "lease_open box",
-    "await_lease 0 ready",
-    "lease_put 0 /pumpkin/in/payload /work/in",
-    "await_transfer 0 moved",
-    "lease_run 0 - print 7",
-    "await_lease 0 ready",
+    "box.open",
+    "await_lease box 0 ready",
+    "box.put 0 /pumpkin/in/payload /work/in",
+    "await_transfer box 0 moved",
+    "box.run 0 - print 7",
+    "await_lease box 0 ready",
     "result",
 ];
 
-// The agent, which names the call's lease, is refused, as no lease of its own has that number.
+// The agent, which names the call's session, is refused, as it holds none of that name.
 #[test]
 fn judge_leases() {
     let argv = [
         "ops",
         "judge train 6",
         "await 0 completed",
-        "lease_status 0",
+        "box.status 0",
         "finalize submit 6",
     ];
     check(
@@ -3823,16 +3822,16 @@ fn judge_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"grant":"box","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":6}
             {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":7}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["print","7"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["print","7"],"grant":"box","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":9}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_collected","result":{"returned":{"raw_score":7},"values":[{"name":"score","value":7}]}},"observed_ns":"<ns>","seq":12}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"lease-0"},"seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ended","lease":0},"observed_ns":"<ns>","seq":14}
-            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"you have no lease 0: name one that `lease open` returned"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":15}
+            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"you hold no grant named `box`: call one that `ops` lists"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"grant":"box","kind":"lease_status","lease":0}},"observed_ns":"<ns>","seq":15}
             {"actions":[{"kind":"reply","reply":{"kind":"submit","remaining_seconds":"<s>","state":"accepted"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"finalize":true,"grant":"submit","kind":"submit","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":16}
             {"actions":[{"kind":"tear_down_agent"},{"grant":null,"job":1,"kind":"start_judge","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":17}
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":18}
@@ -3867,9 +3866,9 @@ fn score_leases() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":6}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":8}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":9}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"direction":"put","kind":"transfer","lease":0,"max_bytes":64,"transfer":0}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"grant":"box","kind":"lease_put","lease":0,"replace":false,"to":"/work/in","tree":"/pumpkin/in/payload"}},"observed_ns":"<ns>","seq":9}
             {"actions":[],"at_ns":"<ns>","event":{"end":{"moved":{"bytes":15,"entries":2}},"kind":"transfer_ended","lease":0,"transfer":0},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["print","7"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":11}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":1,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":3,"request":{"argv":["print","7"],"grant":"box","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":11}
             {"actions":[],"at_ns":"<ns>","event":{"command":1,"end":{"exited":{"code":0}},"kind":"command_ended","lease":0},"observed_ns":"<ns>","seq":12}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":14}
@@ -3884,7 +3883,7 @@ fn score_leases() {
 // then.
 #[test]
 fn lease_starts_by_its_holders_end() {
-    let judge = ["ops", "lease_open box"];
+    let judge = ["ops", "box.open"];
     let argv = [
         "ops",
         "judge train 6",
@@ -3931,9 +3930,9 @@ fn lease_starts_by_its_holders_end() {
 fn judge_exits_leasing() {
     let judge = [
         "ops",
-        "lease_open box",
-        "await_lease 0 ready",
-        "lease_run 0 - sleep",
+        "box.open",
+        "await_lease box 0 ready",
+        "box.run 0 - sleep",
     ];
     let argv = [
         "ops",
@@ -3958,7 +3957,7 @@ fn judge_exits_leasing() {
             {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"judge_started"},"observed_ns":"<ns>","seq":3}
             {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"grant":"box","holder":"job-0","instance":0,"kind":"start_lease","lease":0,"start_by_ns":"<ns>"}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":1,"request":{"grant":"box","instance_seconds":null,"kind":"lease_open"}},"observed_ns":"<ns>","seq":4}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"lease_ready","lease":0},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"argv":["sleep"],"kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","reply":{"kind":"lease","lease":0,"remaining":{"commands":null,"cumulative_seconds":"<s>","instance_seconds":"<s>","instances":0}}},{"command":0,"kind":"run_command","lease":0,"timeout_ns":null}],"at_ns":"<ns>","event":{"caller":"job-0","kind":"op_arrived","op":2,"request":{"argv":["sleep"],"grant":"box","kind":"lease_run","lease":0,"timeout_seconds":null}},"observed_ns":"<ns>","seq":6}
             {"actions":[{"kind":"close_lease","lease":0}],"at_ns":"<ns>","event":{"job":0,"kind":"judge_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"invalid":"the judge wrote no result: write it at /pumpkin/out/result.json","job":0,"kind":"judge_collected"},"observed_ns":"<ns>","seq":9}

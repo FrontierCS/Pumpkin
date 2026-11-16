@@ -28,7 +28,7 @@ workflow(
             "image": agent["image"],
             "user": {"uid": 1000, "gid": 1000},
             "needs": {"cpu_millis": 1000, "memory_bytes": 1 * GiB},
-            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"submit": {"name": "final"}}]}},
+            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"name": "final", "submit": {}}]}},
         },
         {
             "name": "judge",

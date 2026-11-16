@@ -1705,62 +1705,62 @@ fn send_by_content() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 2.0 KiB
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        the calls: query, query, receive, start
-        the store:
-          .pumpkinversion: 444, 2 links
-          PUMPKIN.star: 444, 1 link
-          Pumpkin's bundle: 444, 2 links
-          pumpkin, to run: 555, 2 links
-          pumpkin: 444, 1 link
-          stand-in/CLAUDE.md: 444, 1 link
-          stand-in/Dockerfile: 444, 1 link
-          stand-in/empty: 444, 1 link
-          stand-in/run.sh: 444, 1 link
-          stand-in/task.star: 444, 1 link
-          stand-in/with space.txt: 444, 1 link
-          a manifest: the task's tree
-          a manifest: a tree of no files
-          incoming/: none
-        the job's tree:
-          .pumpkin: a symbolic link to <scratch>/home/.pumpkin
-          .pumpkinversion: a link of its blob, 444
-          PUMPKIN.star: a link of its blob, 444
-          pumpkin: a link of its blob's copy to run, 555
-          stand-in/CLAUDE.md: a symbolic link to Dockerfile
-          stand-in/Dockerfile: a link of its blob, 444
-          stand-in/empty: a link of its blob, 444
-          stand-in/run.sh: a link of its blob's copy to run, 555
-          stand-in/task.star: a link of its blob, 444
-          stand-in/with space.txt: a link of its blob, 444
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` holds all 9 of the task's files
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        the calls: query, start
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 13 bytes
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>
-        the calls: query, query, receive, start"#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 2.0 KiB
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: query, query, receive, start
+            the store:
+              .pumpkinversion: 444, 2 links
+              PUMPKIN.star: 444, 1 link
+              Pumpkin's bundle: 444, 2 links
+              pumpkin, to run: 555, 2 links
+              pumpkin: 444, 1 link
+              stand-in/CLAUDE.md: 444, 1 link
+              stand-in/Dockerfile: 444, 1 link
+              stand-in/empty: 444, 1 link
+              stand-in/run.sh: 444, 1 link
+              stand-in/task.star: 444, 1 link
+              stand-in/with space.txt: 444, 1 link
+              a manifest: a tree of no files
+              a manifest: the task's tree
+              incoming/: none
+            the job's tree:
+              .pumpkin: a symbolic link to <scratch>/home/.pumpkin
+              .pumpkinversion: a link of its blob, 444
+              PUMPKIN.star: a link of its blob, 444
+              pumpkin: a link of its blob's copy to run, 555
+              stand-in/CLAUDE.md: a symbolic link to Dockerfile
+              stand-in/Dockerfile: a link of its blob, 444
+              stand-in/empty: a link of its blob, 444
+              stand-in/run.sh: a link of its blob's copy to run, 555
+              stand-in/task.star: a link of its blob, 444
+              stand-in/with space.txt: a link of its blob, 444
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` holds all 9 of the task's files
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: query, start
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 13 bytes
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: query, query, receive, start"#]],
     );
 }
 
@@ -1880,7 +1880,7 @@ fn send_carries_on() {
               <id>
             the calls: query, query, receive, receive, query, receive, start
             over 0, 16777216 bytes: stand-in/big.bin 00000 (16777216)
-            over 1, 1050685 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1874), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 1050687 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1876), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
               stand-in/big.bin: 444, 1 link
               incoming/: none"#]],
     );
@@ -1924,7 +1924,7 @@ fn send_over_streams() {
           <id>
         the calls: query, query, receive, receive, receive, start
         over 0, 16777216 bytes: stand-in/a.bin 00000 (16777216)
-        over 1, 8390717 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1874), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+        over 1, 8390719 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1876), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
         over 2, 9437184 bytes: stand-in/c.bin 00000 (5242880), stand-in/a.bin 00001 (4194304)
         the store:
           .pumpkinversion: 444, 2 links

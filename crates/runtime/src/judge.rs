@@ -14,7 +14,7 @@ use schema::sandbox::{
     OpPayloadLimit, RESULT_MAX_BYTES, dir_mode, evidence_dir, file_mode, log_dir, out_dir,
     pumpkin_dir, result_file, slot_dir, slot_payload,
 };
-use schema::workflow::{Judge, SlotId};
+use schema::workflow::{Holder, Judge, SlotId};
 use stdx::Context;
 
 use super::child::{Child, Message, Report};
@@ -43,10 +43,10 @@ enum Ended {
 
 pub(super) fn run<H: Host>(call: &Call, child: &mut Child<'_, H, OpReply>) {
     let workflow = child.sandboxes.workflow();
-    let role = call.slot.judge().role();
-    // A judge's ops carry no payload: it holds lease grants alone.
-    let ops = (workflow.lease_grants())
-        .any(|(_, grant)| grant.holder == role)
+    let holder = Holder::Judge(call.slot.judge());
+    // A judge's ops carry no payload: it holds sessions alone.
+    let ops = (workflow.sessions())
+        .any(|(_, grant)| grant.holder == holder)
         .then_some(OpPayloadLimit::NONE);
     super::child::run(child, ops, |child, session| judge(call, child, session));
 }

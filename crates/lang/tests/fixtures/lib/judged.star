@@ -74,14 +74,13 @@ def judged_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mod
                     "deadline_seconds": 5 * 3600,
                     "finalize_grace_seconds": int(env.get("GRACE", "60")),
                     "grants": [
-                        {"judge": {
-                            "name": "train",
+                        {"name": "train", "judge": {
                             "role": "train_judge",
                             "slot": "payload",
                             "calls": _calls(calls),
                             "call_timeout_seconds": 600,
                         }},
-                        {"submit": {"name": "final"}},
+                        {"name": "final", "submit": {}},
                     ],
                 } | egress},
             },

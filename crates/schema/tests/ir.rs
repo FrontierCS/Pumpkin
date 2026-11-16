@@ -1053,10 +1053,34 @@ fn broken_references() {
         &expect![[r#"
             /roles/3/name: `train_judge` also names /roles/1: give each a unique name
             /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
-            /roles/0/runtime/agent/grants/2/judge/name: `train` also names /roles/0/runtime/agent/grants/0/judge: give each a unique name
+            /roles/0/runtime/agent/grants/2/name: `train` also names /roles/0/runtime/agent/grants/0: give each a unique name
             /roles/0/runtime/agent/grants/0/judge/role: no role is named `ghost`: name one listed in `roles`
             /roles/0/runtime/agent/grants/2/judge/slot: `train_judge` has no slot named `submission`: name one of its slots
             /score/role: `agent` is an agent: name a judge"#]],
+    );
+}
+
+#[test]
+fn grant_forms() {
+    let with = |change: fn(&mut Value)| {
+        let mut ir = fixture();
+        change(&mut ir["roles"][0]["runtime"]["agent"]["grants"][0]);
+        ir
+    };
+    check(
+        [
+            with(|grant| grant["submit"] = json!({})),
+            with(|grant| *grant = json!({ "name": "train", "lease": {} })),
+            with(|grant| *grant = json!({ "name": "train" })),
+            with(|grant| {
+                grant.as_object_mut().unwrap().remove("name");
+            }),
+        ],
+        &expect![[r#"
+            `submit` follows `judge`, the function's kind: give a grant its `name` and one function
+            unknown variant `lease`, expected one of `judge`, `session`, `submit`
+            the grant gives no function: give one, under its kind's key
+            missing field `name`"#]],
     );
 }
 
@@ -1069,8 +1093,8 @@ fn leasing() -> Value {
     runner["image"] = json!(format!("sha256:{}", "3".repeat(64)));
     runner["runtime"] = json!({ "runner": { "cwd": "/work", "env": ["CUDA=1"] } });
     ir["roles"].as_array_mut().unwrap().push(runner);
-    let grant = json!({ "lease": {
-        "name": "gpu", "role": "gpu", "instances": 2, "instance_seconds": 900,
+    let grant = json!({ "name": "gpu", "session": {
+        "runner": "gpu", "instances": 2, "instance_seconds": 900,
         "cumulative_seconds": 1200, "commands": 32, "transfer_bytes": 1_048_576,
     } });
     ir["roles"][0]["runtime"]["agent"]["grants"]
@@ -1083,10 +1107,10 @@ fn leasing() -> Value {
 #[test]
 fn broken_leases() {
     let mut judged = leasing();
-    judged["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["role"] = json!("train_judge");
+    judged["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("train_judge");
     let mut twice = leasing();
     let mut again = twice["roles"][0]["runtime"]["agent"]["grants"][1].clone();
-    again["lease"]["name"] = json!("again");
+    again["name"] = json!("again");
     twice["roles"][0]["runtime"]["agent"]["grants"]
         .as_array_mut()
         .unwrap()
@@ -1099,16 +1123,16 @@ fn broken_leases() {
     let mut judge_image = leasing();
     judge_image["roles"][3]["image"] = judge_image["roles"][2]["image"].clone();
     let mut ghost = leasing();
-    ghost["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["role"] = json!("ghost");
+    ghost["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("ghost");
     let mut scored = leasing();
     scored["score"]["role"] = json!("gpu");
     let mut agent = leasing();
-    agent["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["role"] = json!("agent");
+    agent["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("agent");
     let mut huge = leasing();
-    huge["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["transfer_bytes"] =
+    huge["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["transfer_bytes"] =
         json!(MAX_TRANSFER_BYTES + 1);
     let mut most = leasing();
-    most["roles"][0]["runtime"]["agent"]["grants"][1]["lease"]["transfer_bytes"] =
+    most["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["transfer_bytes"] =
         json!(MAX_TRANSFER_BYTES);
     check(
         [
@@ -1125,17 +1149,17 @@ fn broken_leases() {
         ],
         &expect![[r#"
             parsed
-            /roles/0/runtime/agent/grants/1/lease/role: `train_judge` is a judge: name a runner
-            /roles/3: `gpu` is a runner that no lease grant names: name it from one
-            /roles/0/runtime/agent/grants/3/lease/role: `gpu` is named by `agent`'s lease grant `gpu` and `agent`'s `again`: name each runner from one grant
-            /roles/3: `gpu` is a runner that no lease grant names: name it from one
-            /roles/0/runtime/agent/grants/1/lease/role: `gpu` runs judge `train_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
-            /roles/0/runtime/agent/grants/1/lease/role: no role is named `ghost`: name one listed in `roles`
-            /roles/3: `gpu` is a runner that no lease grant names: name it from one
+            /roles/0/runtime/agent/grants/1/session/runner: `train_judge` is a judge: name a runner
+            /roles/3: `gpu` is a runner that no session names: name it from one
+            /roles/0/runtime/agent/grants/3/session/runner: `gpu` is named by `agent`'s session `gpu` and `agent`'s `again`: name each runner from one session
+            /roles/3: `gpu` is a runner that no session names: name it from one
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs judge `train_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge has
+            /roles/0/runtime/agent/grants/1/session/runner: no role is named `ghost`: name one listed in `roles`
+            /roles/3: `gpu` is a runner that no session names: name it from one
             /score/role: `gpu` is a runner: name a judge
-            /roles/0/runtime/agent/grants/1/lease/role: `agent` is an agent: name a runner
-            /roles/3: `gpu` is a runner that no lease grant names: name it from one
-            /roles/0/runtime/agent/grants/1/lease/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
+            /roles/0/runtime/agent/grants/1/session/runner: `agent` is an agent: name a runner
+            /roles/3: `gpu` is a runner that no session names: name it from one
+            /roles/0/runtime/agent/grants/1/session/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
             parsed"#]],
     );
 }
@@ -1148,10 +1172,9 @@ fn judge_leasing() -> Value {
     checker["name"] = json!("checker");
     checker["image"] = ir["roles"][2]["image"].clone();
     ir["roles"].as_array_mut().unwrap().push(checker);
-    ir["roles"][2]["runtime"]["judge"]["lease_grants"] = json!([{
-        "name": "box", "role": "checker", "instances": 1, "instance_seconds": 60,
-        "transfer_bytes": 64,
-    }]);
+    ir["roles"][2]["runtime"]["judge"]["sessions"] = json!([{ "name": "box", "session": {
+        "runner": "checker", "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
+    } }]);
     ir
 }
 
@@ -1162,21 +1185,21 @@ fn judge_leases() {
     same_image["roles"][3]["image"] = image.clone();
     same_image["roles"][4]["image"] = image;
     let mut both = judge_leasing();
-    both["roles"][2]["runtime"]["judge"]["lease_grants"][0]["role"] = json!("gpu");
+    both["roles"][2]["runtime"]["judge"]["sessions"][0]["session"]["runner"] = json!("gpu");
     let mut twice = judge_leasing();
-    let grants = &mut twice["roles"][2]["runtime"]["judge"]["lease_grants"];
+    let grants = &mut twice["roles"][2]["runtime"]["judge"]["sessions"];
     let mut again = grants[0].clone();
-    again["role"] = json!("train_judge");
+    again["session"]["runner"] = json!("train_judge");
     grants.as_array_mut().unwrap().insert(0, again);
     check(
         [judge_leasing(), same_image, both, twice],
         &expect![[r#"
             parsed
             parsed
-            /roles/2/runtime/judge/lease_grants/0/role: `gpu` is named by `agent`'s lease grant `gpu` and `final_judge`'s `box`: name each runner from one grant
-            /roles/4: `checker` is a runner that no lease grant names: name it from one
-            /roles/2/runtime/judge/lease_grants/1/name: `box` also names /roles/2/runtime/judge/lease_grants/0: give each a unique name
-            /roles/2/runtime/judge/lease_grants/0/role: `train_judge` is a judge: name a runner"#]],
+            /roles/2/runtime/judge/sessions/0/session/runner: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
+            /roles/4: `checker` is a runner that no session names: name it from one
+            /roles/2/runtime/judge/sessions/1/name: `box` also names /roles/2/runtime/judge/sessions/0: give each a unique name
+            /roles/2/runtime/judge/sessions/0/session/runner: `train_judge` is a judge: name a runner"#]],
     );
 }
 
@@ -1189,9 +1212,9 @@ fn broken_roles() {
     ir["roles"][2]["runtime"]["judge"]["egress"] =
         ir["roles"][0]["runtime"]["agent"]["egress"].clone();
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
-    let submit = json!({ "submit": { "name": "resubmit" } });
+    let submit = json!({ "name": "resubmit", "submit": {} });
     let mut retrain = grants[0].clone();
-    retrain["judge"]["name"] = json!("retrain");
+    retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
     grants[0]["judge"]["slot"] = json!("submission");
     ir["score"]["role"] = json!("train_judge");

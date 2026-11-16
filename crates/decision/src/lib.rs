@@ -25,8 +25,8 @@ use core::time::Duration;
 
 use schema::ir::{AbsolutePath, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
-use schema::sandbox::op::{CommandEnd, OpReply, TransferEnd};
-use schema::workflow::{JudgeCall, LeaseGrantId, Placed, Workflow};
+use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
+use schema::workflow::{JudgeCall, Placed, SessionId, Workflow};
 
 mod jobs;
 mod leases;
@@ -85,34 +85,8 @@ pub enum Request {
     },
     /// See [`OpCall::Status`](schema::sandbox::op::OpCall::Status).
     Status { job: u64 },
-    /// See [`OpCall::LeaseOpen`](schema::sandbox::op::OpCall::LeaseOpen).
-    LeaseOpen {
-        grant: Name,
-        instance_seconds: Option<NonZeroU64>,
-    },
-    /// See [`OpCall::LeaseRun`](schema::sandbox::op::OpCall::LeaseRun).
-    LeaseRun {
-        lease: u64,
-        argv: Argv,
-        timeout_seconds: Option<NonZeroU64>,
-    },
-    /// See [`OpCall::LeasePut`](schema::sandbox::op::OpCall::LeasePut).
-    LeasePut {
-        lease: u64,
-        tree: AbsolutePath,
-        to: AbsolutePath,
-        replace: bool,
-    },
-    /// See [`OpCall::LeaseGet`](schema::sandbox::op::OpCall::LeaseGet).
-    LeaseGet {
-        lease: u64,
-        from: AbsolutePath,
-        to: AbsolutePath,
-    },
-    /// See [`OpCall::LeaseStatus`](schema::sandbox::op::OpCall::LeaseStatus).
-    LeaseStatus { lease: u64 },
-    /// See [`OpCall::LeaseClose`](schema::sandbox::op::OpCall::LeaseClose).
-    LeaseClose { lease: u64 },
+    /// See [`OpCall::Session`](schema::sandbox::op::OpCall::Session).
+    Session { grant: Name, op: SessionOp },
 }
 
 /// What the runtime observed.
@@ -213,7 +187,7 @@ pub enum Action {
     StartLease {
         lease: LeaseId,
         holder: Caller,
-        grant: LeaseGrantId,
+        grant: SessionId,
         instance: u32,
         start_by: Duration,
     },

@@ -502,10 +502,7 @@ fn reads_unended_commands() {
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
-    let ir = solver(serde_json::json!([
-        { "lease": lease("stopped") },
-        { "lease": lease("expired") },
-    ]));
+    let ir = solver(serde_json::json!([lease("stopped"), lease("expired")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
     let provided = serde_json::json!({ "roles": {
@@ -622,11 +619,11 @@ fn solver(grants: Value) -> Value {
     ir
 }
 
-/// A lease grant `name` of the runner of that name.
+/// A session `name` of the runner of that name.
 fn lease(name: &str) -> Value {
-    serde_json::json!({
-        "name": name, "role": name, "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
-    })
+    serde_json::json!({ "name": name, "session": {
+        "runner": name, "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
+    } })
 }
 
 #[test]
@@ -637,9 +634,9 @@ fn reads_core_times() {
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let train = serde_json::json!({
-        "name": "train", "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
+        "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
     });
-    let ir = solver(serde_json::json!([{ "judge": train }, { "lease": lease("runner") }]));
+    let ir = solver(serde_json::json!([{ "name": "train", "judge": train }, lease("runner")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
     let provided = serde_json::json!({ "roles": {
