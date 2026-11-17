@@ -744,9 +744,9 @@ impl View {
         Ok(run_json(held, named.as_deref(), again))
     }
 
-    /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave: only
-    /// `end` and `live` if nothing, else with the run, the records from `log` on in a window, and
-    /// `next`, the byte to ask from next.
+    /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave: `end`
+    /// and `live`, with the run if it is live or the log gained, and, if it gained, the records
+    /// from `log` on in a window, and `next`, the byte to ask from next.
     fn since_json(
         &mut self,
         id: &RunTag,
@@ -758,8 +758,16 @@ impl View {
         let end = held.fold.taken();
         let live = held.ending.is_none();
         let from = line_at(held, log, log_epoch)?;
-        if log == end {
+        if log == end && !live {
             return Ok(json!({ "end": end, "live": live }));
+        }
+        if log == end {
+            // A live run's clock goes on while its log is quiet, as on a long call.
+            return Ok(json!({
+                "end": end,
+                "live": live,
+                "run": run_json(held, named.as_deref(), again),
+            }));
         }
         let Window { records, past } = window(held, from)?;
         Ok(json!({

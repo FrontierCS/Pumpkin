@@ -676,7 +676,12 @@ fn follows_a_live_run() {
         answered[0],
         answered[answered.len() - 1]
     ));
-    said.push(format!("then: {}\n{}", nothing.0, nothing.1));
+    let quiet: Value = serde_json::from_str(&nothing.1).unwrap();
+    let clock = quiet["run"]["times"]["now"].is_f64();
+    said.push(format!(
+        "then: {}, end {}, live {}, the run's end {} and its clock on: {clock}",
+        nothing.0, quiet["end"], quiet["live"], quiet["run"]["end"],
+    ));
     said.push(format!("once ended: {ended}"));
     check(
         &scratch,
@@ -706,8 +711,7 @@ fn follows_a_live_run() {
             took: {"count":1500,"median":0.0}
 
             the agent's lane: answers {"count":1500,"failed":0}, 500 times of them, the first 1.0 and the last 1497.0
-            then: HTTP/1.1 200 OK
-            {"end":431109,"live":true}
+            then: HTTP/1.1 200 OK, end 431109, live true, the run's end 431109 and its clock on: true
             once ended: {"end":431109,"live":false}"#]],
     );
 }
