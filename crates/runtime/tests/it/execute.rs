@@ -3489,7 +3489,7 @@ fn calling_workflow(argv: &[&str], deadline: u64) -> Value {
 
 const RUNNER_TOO: &str = "sha256:4444444444444444444444444444444444444444444444444444444444444444";
 
-// A now call whose argument doesn't read, or whose body fails or nests deeper than the record
+// A now call whose argument doesn't read, or whose body fails or returns more than the record
 // holds, is refused; one answered at once applies its body's effects in the call's step.
 #[test]
 fn now_calls() {
@@ -3498,14 +3498,21 @@ fn now_calls() {
         "call submit 6 finalize=yes",
         "call broken 6",
         "call too_deep 6",
+        "call too_large 6",
         "call submit 6",
         "call submit 6 finalize=true",
     ];
+    let mut ir = calling_workflow(&argv, 30);
+    let body = json!({ "file": "//check.star", "def": "large" });
+    (ir["roles"][0]["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap())
+    .push(json!({ "name": "too_large", "now": { "body": body, "payload_max_bytes": 8 } }));
     check(
         &System,
         "now-calls",
         &[(PROVIDER, &Sim::new())],
-        &calling_workflow(&argv, 30),
+        &ir,
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=6]
@@ -3517,18 +3524,19 @@ fn now_calls() {
             {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"evaluated":{"unread":"`--arg finalize` is `\"yes\"`, which is no bool: give it `true` or `false`"},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
             {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"the call's body failed: the run's record says why"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":1,"request":{"evaluated":{"failed":"the tests have no body `broken`"},"grant":"broken","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
             {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"the call's body failed: the run's record says why"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"evaluated":{"failed":"the body's return nests lists, tuples and dicts more than 120 deep, its dict included: nest them at most that deep"},"grant":"too_deep","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":4}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"stored"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"evaluated":{"effects":["select"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":5}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"evaluated":{"effects":["select","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
-            {"actions":[{"kind":"tear_down_agent"},{"job":0,"kind":"start_final_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":7}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":9}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":10}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":15}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":16}
+            {"actions":[{"kind":"reply","reply":{"kind":"refused","message":"the call's body failed: the run's record says why"}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"evaluated":{"failed":"the body's return takes 1048588 bytes as JSON, over the limit of 1048576: return at most that"},"grant":"too_large","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":5}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"stored"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":4,"request":{"evaluated":{"effects":["select"],"returned":[{"name":"state","value":"stored"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":6}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":5,"request":{"evaluated":{"effects":["select","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":7}
+            {"actions":[{"kind":"tear_down_agent"},{"job":0,"kind":"start_final_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":8}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":9}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":13}
+            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":14}
+            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":15}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":16}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":17}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -3846,7 +3854,7 @@ fn body_fails() {
 }
 
 // A body's return nested as deep as a reader of the record reads back is logged; one nested
-// deeper fails its call.
+// deeper, or one larger than the record holds, a job's or the final call's, fails its call.
 #[test]
 fn deep_returns() {
     let argv = [
@@ -3855,12 +3863,23 @@ fn deep_returns() {
         "await 0 completed",
         "call deeper 6",
         "await 1 errored",
+        "call large 6",
+        "await 2 errored",
         "call submit 6 finalize=true",
     ];
     let mut ir = calling_workflow(&argv, 30);
+    let mut larger = ir["roles"][1].clone();
+    larger["name"] = json!("larger");
+    larger["runtime"] = json!({ "target": { "cwd": "/work" } });
+    ir["roles"].as_array_mut().unwrap().push(larger);
+    ir["final"]["body"]["def"] = json!("large");
     let grants = ir["roles"][0]["runtime"]["agent"]["grants"]
         .as_array_mut()
         .unwrap();
+    let body = json!({ "file": "//check.star", "def": "large" });
+    grants.push(json!({ "name": "large", "job": {
+        "target": "larger", "body": body, "payload_max_bytes": 8, "call_timeout_seconds": 1,
+    } }));
     let calls = [("check", "deep", 0), ("slow", "deeper", 1)];
     for grant in grants {
         let Some(&(_, name, deeper)) = calls.iter().find(|(was, ..)| grant["name"] == *was) else {
@@ -3878,9 +3897,9 @@ fn deep_returns() {
         &ir,
         SANDBOXD,
         &expect![[r#"
-            finished, showing [score=6]
+            finished without a result
             payloads hold: ["xxxxxx"]
-            outcome.json: {"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"verdict":{"failure":{"kind":"error","reason":"the body's return takes 1048588 bytes as JSON, over the limit of 1048576: return at most that"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             log.jsonl:
             {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"300000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
@@ -3892,17 +3911,17 @@ fn deep_returns() {
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":7}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":8}
             {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_failed","reason":"the body's return nests lists, tuples and dicts more than 120 deep, its dict included: nest them at most that deep"},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"evaluated":{"effects":["select","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
-            {"actions":[{"kind":"tear_down_agent"},{"job":2,"kind":"start_final_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":11}
-            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":14}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":2,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":2,"kind":"target_run"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":2,"kind":"command_ended"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":2,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":19}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":2,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":20}
+            {"actions":[{"kind":"reply","reply":{"job":2,"kind":"call","remaining":{"calls":null,"seconds":null}}},{"grant":"large","job":2,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":2,"request":{"grant":"large","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":10}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_started"},"observed_ns":"<ns>","seq":11}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-2"},"seq":12}
+            {"actions":[],"at_ns":"<ns>","event":{"job":2,"kind":"call_failed","reason":"the body's return takes 1048588 bytes as JSON, over the limit of 1048576: return at most that"},"observed_ns":"<ns>","seq":13}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":"<s>","returned":{"state":"accepted"}}}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":3,"request":{"evaluated":{"effects":["select","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":14}
+            {"actions":[{"kind":"tear_down_agent"},{"job":3,"kind":"start_final_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"120000000000"}],"at_ns":"<ns>","event":{"kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":15}
+            {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"job":3,"kind":"call_started"},"observed_ns":"<ns>","seq":18}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-5","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-3"},"seq":19}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":3,"kind":"call_failed","reason":"the body's return takes 1048588 bytes as JSON, over the limit of 1048576: return at most that"},"observed_ns":"<ns>","seq":20}
             its last record came before the agent's teardown was to end"#]],
     );
 }

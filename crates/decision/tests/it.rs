@@ -39,8 +39,8 @@ use decision::{
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
-use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
+use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
 use schema::workflow::{Class, JobOf, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
@@ -1344,6 +1344,27 @@ fn exact_scores() {
               finish: work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, returned, showing [score=22.830584316865718]
         "#]],
     );
+}
+
+// A body's return is a result as long as its JSON, its dict included, takes at most
+// `RESULT_MAX_BYTES`.
+#[test]
+fn return_bytes() {
+    // A return whose JSON, `{"text":"x…"}`, takes `bytes`.
+    let taking = |bytes: u64| {
+        let text = bytes - u64::try_from(r#"{"text":""}"#.len()).unwrap();
+        let text = "x".repeat(usize::try_from(text).unwrap());
+        vec![(Name::from_static("text"), json!(text))]
+    };
+    let returned = [RESULT_MAX_BYTES, RESULT_MAX_BYTES + 1].map(|bytes| {
+        match CallResult::returned_by(taking(bytes)) {
+            Ok(result) => format!("{bytes} bytes: returned {} value", result.values().len()),
+            Err(reason) => format!("{bytes} bytes: {reason}"),
+        }
+    });
+    expect![[r#"
+        1048576 bytes: returned 1 value
+        1048577 bytes: the body's return takes 1048577 bytes as JSON, over the limit of 1048576: return at most that"#]].assert_eq(&returned.join("\n"));
 }
 
 #[test]
