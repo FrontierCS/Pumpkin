@@ -265,10 +265,11 @@ export async function runView(id) {
       for (const item of folded(shown, new Set())) if ("fold" in item && item.fold.includes(holder)) state.open.add(item.fold[0].byte);
     }
     state.shown = shown;
+    const lit = litOf(data, { lane, role, needle }, holder, shown);
+    // Before the list, whose pane a lane added shrinks, so that a list kept to its end lands there.
+    drawLanes(lanes, data, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), (l) => inspectLane(l, inspector, nearest, data));
     const items = folded(shown, state.open);
     list.set(items, holder ? items.indexOf(holder) : -1);
-    const lit = litOf(data, { lane, role, needle }, holder, shown);
-    drawLanes(lanes, data, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), (l) => inspectLane(l, inspector, nearest, data));
     drawTalk(talk, data, lit, role, (name) => {
       setQuery({ role: name === role ? null : name, lane: null, sel: null });
       redraw();

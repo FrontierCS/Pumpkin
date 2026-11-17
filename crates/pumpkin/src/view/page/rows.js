@@ -23,12 +23,18 @@ export class RowList {
     this.tail = false;
     // The stretch last drawn, which a scroll within it doesn't draw again.
     this.drawn = { first: -1, end: -1 };
+    // The scroll's top at the last scroll, which tells a scroll up from one down.
+    this.scrolled = 0;
     // The height of a row in px, `--row` in the style.
     this.px = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--row"));
     this.rows = h("div", { class: "rows" });
     this.node = h("div", { class: "list", tabindex: 0 }, this.rows);
     this.node.addEventListener("scroll", () => {
-      this.tail = this.atTail();
+      // Only a scroll up leaves the end: the list's own scroll to its end is read after any
+      // change of its height since, which can leave it short of the end.
+      const top = this.node.scrollTop;
+      this.tail = top < this.scrolled ? this.atTail() : this.tail || this.atTail();
+      this.scrolled = top;
       this.paint(false);
     });
   }
