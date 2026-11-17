@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 296" width="880" height="296" role="img" aria-labelledby="title desc">
+<title id="title">A model request, from a sandbox to the model provider</title>
+<desc id="desc">In a sandbox, the harness sends its model request, with no credential, to the model endpoint that sandboxd serves. sandboxd carries it over the sandbox's session to the driver, where the model route admits it only through an entry of the role's route that allows its model, and only while that entry's budget lasts. The upstream adds the key that the configuration names and sends the request to the model provider. The route keeps each exchange, as it passed, in the run's record.</desc>
+<style>
+:root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
+text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;fill:var(--ink)}
+.code{font:600 13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.name{font-size:13px;font-weight:600}
+.note{font-size:11.5px;fill:var(--mute)}
+.zone-label{font-size:10px;font-weight:700;letter-spacing:.8px;fill:var(--mute)}
+.mid{text-anchor:middle}
+.bg{fill:var(--bg)}
+.box{fill:var(--card);stroke:var(--line);stroke-width:1.25}
+.hot{fill:var(--hot-bg);stroke:var(--hot);stroke-width:1.5}
+.zone{fill:none;stroke:var(--line);stroke-width:1.25;stroke-dasharray:6 4}
+.arrow{fill:none;stroke:var(--line);stroke-width:1.5}
+.head{fill:var(--line)}
+</style>
+<defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker></defs>
+<rect class="bg" width="880" height="296"/>
+
+<rect class="zone" x="16" y="16" width="184" height="264" rx="12"/>
+<text class="zone-label" x="32" y="38">A ROLE'S SANDBOX</text>
+<rect class="box" x="32" y="56" width="152" height="60" rx="8"/>
+<text class="name mid" x="108" y="80">the harness</text><text class="note mid" x="108" y="98">holds no credential</text>
+<path class="arrow" d="M108 117V164" marker-end="url(#head)"/>
+<text class="note" x="116" y="144">HTTP</text>
+<rect class="box" x="32" y="166" width="152" height="60" rx="8"/>
+<text class="code mid" x="108" y="190">sandboxd</text><text class="note mid" x="108" y="208">serves the model endpoint</text>
+
+<path class="arrow" d="M185 196H278" marker-end="url(#head)"/>
+<text class="note mid" x="232" y="188">session</text>
+
+<rect class="zone" x="264" y="16" width="360" height="264" rx="12"/>
+<text class="zone-label" x="280" y="38">THE DRIVER</text>
+<rect class="hot" x="280" y="56" width="328" height="140" rx="10"/>
+<text class="code" x="296" y="80">route</text><text class="note" x="348" y="80">the model route</text>
+<text x="296" y="106">admits a request only through an entry of</text>
+<text x="296" y="124">the role's route that allows its model,</text>
+<text x="296" y="142">in a closed form, while the entry's budget lasts;</text>
+<text x="296" y="168" class="note">sends upstream only the admitted body, and the</text>
+<text x="296" y="184" class="note">headers that its API and its entry name</text>
+<path class="arrow" d="M444 197V226" marker-end="url(#head)"/>
+<text class="note" x="452" y="216">keeps each exchange</text>
+<rect class="box" x="280" y="228" width="328" height="40" rx="8"/>
+<text class="name mid" x="444" y="253">the record</text>
+
+<path class="arrow" d="M609 126H662" marker-end="url(#head)"/>
+<rect class="box" x="664" y="96" width="200" height="60" rx="8"/>
+<text class="name mid" x="764" y="120">the model provider</text><text class="note mid" x="764" y="138">reached with the upstream's key</text>
+<text class="note" x="664" y="180">the key stays in the driver: the</text>
+<text class="note" x="664" y="195">configuration names its file</text>
+</svg>
