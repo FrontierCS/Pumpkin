@@ -1,8 +1,8 @@
 """A neutral task, whose workflow a library writes from its values."""
 
-load("//lib/judged.star", "judged_task")
+load("//lib/neutral.star", "neutral_task")
 
-judged_task(
+neutral_task(
     task = "tasks/judged_neutral",
     agent = {"cpu_millis": 4000, "memory_bytes": 8 * GiB},
     metrics = ["solved", "_internal", "rejected"],

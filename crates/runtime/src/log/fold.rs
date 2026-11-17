@@ -38,6 +38,39 @@ fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>
     Ok(Some(unread))
 }
 
+/// The number of the final call's job, from the log in `dir`. Fails if the log is missing, or
+/// holds no start of the final call, naming the parts it couldn't read.
+pub(crate) fn final_call(dir: &Path) -> Result<u64, String> {
+    let mut job = None;
+    let unread = records(dir, |line| {
+        let started = line.actions.iter().find_map(logged::Action::final_call);
+        job = job.or(started);
+    })?;
+    let path = dir.join("log.jsonl");
+    match (unread, job) {
+        (_, Some(job)) => Ok(job),
+        (None, None) => Err(format!(
+            "{} doesn't exist: expected a run's log",
+            path.display()
+        )),
+        (Some(unread), None) => {
+            let mut error = format!(
+                "{} names no final call: expected a `start_final_call`",
+                path.display()
+            );
+            if let Some(first) = unread.first() {
+                let _ = write!(
+                    error,
+                    ", among the parts that this pumpkin can read; {} of its parts can't be read, \
+                     the first at {first}",
+                    unread.len(),
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
 fn open(path: &Path) -> Result<Option<File>, String> {
     match File::open(path) {
         Ok(log) => Ok(Some(log)),
@@ -76,39 +109,6 @@ fn take_lines(
         cursor.lines += 1;
         let record = Line::read(whole, cursor.lines, unread);
         take(TakenLine { byte, bytes: whole }, record);
-    }
-}
-
-/// The number of the judge call that scores the run, from the log in `dir`. Fails if the log is
-/// missing, or holds no start of such a call, naming the parts it couldn't read.
-pub(crate) fn final_judge(dir: &Path) -> Result<u64, String> {
-    let mut job = None;
-    let unread = records(dir, |line| {
-        let started = line.actions.iter().find_map(logged::Action::score_job);
-        job = job.or(started);
-    })?;
-    let path = dir.join("log.jsonl");
-    match (unread, job) {
-        (_, Some(job)) => Ok(job),
-        (None, None) => Err(format!(
-            "{} doesn't exist: expected a run's log",
-            path.display()
-        )),
-        (Some(unread), None) => {
-            let mut error = format!(
-                "{} names no final judge: expected a `start_judge`",
-                path.display()
-            );
-            if let Some(first) = unread.first() {
-                let _ = write!(
-                    error,
-                    ", among the parts that this pumpkin can read; {} of its parts can't be read, \
-                     the first at {first}",
-                    unread.len(),
-                );
-            }
-            Err(error)
-        }
     }
 }
 

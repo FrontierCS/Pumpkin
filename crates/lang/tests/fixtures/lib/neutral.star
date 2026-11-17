@@ -1,5 +1,6 @@
-"""A neutral library: `judged_task` writes the workflow of a task whose agent may call the judge's
-train mode while it works, and whose final judge, of the same image, scores what it submits."""
+"""A neutral library: `neutral_task` writes the workflow of a task whose agent may call the judge's
+train mode while it works, and whose final call, on a target of the same image, judges what it
+submits."""
 
 load("//lib/submit.star", "submit")
 
@@ -14,7 +15,7 @@ def _env(env, mode, max_bytes):
     """The variables of `env`, then the judge's mode and the most bytes it reads."""
     return [key + "=" + value for key, value in env.items()] + [
         "MODE={mode}".format(mode = mode),
-        "SLOT_BYTES=" + str(max_bytes),
+        "READ_BYTES=" + str(max_bytes),
     ]
 
 def _trainer(*, needs, env):
@@ -27,23 +28,21 @@ def _trainer(*, needs, env):
         "runtime": {"target": {"cwd": "/pumpkin/home", "env": _env(env, "train", 64 * KiB)}},
     }
 
-def _judge(*, needs, env, max_bytes):
-    """The final judge, which returns its score and its failure."""
+def _final_target(*, needs, env, max_bytes):
+    """The target that the final call starts, on the judge's image."""
     return {
         "name": "final_judge",
         "image": JUDGE_IMAGE,
         "user": {"uid": 65532, "gid": 65532},
         "needs": JUDGE_NEEDS | needs,
-        "runtime": {"judge": {
-            "command": {
-                "argv": ["/opt/judge/run", "--mode", "eval"],
-                "cwd": "/pumpkin/home",
-                "env": _env(env, "eval", max_bytes),
-            },
-            "slots": [{"name": "payload", "max_bytes": max_bytes}],
-            "result": {"shows": {"score": "/score"}, "returns": ["/score", "/failure"]},
-        }},
+        "runtime": {"target": {"cwd": "/pumpkin/home", "env": _env(env, "eval", max_bytes)}},
     }
+
+def final_call(target: Target, payload: Payload):
+    """Runs the judge in eval mode on the selection, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/judge/run", "--mode", "eval"])
+    return {"result": target.get("/pumpkin/out/result.json")}
 
 def train(target: Target, payload: Payload, *, metrics: list[str]):
     """Runs the judge in train mode on the payload.
@@ -70,11 +69,11 @@ def _calls(calls):
     else:
         return calls
 
-def judged_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, models = []):
+def neutral_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, models = []):
     """The workflow of the task at `task`, a path such as `tasks/<id>`: an agent with `agent`'s
     needs and the routes to `models`, a train function whose calls return `metrics` but those that
-    start with `_`, which the judge keeps to itself, and a final judge that scores, the trainer and
-    the judge each with `judge`'s needs and the variables of `env`."""
+    start with `_`, which the judge keeps to itself, and a final call, the trainer and the final
+    call's target each with `judge`'s needs and the variables of `env`."""
     id = task.split("/")[-1]
     egress = {"egress": {"model": [{"api": "responses", "models": sorted(models)}]}} if models else {}
     workflow(
@@ -110,7 +109,12 @@ def judged_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mod
                 } | egress},
             },
             _trainer(needs = judge, env = env),
-            _judge(needs = judge, env = env, max_bytes = MiB),
+            _final_target(needs = judge, env = env, max_bytes = MiB),
         ],
-        score = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120},
+        final = {
+            "target": "final_judge",
+            "body": final_call,
+            "payload_max_bytes": MiB,
+            "timeout_seconds": 120,
+        },
     )

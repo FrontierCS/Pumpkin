@@ -39,7 +39,7 @@ impl Core<'_> {
             })?;
         let end = self.apply(&effects, payload, latest, deadline, then)?;
         Ok(OpReply::Call(CallReply::Now(NowReply {
-            returned: returned.returned().clone(),
+            returned: returned.returned(),
             remaining_seconds: self.seconds_left(end),
         })))
     }
@@ -127,7 +127,7 @@ impl Core<'_> {
 
     // Refuses a payload that the final call can't take, so that whatever is selected fits it.
     fn selectable(&self, payload: &PayloadRef) -> Result<(), String> {
-        let max_bytes = self.workflow.slot(self.workflow.score().slot).max_bytes();
+        let max_bytes = self.workflow.final_call().payload_max_bytes();
         if payload.size <= max_bytes.get() {
             Ok(())
         } else {

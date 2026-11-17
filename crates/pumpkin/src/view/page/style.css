@@ -18,8 +18,8 @@
   --ok: light-dark(#137333, #81c995); --fail: light-dark(#c5221f, #f28b82); --warn: light-dark(#6d4c41, #bcaaa4);
   --ok-bar: light-dark(#1e8e3e, #81c995); --fail-bar: light-dark(#d93025, #f28b82); --warn-bar: light-dark(#8d6e63, #bcaaa4);
   /* entities: fills for marks and lines, inks for text */
-  --agent: light-dark(#3c4043, #dadce0); --judge: light-dark(#9334e6, #c58af9); --runner: light-dark(#0e8fa0, #4ecde6); --model: light-dark(#d56a00, #fa903e);
-  --agent-ink: light-dark(#202124, #e8eaed); --judge-ink: light-dark(#681da8, #d7aefb); --runner-ink: light-dark(#0b6b78, #78d9ec); --model-ink: light-dark(#9a5b00, #fcad70);
+  --agent: light-dark(#3c4043, #dadce0); --target: light-dark(#9334e6, #c58af9); --runner: light-dark(#0e8fa0, #4ecde6); --model: light-dark(#d56a00, #fa903e);
+  --agent-ink: light-dark(#202124, #e8eaed); --target-ink: light-dark(#681da8, #d7aefb); --runner-ink: light-dark(#0b6b78, #78d9ec); --model-ink: light-dark(#9a5b00, #fcad70);
   --on-bar: light-dark(rgba(255, 255, 255, 0.85), rgba(32, 33, 36, 0.85));
   /* type: the site's face and type scale, two weights */
   --sans: "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
@@ -152,7 +152,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .lane .name:hover { color: var(--accent); }
 .lane .name .place { color: var(--dim); }
 .lane.on .name { font-weight: 600; } .lane.dim { opacity: 0.35; }
-.lane.agent { --kind: var(--agent); } .lane.judge, .lane.target { --kind: var(--judge); } .lane.runner { --kind: var(--runner); }
+.lane.agent { --kind: var(--agent); } .lane.target { --kind: var(--target); } .lane.runner { --kind: var(--runner); }
 .lane.lit .name { box-shadow: inset 2px 0 0 var(--kind); padding-left: var(--s1); }
 .track { position: relative; height: 14px; }
 .axis { position: sticky; top: 0; z-index: 1; height: var(--axis); padding-left: var(--label); background: var(--panel); border-bottom: 1px solid var(--line); color: var(--dim); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--axis); }
@@ -195,7 +195,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 /* A kind is a mono word in its ink, never a filled badge. */
 .kind { font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
 .kind.model_answered { color: var(--model-ink); } .kind.agent { color: var(--agent-ink); }
-.kind.judge, .kind.target, .kind.judge_collected, .kind.call, .kind.call_returned { color: var(--judge-ink); }
+.kind.target, .kind.call, .kind.call_returned { color: var(--target-ink); }
 .kind.runner, .kind.command_ended, .kind.transfer_ended { color: var(--runner-ink); }
 .row.refused .kind { color: var(--warn); } .row.failed .kind { color: var(--fail); }
 
@@ -206,8 +206,8 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
 .talk .node text { font-family: var(--mono); font-size: var(--fs-diagram); fill: var(--text); }
 .talk .node text.place { fill: var(--dim); }
-.talk .node rect.score { fill: var(--accent); stroke: none; }
-.talk .node.agent rect { stroke: var(--agent); } .talk .node.judge rect, .talk .node.target rect { stroke: var(--judge); }
+.talk .node rect.final { fill: var(--accent); stroke: none; }
+.talk .node.agent rect { stroke: var(--agent); } .talk .node.target rect { stroke: var(--target); }
 .talk .node.runner rect { stroke: var(--runner); } .talk .node.model rect { stroke: var(--model); }
 .talk .node.on rect { fill: var(--select); stroke-width: 2.5; }
 .talk .dim { opacity: 0.25; }
@@ -340,7 +340,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .lrow.step .calls { min-width: 14ch; }
 .kind.k-system { color: var(--text-2); font-weight: 600; }
 .kind.k-user { color: var(--agent-ink); }
-.of-judge .kind.k-user { color: var(--judge-ink); }
+.of-target .kind.k-user { color: var(--target-ink); }
 .kind.k-assistant { color: var(--model-ink); }
 .kind.k-reasoning { color: var(--model-ink); }
 .kind.k-call, .kind.k-output { color: var(--runner-ink); }

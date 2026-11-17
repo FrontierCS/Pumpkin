@@ -4,13 +4,13 @@
 //! Each line of the log moves a `Reading` on, and a [`Readout`] completes it with what the log
 //! leaves out: each role's place, startup time and prices, from `ir.json` and `provider.json`
 //! (`Roles`), and what the record's directories hold when the readout is made, such as a sandbox's
-//! `sandbox.json` and a judge's output. Every `Duration` is a time since the run started, by the
+//! `sandbox.json`. Every `Duration` is a time since the run started, by the
 //! run's clock.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
-use std::{fmt, fs};
 
 use provider::UnixTime;
 use schema::ir::{Api, Gpu};
@@ -20,8 +20,8 @@ use serde_json::Value;
 use stdx::Context;
 
 use super::Direction;
-use super::call::{CallEnd, CallSpan};
-use super::logged::{self, Collected, CommandOf, Line};
+use super::call::{CallEnd, CallOf, CallSpan};
+use super::logged::{self, CommandOf, Line};
 use super::roles::{Grant, Roles};
 use crate::sandbox::SandboxName;
 use crate::{TokenPrices, record};
@@ -380,19 +380,13 @@ pub(super) fn readout(
         prices: roles.prices.clone(),
         token_prices: roles.token_prices.clone(),
     };
-    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a call's standard error
-    // and evidence are collected as it ends, so they are read now.
+    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, so it is read now.
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
     for call in &mut progress.calls {
         let job = dir.join(format!("jobs/{}", call.job));
         call.sandbox.deleted = deleted(&job)?;
-        let stderr = job.join(schema::sandbox::command_stderr().as_str());
-        let held = fs::metadata(&stderr).is_ok_and(|stderr| stderr.len() > 0);
-        call.stderr = held.then_some(stderr);
-        let evidence = job.join(schema::sandbox::evidence_dir().as_str());
-        call.evidence = evidence.is_dir().then_some(evidence);
     }
     Ok(Readout {
         progress: Some(progress),
@@ -510,27 +504,14 @@ impl Reading {
                 self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
                 self.agent.sandbox.gone.get_or_insert(at);
             }
-            logged::Event::JudgeStarted { job } | logged::Event::CallStarted { job } => {
+            logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
                 }
             }
-            logged::Event::JudgeTimedOut { job } | logged::Event::CallTimedOut { job } => {
+            logged::Event::CallTimedOut { job } => {
                 if let Some(call) = self.call(*job) {
                     call.timed_out = true;
-                }
-            }
-            logged::Event::JudgeCollected { job, collected } => {
-                let end = match collected {
-                    Collected::Result(result) => CallEnd::Result(
-                        (result.values.iter())
-                            .map(|shown| (shown.name.clone(), shown.value.clone()))
-                            .collect(),
-                    ),
-                    Collected::Invalid(invalid) => CallEnd::Invalid(invalid.clone()),
-                };
-                if let Some(call) = self.call(*job) {
-                    call.end(at, end);
                 }
             }
             logged::Event::CallReturned { job, returned } => {
@@ -544,8 +525,7 @@ impl Reading {
                     call.end(at, end);
                 }
             }
-            logged::Event::JudgeFailed { job, reason }
-            | logged::Event::CallFailed { job, reason } => {
+            logged::Event::CallFailed { job, reason } => {
                 if let Some(call) = self.call(*job) {
                     call.end(at, CallEnd::Failed(reason.clone()));
                 }
@@ -639,7 +619,6 @@ impl Reading {
                 of: CommandOf::Job { .. },
                 ..
             }
-            | logged::Event::JudgeExited { .. }
             | logged::Event::OpArrived { .. }
             | logged::Event::OpRefused
             | logged::Event::Tick
@@ -675,23 +654,29 @@ impl Reading {
         roles: &Roles,
     ) {
         match action {
-            logged::Action::StartJudge { job, timeout_ns } => {
-                let role = roles.score_role.clone();
-                let sandbox = roles.sandbox(role.as_deref(), at);
-                (self.calls).push(CallSpan::new(*job, None, role, sandbox, *timeout_ns));
-            }
             logged::Action::StartCall {
                 job,
                 grant,
+                payload: _,
                 timeout_ns,
             } => {
                 let key = (roles.agent_role.clone(), grant.clone());
                 let granted = roles.grants.get(&key).cloned().unwrap_or_default();
-                let (function, role) = (Some(grant.clone()), granted.role);
+                let (of, role) = (CallOf::Function(grant.clone()), granted.role);
                 let sandbox = roles.sandbox(role.as_deref(), at);
-                (self.calls).push(CallSpan::new(*job, function, role, sandbox, *timeout_ns));
+                (self.calls).push(CallSpan::new(*job, of, role, sandbox, *timeout_ns));
             }
-            logged::Action::StopJudge { job } => {
+            logged::Action::StartFinalCall {
+                job,
+                payload: _,
+                timeout_ns,
+            } => {
+                let role = roles.final_target.clone();
+                let sandbox = roles.sandbox(role.as_deref(), at);
+                let of = CallOf::Final;
+                (self.calls).push(CallSpan::new(*job, of, role, sandbox, *timeout_ns));
+            }
+            logged::Action::StopCall { job } => {
                 if let Some(call) = self.call(*job) {
                     call.stopped = true;
                 }

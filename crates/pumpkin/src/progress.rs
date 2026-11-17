@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
+    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
 };
 use schema::ir::Name;
 use serde_json::Value;
@@ -119,7 +119,7 @@ impl Listed {
 
     pub(crate) fn has_result(&self) -> bool {
         match self {
-            Self::Run(run) => matches!(run.ending, Some(Ending::Judged { .. })),
+            Self::Run(run) => matches!(run.ending, Some(Ending::Returned { .. })),
             Self::Building { .. } | Self::Waiting { .. } | Self::Unstarted => false,
         }
     }
@@ -131,9 +131,7 @@ impl Listed {
             Self::Unstarted => State::Unstarted,
             Self::Run(run) => match &run.ending {
                 None => State::Running,
-                Some(Ending::Judged { .. } | Ending::Unjudged(_) | Ending::NoResult { .. }) => {
-                    State::Finished
-                }
+                Some(Ending::Returned { .. } | Ending::NoResult(_)) => State::Finished,
                 Some(Ending::Failed(_)) => State::Failed,
                 Some(Ending::Interrupted(_)) => State::Interrupted,
                 Some(Ending::Lost) => State::Lost,
@@ -248,7 +246,7 @@ impl Totals {
         let Listed::Run(run) = listed else {
             return;
         };
-        if let Some(Ending::Unjudged(_) | Ending::NoResult { .. }) = run.ending {
+        if let Some(Ending::NoResult(_)) = run.ending {
             self.without_result += 1;
         }
         let Some(progress) = &run.progress else {
@@ -362,12 +360,11 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
     let ran =
         (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
     let rest = match ending {
-        Ending::Judged { values, after: _ } if !values.is_empty() => {
+        Ending::Returned { values, after: _ } if !values.is_empty() => {
             format!("{task}: {}", shown_values(values))
         }
-        Ending::Judged { .. }
-        | Ending::Unjudged(_)
-        | Ending::NoResult { .. }
+        Ending::Returned { .. }
+        | Ending::NoResult(_)
         | Ending::Failed(_)
         | Ending::Interrupted(_)
         | Ending::Lost => task.to_owned(),
@@ -438,11 +435,11 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
     } = progress;
     // Once the work phase has ended, the core ends the run by its hard end.
     if let Some(work_end) = *work_end {
-        if let Some(call) = calls.iter().find(|call| call.function.is_none()) {
+        if let Some(call) = calls.iter().find(|call| call.of == CallOf::Final) {
             return Phase {
-                name: "final judge".to_owned(),
+                name: "final call".to_owned(),
                 since: call.sandbox.asked,
-                // The core collects what the final judge left by the hard end at the latest.
+                // The core collects what the final call left by the hard end at the latest.
                 bound: call_bound(call).map(|bound| bound.min(*hard_end)),
                 doing: on(call) + &flying,
             };
@@ -454,7 +451,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
         let leases = leases.map(|lease| format!("lease {}", lease.lease));
         let waited: Vec<String> = agent.into_iter().chain(calls).chain(leases).collect();
         let doing = match waited.split_last() {
-            None => "the final judge's start".to_owned(),
+            None => "the final call's start".to_owned(),
             Some((last, [])) => format!("the end of {last}"),
             Some((last, rest)) => format!("the end of {} and {last}", rest.join(", ")),
         };
@@ -514,10 +511,10 @@ fn in_flight(model: &runtime::ModelUse, at: Duration) -> String {
 }
 
 fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
-    let calls = progress
-        .calls
-        .iter()
-        .filter_map(|call| Some((call, call.function.as_ref()?)));
+    let calls = progress.calls.iter().filter_map(|call| match &call.of {
+        CallOf::Function(function) => Some((call, function)),
+        CallOf::Final => None,
+    });
     let calls = calls
         .filter(|(call, _)| call.sandbox.gone.is_none())
         .map(|(call, function)| {
@@ -732,7 +729,7 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
     let prices = cost.is_some().then_some(&progress.token_prices);
     let calls = (progress.calls.iter()).map(|call| {
         let asked = call.sandbox.asked;
-        let mut line = called(call, record.dir());
+        let mut line = called(call);
         // Its own model requests, under it, as its leases are.
         if call.model.requests > 0 {
             let model = model(&call.model, prices);
@@ -853,7 +850,7 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
         milestones.push((started, format!("the agent started on {}", placed(agent))));
     }
     // Before the leases and the calls, so that the stable sort keeps it ahead of what follows it
-    // at the same instant: the ends of the leases it closes, then the final judge's ask, which
+    // at the same instant: the ends of the leases it closes, then the final call's ask, which
     // waits for them. Not before the agent's start: an agent that exits at once has its exit
     // stamped by its session's reader, which may be before the loop stamps the start.
     if let Some(work_end) = progress.work_end {
@@ -884,7 +881,6 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
         if let Some(at) = call.sandbox.gone {
             let ended = match &call.end {
                 Some(CallEnd::Result(values)) => result(values),
-                Some(CallEnd::Invalid(_)) => "an invalid result".to_owned(),
                 Some(CallEnd::Failed(reason)) => format!("failed: {}", crate::escaped(reason)),
                 None => STOPPED.to_owned(),
             };

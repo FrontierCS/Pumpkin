@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{
     AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, ResultSpec, User, WorkflowName,
+    Name, Needs, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -32,14 +32,12 @@ pub struct Workflow {
     /// Each role's sandbox, by its id.
     roles: Vec<Sandbox>,
     agent: Agent,
-    /// The score's judge, the workflow's one.
-    judge: Judge,
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     job_functions: Vec<JobFunction>,
     sessions: Vec<Session>,
     now_functions: Vec<NowFunction>,
-    score: Score,
+    final_call: Final,
 }
 
 impl Workflow {
@@ -56,11 +54,6 @@ impl Workflow {
         &self.agent
     }
 
-    /// The workflow's one judge: the score's.
-    pub fn judge(&self) -> &Judge {
-        &self.judge
-    }
-
     pub fn target(&self, id: TargetId) -> &Target {
         &self.targets[&id.0]
     }
@@ -73,14 +66,11 @@ impl Workflow {
         &self.roles[role.0]
     }
 
-    /// The model route of `role`, the agent's, a judge's or a target's, with the budgets of its
-    /// entries, if it has one.
+    /// The model route of `role`, the agent's or a target's, with the budgets of its entries, if
+    /// it has one.
     pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
         if role == self.agent.role {
             return self.agent.model.as_ref();
-        }
-        if role == self.score.slot.judge.role() {
-            return self.judge.model.as_ref();
         }
         let target = self.targets.get(&role).map(|target| &target.model);
         target.and_then(Option::as_ref)
@@ -100,10 +90,6 @@ impl Workflow {
         self.roles().map(f).collect::<Result<_, _>>().map(ByRole)
     }
 
-    pub fn slot(&self, id: SlotId) -> &Slot {
-        &self.judge.slots[id.index]
-    }
-
     /// The agent's job functions, in the IR's order.
     pub fn job_functions(&self) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
         let functions = self.job_functions.iter().enumerate();
@@ -114,7 +100,7 @@ impl Workflow {
         &self.job_functions[id.0]
     }
 
-    /// Every role's sessions: the agent's, then each judge's and target's, each in the IR's order.
+    /// Every role's sessions: the agent's, then each target's, each in the IR's order.
     pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> {
         (self.sessions.iter().enumerate()).map(|(index, grant)| (SessionId(index), grant))
     }
@@ -133,8 +119,8 @@ impl Workflow {
     }
 
     /// How the selected submission is judged.
-    pub fn score(&self) -> &Score {
-        &self.score
+    pub fn final_call(&self) -> &Final {
+        &self.final_call
     }
 }
 
@@ -278,15 +264,6 @@ impl<T> ByProvider<T> {
 pub struct RoleId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct JudgeId(RoleId);
-
-impl JudgeId {
-    pub fn role(self) -> RoleId {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetId(RoleId);
 
 impl TargetId {
@@ -317,18 +294,6 @@ impl<T> ByRole<T> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SlotId {
-    judge: JudgeId,
-    index: usize,
-}
-
-impl SlotId {
-    pub fn judge(self) -> JudgeId {
-        self.judge
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -337,11 +302,11 @@ pub struct JobFunctionId(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NowFunctionId(usize);
 
-/// What a job runs: a call of one of the agent's job functions, or the workflow's [`Score`].
+/// What a job runs: a call of one of the agent's job functions, or the workflow's [`Final`] call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JobOf {
     Function(JobFunctionId),
-    Score,
+    Final,
 }
 
 /// What every role has: the sandbox its instances run in.
@@ -372,38 +337,6 @@ pub struct Agent {
     pub finalize_grace: Duration,
     /// The agent's model route, with the budgets of its entries, if it has one.
     pub model: Option<ModelRoute>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Judge {
-    /// See [`ir::JudgeRuntime::command`](crate::ir::JudgeRuntime::command).
-    pub command: Command,
-    /// Each named once.
-    pub slots: Vec<Slot>,
-    /// See [`ir::JudgeRuntime::result`](crate::ir::JudgeRuntime::result).
-    pub result: ResultSpec,
-    /// The judge's model route, with the budgets of its entries, if it has one.
-    pub model: Option<ModelRoute>,
-}
-
-/// A judge's slot; see [`ir::Slot`](crate::ir::Slot).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Slot {
-    pub name: Name,
-    /// At most [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), as parsing checks.
-    pub(crate) max_bytes: NonZeroU64,
-}
-
-impl Slot {
-    /// See [`ir::Slot::max_bytes`](crate::ir::Slot::max_bytes).
-    pub fn max_bytes(&self) -> NonZeroU64 {
-        self.max_bytes
-    }
-
-    /// The op payload limit of a session whose payloads the slot takes: its `max_bytes`.
-    pub fn payload_limit(&self) -> OpPayloadLimit {
-        OpPayloadLimit(self.max_bytes.get())
-    }
 }
 
 /// A target role; see [`ir::TargetRuntime`](crate::ir::TargetRuntime).
@@ -467,7 +400,7 @@ pub struct Session {
     pub name: Name,
     pub holder: Holder,
     /// The runner, which no other session names, and whose image, if the agent holds the
-    /// session, is no judge's or target's ([`ir::Session::runner`](crate::ir::Session::runner)).
+    /// session, is no target's ([`ir::Session::runner`](crate::ir::Session::runner)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -476,12 +409,10 @@ pub struct Session {
     pub transfer_bytes: NonZeroU64,
 }
 
-/// The role that holds a [`Session`]: the agent, or a judge or a target, each of whose calls uses
-/// it afresh.
+/// The role that holds a [`Session`]: the agent, or a target, each of whose calls uses it afresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
     Agent,
-    Judge(JudgeId),
     Target(TargetId),
 }
 
@@ -490,7 +421,6 @@ impl Holder {
     pub fn role(self, workflow: &Workflow) -> RoleId {
         match self {
             Self::Agent => workflow.agent().role,
-            Self::Judge(judge) => judge.role(),
             Self::Target(target) => target.role(),
         }
     }
@@ -525,11 +455,22 @@ impl NowFunction {
     }
 }
 
-/// The parsed [`ir::Score`](crate::ir::Score): a judge's slot, whose `max_bytes` caps every
-/// selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Score {
-    pub slot: SlotId,
-    /// See [`ir::Score::timeout_seconds`](crate::ir::Score::timeout_seconds).
+/// The parsed [`ir::Final`](crate::ir::Final): a body on a target that no job function names,
+/// whose `payload_max_bytes` caps every selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Final {
+    pub target: TargetId,
+    pub body: crate::ir::FinalBody,
+    pub keywords: serde_json::Map<String, serde_json::Value>,
+    /// At most [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), as parsing checks.
+    pub(crate) payload_max_bytes: NonZeroU64,
+    /// See [`ir::Final::timeout_seconds`](crate::ir::Final::timeout_seconds).
     pub timeout: Duration,
+}
+
+impl Final {
+    /// See [`ir::Final::payload_max_bytes`](crate::ir::Final::payload_max_bytes).
+    pub fn payload_max_bytes(&self) -> NonZeroU64 {
+        self.payload_max_bytes
+    }
 }

@@ -7,29 +7,28 @@ search.
 
 ## Bird's-eye view
 
-Pumpkin runs workflows in which an AI agent works on a task and judges score what it submits. The
-agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses whatever it can
-reach to finish its task or raise its score. Pumpkin's job is to give each part of a run exactly
-what the workflow grants it and nothing more, to bound what a run spends in time and money, and to
-keep a record of the run that no sandbox can alter.
+Pumpkin runs workflows in which an AI agent works on a task and a final call judges what it
+submits. The agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses
+whatever it can reach to finish its task or raise its result. Pumpkin's job is to give each part
+of a run exactly what the workflow grants it and nothing more, to bound what a run spends in time
+and money, and to keep a record of the run that no sandbox can alter.
 
-A workflow is data, the workflow IR. It names its roles, one agent, the targets its job functions
-start, the runners that sessions lease and one judge; the grants each role holds, such as the
-agent's job functions, its sessions and its now functions; each role's model route; and the score,
-the judge whose verdict on the selected submission ends the run. A task's source, in Pumpkin's
-workflow language, a subset of Starlark, evaluates to that IR and to the images its roles run. The
-IR is the only input the runtime reads, and the bodies of its job and now functions reach it as
-`Bodies`, which the driver gives; so any other program may write the IR of a workflow without
-functions with bodies, though one without a now function selects nothing to judge.
+A workflow is data, the workflow IR. It names its roles, one agent, the targets its calls start
+and the runners its sessions lease; the grants each role holds, such as the agent's job functions,
+its sessions and its now functions; each role's model route; and the final call, a body that runs
+on the selection in a fresh sandbox of its target, and whose return is the run's result. A task's
+source, in Pumpkin's workflow language, a subset of Starlark, evaluates to that IR and to the
+images its roles run. The IR is the only input the runtime reads, and the bodies of its functions
+and of its final call reach it as `Bodies`, which the driver gives, so that the runtime depends on
+no language.
 
 Each instance of a role is a sandbox, which a provider makes: a container on the operator's Docker
 engine, a container on an EC2 instance of its own, or a Modal sandbox. In every sandbox,
 `sandboxd` meets the host and serves one session, which is the sandbox's only way out. Over it the
 host puts and collects files, starts commands and freezes the sandbox, and code in the sandbox
-makes ops, such as a call of a job function or a lease's command, and model requests. On the
-host, the gateway holds each session's end, the decision core decides what the run does next from
-what has happened, and the runtime carries out those decisions on the providers and keeps the
-run's record.
+makes ops, such as a call of a function, and model requests. On the host, the gateway holds each
+session's end, the decision core decides what the run does next from what has happened, and the
+runtime carries out those decisions on the providers and keeps the run's record.
 
 A run is one process, the driver, on one machine: the operator's own, or the person's controller,
 an EC2 instance that runs the runs a machine sends it.
@@ -108,10 +107,9 @@ established. The types' private fields hold this.
 such as none or no limit, and whatever writes the IR picks the defaults. Review holds this, as no
 check does: the IR's types default only an `Option` or an empty collection.
 
-**Architecture Invariant:** the agent never reaches the judge that scores it, nor what a judge
-runs. A judge's runtime holds sessions alone, no grant names a judge, as a job function names a
-target, and parsing refuses an agent's session of a runner whose image is a judge's or a job
-function's target's.
+**Architecture Invariant:** the agent never reaches the final call's target, nor what a target
+runs. No grant names the final call's target, as parsing refuses a final call whose target a job
+function names, and parsing refuses an agent's session of a runner whose image is a target's.
 
 ### `crates/decision`
 
@@ -119,7 +117,7 @@ The decision core. `Core` takes each `Event` that the runtime observed, with the
 run started, and returns the `Action`s to perform, until `Action::Finish` carries the run's
 `Outcome` or `Action::Abandon` ends it at its hard end. Its `ops` module authorizes ops, `call`
 takes a call of a function by the function's kind, `jobs` meters the calls of job functions and
-the score's judge call, and `leases` meters and ends leases; `lasts` is a run's hard end.
+the final call, and `leases` meters and ends leases; `lasts` is a run's hard end.
 
 **Architecture Invariant:** the core does no I/O, reads no clock and uses no randomly seeded hash,
 so the same events give the same actions, and time reaches it only with each event. The crate is
@@ -134,7 +132,7 @@ runtime answers each with the core's `Action::Reply`.
 and what its body returns, so the workflow decides the agent's feedback. The status reply's types
 hold nothing else.
 
-**Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs and
+**Architecture Invariant:** the final call starts only once the agent's sandbox, its jobs and
 every lease that they held have ended, so nothing the agent started runs while its submission is
 judged. The core's phases (`Teardown`, then `Final`) hold this.
 
@@ -368,8 +366,8 @@ neither the metadata address nor a public one.
 The host side. `Run::prepare` reserves on each provider and begins a placed workflow's record, and
 `Run::execute` drives the `Core` on the run's providers to its outcome, or until a signal stops it
 (`Stopped`). One thread drives the core and waits on an inbox of the run's `Host`, whose clock
-times the run (`System`, the machine's); each call, the final judge's and those of job functions,
-and each lease is a child on a thread of its own (`child`, `judge`, `call`, `lease`); every
+times the run (`System`, the machine's); each call, the final call and those of job functions,
+and each lease is a child on a thread of its own (`child`, `call`, `lease`); every
 sandbox starts on one path (`sandbox`); and `model` serves each role's route. `record` and `log`
 lay out the record, and `Record` reads it back for
 `pumpkin`: a run's progress (`Readout`), the arguments that started it, its model exchanges, and
@@ -496,7 +494,7 @@ Tasks in the workflow language: `hello` needs no model, `codex` takes one as `--
 
 ### Security model
 
-The agent's code, and whatever a judge or a runner runs, is untrusted, and so is every sandbox,
+The agent's code, and whatever a target or a runner runs, is untrusted, and so is every sandbox,
 which may also be buggy. Each guard either limits what that code can reach, or keeps a sandbox
 from harming the host or the run.
 
@@ -507,7 +505,7 @@ host serves: file trees and command exits go to the runtime, ops go to the core,
 each against the grants of the caller's role, and model requests go through the closed route.
 `sandboxd` and `sandboxctl` are no boundary inside a sandbox; the session is.
 
-![The data that flows in a run: between the sandboxes and the gateway, the runtime and the decision core, and from the route to the model provider, each arrow named by the code that carries it, and into the record that the record module lays out.](docs/figures/run-data.svg)
+![The data that flows in a run: between the sandboxes and the gateway, the runtime and the decision core, and from the route to the model provider, each arrow named by the code that carries it, and into the record that the record module lays out, which keeps each sandbox's out and log, and what a job's body got.](docs/figures/run-data.svg)
 
 A sandbox proves which it is by how it meets the gateway. On the host, it dials a socket of its
 own, which only it can reach. Elsewhere, its hello presents a grant (`RegistrationGrant`) that
@@ -523,10 +521,11 @@ private, in the envelope's ECR repositories: an EC2 instance pulls with its inst
 Modal imports with a pull role that it assumes by its own identity, so no AWS credential of the
 operator's reaches Modal.
 
-A judge's evidence and a lease's transfers stay where the workflow puts them: of what a judge
-leaves, an op reply carries only the fields of its result that its `ResultSpec` returns, so only
-the operator sees the rest, in the record; and a lease's transfer moves trees between its
-holder's sandbox and its runner alone, through the host.
+What a call's target holds and a lease's transfers stay where the workflow puts them: of what a
+call's sandbox leaves, an op reply carries only what the call's body returns, so only the operator
+sees the rest, which the record keeps: the target's `out/`, each file the body got (`got/`) and
+each command's log (`log/`); and a lease's transfer moves trees between its holder's sandbox and
+its runner alone, through the host.
 The key never reaches the record either, as `Keep` is handed bodies and the names of headers
 left behind, never a header's value.
 
@@ -546,9 +545,9 @@ gives up only once it stalls.
 
 A run's bounds are the workflow's: the agent's deadline and finalize grace, each job function's
 calls, seconds and payload size, each session's instances, seconds, commands and transfer bytes,
-each slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
-refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's hard
-end, by which the core abandons the run if nothing has ended it. The model budgets of the
+and the final call's payload size and timeout. The core meters each from its own jobs and leases,
+and refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's
+hard end, by which the core abandons the run if nothing has ended it. The model budgets of the
 entries of a role's route are the one bound the core doesn't meter: the runtime meters each, from
 its entry's answers, at the machine's prices.
 

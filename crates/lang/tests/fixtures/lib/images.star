@@ -1,6 +1,7 @@
 """A neutral library: `images_task` writes the workflow of a task whose package's recipes build
 its images: the agent's, on the package's build tools with its toolchain copied in, with its
-harness added on it, and the trainer's and the judge's, each a stage of one recipe."""
+harness added on it, and the trainer's and the final call's target's, each a stage of one
+recipe."""
 
 load("//lib/submit.star", "submit")
 
@@ -16,13 +17,6 @@ SHARED = {"shared": "//shared"}
 BASE_ARGS = {
     "BASE": "docker.io/example/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 }
-
-# The judge's runtime: it scores the payload in its slot.
-JUDGE = {"judge": {
-    "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
-    "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-    "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
-}}
 
 def _role(name, stage, runtime):
     """The role `name`, on the image of `stage` of the package's judge recipe."""
@@ -48,10 +42,16 @@ def train(target: Target, payload: Payload):
     target.run(["/opt/judge/run"])
     return json.decode(target.get("/pumpkin/out/result.json"))
 
+def final_call(target: Target, payload: Payload):
+    """Runs the judge on the selection, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/judge/run"])
+    return {"result": target.get("/pumpkin/out/result.json")}
+
 def images_task(*, agent):
     """The workflow of the task in the entry's package: a harness works as the agent, with
-    `agent`'s needs, on the image of the package's agent recipe, which calls the trainer, and a
-    judge scores it."""
+    `agent`'s needs, on the image of the package's agent recipe, which calls the trainer, and the
+    final call judges it."""
     task = package_name().split("/")[-1]
     tools = image("tools/Dockerfile", args = BASE_ARGS)
     toolchain = image("toolchain/Dockerfile", target = "Go")
@@ -61,7 +61,7 @@ def images_task(*, agent):
     # image built just before it.
     stages = [
         _role("trainer", "train", {"target": {"cwd": "/pumpkin/home"}}),
-        _role("final_judge", "eval", JUDGE),
+        _role("final_judge", "eval", {"target": {"cwd": "/pumpkin/home"}}),
     ]
     harness = image("Dockerfile", context = "//harness", contexts = {"base": agent_image})
     workflow(
@@ -91,5 +91,10 @@ def images_task(*, agent):
                 }},
             },
         ] + stages,
-        score = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120},
+        final = {
+            "target": "final_judge",
+            "body": final_call,
+            "payload_max_bytes": 64 * KiB,
+            "timeout_seconds": 120,
+        },
     )

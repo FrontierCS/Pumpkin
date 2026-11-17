@@ -1,7 +1,9 @@
 """A workflow that needs no model: the agent counts its greeting's lines and bytes by a call of its
-job function `count`, then submits the greeting, and the judge scores its size and counts its lines."""
+job function `count`, then submits the greeting, and the final call scores its size and counts its
+lines."""
 
 load("//hello/count.star", "count")
+load("//hello/final.star", "final_call")
 load("//submit.star", "submit")
 
 IMAGE = image("Dockerfile")
@@ -54,15 +56,8 @@ workflow(
             "image": IMAGE,
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
-            "runtime": {"judge": {
-                "command": {
-                    "argv": ["sh", "-c", "printf '{\"score\": %s, \"lines\": %s}' $(wc -c < /pumpkin/in/payload/raw) $(wc -l < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"],
-                    "cwd": "/pumpkin/home",
-                },
-                "slots": [{"name": "payload", "max_bytes": 1 * KiB}],
-                "result": {"shows": {"score": "/score", "lines": "/lines"}, "returns": ["/score"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
+    final = {"target": "judge", "body": final_call, "payload_max_bytes": 1 * KiB, "timeout_seconds": 60},
 )

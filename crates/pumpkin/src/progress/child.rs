@@ -4,21 +4,21 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use runtime::{CallEnd, CallSpan, Closed, Direction, LeaseSpan, Work};
+use runtime::{CallEnd, CallOf, CallSpan, Closed, Direction, LeaseSpan, Work};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 
 use super::{placed, result, span};
 
 pub(super) fn call_name(call: &CallSpan) -> String {
-    match &call.function {
-        Some(function) => format!("{function} job {}", call.job),
-        None => format!("final judge job {}", call.job),
+    match &call.of {
+        CallOf::Function(function) => format!("{function} job {}", call.job),
+        CallOf::Final => format!("final call job {}", call.job),
     }
 }
 
-/// The line of a call; the paths of what it kept are shown below `dir`, the record's.
-pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
+/// The line of a call.
+pub(crate) fn called(call: &CallSpan) -> String {
     let Some(at) = call.sandbox.gone else {
         return format!(
             "{} on {}, which never ended",
@@ -43,38 +43,16 @@ pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
         line.push_str(STOPPED);
         return line;
     };
-    let gave = match end {
-        CallEnd::Result(values) => {
-            line.push_str(&result(values));
-            true
-        }
-        CallEnd::Invalid(reason) => {
-            let _ = write!(line, "an invalid result: {}", crate::escaped(reason));
-            false
-        }
+    match end {
+        CallEnd::Result(values) => line.push_str(&result(values)),
         CallEnd::Failed(reason) => {
             let _ = write!(line, "failed: {}", crate::escaped(reason));
-            false
         }
-    };
+    }
     for (said, what) in [(call.stopped, "stopped"), (call.timed_out, "timed out")] {
         if said {
             let _ = write!(line, " ({what})");
         }
-    }
-    let below = |path: &std::path::Path| {
-        let path = path.strip_prefix(dir).unwrap_or(path);
-        path.display().to_string()
-    };
-    let mut kept = Vec::new();
-    if let Some(stderr) = call.stderr.as_deref().filter(|_| !gave) {
-        kept.push(format!("standard error {}", below(stderr)));
-    }
-    if let Some(evidence) = call.evidence.as_deref().filter(|_| !gave) {
-        kept.push(format!("evidence {}", below(evidence)));
-    }
-    if !kept.is_empty() {
-        let _ = write!(line, "; its {}", kept.join(", its "));
     }
     line
 }

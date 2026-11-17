@@ -31,7 +31,7 @@ const KEY = [
     pages: ["run"],
     swatches: [
       { token: "--agent", look: "bar", words: "The agent" },
-      { token: "--judge", look: "bar", words: "A judge" },
+      { token: "--target", look: "bar", words: "A call's target" },
       { token: "--runner", look: "bar", words: "A runner, and a lease's work" },
       { token: "--model", look: "tick", words: "A model answer" },
       { token: "--fail-bar", look: "tick", words: "A failed model answer, or failed work" },
@@ -54,7 +54,7 @@ const KEY = [
     swatches: [
       { token: "--runner", look: "bar", words: "Tools and the harness, between two steps", alpha: 0.55 },
       { token: "--runner", look: "bar", words: "A lease's op" },
-      { token: "--judge", look: "bar", words: "A judge's op" },
+      { token: "--target", look: "bar", words: "A call's op" },
       { token: "--agent", look: "bar", words: "A now function's call" },
       { token: "--fail-bar", look: "bar", words: "A failed op" },
     ],
@@ -64,7 +64,7 @@ const KEY = [
     pages: ["trace"],
     swatches: [
       { token: "--agent-ink", look: "ink", words: "user, of the agent" },
-      { token: "--judge-ink", look: "ink", words: "user, of a judge" },
+      { token: "--target-ink", look: "ink", words: "user, of a call" },
       { token: "--model-ink", look: "ink", words: "assistant and reasoning, the model's" },
       { token: "--runner-ink", look: "ink", words: "call and output, a tool's" },
       { token: "--fail", look: "ink", words: "unread" },

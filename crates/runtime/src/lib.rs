@@ -34,13 +34,13 @@ mod call;
 mod child;
 mod host;
 mod interruption;
-mod judge;
 mod lease;
 mod log;
 mod model;
 mod op;
 mod price;
 mod record;
+mod relay;
 mod routes;
 mod sandbox;
 mod sources;
@@ -55,9 +55,9 @@ use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
 pub use log::{
-    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Cost, Direction, LeaseSpan, LogFold, ModelUse,
-    Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens,
-    TokensCost, Unread, Used, Work, result_values, returned_values,
+    AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, Closed, Cost, Direction, LeaseSpan,
+    LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver,
+    TakenLine, Tokens, TokensCost, Unread, Used, Work, returned_values,
 };
 use log::{Entry, Log, Targeted};
 use model::Served;
@@ -169,7 +169,7 @@ impl<'r, H: Host> Run<'r, H> {
     /// # Errors
     ///
     /// Stops once a signal comes. Fails if `started` fails, if the run is still going at its hard
-    /// end, or if a model provider's refusal or failure could have changed the score.
+    /// end, or if a model provider's refusal or failure could have changed the result.
     pub fn execute(
         self,
         sandboxd: &Path,
@@ -265,7 +265,7 @@ impl<'r, H: Host> Run<'r, H> {
         };
         let outcome = runtime.drive(unix);
         // A refused key, or a model provider's failure of the agent's last request, is the
-        // deployment's failure, not a result of the agent's to score.
+        // deployment's failure, not a result of the agent's to judge.
         let keyed = runtime.routes_held(&outcome);
         let outcome = failed_also(failed_also(outcome, keyed), runtime.sweep());
         let outcome = failed_also(outcome, runtime.settle());
@@ -435,7 +435,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             actions = core.handle(at, event.clone());
             // A call's route is open from its command's or its body's start, as the agent's is
             // from the run's.
-            if let Event::JudgeStarted { job } | Event::CallStarted { job } = event {
+            if let Event::CallStarted { job } = event {
                 let role = self.call(job).role;
                 self.serve(Caller::Job(job), role);
             }
@@ -450,12 +450,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             self.log.event(self.workflow(), at, &event, &actions)?;
             // A route ends as the core stops allowing its model requests, the agent's at the work
-            // phase's end, a judge's at its command's, a body's call's at its timeout or its
-            // report, before the core's actions are performed: its exchanges in flight then end
-            // while the agent's teardown, if the actions hold it, still needs the agent's session.
-            // The event that first stops the agent's ends the work phase or the run, so its record
-            // lists the agent's teardown or the run's abandon, and is synced before the route ends
-            // too.
+            // phase's end, a call's at its timeout or its report, before the core's actions are
+            // performed: its exchanges in flight then end while the agent's teardown, if the
+            // actions hold it, still needs the agent's session. The event that first stops the
+            // agent's ends the work phase or the run, so its record lists the agent's teardown or
+            // the run's abandon, and is synced before the route ends too.
             self.end_routes(Some((core, at)));
         }
     }
@@ -465,12 +464,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     // When the agent's teardown must have ended, as a time since the run started: the hard end
-    // less what the final judge, the run's last sandbox, may take to start and to run.
+    // less what the final call's target, the run's last sandbox, may take to start and to run.
     fn teardown_end(&self) -> Duration {
-        let score = self.workflow().score();
-        let startup = self.placed.startup(score.slot.judge().role());
-        let final_judge = startup.saturating_add(score.timeout);
-        self.hard_end().saturating_sub(final_judge)
+        let final_call = self.workflow().final_call();
+        let startup = self.placed.startup(final_call.target.role());
+        let final_share = startup.saturating_add(final_call.timeout);
+        self.hard_end().saturating_sub(final_share)
     }
 
     fn next_event<'s>(
@@ -632,9 +631,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     // A type excluding these actions here would split the core's actions by the
                     // run's phase.
                     other @ (Action::StartAgent
-                    | Action::StartJudge { .. }
+                    | Action::StartFinalCall { .. }
                     | Action::StartCall { .. }
-                    | Action::StopJudge { .. }
+                    | Action::StopCall { .. }
                     | Action::StartLease { .. }
                     | Action::RunCommand { .. }
                     | Action::Transfer { .. }
@@ -666,11 +665,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             match action {
                 Action::StartAgent => self.start_agent(),
                 Action::Reply { op, reply } => self.reply(op, reply, core.phase_due())?,
-                Action::StartJudge {
+                Action::StartFinalCall {
                     job,
                     payload,
                     timeout,
-                } => self.start_judge(scope, job, &payload, timeout)?,
+                } => self.start_final_call(scope, job, &payload, timeout)?,
                 Action::StartCall {
                     job,
                     function,
@@ -681,7 +680,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     let call = (&payload, arguments);
                     self.start_call(scope, core, job, function, call, timeout)?;
                 }
-                Action::StopJudge { job } => self.stop_job(job),
+                Action::StopCall { job } => self.stop_job(job),
                 Action::StartLease {
                     lease,
                     holder,
@@ -732,7 +731,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     end = Some(Err(format!(
                         "the run was still going at its hard end, {} s after it started: \
                          expected it to end within its deadline, its finalize grace, its final \
-                         judge's timeout and its sandboxes' startups",
+                         call's timeout and its sandboxes' startups",
                         self.hard_end().as_secs()
                     )));
                 }
@@ -832,7 +831,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let Some(call) = self.jobs.get_mut(&job) else {
             unreachable!(
                 "job {} was stopped, answered or leased for, but never started, though the core \
-                 acts only on a job it has started, and the `StartJudge` or `StartCall` that started it, \
+                 acts only on a job it has started, and the `StartFinalCall` or `StartCall` that started it, \
                  performed before, kept a sender into its call's inbox, even if the call then \
                  failed as it started",
                 job.0

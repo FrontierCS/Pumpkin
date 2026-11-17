@@ -18,7 +18,7 @@ pub(super) struct Roles {
     pub(super) agent_role: String,
     pub(super) routed: bool,
     pub(super) grants: BTreeMap<(String, String), Grant>,
-    pub(super) score_role: Option<String>,
+    pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
     pub(super) gpus: BTreeMap<String, Gpu>,
     pub(super) deadline: Option<Duration>,
@@ -34,13 +34,13 @@ impl Roles {
             .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
         let agent = roles.iter().find_map(|role| match &role.runtime {
             ir::Runtime::Agent(agent) => Some((&role.name, agent)),
-            ir::Runtime::Judge(_) | ir::Runtime::Target(_) | ir::Runtime::Runner(_) => None,
+            ir::Runtime::Target(_) | ir::Runtime::Runner(_) => None,
         });
         let grants = roles.iter().flat_map(|role| {
             held(&role.runtime)
                 .map(|(name, grant)| ((role.name.to_string(), name.to_string()), grant))
         });
-        let score = ir.map(|ir| ir.score.role.to_string());
+        let final_target = ir.map(|ir| ir.final_call.target.to_string());
         let (mut startups, mut prices) = (BTreeMap::new(), BTreeMap::new());
         let providers = provided["providers"].as_object().into_iter().flatten();
         for (provider, ready) in providers {
@@ -70,7 +70,7 @@ impl Roles {
             agent_role: agent.map(|(name, _)| name.to_string()).unwrap_or_default(),
             routed: agent.is_some_and(|(_, agent)| agent.egress.model.is_some()),
             grants: grants.collect(),
-            score_role: score,
+            final_target,
             places: places(provided),
             gpus: gpus.collect(),
             deadline: agent.map(|(_, agent)| Duration::from_secs(agent.deadline_seconds.get())),
@@ -98,8 +98,7 @@ pub(super) struct Grant {
     pub(super) ready_for: Option<Duration>,
 }
 
-/// Each grant that `runtime` holds, by its name: the agent's grants, and a judge's or a target's
-/// sessions.
+/// Each grant that `runtime` holds, by its name: the agent's grants, and a target's sessions.
 fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
     let session = |session: &ir::Session| Grant {
         role: Some(session.runner.to_string()),
@@ -107,8 +106,7 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
     };
     let (agent, sessions) = match runtime {
         ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
-        ir::Runtime::Judge(ir::JudgeRuntime { sessions, .. })
-        | ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (&[][..], sessions.as_slice()),
+        ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (&[][..], sessions.as_slice()),
         ir::Runtime::Runner(_) => (&[][..], &[][..]),
     };
     let agent = agent.iter().map(move |grant| {

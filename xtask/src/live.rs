@@ -151,10 +151,10 @@ pub(crate) fn smoke(
 
 /// The longest a lost smoke run's sandboxes may take to end by themselves, from when its job is
 /// killed, after the run's start.
-// The run's hard end is at most 94 minutes after its start: three of an EC2 sandbox's startups
-// (29 minutes each, the agent's twice and the final judge's), the agent's deadline, which the
-// check sets to 2, and the score's timeout, 5. Then an EC2 timer fires within 2 minutes, as it is
-// set for the minute after, and an instance takes up to 10 to be terminated.
+// The run's hard end is at most 94 minutes after its start: three of an EC2 sandbox's startups (29
+// minutes each, the agent's twice and the final call's target's), the agent's deadline, which the
+// check sets to 2, and the final call's timeout, 5. Then an EC2 timer fires within 2 minutes, as it
+// is set for the minute after, and an instance takes up to 10 to be terminated.
 const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 
 /// How often a lost run's sandboxes are looked for.
@@ -495,8 +495,10 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     if outcome["state"] != "finished" {
         failed.push(format!("the run didn't finish: {}", outcome["state"]));
     }
-    let detail = outcome["verdict"]["result"]["returned"]["detail"]
-        .as_array()
+    let values = outcome["verdict"]["result"]["values"].as_array();
+    let detail = (values.into_iter().flatten())
+        .find(|value| value["name"] == "detail")
+        .and_then(|detail| detail["value"].as_array())
         .cloned()
         .unwrap_or_default();
     let sandboxes = if gpu { 4 } else { 3 };
@@ -509,7 +511,7 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     }
     if detail.len() != sandboxes * CHECKS_PER_SANDBOX {
         failed.push(format!(
-            "the judge returned {} probe lines: expected {} for {sandboxes} sandboxes",
+            "the final call returned {} probe lines: expected {} for {sandboxes} sandboxes",
             detail.len(),
             sandboxes * CHECKS_PER_SANDBOX
         ));

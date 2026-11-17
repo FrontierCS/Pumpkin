@@ -1,7 +1,8 @@
 """A workflow whose agent is Codex, on the model that `--arg model=<name>` names: it writes a
-greeting and submits it, and the judge scores the greeting's size."""
+greeting and submits it, and the final call scores the greeting's size."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
+load("//codex/final.star", "final_call")
 load("//submit.star", "submit")
 
 MODEL = arg("model", str)
@@ -36,15 +37,8 @@ workflow(
             "image": IMAGE,
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
-            "runtime": {"judge": {
-                "command": {
-                    "argv": ["sh", "-c", "printf '{\"score\": %s}' $(wc -c < /pumpkin/in/payload/raw) > /pumpkin/out/result.json"],
-                    "cwd": "/pumpkin/home",
-                },
-                "slots": [{"name": "payload", "max_bytes": 1 * KiB}],
-                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = {"role": "judge", "slot": "payload", "timeout_seconds": 60},
+    final = {"target": "judge", "body": final_call, "payload_max_bytes": 1 * KiB, "timeout_seconds": 60},
 )

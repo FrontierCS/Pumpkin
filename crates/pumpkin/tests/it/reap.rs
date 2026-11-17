@@ -9,7 +9,7 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report,
+    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report, returned,
     write_gone, write_on, write_record,
 };
 
@@ -53,7 +53,7 @@ fn reaps() {
     held.lock().unwrap();
     write_record(&scratch, LOST, true, None);
     write_record(&scratch, BARE, true, None);
-    let finished = json!({ "state": "finished", "score": 1 });
+    let finished = returned(1.0);
     write_record(&scratch, FINISHED, true, Some(finished));
     write_record(&scratch, LIVE, true, None);
     let live = File::open(scratch.0.join(format!("runs/{LIVE}/driver.pid"))).unwrap();

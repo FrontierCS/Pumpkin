@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use decision::{Effect, Evaluated, JudgeResult, Unevaluated};
+use decision::{CallResult, Effect, Evaluated, Unevaluated};
 use schema::ir::{Name, argument};
 use schema::workflow::NowFunction;
 
@@ -24,7 +24,7 @@ pub(crate) fn evaluate(
         let returned = bodies.now(&function.body, &arguments, &mut proposed)?;
         Ok(Evaluated {
             effects: proposed.0,
-            returned: JudgeResult::returned_by(returned)?,
+            returned: CallResult::returned_by(returned)?,
         })
     };
     // At the top of a stack of the evaluator's size, as every other evaluation is: the run loop's

@@ -36,14 +36,14 @@ mod ops;
 mod result;
 
 pub use jobs::Failure;
-pub use result::JudgeResult;
+pub use result::CallResult;
 
 /// The runtime's number for an op it took from a session, which the op's reply names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpId(pub u64);
 
-/// A call's job: a job function's, or the score's. The core numbers jobs from 0, in the order it
-/// starts them, and callers ask about their jobs by these numbers.
+/// A call's job: a job function's, or the final call's. The core numbers jobs from 0, in the order
+/// it starts them, and callers ask about their jobs by these numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobId(pub u64);
 
@@ -57,8 +57,7 @@ pub struct LeaseId(pub u64);
 pub enum Caller {
     /// The agent, from its sandbox.
     Agent,
-    /// A job, from its sandbox: the score's judge, while its command runs, or a job function's
-    /// target, while the function's body runs.
+    /// A call, from its target's sandbox, while the call's body runs.
     Job(JobId),
 }
 
@@ -104,8 +103,8 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evaluated {
     pub effects: Vec<Effect>,
-    /// See [`JudgeResult::returned_by`].
-    pub returned: JudgeResult,
+    /// See [`CallResult::returned_by`].
+    pub returned: CallResult,
 }
 
 /// Why a now function's call gave no evaluation.
@@ -147,31 +146,15 @@ pub enum Event {
         caller: Caller,
         request: Request,
     },
-    /// A job's command has started.
-    JudgeStarted { job: JobId },
-    /// A job's command has exited by itself.
-    JudgeExited { job: JobId, status: ExitStatus },
-    /// A job's command reached its timeout, and the runtime stops it.
-    JudgeTimedOut { job: JobId },
-    /// A job's outputs have been collected and its sandbox destroyed. `result` is its
-    /// `result.json` parsed per its judge's [`ResultSpec`](schema::ir::ResultSpec), or
-    /// why it could not be.
-    JudgeCollected {
-        job: JobId,
-        result: Result<JudgeResult, String>,
-    },
-    /// A job failed, or was stopped as [`Action::StopJudge`] asked, and its sandbox has been
-    /// destroyed.
-    JudgeFailed { job: JobId, reason: String },
-    /// A job function's call has started its body on the target.
+    /// A call has started its body on its target.
     CallStarted { job: JobId },
-    /// A job function's call reached its timeout, and the runtime stops it.
+    /// A call reached its timeout, and the runtime stops it.
     CallTimedOut { job: JobId },
-    /// A job function's body returned, as [`JudgeResult::returned_by`] takes its return, and the
-    /// call's target has been destroyed.
-    CallReturned { job: JobId, result: JudgeResult },
-    /// A job function's call failed, or was stopped as [`Action::StopJudge`] asked, and its target
-    /// has been destroyed.
+    /// A call's body returned, as [`CallResult::returned_by`] takes its return, and the call's
+    /// target has been destroyed.
+    CallReturned { job: JobId, result: CallResult },
+    /// A call failed, or was stopped as [`Action::StopCall`] asked, and its target has been
+    /// destroyed.
     CallFailed { job: JobId, reason: String },
     /// A lease's runner has started, and runs the commands it is given from now.
     LeaseReady { lease: LeaseId },
@@ -209,12 +192,10 @@ pub enum Action {
     StartAgent,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
-    /// Runs the score's judge call: a fresh sandbox of its judge, with `payload` in its slot, and
-    /// the judge's command, stopped once it has run for `timeout`. The runtime reports
-    /// [`Event::JudgeStarted`] when the command starts, then [`Event::JudgeExited`] or
-    /// [`Event::JudgeTimedOut`], and last [`Event::JudgeCollected`], or [`Event::JudgeFailed`] at
-    /// any point, once the job's sandbox is gone.
-    StartJudge {
+    /// Runs the final call: a fresh sandbox of its target, and its body on it with `payload`,
+    /// whose every step on the target is to be done within `timeout` of the body's start, as a
+    /// job function's call's is. The runtime reports as it does for [`Action::StartCall`].
+    StartFinalCall {
         job: JobId,
         payload: PayloadRef,
         timeout: Duration,
@@ -233,8 +214,8 @@ pub enum Action {
         arguments: BTreeMap<Name, ArgumentValue>,
         timeout: Duration,
     },
-    /// Stops a job wherever it is, and destroys its sandbox. Its last report follows as usual.
-    StopJudge { job: JobId },
+    /// Stops a call wherever it is, and destroys its target. Its last report follows as usual.
+    StopCall { job: JobId },
     /// Opens lease `lease` of grant `grant` for `holder`: starts a fresh sandbox of the grant's
     /// runner, as instance `instance` of its role (`provider::Create::instance`). The runtime
     /// reports [`Event::LeaseReady`] once it has started, then each command's end as
@@ -335,14 +316,15 @@ pub struct Outcome {
     pub verdict: Verdict,
 }
 
-/// What the final judge made of the selected submission.
+/// What the final call made of the selected submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// The agent made no submission, so nothing was judged.
+    /// The agent made no submission, so the final call wasn't made.
     NoSubmission,
-    Judged {
+    /// The final call returned `result`.
+    Returned {
         submission: Submission,
-        result: JudgeResult,
+        result: CallResult,
     },
     NoResult {
         submission: Submission,
@@ -354,26 +336,26 @@ pub enum Verdict {
 /// sets, after the deadline.
 ///
 /// It is the sum of six shares: the agent's startup, its deadline, its finalize grace, the
-/// agent's startup again, the score's timeout, and the final judge's startup. A role's
+/// agent's startup again, the final call's timeout, and its target's startup. A role's
 /// startup ([`Placed::startup`]) is how long its class may take to start one of its sandboxes,
 /// from when the runtime asks for one to when its session is ready.
 pub fn lasts(placed: &Placed) -> Duration {
     let workflow = placed.workflow();
-    let score = workflow.score();
-    let agent = placed.startup(workflow.agent().role);
-    let final_judge = placed.startup(score.slot.judge().role());
+    let final_call = workflow.final_call();
+    let agent_startup = placed.startup(workflow.agent().role);
+    let final_startup = placed.startup(final_call.target.role());
     // Each start is attempted once (a failed start isn't retried), which is why the hard
     // end counts one startup per start. The core ends the work phase by the first two shares
-    // (`latest_deadline`), and the agent's teardown begins by then. The final judge's startup
-    // and the score's timeout are the final judge's, the run's last sandbox: its start and its
-    // command. The grace, which the deadline cuts short, and the agent's startup again are slack
-    // for ending the work phase and collecting what it left, which nothing else bounds: a margin
-    // chosen, not derived.
+    // (`latest_deadline`), and the agent's teardown begins by then. The target's startup and the
+    // final call's timeout are those of the final call's target, the run's last sandbox: its
+    // start and its body's run. The grace, which the deadline cuts short, and the agent's startup
+    // again are slack for ending the work phase and collecting what it left, which nothing else
+    // bounds: a margin chosen, not derived.
     latest_deadline(placed)
         .saturating_add(workflow.agent().finalize_grace)
-        .saturating_add(agent)
-        .saturating_add(score.timeout)
-        .saturating_add(final_judge)
+        .saturating_add(agent_startup)
+        .saturating_add(final_call.timeout)
+        .saturating_add(final_startup)
 }
 
 /// The latest that the work phase's deadline of a run of `placed` may be, from the run's start:
@@ -427,7 +409,7 @@ enum Phase {
         work_end: WorkEnd,
         submission: Option<Submission>,
     },
-    /// The final judge judges the selected submission in job `job`, and the run ends once the
+    /// The final call judges the selected submission in job `job`, and the run ends once the
     /// job, and every lease it held, has ended.
     Final {
         work_end: WorkEnd,
@@ -488,23 +470,14 @@ impl<'w> Core<'w> {
                 caller,
                 request,
             } => self.op(op, caller, request, &mut actions),
-            Event::JudgeStarted { job } | Event::CallStarted { job } => {
+            Event::CallStarted { job } => {
                 self.on_job(job, |state| state.started(at), &mut actions);
             }
-            // The run log keeps the status; its `result.json` says whether a call gave a result.
-            Event::JudgeExited { job, status: _ } => {
-                let ended = |state: &mut jobs::State| state.ended(at, jobs::End::Exited);
-                self.on_job(job, ended, &mut actions);
-            }
-            Event::JudgeTimedOut { job } | Event::CallTimedOut { job } => {
+            Event::CallTimedOut { job } => {
                 let ended = |state: &mut jobs::State| state.ended(at, jobs::End::TimedOut);
                 self.on_job(job, ended, &mut actions);
             }
-            Event::JudgeCollected { job, result } => {
-                let outcome = result.map_err(Failure::InvalidResult);
-                self.on_job(job, |state| state.report(at, outcome), &mut actions);
-            }
-            Event::JudgeFailed { job, reason } | Event::CallFailed { job, reason } => {
+            Event::CallFailed { job, reason } => {
                 let outcome = Err(Failure::Error(reason));
                 self.on_job(job, |state| state.report(at, outcome), &mut actions);
             }
@@ -558,7 +531,7 @@ impl<'w> Core<'w> {
             Phase::Final { submission, .. } => submission.finalized,
             Phase::Finished(Outcome { verdict, .. }) => match verdict {
                 Verdict::NoSubmission => false,
-                Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
+                Verdict::Returned { submission, .. } | Verdict::NoResult { submission, .. } => {
                     submission.finalized
                 }
             },
@@ -577,13 +550,12 @@ impl<'w> Core<'w> {
     /// Whether `caller`'s model requests are allowed at `at`, a time since the run started: the
     /// agent's until the work phase ends, the grace after a finalize included
     /// ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)); a call's
-    /// from its start, its judge's command's or its function's body's, until it ends, is
-    /// stopped, or its timeout passes, in whichever phase. Once they aren't, the runtime refuses
-    /// each that it takes, and ends those in flight.
+    /// from its body's start until it ends, is stopped, or its timeout passes, in whichever phase.
+    /// Once they aren't, the runtime refuses each that it takes, and ends those in flight.
     pub fn model_requests_allowed(&self, caller: Caller, at: Duration) -> bool {
         match caller {
             // A harness asks its model after each command, the finalize's too, and fails its turn
-            // if refused; the locked selection keeps any answer off the score.
+            // if refused; the locked selection keeps any answer off the result.
             Caller::Agent => self.work_end_due().is_some_and(|(end, _)| at < end),
             // A call's route is open while it may make ops, which its timeout bounds.
             Caller::Job(_) => self.working(caller).is_ok_and(|working| at < working.end()),
@@ -660,7 +632,7 @@ impl<'w> Core<'w> {
             submission,
         };
         let stopped = self.jobs.stop_unfinished(self.now);
-        actions.extend(stopped.into_iter().map(|job| Action::StopJudge { job }));
+        actions.extend(stopped.into_iter().map(|job| Action::StopCall { job }));
         let closed = self.leases.close_where(self.now, |_| true);
         actions.extend(closed.into_iter().map(|lease| Action::CloseLease { lease }));
         actions.push(Action::TearDownAgent);
@@ -694,7 +666,7 @@ impl<'w> Core<'w> {
                 }
                 let submission = submission.clone();
                 let verdict = match outcome.clone() {
-                    Ok(result) => Verdict::Judged { submission, result },
+                    Ok(result) => Verdict::Returned { submission, result },
                     Err(failure) => Verdict::NoResult {
                         submission,
                         failure,
@@ -722,11 +694,12 @@ impl<'w> Core<'w> {
             return self.finish(Outcome { work_end, verdict }, actions);
         };
         // The final phase comes after the deadline, so the time left before it doesn't count.
-        let job = (self.jobs).add(JobOf::Score, self.workflow.score().timeout);
-        actions.push(Action::StartJudge {
+        let timeout = self.workflow.final_call().timeout;
+        let job = (self.jobs).add(JobOf::Final, timeout);
+        actions.push(Action::StartFinalCall {
             job,
             payload: submission.payload.clone(),
-            timeout: self.workflow.score().timeout,
+            timeout,
         });
         self.phase = Phase::Final {
             work_end,

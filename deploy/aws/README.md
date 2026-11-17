@@ -13,7 +13,7 @@ bucket of the account, so no laptop can lose it.
 | a launch template per class: the AMI, the type, IMDSv2 within one hop, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
 | the timer: a schedule group and a role that terminates run instances | a kill bound outside each guest |
-| the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports judges' images, which hold hidden data |
+| the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker and nftables | each sandbox's boot runs them, at the release's versions |
 | the controller's role and instance profile: SSM, its jobs' settings, and what the `ec2` provider's calls need | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |

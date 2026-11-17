@@ -31,7 +31,7 @@ resource "aws_ecr_lifecycle_policy" "images" {
 
 # Modal imports a role's image from ECR with this role, which it assumes by the identity token
 # that Modal's OIDC issuer gives a workspace: AWS takes only a token for the person's workspace,
-# as judges' images hold hidden data. The account's OIDC provider is made once (README.md).
+# as targets' images hold hidden data. The account's OIDC provider is made once (README.md).
 data "aws_iam_openid_connect_provider" "modal" {
   url = "https://oidc.modal.com"
 }

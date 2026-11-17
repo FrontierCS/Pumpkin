@@ -178,12 +178,12 @@ impl<const P: usize, const R: usize, const O: usize> Params<P, R, O> {
     }
 }
 
-// `workflow(*, name, roles, score)`: the evaluation's workflow is the one whose IR has these
+// `workflow(*, name, roles, final)`: the evaluation's workflow is the one whose IR has these
 // fields, at the version this crate reads. It returns `None`.
 fn workflow(call: &Call<'_>, site: &Site<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     const PARAMS: Params<0, 3, 0> = Params {
         positional: [],
-        required: ["name", "roles", "score"],
+        required: ["name", "roles", "final"],
         optional: [],
     };
     // Bound only to check the call: the dict keeps the arguments in the order given, each key at

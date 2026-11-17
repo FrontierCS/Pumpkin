@@ -59,8 +59,9 @@ impl<L: Loader> Loader for Keeping<'_, L> {
     }
 }
 
-/// Checks, without calling it, that each body of `workflow`'s functions takes a call of its kind,
-/// on an evaluation of its file from `sources` with `args`, and gives `sources` back.
+/// Checks, without calling it, that each body of `workflow`'s functions, and its final call's,
+/// takes a call of its kind, on an evaluation of its file from `sources` with `args`, and gives
+/// `sources` back.
 ///
 /// # Errors
 ///
@@ -71,21 +72,35 @@ pub(crate) fn check(
     args: &Args,
 ) -> Result<Sources, Problems> {
     for (_, function) in workflow.job_functions() {
-        let body = body(&function.body, &function.keywords);
+        let body = body(&function.body.file, &function.body.def, &function.keywords);
         lang::check(&body, BodyKind::Job, &mut &sources, args, Bounds::WORKFLOW)?;
     }
+    // A now function gives its body no keywords.
     let keywords = Map::new();
     for (_, function) in workflow.now_functions() {
-        let body = body(&function.body, &keywords);
+        let body = body(&function.body.file, &function.body.def, &keywords);
         lang::check(&body, BodyKind::Now, &mut &sources, args, Bounds::WORKFLOW)?;
     }
+    let final_call = workflow.final_call();
+    let body = body(
+        &final_call.body.file,
+        &final_call.body.def,
+        &final_call.keywords,
+    );
+    lang::check(
+        &body,
+        BodyKind::Final,
+        &mut &sources,
+        args,
+        Bounds::WORKFLOW,
+    )?;
     Ok(sources)
 }
 
-fn body<'b>(body: &'b ir::Body, keywords: &'b Map<String, Value>) -> Body<'b> {
+fn body<'b>(file: &'b Label, def: &'b Name, keywords: &'b Map<String, Value>) -> Body<'b> {
     Body {
-        file: &body.file,
-        def: body.def.as_str(),
+        file,
+        def: def.as_str(),
         keywords,
     }
 }
@@ -117,11 +132,26 @@ impl runtime::Bodies for Bodies<'_> {
         arguments: &BTreeMap<Name, ir::ArgumentValue>,
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
-        let body = self::body(body, keywords);
+        let body = self::body(&body.file, &body.def, keywords);
         let host = Host::Job(&mut Driven(target));
         let mut sources = self.sources;
         let bounds = Bounds::WORKFLOW;
         let returned = lang::call(&body, host, arguments, &mut sources, self.args, bounds);
+        returned.map_err(|problems| problems.to_string())
+    }
+
+    fn final_call(
+        &self,
+        body: &ir::FinalBody,
+        keywords: &Map<String, Value>,
+        target: &mut dyn runtime::Target,
+    ) -> Result<Vec<(Name, Value)>, String> {
+        let body = self::body(&body.file, &body.def, keywords);
+        let host = Host::Final(&mut Driven(target));
+        let mut sources = self.sources;
+        let bounds = Bounds::WORKFLOW;
+        let arguments = BTreeMap::new();
+        let returned = lang::call(&body, host, &arguments, &mut sources, self.args, bounds);
         returned.map_err(|problems| problems.to_string())
     }
 
@@ -132,7 +162,7 @@ impl runtime::Bodies for Bodies<'_> {
         run: &mut dyn runtime::RunState,
     ) -> Result<Vec<(Name, Value)>, String> {
         let keywords = Map::new();
-        let body = self::body(body, &keywords);
+        let body = self::body(&body.file, &body.def, &keywords);
         let host = Host::Now(&mut Proposing(run));
         let mut sources = self.sources;
         let bounds = Bounds::WORKFLOW;

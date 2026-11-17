@@ -56,7 +56,7 @@ const ROLES: [&str; 13] = [
     "confined",
     "first",
     "hung",
-    "judge",
+    "leaver",
     "missing",
     "model",
     "not_utf8",
@@ -459,18 +459,18 @@ fn processes(sandbox: &Started, done: impl Fn(&str) -> bool) -> String {
     }
 }
 
-// A judge exits leaving processes that freezing kills: one orphaned to `sandboxd`, and one in a
-// session of its own, outside its command's process group.
+// A role's command exits leaving processes that freezing kills: one orphaned to `sandboxd`, and
+// one in a session of its own, outside its command's process group.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
-fn judge() {
+fn freezes_what_it_left() {
     check(
-        "judge",
+        "freezes",
         |fixture| {
-            let mut sandbox = fixture.start(&fixture.run, "judge");
-            let (slot, payload) = (relative("in/payload"), relative("in/payload/raw"));
+            let mut sandbox = fixture.start(&fixture.run, "leaver");
+            let (dir, payload) = (relative("in/payload"), relative("in/payload/raw"));
             let put = [
-                Put::Dir(slot, dir_mode()),
+                Put::Dir(dir, dir_mode()),
                 Put::File(payload, file_mode(), b"ledger"),
             ];
             sandbox
@@ -623,8 +623,8 @@ fn cpus() {
                 ("a runner", start(first, "runner-0", runners(), 0)),
                 ("another runner", start(first, "runner-1", runners(), 1)),
                 (
-                    "another run's judge",
-                    start(&fixture.run, "judge", role("judge"), 0),
+                    "another run's role",
+                    start(&fixture.run, "leaver", role("leaver"), 0),
                 ),
             ];
             let mut lines = Vec::new();
@@ -676,7 +676,7 @@ fn cpus() {
             the trainer: on whole cores: true, as it sees them: true
             a runner: on whole cores: true, as it sees them: true
             another runner: on whole cores: true, as it sees them: true
-            another run's judge: on whole cores: true, as it sees them: true
+            another run's role: on whole cores: true, as it sees them: true
             each apart from the others: true
             one that needs more than are left: refused, naming them: true
             one that needs more than the machine has: the run's roles need more whole cores at once than the <cores> that this machine gives sandboxes, to hold their CPUs (`wide` <cpus + 1>): give them fewer CPUs"#]],

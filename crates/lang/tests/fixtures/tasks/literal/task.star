@@ -1,7 +1,8 @@
 """A neutral workflow written as literals: an agent, two job functions it calls while it works,
-whose bodies verify on targets, and the judge that scores what it submits."""
+whose bodies verify on targets, and the final call that judges what it submits."""
 
 load("//lib/submit.star", "submit")
+load("//lib/parts.star", "final_call")
 load("//lib/verify.star", "verify")
 
 # The agent's user and group, unpacked from one tuple, on two lines joined.
@@ -78,11 +79,7 @@ joined\n',
             "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
             "user": {"uid": 65532, "gid": 65532},
             "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
-            "runtime": {"judge": {
-                "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home", "env": ["MODE=eval"]},
-                "slots": [{"name": "payload", "max_bytes": 0o20 * KiB}],
-                "result": {"shows": {"score": "/score"}, "returns": ["/score"]},
-            }},
+            "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval"]}},
         },
         {
             "name": "verifier",
@@ -92,5 +89,10 @@ joined\n',
             "runtime": {"target": {"cwd": "/pumpkin/home"}},
         },
     ],
-    score = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120},
+    final = {
+        "target": "final_judge",
+        "body": final_call,
+        "payload_max_bytes": 0o20 * KiB,
+        "timeout_seconds": 120,
+    },
 )

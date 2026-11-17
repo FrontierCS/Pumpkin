@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use runtime::{Place, RouteEntry};
+use runtime::{CallOf, CallStart, Place, RouteEntry};
 use schema::ir::{self, Name};
 use serde_json::{Value, json};
 
@@ -64,7 +64,7 @@ impl Talk {
         routes: Option<&BTreeMap<String, Vec<RouteEntry>>>,
     ) -> Self {
         let roles = ir.roles.as_slice();
-        let score = ir.score.role.as_str();
+        let final_target = ir.final_call.target.as_str();
         let mut granted = BTreeMap::new();
         for role in roles {
             // Each grant that names a role: a job function its target, a session its runner; and
@@ -79,8 +79,7 @@ impl Talk {
                         ir::Function::Now(_) => None,
                     })
                     .collect(),
-                ir::Runtime::Judge(ir::JudgeRuntime { sessions, .. })
-                | ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (sessions.iter())
+                ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (sessions.iter())
                     .map(|named| (&named.name, &named.session.runner, "lease"))
                     .collect(),
                 ir::Runtime::Runner(_) => Vec::new(),
@@ -99,7 +98,7 @@ impl Talk {
         };
         Self {
             roles: (roles.iter())
-                .map(|role| role_json(role, score, places, routes(role)))
+                .map(|role| role_json(role, final_target, places, routes(role)))
                 .collect(),
             edges: BTreeMap::new(),
             runners: BTreeMap::new(),
@@ -111,7 +110,7 @@ impl Talk {
                     .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)))
                     .map(|role| role.name.to_string())
                     .unwrap_or_default(),
-                score: score.to_owned(),
+                final_target: final_target.to_owned(),
                 granted,
                 jobs: BTreeMap::new(),
                 holders: BTreeMap::new(),
@@ -145,7 +144,7 @@ impl Talk {
 
 struct Reading {
     agent: String,
-    score: String,
+    final_target: String,
     /// Each grant's role, by its holder and name, and how the page names a call of it.
     granted: BTreeMap<(String, String), (String, &'static str)>,
     jobs: BTreeMap<u64, String>,
@@ -155,25 +154,12 @@ struct Reading {
 
 impl Talk {
     fn action(&mut self, at: f64, action: &Value, request: &Value) {
+        if let Some(start) = CallStart::read(action) {
+            self.call_started(start);
+            return;
+        }
         let lease = action["lease"].as_u64();
         match (action["kind"].as_str().unwrap_or_default(), lease) {
-            ("start_judge" | "start_call", _) => {
-                let Some(job) = action["job"].as_u64() else {
-                    return;
-                };
-                let called = match action["grant"].as_str() {
-                    None => Some((self.reading.score.clone(), "submission")),
-                    Some(grant) => {
-                        let grant = (self.reading.agent.clone(), grant.to_owned());
-                        self.reading.granted.get(&grant).cloned()
-                    }
-                };
-                let Some((role, kind)) = called else { return };
-                let size = action["payload"]["size"].as_u64();
-                self.edge(&self.reading.agent.clone(), &role, kind)
-                    .add(size, None);
-                self.reading.jobs.insert(job, role);
-            }
             ("start_lease", Some(lease)) => {
                 let holder = action["holder"]
                     .as_str()
@@ -211,6 +197,25 @@ impl Talk {
             }
             _ => {}
         }
+    }
+
+    fn call_started(&mut self, start: CallStart) {
+        let CallStart {
+            job,
+            of,
+            payload_bytes,
+        } = start;
+        let called = match of {
+            CallOf::Function(grant) => {
+                let grant = (self.reading.agent.clone(), grant);
+                self.reading.granted.get(&grant).cloned()
+            }
+            CallOf::Final => Some((self.reading.final_target.clone(), "final call")),
+        };
+        let Some((role, kind)) = called else { return };
+        self.edge(&self.reading.agent.clone(), &role, kind)
+            .add(Some(payload_bytes), None);
+        self.reading.jobs.insert(job, role);
     }
 
     fn event(&mut self, at: f64, event: &Value) {
@@ -321,14 +326,13 @@ impl Talk {
 
 fn role_json(
     role: &ir::Role,
-    score: &str,
+    target: &str,
     places: &BTreeMap<String, Place>,
     routes: Option<&[RouteEntry]>,
 ) -> Value {
     let name = role.name.as_str();
     let (kind, has_route) = match &role.runtime {
         ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
-        ir::Runtime::Judge(judge) => ("judge", judge.egress.model.is_some()),
         ir::Runtime::Target(target) => ("target", target.egress.model.is_some()),
         ir::Runtime::Runner(_) => ("runner", false),
     };
@@ -347,7 +351,7 @@ fn role_json(
     json!({
         "name": name,
         "kind": kind,
-        "score": name == score,
+        "final_target": name == target,
         "routed": has_route,
         "place": place,
         "routes": routes,

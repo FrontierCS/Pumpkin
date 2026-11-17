@@ -1116,7 +1116,7 @@ enum Step {
     Exit,
     /// The answer to the collects of a `held` directory.
     Release,
-    /// A judge's result of the last number read.
+    /// A result, `{"raw_score": …}`, of the last number read.
     Result,
     /// The session's end.
     End(End),
@@ -1456,12 +1456,12 @@ fn state_name(reply: &OpReply) -> String {
 // hold its field. `chat` is alike through Chat Completions; `ask <model> <text>` is one whose
 // response's first part the next step waits for.
 //
-// `result` writes a judge's result of what a lease's command printed, or a model answered;
-// `sleep <seconds>`; `exit` exits the command with 0, and the steps after it still play, as a
-// process the command left would; `release` lets a collect of a directory named `held` go, and
+// `result` writes a result, `{"raw_score": …}`, of what a lease's command printed, or a model
+// answered; `sleep <seconds>`; `exit` exits the command with 0, and the steps after it still play,
+// as a process the command left would; `release` lets a collect of a directory named `held` go, and
 // any later one. `crash` and `close` end the session: after an op, `crash` reads nothing more as
-// the op goes out, so that its reply, which can't be written, ends the session, and `close`
-// closes the connection, so that the end reaches the gateway behind the op.
+// the op goes out, so that its reply, which can't be written, ends the session, and `close` closes
+// the connection, so that the end reaches the gateway behind the op.
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -1726,6 +1726,9 @@ fn judge(
     }
 }
 
+/// Where the sim's `judge` writes its result, which the tests' bodies get.
+const RESULT: &str = "/pumpkin/out/result.json";
+
 fn collect(
     stream: u32,
     dir: &AbsolutePath,
@@ -1739,7 +1742,13 @@ fn collect(
     }
     // A collect of a file sends the tree of that one file, by its name, as `sandboxd`'s does.
     let printed = served.printed.get(dir.as_str()).map(String::as_bytes);
-    if let Some(body) = (served.files.by_path.get(dir.as_str()).map(Vec::as_slice)).or(printed) {
+    let caller = served.caller.as_ref();
+    let written = caller.and_then(|caller| caller.result.as_deref());
+    let result = (dir.as_str() == RESULT)
+        .then(|| served.result.as_deref().or(written))
+        .flatten();
+    let put = served.files.by_path.get(dir.as_str()).map(Vec::as_slice);
+    if let Some(body) = put.or(printed).or(result) {
         let (_, name) = dir.as_str().rsplit_once('/').unwrap();
         send_file(
             stream,

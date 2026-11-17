@@ -1,5 +1,5 @@
-"""The parts of a neutral workflow that the fixtures' workflows share: `AGENT`, `JUDGE` and
-`SCORE` make a whole one, which a case changes a field of, as `JUDGE | {"status": "ready"}`."""
+"""The parts of a neutral workflow that the fixtures' workflows share: `AGENT`, `FINAL_TARGET` and
+`FINAL` make a whole one, which a case changes a field of, as `FINAL_TARGET | {"status": "ready"}`."""
 
 load("//lib/submit.star", "submit")
 
@@ -21,24 +21,21 @@ JUDGE_IMAGE = "sha256:2222222222222222222222222222222222222222222222222222222222
 
 JUDGE_USER = {"uid": 65532, "gid": 65532}
 
-# What every judge returns of its result.
-RESULT = {"shows": {"score": "/score"}, "returns": ["/score", "/failure"]}
-
-JUDGE_RUNTIME = {"judge": {
-    "command": {"argv": ["/opt/judge/run"], "cwd": "/pumpkin/home"},
-    "slots": [{"name": "payload", "max_bytes": 64 * KiB}],
-    "result": RESULT,
-}}
-
-# The judge that scores, as `SCORE` names it.
-JUDGE = {
+# The final call's target, as `FINAL` names it.
+FINAL_TARGET = {
     "name": "final_judge",
     "image": JUDGE_IMAGE,
     "user": JUDGE_USER,
     "needs": {"cpu_millis": 1000, "memory_bytes": 512 * MiB},
-    "runtime": JUDGE_RUNTIME,
+    "runtime": {"target": {"cwd": "/pumpkin/home"}},
 }
 
-SCORE = {"role": "final_judge", "slot": "payload", "timeout_seconds": 120}
+def final_call(target: Target, payload: Payload):
+    """Runs the judge on the selection, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", payload)
+    target.run(["/opt/judge/run"])
+    return {"result": target.get("/pumpkin/out/result.json")}
+
+FINAL = {"target": "final_judge", "body": final_call, "payload_max_bytes": 64 * KiB, "timeout_seconds": 120}
 
 _DRAFT = "private to this file"

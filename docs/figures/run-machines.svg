@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 616" width="880" height="616" role="img" aria-labelledby="title desc">
 <title id="title">The programs and machines of a run</title>
-<desc id="desc">The operator's pumpkin starts the driver, one process for each run, on the operator's machine or, over ssh through SSM, on the controller. In the driver, the runtime, the decision core, the gateway, the model route and the providers work together; the providers create the sandboxes of the agent, a judge or a runner, each of which has one session with the gateway, and the route sends the requests it admits to the model provider.</desc>
+<desc id="desc">The operator's pumpkin starts the driver, one process for each run, on the operator's machine or, over ssh through SSM, on the controller. In the driver, the runtime, the decision core, the gateway, the model route and the providers work together; the providers create the sandboxes of the agent, of the targets that a call starts afresh and of the runners that a session leases, each of which has one session with the gateway, and the route sends the requests it admits to the model provider.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -67,9 +67,9 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <rect class="box" x="698" y="262" width="152" height="52" rx="8"/>
 <text class="name mid" x="774" y="284">agent</text><text class="note mid" x="774" y="302">works on the task</text>
 <rect class="box" x="698" y="324" width="152" height="52" rx="8"/>
-<text class="name mid" x="774" y="346">judge</text><text class="note mid" x="774" y="364">judges a submission</text>
+<text class="name mid" x="774" y="346">target</text><text class="note mid" x="774" y="364">started afresh by a call</text>
 <rect class="box" x="698" y="386" width="152" height="52" rx="8"/>
-<text class="name mid" x="774" y="408">runner</text><text class="note mid" x="774" y="426">leased by a role</text>
+<text class="name mid" x="774" y="408">runner</text><text class="note mid" x="774" y="426">leased in a session</text>
 <text class="note" x="698" y="458">each runs <tspan class="code">sandboxd</tspan>,</text>
 <text class="note" x="698" y="474">which serves its session</text>
 <path class="arrow" d="M578 276H682" marker-start="url(#tail)" marker-end="url(#head)"/>

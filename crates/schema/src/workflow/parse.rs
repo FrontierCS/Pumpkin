@@ -1,22 +1,23 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use super::errors::{Errors, Reported};
 use super::{
-    Agent, Holder, JobFunction, Judge, JudgeId, NowFunction, ParseErrors, RoleId, Runner, RunnerId,
-    Sandbox, Score, Session, Slot, SlotId, Target, TargetId, Workflow,
+    Agent, Final, Holder, JobFunction, NowFunction, ParseErrors, RoleId, Runner, RunnerId, Sandbox,
+    Session, Target, TargetId, Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 
 impl Workflow {
     /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
-    /// [at](super::ParseError::at) its place. The rules: one agent; names unique among roles,
-    /// among a role's slots and among its grants; the agent's `dirs` and `files` give each path
-    /// once, none below a file; each limit of bytes is within the protocol's; each grant names a
-    /// role of its kind that no other grant of its kind names; an agent's runner has an image no
-    /// judge or target has; every runner is leased, and every target called; the score names a
-    /// judge's slot, and no other judge is listed. A rule about parts that fail to resolve goes
+    /// [at](super::ParseError::at) its place. The rules: one agent; names unique among roles and
+    /// among a role's grants; the agent's `dirs` and `files` give each path once, none below a
+    /// file; each limit of bytes is within the protocol's; each grant names a role of its kind
+    /// that no other grant of its kind names; an agent's runner has an image no target has; the
+    /// final call's target is one that no job function names; every runner is leased, and every
+    /// target called. A rule about parts that fail to resolve goes
     /// unchecked, so fixing these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
@@ -29,7 +30,6 @@ struct Parser<'ir> {
     role_ids: BTreeMap<&'ir str, RoleId>,
     roles: Vec<Sandbox>,
     agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
-    judges: BTreeMap<RoleId, Judge>,
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     holders: Vec<Holding<'ir>>,
@@ -39,8 +39,31 @@ struct Parser<'ir> {
 
 /// A role that holds sessions, with each of them, its name and its place.
 struct Holding<'ir> {
-    role: RoleId,
+    holder: HeldBy,
     sessions: Vec<(JsonPointer, &'ir Name, &'ir ir::Session)>,
+}
+
+/// The role that holds a session, of the kind the parser read it as.
+#[derive(Clone, Copy)]
+enum HeldBy {
+    Agent(RoleId),
+    Target(TargetId),
+}
+
+impl HeldBy {
+    fn role(self) -> RoleId {
+        match self {
+            Self::Agent(role) => role,
+            Self::Target(target) => target.role(),
+        }
+    }
+
+    fn holder(self) -> Holder {
+        match self {
+            Self::Agent(_) => Holder::Agent,
+            Self::Target(target) => Holder::Target(target),
+        }
+    }
 }
 
 type Grants = (
@@ -54,7 +77,7 @@ impl<'ir> Parser<'ir> {
             ir_version: ir::IrVersion::V0,
             name: _,
             roles,
-            score,
+            final_call,
         } = ir;
         self.roles(roles);
         let agent = match self.first_agent() {
@@ -71,18 +94,22 @@ impl<'ir> Parser<'ir> {
                 });
                 // The agent's sessions come first, as [`Workflow::sessions`] says.
                 let holding = Holding {
-                    role: agent.role,
+                    holder: HeldBy::Agent(agent.role),
                     sessions: sessions.collect(),
                 };
                 self.holders.insert(0, holding);
-                let parsed = self.grants(&at, grants);
-                self.uncalled();
-                Ok((agent, parsed))
+                Ok((agent, self.grants(&at, grants)))
             }
             Err(reported) => Err(reported),
         };
-        let sessions = self.sessions(agent.as_ref().ok().map(|(agent, _)| agent.role));
-        let score = self.score(score);
+        // After the grants, since the final call's target is one that no job function names.
+        let target = self.final_target(&final_call.target);
+        // With no agent, it holds no grants, so no target is checked against job functions.
+        if agent.is_ok() {
+            self.uncalled(target.as_ref().ok().copied());
+        }
+        let final_call = self.final_call(final_call, target);
+        let sessions = self.sessions();
         let Self {
             errors,
             roles,
@@ -92,21 +119,20 @@ impl<'ir> Parser<'ir> {
         } = self;
         let parsed = agent.and_then(|(agent, (job_functions, now_functions))| {
             let grants = (job_functions?, sessions?, now_functions?);
-            Ok((agent, grants, score?))
+            Ok((agent, grants, final_call?))
         });
-        let (agent, grants, (score, judge)) = errors.finish(parsed)?;
+        let (agent, grants, final_call) = errors.finish(parsed)?;
         let (job_functions, sessions, now_functions) = grants;
         Ok(Workflow {
             ir: ir.clone(),
             roles,
             agent,
-            judge,
             targets,
             runners,
             job_functions,
             sessions,
             now_functions,
-            score,
+            final_call,
         })
     }
 
@@ -133,7 +159,6 @@ impl<'ir> Parser<'ir> {
             let runtime_at = at.token("runtime");
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
-                ir::Runtime::Judge(judge) => self.judge(&runtime_at.token("judge"), id, judge),
                 ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
                     let runner = Runner {
@@ -223,8 +248,8 @@ impl<'ir> Parser<'ir> {
         Ok(first)
     }
 
-    /// Holds `sessions`, those of `role`'s kind at `at`, for [`Self::sessions`] to parse.
-    fn hold(&mut self, at: &JsonPointer, role: RoleId, sessions: &'ir [ir::NamedSession]) {
+    /// Holds `sessions`, target `target`'s at `at`, for [`Self::sessions`] to parse.
+    fn hold(&mut self, at: &JsonPointer, target: TargetId, sessions: &'ir [ir::NamedSession]) {
         let list = at.token("sessions");
         let names = sessions.iter().map(|named| &named.name);
         self.errors.unique(names, |index| list.token(index));
@@ -233,7 +258,7 @@ impl<'ir> Parser<'ir> {
             (list.token(index).token("session"), name, session)
         });
         self.holders.push(Holding {
-            role,
+            holder: HeldBy::Target(target),
             sessions: sessions.collect(),
         });
     }
@@ -245,57 +270,13 @@ impl<'ir> Parser<'ir> {
             egress,
             sessions,
         } = target;
-        self.hold(at, role, sessions);
+        self.hold(at, TargetId(role), sessions);
         let target = Target {
             cwd: cwd.clone(),
             env: env.clone(),
             model: egress.model.clone(),
         };
         self.targets.insert(role, target);
-    }
-
-    fn judge(&mut self, at: &JsonPointer, role: RoleId, judge: &'ir ir::JudgeRuntime) {
-        let ir::JudgeRuntime {
-            command,
-            slots,
-            result,
-            egress,
-            sessions,
-        } = judge;
-        let model = egress.model.clone();
-        self.hold(at, role, sessions);
-        let list = at.token("slots");
-        let names = slots.iter().map(|slot| &slot.name);
-        self.errors.unique(names, |index| list.token(index));
-        for (index, slot) in slots.iter().enumerate() {
-            let max_bytes = slot.max_bytes.get();
-            // Every payload reaches its judge through an op, which carries no more.
-            if max_bytes > MAX_OP_PAYLOAD_BYTES {
-                self.errors.report(
-                    list.token(index).token("max_bytes"),
-                    format!(
-                        "slot `{}`'s `max_bytes` is {max_bytes}, over the op payload limit of \
-                         {MAX_OP_PAYLOAD_BYTES}: give at most that",
-                        slot.name
-                    ),
-                );
-            }
-        }
-        // A slot over the limit is kept, so that the calls that name it resolve, and reported, so
-        // that no parsed workflow holds it.
-        let slots = (slots.iter())
-            .map(|ir::Slot { name, max_bytes }| Slot {
-                name: name.clone(),
-                max_bytes: *max_bytes,
-            })
-            .collect();
-        let judge = Judge {
-            command: command.clone(),
-            slots,
-            result: result.clone(),
-            model,
-        };
-        self.judges.insert(role, judge);
     }
 
     fn grants(&mut self, agent: &JsonPointer, grants: &'ir [ir::Grant]) -> Grants {
@@ -333,28 +314,12 @@ impl<'ir> Parser<'ir> {
             cumulative_seconds,
             call_timeout_seconds,
         } = job;
-        // Every payload reaches its function through an op, which carries no more.
-        let bounded = if payload_max_bytes.get() > MAX_OP_PAYLOAD_BYTES {
-            Err(self.errors.report(
-                at.token("payload_max_bytes"),
-                format!(
-                    "`{name}`'s `payload_max_bytes` is {payload_max_bytes}, over the op payload \
-                     limit of {MAX_OP_PAYLOAD_BYTES}: give at most that"
-                ),
-            ))
-        } else {
-            Ok(())
-        };
+        let bounded = self.payload_bound(at, &format!("`{name}`'s"), *payload_max_bytes);
         let target_at = at.token("target");
-        let id = self.resolve(&target_at, target)?;
-        if !self.targets.contains_key(&id) {
-            let kind = self.kind(id);
-            let message = format!("`{target}` is {kind}: name a target as a job's target");
-            return Err(self.errors.report(target_at, message));
-        }
-        // So that a target, like a judge, runs one call at a time.
-        let shared = match self.called.iter().find(|(earlier, _)| *earlier == id) {
-            Some((_, first)) => Err(self.errors.report(
+        let target_id = self.call_target(&target_at, target, "a job's target")?;
+        // So that a target runs one call at a time, as its function does.
+        let shared = match self.caller(target_id) {
+            Some(first) => Err(self.errors.report(
                 target_at,
                 format!(
                     "`{target}` is the target of job functions `{first}` and `{name}`: name each \
@@ -363,27 +328,27 @@ impl<'ir> Parser<'ir> {
             )),
             None => Ok(()),
         };
-        self.called.push((id, name));
-        shared.and(bounded).map(|()| JobFunction {
+        self.called.push((target_id.role(), name));
+        shared.and(bounded).map(|payload_max_bytes| JobFunction {
             name: name.clone(),
-            target: TargetId(id),
+            target: target_id,
             body: body.clone(),
             keywords: keywords.clone(),
-            payload_max_bytes: *payload_max_bytes,
+            payload_max_bytes,
             calls: *calls,
             cumulative_seconds: *cumulative_seconds,
             call_timeout_seconds: *call_timeout_seconds,
         })
     }
 
-    fn sessions(&mut self, agent: Option<RoleId>) -> Result<Vec<Session>, Reported> {
+    fn sessions(&mut self) -> Result<Vec<Session>, Reported> {
         let holders = std::mem::take(&mut self.holders);
         let mut parsed = Vec::new();
-        let mut earlier: Vec<(RoleId, &Name, &ir::Session)> = Vec::new();
-        for Holding { role, sessions } in &holders {
+        let mut earlier: Vec<(HeldBy, &Name, &ir::Session)> = Vec::new();
+        for Holding { holder, sessions } in &holders {
             for (at, name, session) in sessions {
-                let held = (*role, *name, *session);
-                let leased = self.session(at, held, &earlier, agent);
+                let held = (*holder, *name, *session);
+                let leased = self.session(at, held, &earlier);
                 parsed.push(leased);
                 earlier.push(held);
             }
@@ -395,9 +360,8 @@ impl<'ir> Parser<'ir> {
     fn session(
         &mut self,
         at: &JsonPointer,
-        (holder, name, grant): (RoleId, &Name, &ir::Session),
-        earlier: &[(RoleId, &Name, &ir::Session)],
-        agent: Option<RoleId>,
+        (holder, name, grant): (HeldBy, &Name, &ir::Session),
+        earlier: &[(HeldBy, &Name, &ir::Session)],
     ) -> Result<Session, Reported> {
         let ir::Session {
             runner,
@@ -423,7 +387,7 @@ impl<'ir> Parser<'ir> {
         let first = (earlier.iter()).find(|(_, _, earlier)| earlier.runner == *runner);
         let shared = match first {
             Some((first_holder, first, _)) => {
-                let holder_name = |id: &RoleId| &self.roles[id.0].name;
+                let holder_name = |held: &HeldBy| &self.roles[held.role().0].name;
                 let message = format!(
                     "`{runner}` is named by `{}`'s session `{}` and `{}`'s `{name}`: name each \
                      runner from one session",
@@ -443,20 +407,12 @@ impl<'ir> Parser<'ir> {
                 .errors
                 .report(runner_at, format!("`{runner}` is {kind}: name a runner")));
         }
-        if agent == Some(holder) {
+        if let HeldBy::Agent(_) = holder {
             self.agents_runner(&runner_at, id)?;
         }
-        // The agent, the judges and the targets alone hold sessions (`Parser::roles`).
-        let holder = if agent == Some(holder) {
-            Holder::Agent
-        } else if self.judges.contains_key(&holder) {
-            Holder::Judge(JudgeId(holder))
-        } else {
-            Holder::Target(TargetId(holder))
-        };
         shared.and(bounded).map(|()| Session {
             name: name.clone(),
-            holder,
+            holder: holder.holder(),
             runner: RunnerId(id),
             instances: *instances,
             instance_seconds: *instance_seconds,
@@ -467,31 +423,23 @@ impl<'ir> Parser<'ir> {
     }
 
     fn agents_runner(&mut self, at: &JsonPointer, runner: RoleId) -> Result<(), Reported> {
-        // So that the agent never runs what a judge's or a target's image holds
-        // ([`ir::Session::runner`]).
+        // So that the agent never runs what a target's image holds ([`ir::Session::runner`]).
         let (role, image) = (&self.roles[runner.0].name, &self.roles[runner.0].image);
-        let targets = self.targets.keys();
-        let judge =
-            (self.judges.keys().chain(targets)).find(|judge| self.roles[judge.0].image == *image);
-        let Some(judge) = judge else {
+        let mut targets = self.targets.keys();
+        let Some(target) = targets.find(|target| self.roles[target.0].image == *image) else {
             return Ok(());
         };
-        let kind = if self.judges.contains_key(judge) {
-            "judge"
-        } else {
-            "target"
-        };
-        let judge = &self.roles[judge.0].name;
+        let target = &self.roles[target.0].name;
         Err(self.errors.report(
             at.clone(),
             format!(
-                "`{role}` runs {kind} `{judge}`'s image, {image}: give the runner an image no \
-                 judge or target has"
+                "`{role}` runs target `{target}`'s image, {image}: give the runner an image no \
+                 target has"
             ),
         ))
     }
 
-    fn unleased(&mut self, grants: &[(RoleId, &Name, &ir::Session)]) {
+    fn unleased(&mut self, grants: &[(HeldBy, &Name, &ir::Session)]) {
         let named = |role: &Name| grants.iter().any(|(_, _, grant)| grant.runner == *role);
         let runners: Vec<RoleId> = self.runners.keys().copied().collect();
         for runner in runners {
@@ -513,34 +461,23 @@ impl<'ir> Parser<'ir> {
     }
 
     // So that each target is reached, as each runner is (`Self::unleased`).
-    fn uncalled(&mut self) {
+    fn uncalled(&mut self, final_target: Option<TargetId>) {
         let targets: Vec<RoleId> = self.targets.keys().copied().collect();
         for target in targets {
-            if !self.called.iter().any(|(called, _)| *called == target) {
+            let called = self.called.iter().any(|(called, _)| *called == target);
+            if !called && final_target != Some(TargetId(target)) {
                 let name = &self.roles[target.0].name;
-                let message =
-                    format!("`{name}` is a target that no job function names: name it from one");
+                let message = format!(
+                    "`{name}` is a target that no job function or final call names: name it from \
+                     one"
+                );
                 (self.errors).report(JsonPointer::root().token("roles").token(target.0), message);
             }
         }
     }
 
-    // A judge runs only as the score's, so another would never run.
-    fn unscored(&mut self, scorer: JudgeId) {
-        let judges: Vec<RoleId> = self.judges.keys().copied().collect();
-        for judge in judges.into_iter().filter(|&judge| judge != scorer.role()) {
-            let name = &self.roles[judge.0].name;
-            let message = format!(
-                "`{name}` is a judge that the score doesn't name: name it as the score's role"
-            );
-            (self.errors).report(JsonPointer::root().token("roles").token(judge.0), message);
-        }
-    }
-
     fn kind(&self, id: RoleId) -> &'static str {
-        if self.judges.contains_key(&id) {
-            "a judge"
-        } else if self.targets.contains_key(&id) {
+        if self.targets.contains_key(&id) {
             "a target"
         } else if self.runners.contains_key(&id) {
             "a runner"
@@ -559,69 +496,96 @@ impl<'ir> Parser<'ir> {
             body,
             payload_max_bytes,
         } = now;
-        let max_bytes = payload_max_bytes.get();
-        // A call's payload comes in an op, which carries no more.
-        if max_bytes > MAX_OP_PAYLOAD_BYTES {
+        let payload_max_bytes =
+            self.payload_bound(at, &format!("`{name}`'s"), *payload_max_bytes)?;
+        Ok(NowFunction {
+            name: name.clone(),
+            body: body.clone(),
+            payload_max_bytes,
+        })
+    }
+
+    /// `bytes`, the `payload_max_bytes` below `at` of `whose` (as "`train`'s"), if an op can
+    /// carry that many.
+    fn payload_bound(
+        &mut self,
+        at: &JsonPointer,
+        whose: &str,
+        bytes: NonZeroU64,
+    ) -> Result<NonZeroU64, Reported> {
+        // Every payload reaches its body through an op, which carries no more.
+        if bytes.get() > MAX_OP_PAYLOAD_BYTES {
             return Err(self.errors.report(
                 at.token("payload_max_bytes"),
                 format!(
-                    "`{name}`'s `payload_max_bytes` is {max_bytes}, over the op payload limit of \
+                    "{whose} `payload_max_bytes` is {bytes}, over the op payload limit of \
                      {MAX_OP_PAYLOAD_BYTES}: give at most that"
                 ),
             ));
         }
-        Ok(NowFunction {
-            name: name.clone(),
-            body: body.clone(),
-            payload_max_bytes: *payload_max_bytes,
-        })
+        Ok(bytes)
     }
 
-    /// The score, and its judge, the workflow's one.
-    fn score(&mut self, score: &ir::Score) -> Result<(Score, Judge), Reported> {
-        let ir::Score {
-            role,
-            slot,
-            timeout_seconds,
-        } = score;
-        let at = JsonPointer::root().token("score");
-        let (slot, judge) = self.judge_slot(&at, role, slot)?;
-        self.unscored(slot.judge);
-        let score = Score {
-            slot,
-            timeout: Duration::from_secs(timeout_seconds.get()),
-        };
-        Ok((score, judge))
-    }
-
-    fn judge_slot(
+    /// The target that `target`, at `at`, names as `named_as` (as "a job's target").
+    fn call_target(
         &mut self,
         at: &JsonPointer,
-        role: &Name,
-        slot: &Name,
-    ) -> Result<(SlotId, Judge), Reported> {
-        let role_at = at.token("role");
-        let id = self.resolve(&role_at, role)?;
-        let Some(judge) = self.judges.get(&id) else {
+        target: &Name,
+        named_as: &str,
+    ) -> Result<TargetId, Reported> {
+        let id = self.resolve(at, target)?;
+        if !self.targets.contains_key(&id) {
             let kind = self.kind(id);
-            return Err(self
-                .errors
-                .report(role_at, format!("`{role}` is {kind}: name a judge")));
-        };
-        let index = (judge.slots.iter()).position(|judge_slot| judge_slot.name == *slot);
-        match index {
-            Some(index) => {
-                let slot = SlotId {
-                    judge: JudgeId(id),
-                    index,
-                };
-                Ok((slot, judge.clone()))
-            }
-            None => Err(self.errors.report(
-                at.token("slot"),
-                format!("`{role}` has no slot named `{slot}`: name one of its slots"),
-            )),
+            let message = format!("`{target}` is {kind}: name a target as {named_as}");
+            return Err(self.errors.report(at.clone(), message));
         }
+        Ok(TargetId(id))
+    }
+
+    /// The job function whose target is `target`, if one's is.
+    fn caller(&self, target: TargetId) -> Option<&'ir Name> {
+        let mut called = self.called.iter();
+        called
+            .find(|(called, _)| *called == target.role())
+            .map(|(_, name)| *name)
+    }
+
+    fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
+        let at = JsonPointer::root().token("final").token("target");
+        let id = self.call_target(&at, target, "the final call's target")?;
+        // So that the final call, like a job, has its target to itself.
+        if let Some(function) = self.caller(id) {
+            let message = format!(
+                "`{target}` is the final call's target and `{function}`'s: give the final call a \
+                 role no job names"
+            );
+            return Err(self.errors.report(at, message));
+        }
+        Ok(id)
+    }
+
+    fn final_call(
+        &mut self,
+        final_call: &ir::Final,
+        target: Result<TargetId, Reported>,
+    ) -> Result<Final, Reported> {
+        let ir::Final {
+            target: _,
+            body,
+            keywords,
+            payload_max_bytes,
+            timeout_seconds,
+        } = final_call;
+        let at = JsonPointer::root().token("final");
+        let payload_max_bytes = self.payload_bound(&at, "the final call's", *payload_max_bytes);
+        let target = target?;
+        payload_max_bytes.map(|payload_max_bytes| Final {
+            target,
+            body: body.clone(),
+            keywords: keywords.clone(),
+            payload_max_bytes,
+            timeout: Duration::from_secs(timeout_seconds.get()),
+        })
     }
 }
 

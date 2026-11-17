@@ -117,10 +117,10 @@ pub fn evaluate(
 ///
 /// # Errors
 ///
-/// A problem of the evaluation; no function `body.def` in the file; or, in source order, each
-/// parameter that doesn't fit: the handle or the payload, first, with a default or another type;
-/// one after them not annotated `str`, `int` or `bool`; a keyword-only one without a default that
-/// `body.keywords` misses; and each keyword that names none, or doesn't fit.
+/// An evaluation's problem; no function `body.def` in the file; or, in source order, each parameter
+/// that doesn't fit: the handle or the payload, first, with a default or another type; one after
+/// them, in a final call's body, or one not annotated `str`, `int` or `bool`; a keyword-only one
+/// without a default that `body.keywords` misses; each keyword that names none, or doesn't fit.
 pub fn check(
     body: &Body<'_>,
     kind: BodyKind,

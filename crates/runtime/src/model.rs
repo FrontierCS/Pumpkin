@@ -218,7 +218,7 @@ fn exited_unfinalized(outcome: &Result<Outcome, Stopped>) -> bool {
     };
     let finalized = match verdict {
         Verdict::NoSubmission => false,
-        Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
+        Verdict::Returned { submission, .. } | Verdict::NoResult { submission, .. } => {
             submission.finalized
         }
     };

@@ -20,8 +20,8 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Endpoint, ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant,
-    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout,
-    evidence_dir, frame, pumpkin_dir, pumpkin_subdirs, result_file, slot_dir, slot_payload,
+    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout, frame,
+    pumpkin_dir, pumpkin_subdirs,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use serde_json::{Value, json};
@@ -71,7 +71,10 @@ impl Case for Result<ir::Workflow, serde_json::Error> {
                 Err(errors) => {
                     let json = serde_json::to_value(&ir).unwrap();
                     for error in errors.as_slice() {
-                        assert!(error.at.resolve(&json).is_some(), "{error} resolves");
+                        assert!(
+                            json.pointer(error.at.as_str()).is_some(),
+                            "{error} resolves"
+                        );
                     }
                     errors.to_string()
                 }
@@ -131,8 +134,8 @@ impl Case for Needing {
             .place(&offered, |classes| classes);
         let at = match placed {
             Ok((placed, _)) => {
-                let (judge, _) = placed.workflow().roles().nth(1).unwrap();
-                let placement = placed.placement(judge);
+                let (trainer, _) = placed.workflow().roles().nth(1).unwrap();
+                let placement = placed.placement(trainer);
                 format!("`{}` `{}`", placement.provider, placement.class)
             }
             Err(errors) => errors.to_string(),
@@ -686,33 +689,23 @@ fn hellos() {
 
 #[test]
 fn in_sandbox_contract() {
-    let slot = ir::Name::try_from("payload".to_owned()).unwrap();
-    let paths = pumpkin_subdirs().into_iter().chain([
-        slot_dir(&slot),
-        slot_payload(&slot),
-        result_file(),
-        evidence_dir(),
-        command_stdout(),
-        command_stderr(),
-        command_stdin(),
-    ]);
+    let paths =
+        pumpkin_subdirs()
+            .into_iter()
+            .chain([command_stdout(), command_stderr(), command_stdin()]);
     let root = ir::AbsolutePath::try_from("/".to_owned()).unwrap();
     let paths = paths.map(|path| Joined(pumpkin_dir(), path));
     check(
-        paths.chain([Joined(root, result_file())]),
+        paths.chain([Joined(root, command_stdin())]),
         &expect![[r#"
             /pumpkin/in
             /pumpkin/out
             /pumpkin/home
             /pumpkin/log
-            /pumpkin/in/payload
-            /pumpkin/in/payload/raw
-            /pumpkin/out/result.json
-            /pumpkin/out/evidence
             /pumpkin/log/command.stdout
             /pumpkin/log/command.stderr
             /pumpkin/in/command.stdin
-            /out/result.json"#]],
+            /in/command.stdin"#]],
     );
     let envs = [
         json!([]),
@@ -736,43 +729,27 @@ fn parsed() {
     assert_eq!(name(workflow.agent().role), "agent");
     let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
     assert_eq!(now.collect::<Vec<_>>(), ["submit"]);
-    assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
+    assert_eq!(name(workflow.final_call().target.role()), "final_judge");
     let model = workflow.agent().model.as_ref();
     let route = model.unwrap();
     let apis: Vec<ir::Api> = route.as_slice().iter().map(|e| e.api).collect();
     assert_eq!(apis, [ir::Api::Responses], "the agent's route");
-    let ir::Runtime::Judge(judge) = &ir.roles[2].runtime else {
-        panic!("the final judge's runtime is a judge's");
-    };
-    let shows: Vec<&str> = judge
-        .result
-        .shows
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let keywords = fixture_with("/final/keywords", json!({ "mode": "final" }));
+    let ir: ir::Workflow = serde_json::from_value(keywords).unwrap();
+    let workflow = Workflow::parse(&ir).unwrap();
     assert_eq!(
-        shows,
-        ["score", "metrics"],
-        "the final judge's values, in the IR's order"
+        workflow.final_call().keywords["mode"],
+        "final",
+        "the final call's keywords"
     );
-    let written = serde_json::to_string(&judge.result.shows).unwrap();
-    assert_eq!(written, r#"{"score":"/raw_score","metrics":"/metrics"}"#);
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
 fn checked_values() {
     let agent = "/roles/0";
     let command = "/roles/0/runtime/agent/command";
-    let result = "/roles/2/runtime/judge/result";
     let route = "/roles/0/runtime/agent/egress/model";
     let entry = &fixture()["roles"][0]["runtime"]["agent"]["egress"]["model"][0];
-    // A `Value` holds a key once, so the IR repeats a name as text.
-    let shows = r#""metrics": "/metrics" }"#;
-    let repeated = WORKFLOW.replacen(shows, r#""metrics": "/metrics", "score": "/x" }"#, 1);
     check(
         [
             fixture_with("/name", json!("example task")),
@@ -801,23 +778,11 @@ fn checked_values() {
             ),
             fixture_with(route, json!([])),
             fixture_with(route, json!([entry, entry])),
-            fixture_with(&format!("{result}/shows"), json!({ "Score": "/raw_score" })),
-            fixture_with(&format!("{result}/shows"), json!({ "score": "raw_score" })),
-            fixture_with(
-                &format!("{result}/shows"),
-                json!({ "score": "/raw~2score" }),
-            ),
-            fixture_with(&format!("{result}/returns"), json!(["/metrics", ""])),
-            fixture_with(&format!("{result}/returns"), json!(["/metrics/"])),
-            fixture_with(&format!("{result}/returns"), json!(["/x/a~1b", "/a~1b"])),
-            fixture_with(
-                "/roles/2/runtime/judge/slots/0/max_bytes",
-                json!(MAX_OP_PAYLOAD_BYTES + 1),
-            ),
+            fixture_with("/final/payload_max_bytes", json!(MAX_OP_PAYLOAD_BYTES + 1)),
+            fixture_with("/final/payload_max_bytes", json!(MAX_OP_PAYLOAD_BYTES)),
         ]
         .into_iter()
-        .map(serde_json::from_value)
-        .chain([serde_json::from_str(&repeated)]),
+        .map(serde_json::from_value),
         &expect![[r#"
             `example task` is not a valid workflow name: use 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/`
             `Agent` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
@@ -836,14 +801,8 @@ fn checked_values() {
             `gpt-6-astra` is listed more than once: list each model once
             no APIs: a model route has an entry for one at least
             `gpt-6-astra` is in more than one `responses` entry: list each model in one entry for its API
-            `Score` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
-            `raw_score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
-            `/raw~2score` is not a JSON pointer: write `/` before each token, `~0` for `~` and `~1` for `/`, or nothing for the whole document
-            the empty pointer names the whole result, with no key: point to a field
-            `/metrics/` would return the empty key: point to a field with a name
-            `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
-            /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
-            `score` is shown more than once: show each name once at line 98 column 84"#]],
+            /final/payload_max_bytes: the final call's `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
+            parsed"#]],
     );
     assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }
@@ -1036,30 +995,20 @@ fn broken_references() {
     let mut ir = fixture();
     let trainer = ir["roles"][1].clone();
     ir["roles"].as_array_mut().unwrap().push(trainer);
-    let payload = ir["roles"][2]["runtime"]["judge"]["slots"][0].clone();
-    ir["roles"][2]["runtime"]["judge"]["slots"]
-        .as_array_mut()
-        .unwrap()
-        .push(payload);
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let train = grants[0].clone();
     grants.as_array_mut().unwrap().push(train);
     grants[0]["job"]["target"] = json!("ghost");
-    ir["score"]["role"] = json!("agent");
-    let mut unscored = fixture();
-    let mut judge = unscored["roles"][2].clone();
-    judge["name"] = json!("spare");
-    unscored["roles"].as_array_mut().unwrap().push(judge);
+    ir["final"]["target"] = json!("agent");
     check(
-        [ir, unscored],
+        [ir],
         &expect![[r#"
             /roles/3/name: `trainer` also names /roles/1: give each a unique name
-            /roles/2/runtime/judge/slots/1/name: `payload` also names /roles/2/runtime/judge/slots/0: give each a unique name
             /roles/0/runtime/agent/grants/2/name: `train` also names /roles/0/runtime/agent/grants/0: give each a unique name
             /roles/0/runtime/agent/grants/0/job/target: no role is named `ghost`: name one listed in `roles`
-            /roles/3: `trainer` is a target that no job function names: name it from one
-            /score/role: `agent` is an agent: name a judge
-            /roles/3: `spare` is a judge that the score doesn't name: name it as the score's role"#]],
+            /final/target: `agent` is an agent: name a target as the final call's target
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            /roles/3: `trainer` is a target that no job function or final call names: name it from one"#]],
     );
 }
 
@@ -1078,12 +1027,14 @@ fn grant_forms() {
             with(|grant| {
                 grant.as_object_mut().unwrap().remove("name");
             }),
+            fixture_with("/final/body/arguments", json!({ "level": { "int": {} } })),
         ],
         &expect![[r#"
             `now` follows `job`, the function's kind: give a grant its `name` and one function
             unknown variant `lease`, expected one of `job`, `session`, `now`
             the grant gives no function: give one, under its kind's key
-            missing field `name`"#]],
+            missing field `name`
+            unknown field `arguments`, expected `file` or `def`"#]],
     );
 }
 
@@ -1130,12 +1081,12 @@ fn broken_leases() {
         .as_array_mut()
         .unwrap()
         .remove(1);
-    let mut judge_image = leasing();
-    judge_image["roles"][3]["image"] = judge_image["roles"][2]["image"].clone();
+    let mut target_image = leasing();
+    target_image["roles"][3]["image"] = target_image["roles"][2]["image"].clone();
     let mut ghost = leasing();
     ghost["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("ghost");
-    let mut scored = leasing();
-    scored["score"]["role"] = json!("gpu");
+    let mut final_on_runner = leasing();
+    final_on_runner["final"]["target"] = json!("gpu");
     let mut agent = leasing();
     agent["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["runner"] = json!("agent");
     let mut huge = leasing();
@@ -1150,23 +1101,24 @@ fn broken_leases() {
             judged,
             twice,
             unleased,
-            judge_image,
+            target_image,
             ghost,
-            scored,
+            final_on_runner,
             agent,
             huge,
             most,
         ],
         &expect![[r#"
             parsed
-            /roles/0/runtime/agent/grants/1/session/runner: `final_judge` is a judge: name a runner
+            /roles/0/runtime/agent/grants/1/session/runner: `final_judge` is a target: name a runner
             /roles/3: `gpu` is a runner that no session names: name it from one
             /roles/0/runtime/agent/grants/3/session/runner: `gpu` is named by `agent`'s session `gpu` and `agent`'s `again`: name each runner from one session
             /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs judge `final_judge`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no judge or target has
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `trainer`'s image, sha256:2222222222222222222222222222222222222222222222222222222222222222: give the runner an image no target has
             /roles/0/runtime/agent/grants/1/session/runner: no role is named `ghost`: name one listed in `roles`
             /roles/3: `gpu` is a runner that no session names: name it from one
-            /score/role: `gpu` is a runner: name a judge
+            /final/target: `gpu` is a runner: name a target as the final call's target
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
             /roles/0/runtime/agent/grants/1/session/runner: `agent` is an agent: name a runner
             /roles/3: `gpu` is a runner that no session names: name it from one
             /roles/0/runtime/agent/grants/1/session/transfer_bytes: `gpu`'s `transfer_bytes` is 1073741825, over the transfer limit of 1073741824: give at most that
@@ -1233,6 +1185,8 @@ fn job_functions() {
     let mut uncalled = calling();
     let grants = &mut uncalled["roles"][0]["runtime"]["agent"]["grants"];
     grants.as_array_mut().unwrap().remove(3);
+    let mut shared = calling();
+    shared["final"]["target"] = json!("verifier");
     check(
         [
             calling(),
@@ -1245,60 +1199,63 @@ fn job_functions() {
             twice,
             uncalled,
             target_holding(),
+            shared,
         ],
         &expect![[r#"
             parsed
-            /roles/0/runtime/agent/grants/3/job/target: `final_judge` is a judge: name a target as a job's target
-            /roles/4: `verifier` is a target that no job function names: name it from one
+            /final/target: `final_judge` is the final call's target and `check`'s: give the final call a role no job names
+            /roles/4: `verifier` is a target that no job function or final call names: name it from one
             /roles/0/runtime/agent/grants/3/job/target: `gpu` is a runner: name a target as a job's target
-            /roles/4: `verifier` is a target that no job function names: name it from one
+            /roles/4: `verifier` is a target that no job function or final call names: name it from one
             /roles/0/runtime/agent/grants/3/job/payload_max_bytes: `check`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             `lib/verify.star` is no label: start it with `//`, the root
             /roles/0/runtime/agent/grants/1/session/runner: `verifier` is a target: name a runner
             /roles/3: `gpu` is a runner that no session names: name it from one
-            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `verifier`'s image, sha256:3333333333333333333333333333333333333333333333333333333333333333: give the runner an image no judge or target has
+            /roles/0/runtime/agent/grants/1/session/runner: `gpu` runs target `verifier`'s image, sha256:3333333333333333333333333333333333333333333333333333333333333333: give the runner an image no target has
             /roles/0/runtime/agent/grants/4/job/target: `verifier` is the target of job functions `check` and `again`: name each target from one function
-            /roles/4: `verifier` is a target that no job function names: name it from one
-            parsed"#]],
+            /roles/4: `verifier` is a target that no job function or final call names: name it from one
+            parsed
+            /final/target: `verifier` is the final call's target and `check`'s: give the final call a role no job names
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one"#]],
     );
 }
 
-/// [`leasing`]'s workflow, with a runner, `checker`, of the final judge's image, which the final
-/// judge leases under its grant `box`.
-fn judge_leasing() -> Value {
+/// [`leasing`]'s workflow, with a runner, `checker`, of the image of the final call's target,
+/// which the target leases under its grant `box`.
+fn target_leasing() -> Value {
     let mut ir = leasing();
     let mut checker = ir["roles"][3].clone();
     checker["name"] = json!("checker");
     checker["image"] = ir["roles"][2]["image"].clone();
     ir["roles"].as_array_mut().unwrap().push(checker);
-    ir["roles"][2]["runtime"]["judge"]["sessions"] = json!([{ "name": "box", "session": {
+    ir["roles"][2]["runtime"]["target"]["sessions"] = json!([{ "name": "box", "session": {
         "runner": "checker", "instances": 1, "instance_seconds": 60, "transfer_bytes": 64,
     } }]);
     ir
 }
 
 #[test]
-fn judge_leases() {
-    let mut same_image = judge_leasing();
+fn target_leases() {
+    let mut same_image = target_leasing();
     let image = json!(format!("sha256:{}", "4".repeat(64)));
     same_image["roles"][3]["image"] = image.clone();
     same_image["roles"][4]["image"] = image;
-    let mut both = judge_leasing();
-    both["roles"][2]["runtime"]["judge"]["sessions"][0]["session"]["runner"] = json!("gpu");
-    let mut twice = judge_leasing();
-    let grants = &mut twice["roles"][2]["runtime"]["judge"]["sessions"];
+    let mut both = target_leasing();
+    both["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["runner"] = json!("gpu");
+    let mut twice = target_leasing();
+    let grants = &mut twice["roles"][2]["runtime"]["target"]["sessions"];
     let mut again = grants[0].clone();
     again["session"]["runner"] = json!("trainer");
     grants.as_array_mut().unwrap().insert(0, again);
     check(
-        [judge_leasing(), same_image, both, twice],
+        [target_leasing(), same_image, both, twice],
         &expect![[r#"
             parsed
             parsed
-            /roles/2/runtime/judge/sessions/0/session/runner: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
+            /roles/2/runtime/target/sessions/0/session/runner: `gpu` is named by `agent`'s session `gpu` and `final_judge`'s `box`: name each runner from one session
             /roles/4: `checker` is a runner that no session names: name it from one
-            /roles/2/runtime/judge/sessions/1/name: `box` also names /roles/2/runtime/judge/sessions/0: give each a unique name
-            /roles/2/runtime/judge/sessions/0/session/runner: `trainer` is a target: name a runner"#]],
+            /roles/2/runtime/target/sessions/1/name: `box` also names /roles/2/runtime/target/sessions/0: give each a unique name
+            /roles/2/runtime/target/sessions/0/session/runner: `trainer` is a target: name a runner"#]],
     );
 }
 
@@ -1308,7 +1265,7 @@ fn broken_roles() {
     let mut helper = ir["roles"][0].clone();
     helper["name"] = json!("helper");
     ir["roles"].as_array_mut().unwrap().push(helper);
-    ir["roles"][2]["runtime"]["judge"]["egress"] =
+    ir["roles"][2]["runtime"]["target"]["egress"] =
         ir["roles"][0]["runtime"]["agent"]["egress"].clone();
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
     let mut submit = now("resubmit");
@@ -1316,7 +1273,7 @@ fn broken_roles() {
     let mut retrain = grants[0].clone();
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
-    ir["score"]["role"] = json!("trainer");
+    ir["final"]["target"] = json!("trainer");
     let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
     let mut untimed = fixture();
@@ -1330,7 +1287,8 @@ fn broken_roles() {
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
-            /score/role: `trainer` is a target: name a judge
+            /final/target: `trainer` is the final call's target and `train`'s: give the final call a role no job names
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
             /roles: no role is an agent: a workflow has exactly one
             missing field `call_timeout_seconds`"#]],
     );

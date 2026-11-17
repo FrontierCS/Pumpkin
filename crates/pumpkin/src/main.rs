@@ -49,7 +49,7 @@ const MODAL_HELPER: &str = "pumpkin-modal.py";
 
 fn main() -> ExitCode {
     stdx::abort_on_panic();
-    // A run reads back what its record holds, such as a payload or a judge's result, and the
+    // A run reads back what its record holds, such as a payload or a call's result, and the
     // operator trusts the outcome there; a umask such as 002 would leave all of it writable by a
     // group that may have other members. So every `pumpkin` process, and each program it starts,
     // makes nothing that another user may write, as a service does under systemd's default

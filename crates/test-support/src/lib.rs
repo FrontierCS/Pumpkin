@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::{fs, io, iter};
 
-use schema::sandbox::command_stdout;
+use schema::sandbox::{command_stdout, log_dir};
 use stdx::Deadline;
 use stdx::process::Environment;
 
@@ -24,9 +24,9 @@ pub mod suite;
 
 /// A complete workflow, in the IR's JSON.
 ///
-/// Its roles are an agent with a model route, the target of its job function `train`, and a final
-/// judge that scores its submission, in that order. Their images' digests, commands, files,
-/// standard input and environment are placeholders, and so is the body's file.
+/// Its roles are an agent with a model route, the target of its job function `train`, and the
+/// target of its final call, in that order. Their images' digests, commands, files, standard
+/// input and environment are placeholders, and so are the bodies' files.
 pub const WORKFLOW: &str = include_str!("workflow.json");
 
 /// How long a test waits for what only a test that hangs never sees, so no outcome rests on it.
@@ -135,22 +135,57 @@ pub fn sandboxd() -> PathBuf {
     PathBuf::from(sandboxd).canonicalize().unwrap()
 }
 
-/// The standard output that `record`, a run's record, holds of the agent's command and of each
-/// call's, in the order of the jobs' numbers, each after a line that says whose it is.
+/// The standard outputs that `record`, a run's record, holds, each after a line that says whose
+/// it is.
+///
+/// The agent's command's, then each call's commands', in the order of the jobs' numbers and then
+/// of the commands'; not a lease's commands', whose log entries hold their ends.
 ///
 /// # Panics
 ///
 /// Panics if a job's directory isn't named by its number, or an output can't be read as UTF-8.
 pub fn standard_outputs(record: &Path) -> Vec<String> {
     let mut lines = Vec::new();
-    for (whose, dir) in sandbox_dirs(record) {
-        let stdout = record.join(dir).join(command_stdout().as_str());
-        if let Ok(stdout) = fs::read_to_string(stdout) {
-            lines.push(format!("{whose} standard output:"));
-            lines.extend(stdout.lines().map(str::to_owned));
+    let mut shown = |whose: String, stdout: PathBuf| {
+        let Ok(stdout) = fs::read_to_string(stdout) else {
+            return false;
+        };
+        lines.push(format!("{whose} standard output:"));
+        lines.extend(stdout.lines().map(str::to_owned));
+        true
+    };
+    let agent = command_stdout();
+    let agent = Path::new(agent.as_str());
+    for (whose, dir, kind) in sandbox_dirs(record) {
+        let dir = record.join(dir);
+        match kind {
+            Sandbox::Agent => {
+                shown(whose, dir.join(agent));
+            }
+            // A call's body runs each of its commands with its output in `log/<c>`, its `c`th,
+            // under the names the agent's command's has in `log`.
+            Sandbox::Job => {
+                let name = agent.file_name().unwrap();
+                let commands = dir.join(log_dir().as_str());
+                for command in 0.. {
+                    let stdout = commands.join(command.to_string()).join(name);
+                    if !shown(format!("{whose} command {command}'s"), stdout) {
+                        break;
+                    }
+                }
+            }
+            Sandbox::Lease => {}
         }
     }
     lines
+}
+
+/// The kind of sandbox that a directory of a run's record is of.
+#[derive(Clone, Copy)]
+enum Sandbox {
+    Agent,
+    Job,
+    Lease,
 }
 
 /// What `record`, a run's record, keeps of each sandbox, the agent's, each call's, each lease's.
@@ -163,7 +198,7 @@ pub fn standard_outputs(record: &Path) -> Vec<String> {
 /// JSON.
 pub fn sandboxes(record: &Path) -> Vec<String> {
     let mut lines = Vec::new();
-    for (whose, dir) in sandbox_dirs(record) {
+    for (whose, dir, _) in sandbox_dirs(record) {
         let sandbox = fs::read(record.join(&dir).join("sandbox.json"));
         match sandbox {
             Ok(sandbox) => {
@@ -179,18 +214,19 @@ pub fn sandboxes(record: &Path) -> Vec<String> {
 
 /// Who each sandbox's directory in `record`, a run's record, is of, and the directory, below
 /// `record`: the agent's, then each job's, then each lease's, each in the order of their numbers.
-fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String)> {
-    let numbered = |kind: &'static str, whose: &'static str| {
+fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String, Sandbox)> {
+    let numbered = |kind: &'static str, whose: &'static str, sandbox: Sandbox| {
         let entries = fs::read_dir(record.join(kind)).into_iter().flatten();
         let number = |entry: fs::DirEntry| entry.file_name().into_string().unwrap().parse();
         let mut numbers: Vec<u64> = entries
             .map(|entry| number(entry.unwrap()).unwrap())
             .collect();
         numbers.sort_unstable();
-        (numbers.into_iter()).map(move |n| (format!("{whose} {n}'s"), format!("{kind}/{n}")))
+        let dir = move |n| (format!("{whose} {n}'s"), format!("{kind}/{n}"), sandbox);
+        numbers.into_iter().map(dir)
     };
-    let agent = ("the agent's".to_owned(), "agent".to_owned());
+    let agent = ("the agent's".to_owned(), "agent".to_owned(), Sandbox::Agent);
     iter::once(agent)
-        .chain(numbered("jobs", "job"))
-        .chain(numbered("leases", "lease"))
+        .chain(numbered("jobs", "job", Sandbox::Job))
+        .chain(numbered("leases", "lease", Sandbox::Lease))
 }

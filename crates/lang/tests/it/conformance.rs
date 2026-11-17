@@ -68,9 +68,9 @@ def freeze(x):
 // Loads a chunk, `//case.star`, then gives a whole workflow, so that its evaluation succeeds
 // unless the chunk's problem ends it.
 const ENTRY: &str = r#"load("//case.star", "conformance_done")
-load("//lib/parts.star", "AGENT", "JUDGE", "SCORE")
+load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 
-workflow(name = "conformance/chunk", roles = [AGENT, JUDGE], score = SCORE)
+workflow(name = "conformance/chunk", roles = [AGENT, FINAL_TARGET], final = FINAL)
 "#;
 
 #[derive(Clone, Copy)]

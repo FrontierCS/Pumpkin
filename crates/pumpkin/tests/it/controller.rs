@@ -17,7 +17,7 @@ use test_support::BUSYBOX;
 use super::view::Served;
 use super::{
     BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Prices, Scratch, StandIn, asked, cpu_list, cut,
-    docker_table, ended, install, invocation, judged, judged_log, lease_places, poll, report,
+    docker_table, ended, install, invocation, lease_places, poll, report, returned, whole_log,
     workflow, write_run,
 };
 
@@ -758,8 +758,8 @@ fn job_admission() {
             exit status: Some(1)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:4:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
-                4 | IMAGE = image("Dockerfile")
+            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
+                5 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: built/task.star: the task has 1 problem
             printed the IR of the image built: false
@@ -1062,10 +1062,7 @@ fn boot() {
             json!({ "provider": provider, "id": format!("sandbox-{run}"), "report": {} });
         if ended {
             sandbox["delete"] = json!({ "state": "deleted" });
-            scratch.write(
-                &format!("{record}/outcome.json"),
-                r#"{"state": "finished"}"#,
-            );
+            scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
@@ -1103,7 +1100,7 @@ fn boot() {
               <lost>
             aws --version
             aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
-            <clean>'s outcome.json: {"state": "finished"}
+            <clean>'s outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             <local>'s outcome.json: {
               "reason": "its driver ended without an outcome",
               "state": "failed"
@@ -1335,7 +1332,7 @@ fn keys_on_standard_input() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files and Pumpkin's bundle: sending 2.6 KiB
+            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1423,11 +1420,15 @@ fn target_refusals() {
         scratch.0.join("PUMPKIN.star"),
     );
     fs::rename(&marker, &above).unwrap();
-    // The bodies' files where the task's labels now find them, so that the root is what is
+    // The files the task loads where its labels now find them, so that the root is what is
     // refused.
-    for file in ["lib/train.star", "stand-in/submit.star"] {
-        let text = fs::read_to_string(scratch.0.join("repo").join(file)).unwrap();
-        scratch.write(file, &text);
+    for loaded in [
+        "lib/train.star",
+        "stand-in/submit.star",
+        "stand-in/final.star",
+    ] {
+        let text = fs::read_to_string(scratch.0.join("repo").join(loaded)).unwrap();
+        scratch.write(loaded, &text);
     }
     let mut outside = on_client(&scratch, &client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&outside);
@@ -1714,7 +1715,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 11 of the task's files and Pumpkin's bundle: sending 2.6 KiB
+            pumpkin: controller `alice` lacks all 12 of the task's files and Pumpkin's bundle: sending 3.0 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1731,6 +1732,7 @@ fn send_by_content() {
               stand-in/CLAUDE.md: 444, 1 link
               stand-in/Dockerfile: 444, 1 link
               stand-in/empty: 444, 1 link
+              stand-in/final.star: 444, 1 link
               stand-in/run.sh: 444, 1 link
               stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
@@ -1747,6 +1749,7 @@ fn send_by_content() {
               stand-in/CLAUDE.md: a symbolic link to Dockerfile
               stand-in/Dockerfile: a link of its blob, 444
               stand-in/empty: a link of its blob, 444
+              stand-in/final.star: a link of its blob, 444
               stand-in/run.sh: a link of its blob's copy to run, 555
               stand-in/submit.star: a link of its blob, 444
               stand-in/task.star: a link of its blob, 444
@@ -1754,7 +1757,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` holds all 11 of the task's files
+            pumpkin: controller `alice` holds all 12 of the task's files
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1764,7 +1767,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 11 files: sending 13 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 12 files: sending 13 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1800,14 +1803,14 @@ fn send_refused_piece() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 7 of the task's 8 files and Pumpkin's bundle: sending 2.6 KiB
+            pumpkin: controller `alice` lacks 8 of the task's 9 files and Pumpkin's bundle: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
             the calls: query, query, receive, start
             the store holds it: false; a piece of it: false
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 6 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 6 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1877,12 +1880,12 @@ fn send_carries_on() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             tar: Unexpected EOF in archive
             tar: Unexpected EOF in archive
             tar: Error is not recoverable: exiting now
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: asking again what it lacks, now, attempt 2 of 7
-            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 16.0 MiB
+            pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 16.0 MiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1890,7 +1893,7 @@ fn send_carries_on() {
               <id>
             the calls: query, query, receive, receive, query, receive, start
             over 0, 16777216 bytes: stand-in/big.bin 00000 (16777216)
-            over 1, 1051299 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1788), lib/train.star 00000 (572), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 1051622 bytes: stand-in/big.bin 00001 (1048576), stand-in/task.star 00000 (1555), lib/train.star 00000 (572), stand-in/final.star 00000 (556), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
               stand-in/big.bin: 444, 1 link
               incoming/: none"#]],
     );
@@ -1926,7 +1929,7 @@ fn send_over_streams() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 10 of the task's files and Pumpkin's bundle: sending 33.0 MiB over 3 connections
+            pumpkin: controller `alice` lacks all 11 of the task's files and Pumpkin's bundle: sending 33.0 MiB over 3 connections
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -1934,7 +1937,7 @@ fn send_over_streams() {
               <id>
             the calls: query, query, receive, receive, receive, start
             over 0, 16777216 bytes: stand-in/a.bin 00000 (16777216)
-            over 1, 8391331 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1788), lib/train.star 00000 (572), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
+            over 1, 8391654 bytes: stand-in/b.bin 00000 (8388608), stand-in/task.star 00000 (1555), lib/train.star 00000 (572), stand-in/final.star 00000 (556), stand-in/submit.star 00000 (128), stand-in/Dockerfile 00000 (118), .pumpkinversion 00000 (62), PUMPKIN.star 00000 (25), Pumpkin's bundle 00000 (20), pumpkin 00000 (10)
             over 2, 9437184 bytes: stand-in/c.bin 00000 (5242880), stand-in/a.bin 00001 (4194304)
             the store:
               .pumpkinversion: 444, 2 links
@@ -1947,6 +1950,7 @@ fn send_over_streams() {
               stand-in/a.bin: 444, 1 link
               stand-in/b.bin: 444, 1 link
               stand-in/c.bin: 444, 1 link
+              stand-in/final.star: 444, 1 link
               stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
@@ -1992,7 +1996,7 @@ fn send_over_one_connection() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2008,6 +2012,7 @@ fn send_over_one_connection() {
               pumpkin: 444, 1 link
               stand-in/Dockerfile: 444, 1 link
               stand-in/big.bin: 444, 1 link
+              stand-in/final.star: 444, 1 link
               stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
@@ -2039,7 +2044,7 @@ fn send_over_the_connection_held() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
+            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 17.0 MiB over 2 connections
             pumpkin: connection 1 to controller `alice` can't be opened, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/1.log: this goes on over those it holds
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
@@ -2056,6 +2061,7 @@ fn send_over_the_connection_held() {
               pumpkin: 444, 1 link
               stand-in/Dockerfile: 444, 1 link
               stand-in/big.bin: 444, 1 link
+              stand-in/final.star: 444, 1 link
               stand-in/submit.star: 444, 1 link
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
@@ -2126,13 +2132,13 @@ fn send_changed_file() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 8 of the task's files and Pumpkin's bundle: sending 2.6 KiB
+            pumpkin: controller `alice` lacks all 9 of the task's files and Pumpkin's bundle: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed while it was sent: run it again
             the calls: query, query, receive
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 2 bytes
+            pumpkin: controller `alice` lacks 1 of the task's 9 files: sending 2 bytes
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2182,7 +2188,7 @@ fn send_bundle_and_gone() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` holds all 8 of the task's files
+            pumpkin: controller `alice` holds all 9 of the task's files
             pumpkin: 1 of the task's files and Pumpkin's bundle are no longer whole on the controller: run it again
             the calls: query, start"#]],
     );
@@ -2298,6 +2304,7 @@ fn store_collection() {
               pumpkin, to run: 555, 5 links
               pumpkin: 444, 1 link
               stand-in/Dockerfile: 444, 4 links
+              stand-in/final.star: 444, 4 links
               stand-in/notes, as the first sent it: 444, 2 links
               stand-in/notes, as the third sent it: 444, 3 links
               stand-in/submit.star: 444, 4 links
@@ -2331,10 +2338,7 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
         &json!({ "record_version": "pumpkin.record/v0", "args": args }),
     );
     scratch.write(&format!("{record}/driver.pid"), "4242\n");
-    scratch.write(
-        &format!("{record}/outcome.json"),
-        r#"{"state": "finished"}"#,
-    );
+    scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
     said
 }
 
@@ -2673,7 +2677,7 @@ fn ls_by_offsets() {
     grow(&scratch, ids[0], 1, "");
     scratch.write(
         &format!("home/.pumpkin/runs/{}/outcome.json", ids[0]),
-        r#"{"state": "finished"}"#,
+        &returned(1.0),
     );
     drop(drivers.remove(0));
     lines.push("run 0 ended:".to_owned());
@@ -2722,10 +2726,7 @@ fn ls_by_offsets() {
     scratch.write(&format!("{job}/log"), "");
     scratch.write(&format!("{job}/out"), &format!("{}\n", ids[2]));
     scratch.write_executable(&format!("{job}/pumpkin"), b"#!/bin/sh\nexit 102\n");
-    scratch.write(
-        &format!("{record}/outcome.json"),
-        r#"{"state": "finished"}"#,
-    );
+    scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
     drop(drivers.remove(1));
     // Uncounted: what `wait` moves is no listing's.
     fs::remove_file(scratch.0.join("bin/count-out")).unwrap();
@@ -2788,7 +2789,7 @@ fn ls_by_offsets() {
               tail: error reading '.pumpkin/runs/<run 1>/log.jsonl': Is a directory
               reading the log of run <run 1> for the listing failed, as said above: run the command again
               pumpkin: listing the runs on controller `alice` failed (exit status: 1), as said above
-            run 2 ended, and `wait` copied it (exit status: 3):
+            run 2 ended, and `wait` copied it (exit status: 0):
             ls: exit status: 0, 4 rows, 1088 bytes
               <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
               <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
@@ -3109,7 +3110,7 @@ fn record_copy() {
               the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: 
             whole:
-            wait: exit status: 3
+            wait: exit status: 0
               the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: jobs/0/secret, record.json
               model/marked: 755
@@ -3134,7 +3135,7 @@ fn record_copy() {
               pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, carrying on, now, attempt 2 of 7
               the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: model/big-2, model/big-3
-              counted: 25, 0, 615, 615, 102400
+              counted: 25, 0, 616, 616, 102400
             the copy (but `jobs/0/out`) is the record's:
               driver.pid 644
               jobs/0/secret 600
@@ -3259,12 +3260,12 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
     install(scratch, &format!("home/.pumpkin/{commit}/bin"));
     let (ended, live) = ("20261110-090000-0000000a", "20261110-110000-0000000c");
     let places = lease_places(Prices::Both);
-    let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+    let outcome = returned(49.36);
     let dir = write_run(
         scratch,
         ended,
         asked(ended, 30),
-        &judged_log(),
+        &whole_log(),
         Some(outcome),
         &places,
     );
@@ -3285,7 +3286,7 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
         scratch,
         live,
         asked(live, 30),
-        &cut(&judged_log(), 130),
+        &cut(&whole_log(), 130),
         None,
         &places,
     );
@@ -3339,14 +3340,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308743, end: 308743
+            next: 309222, end: 309222
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "agent"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 308743"#]],
+            state: "finished", end: 309222"#]],
     );
 }
 
@@ -3376,7 +3377,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 308743, end: 308743"#]],
+            next: 309222, end: 309222"#]],
     );
 }
 

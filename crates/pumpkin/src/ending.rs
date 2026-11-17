@@ -2,8 +2,6 @@
 //! commands to run next.
 
 use std::fmt;
-use std::fs::File;
-use std::io::{self, Read as _};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -12,13 +10,7 @@ use schema::ir::Name;
 use serde_json::Value;
 use stdx::Context;
 
-use crate::{Reader, advise, escaped, next, print_outcome, progress, say, tell, to_stderr};
-
-/// The most bytes of a final judge's standard error that an ending shows ([`end`]): one that
-/// holds more is named, and not shown.
-// A judge's diagnostic, such as a traceback, fits many times over; more is a log, which the
-// record keeps for reading, rather than a message for a terminal.
-const JUDGE_STDERR_SHOWN_BYTES: u64 = 1 << 20;
+use crate::{Reader, advise, next, print_outcome, progress, say, tell, to_stderr};
 
 /// Says how `record`'s run ended, following it first if it is live. `command` is the command that
 /// follows it, which the following names, and `runs` is as [`crate::runs_dir`]'s second.
@@ -102,13 +94,10 @@ pub(crate) fn end(
     args: &[String],
 ) -> Result<ExitCode, String> {
     let id = record.id();
-    let (exit, how, judge_stderr) = match ending {
-        Ending::Judged { values, after } => (ExitCode::SUCCESS, judged(values, after), None),
-        Ending::Unjudged(why) => (ExitCode::from(3), why.clone(), None),
-        Ending::NoResult { why, judge_stderr } => {
-            (ExitCode::from(3), why.clone(), Some(judge_stderr))
-        }
-        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how.clone(), None),
+    let (exit, how) = match ending {
+        Ending::Returned { values, after } => (ExitCode::SUCCESS, returned(values, after)),
+        Ending::NoResult(why) => (ExitCode::from(3), why.clone()),
+        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how.clone()),
         // It has no `outcome.json` to print.
         Ending::Lost => {
             let how = "is lost: its driver ended without writing outcome.json, so nothing says \
@@ -126,14 +115,6 @@ pub(crate) fn end(
     };
     print_outcome(record.dir())?;
     summarize(record);
-    match judge_stderr {
-        Some(Ok(path)) => show_judge_stderr(path),
-        Some(Err(error)) => say(format_args!(
-            "the final judge's standard error can't be found: {}",
-            escaped(error)
-        )),
-        None => {}
-    }
     say(closing(id, &how, record.dir()));
     again(record, args);
     Ok(exit)
@@ -161,7 +142,7 @@ fn again(record: &Record, args: &[String]) {
     advise("run it again", &next::run_again(args));
 }
 
-pub(crate) fn judged(values: &[(Name, Value)], after: &str) -> String {
+pub(crate) fn returned(values: &[(Name, Value)], after: &str) -> String {
     if values.is_empty() {
         format!("finished with a result, {after}")
     } else {
@@ -172,41 +153,4 @@ pub(crate) fn judged(values: &[(Name, Value)], after: &str) -> String {
 
 pub(crate) fn closing(id: &str, how: &str, dir: &Path) -> String {
     format!("run {id} {how}; its record is {}", dir.display())
-}
-
-fn show_judge_stderr(path: &Path) {
-    let named = format!("the final judge's standard error, {},", path.display());
-    let mut bytes = Vec::new();
-    let read = File::open(path).and_then(|file| {
-        let size = file.metadata()?.len();
-        if size <= JUDGE_STDERR_SHOWN_BYTES {
-            file.take(JUDGE_STDERR_SHOWN_BYTES)
-                .read_to_end(&mut bytes)?;
-        }
-        Ok(size)
-    });
-    match read {
-        Ok(size) if size > JUDGE_STDERR_SHOWN_BYTES => say(format_args!(
-            "{named} holds {size} bytes, more than the {JUDGE_STDERR_SHOWN_BYTES} shown here: read \
-             it there"
-        )),
-        Ok(_) if bytes.is_empty() => {}
-        Ok(_) => {
-            say(format_args!("{named} holds:"));
-            to_stderr(indented(&bytes).as_bytes());
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => say(format_args!("{named} can't be read: {error}")),
-    }
-}
-
-fn indented(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let mut shown = String::new();
-    for line in text.strip_suffix('\n').unwrap_or(&text).split('\n') {
-        shown.push_str("  ");
-        shown.push_str(&escaped(line));
-        shown.push('\n');
-    }
-    shown
 }

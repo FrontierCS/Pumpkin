@@ -9,7 +9,7 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, judged, judged_log, lease_places, logged, poll,
+    Prices, Scratch, Step, asked, check, cut, lease_places, logged, poll, returned, whole_log,
     write_record, write_run,
 };
 
@@ -168,7 +168,7 @@ const SERVED_LIVE: &str = "20261110-110000-0000000c";
 fn write_served(scratch: &Scratch) -> File {
     let priced = lease_places(Prices::Both);
     let ended = SERVED_ENDED;
-    let mut outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+    let mut outcome = returned(49.36);
     // Its sandboxes all priced, so that its unpriced model alone makes its cost more.
     outcome["usage"] = json!({
         "ran_ns": "1100000000000", "model_requests": 4,
@@ -181,7 +181,7 @@ fn write_served(scratch: &Scratch) -> File {
         scratch,
         ended,
         asked(ended, 30),
-        &judged_log(),
+        &whole_log(),
         Some(outcome),
         &priced,
     );
@@ -190,7 +190,7 @@ fn write_served(scratch: &Scratch) -> File {
         scratch,
         lost,
         asked(lost, 30),
-        &cut(&judged_log(), 130),
+        &cut(&whole_log(), 130),
         None,
         &priced,
     );
@@ -200,7 +200,7 @@ fn write_served(scratch: &Scratch) -> File {
         scratch,
         live,
         since.checked_sub(Duration::from_secs(200)).unwrap(),
-        &cut(&judged_log(), 130),
+        &cut(&whole_log(), 130),
         None,
         &priced,
     );
@@ -257,13 +257,13 @@ fn serves_runs() {
         ("20261110-040000-00000007", Prices::Nothing),
     ];
     for (id, prices) in others {
-        let outcome = judged(49.36, json!({ "raw_score": 49.36 }));
+        let outcome = returned(49.36);
         let places = lease_places(prices);
         write_run(
             &scratch,
             id,
             asked(id, 30),
-            &judged_log(),
+            &whole_log(),
             Some(outcome),
             &places,
         );
@@ -370,27 +370,27 @@ fn serves_runs() {
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
-            end: 8743
+            end: 9222
             has_result: true
             id: "<ended>"
             lanes:
               {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"grant":"train","kind":"target","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"kind":"target","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
               {"grant":"box","holder":"job 0","kind":"runner","lane":"lease 0","role":"box","said":"box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\\nprint 7` exited 0; closed as its call ended","sandbox":{"asked":50.0,"deleted":true,"gone":102.0,"place":"aws/box","started":55.0},"work":[{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
               {"grant":"cpu","holder":"agent","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"grant":"train","kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train job 1 on modal/a100_80, never started, ended after 1m: failed: the judge's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"grant":"train","kind":"target","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"grant":"train","kind":"target","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"role":"trainer","said":"train job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 1 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"kind":"target","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"kind":"target","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
               {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
-              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"grant":null,"kind":"judge","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"role":"scorer","said":"final judge job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={\"solved\":3}","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
+              {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"kind":"target","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"of":"final","role":"scorer","said":"final call job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={\"solved\":3}","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
             live: false
             log_epoch: 0
             model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3500,"output":350},"took":{"count":3,"median":5.0}}
             other_build: null
             state: "finished"
             summary: "<as `wait` says it>"
-            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"submission","to":"scorer"},{"back_bytes":null,"bytes":null,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}],"score":false},{"kind":"target","name":"trainer","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":"judge","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}],"score":true},{"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[],"score":false},{"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[],"score":false},{"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[],"score":false}]}
+            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":3,"count":1,"from":"solver","kind":"final call","to":"scorer"},{"back_bytes":null,"bytes":12,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"final_target":false,"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}]},{"final_target":false,"kind":"target","name":"trainer","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":true,"kind":"target","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}]},{"final_target":false,"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[]}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
@@ -400,11 +400,11 @@ fn serves_runs() {
             GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
             GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>
-            {"end":8743,"live":false}
+            {"end":9222,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 8743, live false, next 8743, run "<ended>", 59 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7302
-            next 8743, end 8743, bytes [Number(7302), Number(7461), Number(7564), Number(7653), Number(7783), Number(7914), Number(8003), Number(8121), Number(8511)], the last's event "judge_collected"
+            end 9222, live false, next 9222, run "<ended>", 59 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7715
+            next 9222, end 9222, bytes [Number(7715), Number(7874), Number(7977), Number(8066), Number(8305), Number(8436), Number(8524), Number(8642), Number(9032)], the last's event "call_returned"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -422,7 +422,7 @@ fn serves_runs() {
             {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 8743: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9222: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -522,8 +522,8 @@ fn answers_over_a_pipe() {
     let (_, first) = piped.ask(&format!("/api/runs/{live}/since?log=0"), false);
     let first: Value = serde_json::from_slice(&first).unwrap();
     let end = first["end"].as_u64().unwrap();
-    let mut next = judged_log()[cut(&judged_log(), 130).len()].clone();
-    next["seq"] = json!(1 + cut(&judged_log(), 130).len());
+    let mut next = whole_log()[cut(&whole_log(), 130).len()].clone();
+    next["seq"] = json!(1 + cut(&whole_log(), 130).len());
     let log_path = scratch.0.join(format!(".pumpkin/runs/{live}/log.jsonl"));
     let mut log = OpenOptions::new().append(true).open(&log_path).unwrap();
     writeln!(log, "{next}").unwrap();
@@ -855,7 +855,7 @@ fn starts_over_a_shortened_log() {
         &scratch,
         id,
         since.checked_sub(Duration::from_secs(200)).unwrap(),
-        &judged_log(),
+        &whole_log(),
         None,
         &places,
     );
@@ -906,16 +906,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 8743, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3226&log_epoch=0
+            GET /api/runs/<id>: end 9222, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3330&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3226: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3226&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3330: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3330&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3226: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4548, log_epoch 1
-            GET /api/runs/<id>/since?log=3226&log_epoch=1
-            end 4548, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3330: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4652, log_epoch 1
+            GET /api/runs/<id>/since?log=3330&log_epoch=1
+            end 4652, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -929,8 +929,8 @@ fn windows_a_log_by_its_bytes() {
     padded["pad"] = json!("x".repeat(1024 * 1024));
     let mut log = vec![tick; 20_000];
     log.insert(10_000, padded);
-    log.extend(judged_log());
-    let outcome = Some(judged(49.36, json!({})));
+    log.extend(whole_log());
+    let outcome = Some(returned(49.36));
     write_run(
         &scratch,
         id,
@@ -963,7 +963,7 @@ fn windows_a_log_by_its_bytes() {
         &expect![[r#"
             from byte 0: 10001 records, next 709044
             from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10058 records, next 2486477"#]],
+            from byte 1757701: 10058 records, next 2486956"#]],
     );
 }
 
@@ -1134,9 +1134,9 @@ fn answers_past_a_connection_that_sends_nothing() {
 fn deflates_what_the_request_accepts() {
     let scratch = Scratch::new("deflates");
     let id = "20261110-200000-00000015";
-    let outcome = Some(judged(49.36, json!({})));
+    let outcome = Some(returned(49.36));
     let places = lease_places(Prices::Both);
-    write_run(&scratch, id, asked(id, 30), &judged_log(), outcome, &places);
+    write_run(&scratch, id, asked(id, 30), &whole_log(), outcome, &places);
     let served = Served::start(&scratch);
     let mut steps = Vec::new();
     let log = format!("/api/runs/{id}/log?at=0");
@@ -1185,10 +1185,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8743 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8743 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8743 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=8743 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=9222 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9222 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9222 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9222 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
@@ -1488,7 +1488,7 @@ fn traces_a_caller() {
     fs::write(&outside, "not the record's").unwrap();
     std::os::unix::fs::symlink(&outside, dir.join("model/5.response")).unwrap();
     log.push(answered(12, "agent", 5, 200, kept, Some("responses")));
-    // A judge's Chat Completions request, which names no API and keeps its tools in each request.
+    // A call's Chat Completions request, which names no API and keeps its tools in each request.
     let system = json!({ "role": "system", "content": "judge it" });
     let asked = json!({ "role": "user", "content": "is it right?" });
     let calls = |id: &str| {
@@ -1529,7 +1529,7 @@ fn traces_a_caller() {
         )),
     );
     log.push(answered(15, "job-0", 8, 200, kept, None));
-    // And the same again, abandoned as the judge's route ended.
+    // And the same again, abandoned as the call's route ended.
     log.push(started(16, "job-0", 9));
     let ended = "{\"error\":{\"message\":\"the model route has ended\"}}";
     let kept = model.keep(9, "messages", &sent, &[], chat_rest(), Some(ended));
@@ -1575,7 +1575,7 @@ fn traces_a_caller() {
     let steps = served.get(&format!("{run}/trace/job-0/steps"));
     entries_counted(&served, &format!("{run}/trace/job-0"), &steps);
     said.push(format!(
-        "the judge's steps:\n{}",
+        "the call's steps:\n{}",
         columns_text(&steps, "steps")
     ));
     let entries = served.get(&format!("{run}/trace/job-0/entries?from=0&to=9"));
@@ -1721,7 +1721,7 @@ fn traces_a_caller() {
             caller: "agent"
             totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":2,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.33599999999999997,"usd_unknown":2}
 
-            the judge's steps:
+            the call's steps:
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.08333333333333333 cached=50 calls=["grep"] end_ns="13000000000" input=600 items=2 kept_bytes=243 output=10 request=6 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
@@ -2440,7 +2440,7 @@ fn places_steps_whatever_their_answers_order() {
             })
             .collect();
     }
-    // Each root answered after the other's child, as two samples of a judge run at once.
+    // Each root answered after the other's child, as two samples of a call run at once.
     let order = [1, 0, 3, 2, 4, 5, 6, 8, 9, 7];
     let mut lines: Vec<Value> = (0..10).map(|n| started(n + 1, "job-0", n)).collect();
     for (at, n) in (0..).zip(order) {
