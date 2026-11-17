@@ -1,22 +1,23 @@
-//! The jobs that judge calls become, and the meter they keep.
+//! The jobs that calls of job functions, and the score, become, and the meter they keep.
 //!
-//! A call counts from when it is accepted, unless its job fails before its command starts, as
-//! when its sandbox fails to start: that is the run's or its provider's failure, not the
-//! caller's, so the call is given back, as a lease that fails to start costs nothing. Its
-//! seconds run from its command's start to the command's exit, to its stop at the timeout,
-//! to the job's failure, or to the core stopping it when the work phase ends, each as the
-//! runtime observed it. A call keeps its grant, which
-//! [runs one call at a time](schema::ir::JudgeGrant), busy until its job has ended,
+//! A call counts from when it is accepted, unless its job fails before it starts, as when its
+//! sandbox fails to start: that is the run's or its provider's failure, not the caller's, so the
+//! call is given back, as a lease that fails to start costs nothing. A job starts with its
+//! judge's command, or its function's body. Its seconds run from its start to its command's
+//! exit, or to its body's end once its target is gone, to its stop at the timeout, to the job's
+//! failure, or to the core stopping it when the work phase ends, each as the runtime observed
+//! it. A call keeps its function, which
+//! [runs one call at a time](schema::ir::JobFunction), busy until its job has ended,
 //! once its outputs are collected and its sandbox destroyed, and every lease it held has ended,
 //! which the core reads from its leases.
 //!
-//! The cumulative seconds left are what the grant allows less what ended commands used. A call
-//! is accepted only once the grant's earlier calls have all ended, and its timeout is at most
-//! the time left then, so the grant's calls stay within
-//! [`cumulative_seconds`](schema::ir::JudgeGrant::cumulative_seconds) but for how late
+//! The cumulative seconds left are what the function allows less what ended calls used. A call
+//! is accepted only once the function's earlier calls have all ended, and its timeout is at most
+//! the time left then, so the function's calls stay within
+//! [`cumulative_seconds`](schema::ir::JobFunction::cumulative_seconds) but for how late
 //! the runtime observes a call's end.
 //!
-//! The quota ledger is not kept apart: what each grant has used is counted from its jobs
+//! The quota ledger is not kept apart: what each function has used is counted from its jobs
 //! ([`Jobs::usage`]), so the two can't disagree.
 
 use alloc::borrow::ToOwned;
@@ -25,15 +26,14 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use schema::sandbox::op::{self, FailureCode};
-use schema::workflow::{JudgeCall, JudgeGrantId};
+use schema::workflow::JobOf;
 
 use super::{JobId, JudgeResult};
 
 /// Why a job gave no result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Its command ran past its timeout. A timed-out call returns no result, whatever its
-    /// judge wrote.
+    /// It ran past its timeout. A timed-out job gives no result, whatever its judge wrote.
     Timeout,
     /// It failed before giving a result, for the runtime's reason.
     Error(String),
@@ -42,18 +42,19 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// The failure as a status reply gives it. Its message holds no detail from the judge or
-    /// the runtime, so a caller learns of a call only what its judge's declared fields say.
+    /// The failure as the caller of a job function hears of it in a status reply: a fixed
+    /// sentence, as the record says why.
     pub(super) fn reply(&self) -> op::Failure {
         let (code, message) = match self {
-            Self::Timeout => (FailureCode::JudgeTimeout, "the judge ran past its timeout"),
+            Self::Timeout => (FailureCode::CallTimeout, "the call ran past its timeout"),
             Self::Error(_) => (
-                FailureCode::JudgeError,
-                "the judge failed before giving a result",
+                FailureCode::CallError,
+                "the call's body failed: the run's record says why",
             ),
-            Self::InvalidResult(_) => (
-                FailureCode::InvalidResult,
-                "the judge wrote no valid result",
+            // A type of its own for a function's failures would split the jobs' states by kind.
+            Self::InvalidResult(_) => unreachable!(
+                "a job function's call gave an invalid result, though only the score's judge \
+                 writes a result, and a body's return is its result"
             ),
         };
         op::Failure {
@@ -70,22 +71,22 @@ pub(super) struct Jobs(Vec<Job>);
 #[derive(Debug)]
 pub(super) struct Job {
     /// What the call was made under.
-    pub(super) call: JudgeCall,
+    pub(super) call: JobOf,
     pub(super) timeout: Duration,
     pub(super) state: State,
 }
 
 #[derive(Debug)]
 pub(super) enum State {
-    /// Accepted; its command has not started.
+    /// Accepted; it has not started.
     Queued,
-    /// Its command started at `started`.
+    /// Its judge's command, or its function's body, started at `started`.
     Running { started: Duration },
-    /// Its command has ended, or the core stopped the job; its sandbox is being collected and
-    /// destroyed. `used` is how long its command ran, none if it didn't start.
+    /// It has ended, or the core stopped it; its sandbox is being collected and destroyed. `used`
+    /// is how long it ran, none if it didn't start.
     Ending { used: Duration, end: End },
-    /// Its sandbox is gone. It is `charged` against its grant's calls unless it failed before
-    /// its command started.
+    /// Its sandbox is gone. It is `charged` against its function's calls unless it failed before
+    /// it started.
     Ended {
         used: Duration,
         outcome: Result<JudgeResult, Failure>,
@@ -109,7 +110,7 @@ pub(super) struct Usage {
     pub(super) calls: u64,
     /// The time the commands that have ended ran.
     pub(super) used: Duration,
-    /// Whether one of the grant's calls hasn't ended.
+    /// Whether one of the function's calls hasn't ended.
     pub(super) busy: bool,
 }
 
@@ -155,7 +156,7 @@ impl State {
 }
 
 impl Jobs {
-    pub(super) fn add(&mut self, call: JudgeCall, timeout: Duration) -> JobId {
+    pub(super) fn add(&mut self, call: JobOf, timeout: Duration) -> JobId {
         let job = JobId(self.0.len() as u64);
         self.0.push(Job {
             call,
@@ -165,9 +166,9 @@ impl Jobs {
         job
     }
 
-    pub(super) fn of(&self, grant: JudgeGrantId) -> impl Iterator<Item = JobId> {
+    pub(super) fn of(&self, call: JobOf) -> impl Iterator<Item = JobId> {
         let jobs = self.0.iter().enumerate();
-        jobs.filter(move |(_, job)| job.call == JudgeCall::Grant(grant))
+        jobs.filter(move |(_, job)| job.call == call)
             .map(|(index, _)| JobId(index as u64))
     }
 
@@ -201,9 +202,9 @@ impl Jobs {
             .all(|job| matches!(job.state, State::Ended { .. }))
     }
 
-    pub(super) fn usage(&self, grant: JudgeGrantId) -> Usage {
+    pub(super) fn usage(&self, call: JobOf) -> Usage {
         let mut usage = Usage::default();
-        for job in (self.0.iter()).filter(|job| job.call == JudgeCall::Grant(grant)) {
+        for job in (self.0.iter()).filter(|job| job.call == call) {
             let charged = !matches!(job.state, State::Ended { charged: false, .. });
             usage.calls += u64::from(charged);
             match job.state {

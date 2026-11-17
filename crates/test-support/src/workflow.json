@@ -36,9 +36,10 @@
           "grants": [
             {
               "name": "train",
-              "judge": {
-                "role": "train_judge",
-                "slot": "payload",
+              "job": {
+                "target": "trainer",
+                "body": { "file": "//lib/train.star", "def": "train" },
+                "payload_max_bytes": 4194304,
                 "calls": 100,
                 "cumulative_seconds": 12000,
                 "call_timeout_seconds": 12000
@@ -50,7 +51,7 @@
       }
     },
     {
-      "name": "train_judge",
+      "name": "trainer",
       "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "user": { "uid": 65532, "gid": 65532 },
       "needs": {
@@ -58,20 +59,9 @@
         "memory_bytes": 2147483648
       },
       "runtime": {
-        "judge": {
-          "command": {
-            "argv": ["/usr/local/bin/judge"],
-            "cwd": "/pumpkin/home",
-            "env": [
-              "MODE=train",
-              "DATASET=/data/train.json"
-            ]
-          },
-          "slots": [{ "name": "payload", "max_bytes": 4194304 }],
-          "result": {
-            "shows": { "score": "/raw_score", "metrics": "/metrics" },
-            "returns": ["/raw_score", "/metrics", "/failure"]
-          }
+        "target": {
+          "cwd": "/workspace",
+          "env": ["MODE=train", "DATASET=/data/train.json"]
         }
       }
     },

@@ -21,6 +21,7 @@ use rustix::process::umask;
 use stdx::Context;
 use workspace::Workspace;
 
+mod bodies;
 mod cli;
 mod config;
 mod controller;
@@ -341,7 +342,7 @@ fn built(
         let engine = configured_engine(&config_path(config)?, reader)?;
         Ok(task.build(&engine, &mut ()))
     })?;
-    let (workflow, _) = built.map_err(|problems| task_problems(entry, &problems))?;
+    let (workflow, _, _) = built.map_err(|problems| task_problems(entry, &problems))?;
     let ir = runtime::ir_json(&workflow);
     print(ir.as_bytes()).context("printing the IR failed")
 }

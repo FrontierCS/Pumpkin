@@ -29,15 +29,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Caller, Event, Failure, JudgeResult, Outcome, PayloadRef, Request, Submission, Verdict,
-    WorkEnd,
+    Action, Caller, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef, Request, Submission,
+    Verdict, WorkEnd,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
 use route::{Answer, Usage};
-use schema::ir::{Api, GpuModel, Name};
-use schema::sandbox::op::{OpReply, SessionOp};
-use schema::workflow::{JudgeCall, Workflow};
+use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
+use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
+use schema::workflow::Workflow;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
@@ -45,19 +45,21 @@ use stdx::Context;
 use super::sandbox::Deleted;
 use super::{Clock, Durable, Host, record};
 
+mod call;
 mod fold;
 mod logged;
 mod progress;
 mod roles;
 mod usage;
 
+pub use call::{CallEnd, CallSpan};
 pub use fold::{LogFold, StartedOver, TakenLine};
 pub(super) use fold::{final_judge, lines, progress};
 pub use logged::Direction;
 pub(super) use progress::places;
 pub use progress::{
-    AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress,
-    Readout, Sandbox, Tokens, Unread, Work,
+    AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
+    Tokens, Unread, Work,
 };
 pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
@@ -254,6 +256,26 @@ impl<'h, H: Host> Log<'h, H> {
             Entry::Gpus(sandbox, gpus) => {
                 self.told(json!({ "kind": "sandbox_gpus", "sandbox": sandbox, "gpus": gpus }))
             }
+            Entry::Target(job, targeted, at) => {
+                let job = job.0;
+                let event = match targeted {
+                    Targeted::Put { path, put } => json!({
+                        "kind": "target_put", "job": job, "path": path,
+                        "digest": put.digest, "bytes": put.size,
+                    }),
+                    Targeted::Run { command, argv } => json!({
+                        "kind": "target_run", "job": job, "command": command, "argv": argv,
+                    }),
+                    Targeted::Ended { command, end } => json!({
+                        "kind": "command_ended", "job": job, "command": command, "end": end,
+                    }),
+                    Targeted::Get { path, got } => json!({
+                        "kind": "target_get", "job": job, "path": path,
+                        "digest": got.digest, "bytes": got.size,
+                    }),
+                };
+                self.observed(at, event, &[])
+            }
             Entry::Deleted(deleted) => {
                 let Deleted {
                     sandbox,
@@ -343,6 +365,23 @@ pub(super) enum Entry {
     /// short of the core's end included, after which the log keeps the notes and deletes of the
     /// run's children, but no event of theirs.
     Deleted(Deleted),
+    /// What a job function's body asked of its call's target, job `job`'s, at a time.
+    Target(JobId, Targeted, Duration),
+}
+
+/// What a body asked of its target, as the log's `target_put`, `target_run`, `command_ended` and
+/// `target_get` hold it.
+pub(super) enum Targeted {
+    /// The call's payload is now at `path` in the target; `put` names it by its size and digest.
+    Put { path: AbsolutePath, put: PayloadRef },
+    /// A command has started, the body's `command`th, whose output the job's `log/<command>`
+    /// holds once it exits.
+    Run { command: u64, argv: Argv },
+    /// The body's `command`th command exited, as `end` says; one that its call's end cut short
+    /// has none.
+    Ended { command: u64, end: CommandEnd },
+    /// The body got the file at `path`, which `got` names by its size and digest.
+    Get { path: AbsolutePath, got: PayloadRef },
 }
 
 pub(super) struct ModelAnswer {
@@ -422,6 +461,16 @@ fn event_json(event: &Event) -> Value {
         Event::JudgeFailed { job, reason } => {
             json!({ "kind": "judge_failed", "job": job.0, "reason": reason })
         }
+        Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
+        Event::CallTimedOut { job } => json!({ "kind": "call_timed_out", "job": job.0 }),
+        Event::CallReturned { job, result } => json!({
+            "kind": "call_returned",
+            "job": job.0,
+            "returned": shown_json(result.values()),
+        }),
+        Event::CallFailed { job, reason } => {
+            json!({ "kind": "call_failed", "job": job.0, "reason": reason })
+        }
         Event::LeaseReady { lease } => json!({ "kind": "lease_ready", "lease": lease.0 }),
         Event::CommandEnded {
             lease,
@@ -457,9 +506,9 @@ fn event_json(event: &Event) -> Value {
 fn request_json(request: &Request) -> Value {
     match request {
         Request::Ops => json!({ "kind": "ops" }),
-        Request::Judge { grant, payload } => json!({
-            "kind": "judge",
-            "grant": grant.as_str(),
+        Request::Call { function, payload } => json!({
+            "kind": "call",
+            "grant": function.as_str(),
             "payload": payload_json(payload),
         }),
         Request::Submit {
@@ -537,7 +586,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
                 OpReply::Status(_) => json!({ "kind": "status" }),
                 OpReply::LeaseStatus(_) => json!({ "kind": "lease_status" }),
                 OpReply::Ops(_)
-                | OpReply::Judge(_)
+                | OpReply::Call(_)
                 | OpReply::Submit(_)
                 | OpReply::Lease(_)
                 | OpReply::Refused { .. } => json!(reply),
@@ -546,16 +595,23 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         }
         Action::StartJudge {
             job,
-            call,
             payload,
             timeout,
         } => json!({
             "kind": "start_judge",
             "job": job.0,
-            "grant": match call {
-                JudgeCall::Grant(grant) => Some(workflow.judge_grant(*grant).name.as_str()),
-                JudgeCall::Score => None,
-            },
+            "payload": payload_json(payload),
+            "timeout_ns": nanos(*timeout),
+        }),
+        Action::StartCall {
+            job,
+            function,
+            payload,
+            timeout,
+        } => json!({
+            "kind": "start_call",
+            "job": job.0,
+            "grant": workflow.job_function(*function).name,
             "payload": payload_json(payload),
             "timeout_ns": nanos(*timeout),
         }),
@@ -654,13 +710,18 @@ fn submission_json(submission: &Submission) -> Value {
 fn result_json(result: &JudgeResult) -> Value {
     let mut json = json!({ "returned": result.returned() });
     if !result.values().is_empty() {
-        let values = result.values().iter();
-        let values: Vec<Value> = values
-            .map(|(name, value)| json!({ "name": name, "value": value }))
-            .collect();
-        json["values"] = json!(values);
+        json["values"] = shown_json(result.values());
     }
     json
+}
+
+/// `values` in order, each as `{"name": …, "value": …}`.
+fn shown_json(values: &[(Name, Value)]) -> Value {
+    let values = values.iter();
+    let values: Vec<Value> = values
+        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .collect();
+    json!(values)
 }
 
 /// The values that `result`, a judge's result as the log's `judge_collected` and `outcome.json`'s
@@ -674,7 +735,18 @@ pub fn result_values(result: &Value) -> Result<Vec<(Name, Value)>, serde_json::E
     let Some(values) = result.get("values") else {
         return Ok(Vec::new());
     };
-    let values = Vec::<logged::Shown>::deserialize(values)?;
+    returned_values(values)
+}
+
+/// The values that `returned`, a job function's return as the log's `call_returned` holds it,
+/// gives, each by its name, in order.
+///
+/// # Errors
+///
+/// Fails if `returned` is not an array of objects that each hold a `name`, a [`Name`], and a
+/// `value`.
+pub fn returned_values(returned: &Value) -> Result<Vec<(Name, Value)>, serde_json::Error> {
+    let values = Vec::<logged::Shown>::deserialize(returned)?;
     Ok(values
         .into_iter()
         .map(|shown| (shown.name, shown.value))

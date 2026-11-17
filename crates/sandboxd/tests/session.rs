@@ -990,7 +990,7 @@ fn greeted(address: SocketAddr, answer: &HelloReply, peers: &mut Vec<String>) ->
     frame::write(&mut peer, answer, &[]).unwrap();
     let probe = ToSandbox::Collect {
         stream: 1,
-        dir: absolute(Path::new("/nonexistent")),
+        path: absolute(Path::new("/nonexistent")),
     };
     let _ = frame::write(&mut peer, &probe, &[]);
     let then = match frame::read::<Value>(&mut peer) {
@@ -1186,10 +1186,48 @@ fn reading_while_collecting() {
     );
 }
 
+#[test]
+fn collects_one_file() {
+    check(
+        Meeting::Socket,
+        |sandbox| {
+            fs::write(sandbox.root.join("out/result.json"), "{}").unwrap();
+            let (mut gateway, sandboxd) = accepting_gateway(&sandbox.socket("fake.sock"));
+            let collect = ToSandbox::Collect {
+                stream: 1,
+                path: absolute(&sandbox.root.join("out/result.json")),
+            };
+            frame::write(&mut gateway, &collect, &[]).unwrap();
+            let mut lines = Vec::new();
+            loop {
+                let (message, body) = frame::read::<FromSandbox>(&mut gateway).unwrap().unwrap();
+                match message {
+                    FromSandbox::Entry { entry, .. } => lines.push(format!("{entry:?}")),
+                    FromSandbox::Data { .. } => {
+                        lines.push(format!("its data: {}", String::from_utf8_lossy(&body)));
+                    }
+                    FromSandbox::End { .. } => break,
+                    other => lines.push(format!("then {other:?}")),
+                }
+            }
+            drop(gateway);
+            lines.push(format!("the fake gateway's sandboxd: {}", ended(sandboxd)));
+            lines
+        },
+        &expect![[r#"
+            File { path: RelativePath("result.json"), size: 2, mode: Mode(436) }
+            its data: {}
+            the fake gateway's sandboxd: exit status: 0
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
 fn collect_and_put<'a>(root: &Path, bytes: &'a [u8]) -> Vec<(ToSandbox, &'a [u8])> {
     let collect = ToSandbox::Collect {
         stream: 1,
-        dir: absolute(&root.join("out")),
+        path: absolute(&root.join("out")),
     };
     let put = ToSandbox::Put {
         stream: 2,

@@ -1,5 +1,5 @@
-//! The ops that a run brokered for each caller, as its log says of them: each judge call, lease
-//! command, transfer and submission, from when it arrived to when the work it started ended. An
+//! The ops that a run brokered for each caller, as its log says of them: each call, lease command,
+//! transfer and submission, from when it arrived to when the work it started ended. An
 //! op that starts no work, a submission or one refused, ends as it arrives; one whose work hasn't
 //! ended has no end. The ops that only ask how things stand, or open and close a lease, are left
 //! out.
@@ -33,12 +33,12 @@ struct Op {
 /// A piece of work that an op starts, as the log names it.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Work {
-    Judge(u64),
+    Call(u64),
     Command(u64, u64),
     Transfer(u64, u64),
 }
 
-const KINDS: [&str; 5] = ["judge", "submit", "lease_run", "lease_put", "lease_get"];
+const KINDS: [&str; 5] = ["call", "submit", "lease_run", "lease_put", "lease_get"];
 
 impl Ops {
     pub(in crate::view) fn take(&mut self, record: &Value) {
@@ -48,21 +48,17 @@ impl Ops {
         let number = |name: &str| event[name].as_u64();
         let (work, result, failed) = match event["kind"].as_str() {
             Some("op_arrived") => return self.arrived(event, &record["actions"], ns),
-            Some("judge_collected") => {
-                let Ok(values) = runtime::result_values(&event["result"]) else {
+            Some("call_returned") => {
+                let Ok(values) = runtime::returned_values(&event["returned"]) else {
                     return;
                 };
-                let (result, failed) = match event["invalid"].as_str() {
-                    Some(why) => (format!("invalid: {why}"), true),
-                    None if values.is_empty() => ("result".to_owned(), false),
-                    None => (format!("result {}", progress::shown_values(&values)), false),
-                };
-                (number("job").map(Work::Judge), result, failed)
+                let result = format!("returned {}", progress::shown_values(&values));
+                (number("job").map(Work::Call), result, false)
             }
-            Some("judge_failed") => {
+            Some("call_failed") => {
                 let why = event["reason"].as_str().unwrap_or_default();
                 (
-                    number("job").map(Work::Judge),
+                    number("job").map(Work::Call),
                     format!("failed: {why}"),
                     true,
                 )
@@ -123,9 +119,9 @@ impl Ops {
             Some(lease) => Some(format!("lease {lease}")),
             None => request["grant"].as_str().map(str::to_owned),
         };
-        // A judge call's job may start later, once a slot frees; a lease's work starts at once.
-        let work = if reply["kind"] == "judge" {
-            reply["job"].as_u64().map(Work::Judge)
+        // A call's job may start later, once a slot frees; a lease's work starts at once.
+        let work = if reply["kind"] == "call" {
+            reply["job"].as_u64().map(Work::Call)
         } else {
             actions.iter().find_map(|action| {
                 let lease = action["lease"].as_u64()?;

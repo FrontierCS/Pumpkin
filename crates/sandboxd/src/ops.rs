@@ -3,11 +3,11 @@
 //!
 //! `sandboxd` serves them on the control socket, in a directory it makes, which only the
 //! sandbox's user may enter. A caller connects and sends one frame: its message is the
-//! `OpCall`, and its body, for a judge call or a submission, the absolute path of the payload's
-//! file, which `sandboxd` reads itself, since both run as the same user, and opens through no
-//! symbolic link; any other call's body is ignored. The caller keeps the connection open until
-//! one frame comes back, a `Result<OpReply, String>`: the reply, or why the op couldn't be
-//! carried. Callers take turns. The connection closes unanswered if the session ends first, as
+//! `OpCall`, and its body, for a function's call or a submission, the absolute path of the
+//! payload's file, which `sandboxd` reads itself, since both run as the same user, and opens
+//! through no symbolic link; any other call's body is ignored. The caller keeps the connection
+//! open until one frame comes back, a `Result<OpReply, String>`: the reply, or why the op couldn't
+//! be carried. Callers take turns. The connection closes unanswered if the session ends first, as
 //! `sandboxd` then exits, or if `sandboxd` can't start a thread for the caller or write its
 //! answer.
 //!

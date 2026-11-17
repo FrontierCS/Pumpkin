@@ -688,7 +688,7 @@ fn op(number: u32, call: Value, size: u64) -> (Value, Vec<u8>) {
 }
 
 fn train(number: u32, size: u64) -> (Value, Vec<u8>) {
-    op(number, json!({ "kind": "judge", "grant": "train" }), size)
+    op(number, json!({ "kind": "call", "grant": "train" }), size)
 }
 
 fn finalize(number: u32, size: u64) -> (Value, Vec<u8>) {
@@ -953,15 +953,15 @@ fn sandbox_ops() {
             ],
         ),
         &expect![[r#"
-            freeze: ok; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; Submit { grant: Name("submit"), finalize: true, payload: [97, 98, 99, 100] }; Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"refused","message":"the payload is 5 bytes, more than the limit of 4: send at most 4"}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 9: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            freeze: ok; refused Call { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; Submit { grant: Name("submit"), finalize: true, payload: [97, 98, 99, 100] }; Status { job: 3 }; ended: the sandbox ended the session; the sandbox heard op 7: {"kind":"refused","message":"the payload is 5 bytes, more than the limit of 4: send at most 4"}, op 8: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}, op 9: {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
             freeze: ok; ended: the sandbox broke the protocol: it sent data for op 7, which is not open
             freeze: ok; ended: the sandbox broke the protocol: it opened op 7 with a payload of 67108865 bytes, more than the protocol's 67108864
             freeze: ok; ended: the sandbox broke the protocol: it opened op 9 with a payload of 3 bytes, for a call that takes none
             freeze: ok; ended: the sandbox broke the protocol: it sent 3 bytes of op 7's payload, past its size: 2 were left
             freeze: ok; ended: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
-            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; Judge { grant: Name("train"), payload: [97] }; reply: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; ended: the sandbox broke the protocol: it sent data for op 7, which is not open
-            freeze: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; Judge { grant: Name("train"), payload: [] }; reply: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; ended: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
-            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Judge { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; refuse: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; ended: the sandbox broke the protocol: it sent data for op 99, which is not open
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; Call { function: Name("train"), payload: [97] }; reply: ConnectionAborted: the sandbox broke the protocol: it sent data for op 7, which is not open; ended: the sandbox broke the protocol: it sent data for op 7, which is not open
+            freeze: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; Call { function: Name("train"), payload: [] }; reply: ConnectionAborted: the sandbox broke the protocol: it opened op 8 while op 7 is in flight; ended: the sandbox broke the protocol: it opened op 8 while op 7 is in flight
+            freeze: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; refused Call { grant: Name("train") } of 5 bytes over 4: the payload is 5 bytes, more than the limit of 4: send at most 4; refuse: ConnectionAborted: the sandbox broke the protocol: it sent data for op 99, which is not open; ended: the sandbox broke the protocol: it sent data for op 99, which is not open
             freeze: ok; InvalidInput: the message is 65602 bytes: a frame's message holds at most 65536; ok; the sandbox heard op 7: {"kind":"refused","message":"the reply was too long to send: the message is 65602 bytes: a frame's message holds at most 65536"}, op 8: {"kind":"refused","message":"no"}"#]],
     );
 }

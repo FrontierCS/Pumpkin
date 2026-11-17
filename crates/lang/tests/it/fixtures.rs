@@ -133,11 +133,21 @@ fn tasks() {
                       "finalize_grace_seconds": 30,
                       "grants": [
                         {
-                          "judge": {
+                          "job": {
+                            "body": {
+                              "def": "train",
+                              "file": "//lib/judged.star"
+                            },
                             "call_timeout_seconds": 600,
                             "calls": 20,
-                            "role": "train_judge",
-                            "slot": "payload"
+                            "keywords": {
+                              "metrics": [
+                                "solved",
+                                "rejected"
+                              ]
+                            },
+                            "payload_max_bytes": 65536,
+                            "target": "trainer"
                           },
                           "name": "train"
                         },
@@ -156,43 +166,19 @@ fn tasks() {
                 },
                 {
                   "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-                  "name": "train_judge",
+                  "name": "trainer",
                   "needs": {
                     "cpu_millis": 1000,
                     "memory_bytes": 1073741824
                   },
                   "runtime": {
-                    "judge": {
-                      "command": {
-                        "argv": [
-                          "/opt/judge/run",
-                          "--mode",
-                          "train"
-                        ],
-                        "cwd": "/pumpkin/home",
-                        "env": [
-                          "LEVEL=hard",
-                          "GRACE=30",
-                          "MODE=train",
-                          "SLOT_BYTES=65536"
-                        ]
-                      },
-                      "result": {
-                        "returns": [
-                          "/score",
-                          "/metrics/solved",
-                          "/metrics/rejected",
-                          "/failure"
-                        ],
-                        "shows": {
-                          "score": "/score"
-                        }
-                      },
-                      "slots": [
-                        {
-                          "max_bytes": 65536,
-                          "name": "payload"
-                        }
+                    "target": {
+                      "cwd": "/pumpkin/home",
+                      "env": [
+                        "LEVEL=hard",
+                        "GRACE=30",
+                        "MODE=train",
+                        "SLOT_BYTES=65536"
                       ]
                     }
                   },
@@ -254,7 +240,7 @@ fn tasks() {
               }
             }
 
-            == tasks/literal/task.star: 2 of 569 prefixes evaluate
+            == tasks/literal/task.star: 2 of 655 prefixes evaluate
             {
               "ir_version": "pumpkin.ir/v0",
               "name": "neutral/literal",
@@ -311,13 +297,41 @@ fn tasks() {
                       "finalize_grace_seconds": 60,
                       "grants": [
                         {
-                          "judge": {
+                          "job": {
+                            "body": {
+                              "def": "verify",
+                              "file": "//lib/verify.star"
+                            },
                             "call_timeout_seconds": 600,
                             "calls": 100,
-                            "role": "train_judge",
-                            "slot": "payload"
+                            "keywords": {
+                              "metrics": [
+                                "score",
+                                "metrics",
+                                "failure"
+                              ]
+                            },
+                            "payload_max_bytes": 16384,
+                            "target": "trainer"
                           },
                           "name": "train"
+                        },
+                        {
+                          "job": {
+                            "body": {
+                              "def": "verify",
+                              "file": "//lib/verify.star"
+                            },
+                            "call_timeout_seconds": 60,
+                            "keywords": {
+                              "metrics": [
+                                "passed"
+                              ]
+                            },
+                            "payload_max_bytes": 16384,
+                            "target": "verifier"
+                          },
+                          "name": "verify"
                         },
                         {
                           "name": "final",
@@ -334,38 +348,17 @@ fn tasks() {
                 },
                 {
                   "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-                  "name": "train_judge",
+                  "name": "trainer",
                   "needs": {
                     "cpu_millis": 1000,
                     "memory_bytes": 536870912
                   },
                   "runtime": {
-                    "judge": {
-                      "command": {
-                        "argv": [
-                          "/opt/judge/run"
-                        ],
-                        "cwd": "/pumpkin/home",
-                        "env": [
-                          "MODE=train",
-                          "PATTERN=\\d+\\.json"
-                        ]
-                      },
-                      "result": {
-                        "returns": [
-                          "/score",
-                          "/metrics",
-                          "/failure"
-                        ],
-                        "shows": {
-                          "score": "/score"
-                        }
-                      },
-                      "slots": [
-                        {
-                          "max_bytes": 16384,
-                          "name": "payload"
-                        }
+                    "target": {
+                      "cwd": "/pumpkin/home",
+                      "env": [
+                        "MODE=train",
+                        "PATTERN=\\d+\\.json"
                       ]
                     }
                   },
@@ -406,6 +399,23 @@ fn tasks() {
                           "name": "payload"
                         }
                       ]
+                    }
+                  },
+                  "user": {
+                    "gid": 65532,
+                    "uid": 65532
+                  }
+                },
+                {
+                  "image": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                  "name": "verifier",
+                  "needs": {
+                    "cpu_millis": 1000,
+                    "memory_bytes": 536870912
+                  },
+                  "runtime": {
+                    "target": {
+                      "cwd": "/pumpkin/home"
                     }
                   },
                   "user": {
@@ -583,10 +593,12 @@ fn lib() {
         &expect![[r#"
             == lib/deep.star: 0 of 58 prefixes evaluate
 
-            == lib/images.star: 0 of 500 prefixes evaluate
+            == lib/images.star: 0 of 593 prefixes evaluate
 
-            == lib/judged.star: 0 of 564 prefixes evaluate
+            == lib/judged.star: 0 of 703 prefixes evaluate
 
-            == lib/parts.star: 0 of 226 prefixes evaluate"#]],
+            == lib/parts.star: 0 of 226 prefixes evaluate
+
+            == lib/verify.star: 0 of 91 prefixes evaluate"#]],
     );
 }

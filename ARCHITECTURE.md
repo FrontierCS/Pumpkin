@@ -13,20 +13,23 @@ reach to finish its task or raise its score. Pumpkin's job is to give each part 
 what the workflow grants it and nothing more, to bound what a run spends in time and money, and to
 keep a record of the run that no sandbox can alter.
 
-A workflow is data, the workflow IR. It names its roles, one agent, its judges and the runners
-they lease; the grants each role holds, such as the agent's judge calls, its sessions and its
-submission; each role's model route; and the score, the judge whose verdict on the selected
-submission ends the run. A task's source, in Pumpkin's workflow language, a subset of Starlark,
-evaluates to that IR and to the images its roles run. The IR is the only input the runtime reads,
-so any other program may write it instead.
+A workflow is data, the workflow IR. It names its roles, one agent, the targets its job functions
+start, the runners that sessions lease and one judge; the grants each role holds, such as the
+agent's job functions, its sessions and its submission; each role's model route; and the score,
+the judge whose verdict on the selected submission ends the run. A task's source, in Pumpkin's
+workflow language, a subset of Starlark, evaluates to that IR and to the images its roles run. The
+IR is the only input the runtime reads, and the bodies of its job functions reach it as `Bodies`,
+which the driver gives; so any other program may write the IR of a workflow without job
+functions.
 
 Each instance of a role is a sandbox, which a provider makes: a container on the operator's Docker
 engine, a container on an EC2 instance of its own, or a Modal sandbox. In every sandbox,
 `sandboxd` meets the host and serves one session, which is the sandbox's only way out. Over it the
 host puts and collects files, starts commands and freezes the sandbox, and code in the sandbox
-makes ops, such as a judge call or a lease's command, and model requests. On the host, the gateway
-holds each session's end, the decision core decides what the run does next from what has
-happened, and the runtime carries out those decisions on the providers and keeps the run's record.
+makes ops, such as a call of a job function or a lease's command, and model requests. On the
+host, the gateway holds each session's end, the decision core decides what the run does next from
+what has happened, and the runtime carries out those decisions on the providers and keeps the
+run's record.
 
 A run is one process, the driver, on one machine: the operator's own, or the person's controller,
 an EC2 instance that runs the runs a machine sends it.
@@ -106,15 +109,17 @@ such as none or no limit, and whatever writes the IR picks the defaults. Review 
 check does: the IR's types default only an `Option` or an empty collection.
 
 **Architecture Invariant:** the agent never reaches the judge that scores it, nor what a judge
-runs. A judge's runtime holds sessions alone, and parsing refuses a score whose judge one of the
-agent's grants names and an agent's session of a runner whose image is a judge's.
+runs. A judge's runtime holds sessions alone, no grant names a judge, as a job function names a
+target, and parsing refuses an agent's session of a runner whose image is a judge's or a job
+function's target's.
 
 ### `crates/decision`
 
 The decision core. `Core` takes each `Event` that the runtime observed, with the time since the
 run started, and returns the `Action`s to perform, until `Action::Finish` carries the run's
-`Outcome` or `Action::Abandon` ends it at its hard end. Its `ops` module authorizes ops, `jobs`
-meters judge calls and `leases` meters and ends leases; `lasts` is a run's hard end.
+`Outcome` or `Action::Abandon` ends it at its hard end. Its `ops` module authorizes ops, `call`
+takes a call of a function by the function's kind, `jobs` meters the calls of job functions and
+the score's judge call, and `leases` meters and ends leases; `lasts` is a run's hard end.
 
 **Architecture Invariant:** the core does no I/O, reads no clock and uses no randomly seeded hash,
 so the same events give the same actions, and time reaches it only with each event. The crate is
@@ -125,9 +130,9 @@ reachable through it.
 in its sandbox makes, the gateway hands each to the session's owner as an `Arrival`, and the
 runtime answers each with the core's `Action::Reply`.
 
-**Architecture Invariant:** the agent learns of a judge call only its state, what its grant has
-left, and the fields that the judge's `ResultSpec` returns, so the workflow decides the agent's
-feedback. The status reply's types hold nothing else.
+**Architecture Invariant:** the agent learns of a call only its state, what its function has left,
+and what its body returns, so the workflow decides the agent's feedback. The status reply's types
+hold nothing else.
 
 **Architecture Invariant:** the final judge starts only once the agent's sandbox, its jobs and
 every lease that they held have ended, so nothing the agent started runs while its submission is
@@ -363,9 +368,10 @@ neither the metadata address nor a public one.
 The host side. `Run::prepare` reserves on each provider and begins a placed workflow's record, and
 `Run::execute` drives the `Core` on the run's providers to its outcome, or until a signal stops it
 (`Stopped`). One thread drives the core and waits on an inbox of the run's `Host`, whose clock
-times the run (`System`, the machine's); each judge call or lease is a child on a thread of its
-own (`child`, `judge`, `lease`); every sandbox starts on one path (`sandbox`); and `model` serves
-each role's route. `record` and `log` lay out the record, and `Record` reads it back for
+times the run (`System`, the machine's); each call, the final judge's and those of job functions,
+and each lease is a child on a thread of its own (`child`, `judge`, `call`, `lease`); every
+sandbox starts on one path (`sandbox`); and `model` serves each role's route. `record` and `log`
+lay out the record, and `Record` reads it back for
 `pumpkin`: a run's progress (`Readout`), the arguments that started it, its model exchanges, and
 the reap of what it left (`Record::reap`).
 
@@ -538,9 +544,9 @@ and so is each `docker` command but a build. Before a run starts, a build and a 
 files to a controller have no bound on their whole time, as their inputs' size sets it: a send
 gives up only once it stalls.
 
-A run's bounds are the workflow's: the agent's deadline and finalize grace, each judge grant's
-calls and judge seconds, each session's instances, seconds, commands and transfer bytes, each
-slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
+A run's bounds are the workflow's: the agent's deadline and finalize grace, each job function's
+calls, seconds and payload size, each session's instances, seconds, commands and transfer bytes,
+each slot's size, and the score's timeout. The core meters each from its own jobs and leases, and
 refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's hard
 end, by which the core abandons the run if nothing has ended it. The model budgets of the
 entries of a role's route are the one bound the core doesn't meter: the runtime meters each, from
@@ -569,8 +575,9 @@ each whole or not at all: a part that this build can't read is listed as unread 
 content of the log fails a read.
 
 The record is written as the run goes, and each file is synced through the `Host`. The run log
-only grows, a whole line at a time, and `ir.json` and `provider.json` are written before it and
-never again, so a reader of a live run reads only what the log gained (`LogFold`). A record
+only grows, a whole line at a time, and `ir.json`, `sources/` (the text of each file that the
+workflow's evaluation read) and `provider.json` are written before it and never again, so a reader
+of a live run reads only what the log gained (`LogFold`). A record
 appears only once its `driver.pid` is locked (`Lock`), and the lock is held until the run's last
 write, so `outcome.json` and the lock tell an ended run from a live or a lost one. Only the lock's
 holder writes the record; once it has let go, only `Record::reap` does.

@@ -1,4 +1,4 @@
-//! The words for a run's children: the line of a judge call, and of a lease with the last
+//! The words for a run's children: the line of a call, and of a lease with the last
 //! command or transfer it ran.
 
 use std::fmt::Write as _;
@@ -10,17 +10,19 @@ use schema::sandbox::op::{CommandEnd, TransferEnd};
 
 use super::{placed, result, span};
 
-pub(super) fn judge(call: &CallSpan) -> String {
-    let which = call.grant.as_deref().unwrap_or("final");
-    format!("{which} judge job {}", call.job)
+pub(super) fn call_name(call: &CallSpan) -> String {
+    match &call.function {
+        Some(function) => format!("{function} job {}", call.job),
+        None => format!("final judge job {}", call.job),
+    }
 }
 
-/// The line of a judge's call; the paths of what it kept are shown below `dir`, the record's.
+/// The line of a call; the paths of what it kept are shown below `dir`, the record's.
 pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
     let Some(at) = call.sandbox.gone else {
         return format!(
             "{} on {}, which never ended",
-            judge(call),
+            call_name(call),
             placed(&call.sandbox)
         );
     };
@@ -36,7 +38,7 @@ pub(crate) fn called(call: &CallSpan, dir: &std::path::Path) -> String {
             span(at.saturating_sub(asked))
         ),
     };
-    let mut line = format!("{} on {}, {took}: ", judge(call), placed(&call.sandbox));
+    let mut line = format!("{} on {}, {took}: ", call_name(call), placed(&call.sandbox));
     let Some(end) = &call.end else {
         line.push_str(STOPPED);
         return line;

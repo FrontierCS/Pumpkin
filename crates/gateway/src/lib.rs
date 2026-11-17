@@ -164,13 +164,13 @@ impl Trees {
     /// umask may have narrowed in `into`.
     pub fn collect(
         &self,
-        dir: &AbsolutePath,
+        path: &AbsolutePath,
         into: &Path,
         limits: Limits,
         by: Deadline,
         stopped: &mut dyn FnMut() -> bool,
     ) -> io::Result<Vec<Entry>> {
-        self.shared.collect(dir, into, limits, by, stopped)
+        self.shared.collect(path, into, limits, by, stopped)
     }
 }
 
@@ -415,17 +415,17 @@ impl Session {
             .request(|stream| ToSandbox::Freeze { stream }, by)
     }
 
-    /// Copies the tree in the sandbox's `dir` into `into`, a new directory, within `limits`. Fails
-    /// if `into` exists or the tree passes a limit; after any failure, `into` holds whatever
-    /// arrived before it.
+    /// Copies the tree at the sandbox's `path`, a directory's or a file's, into `into`, a new
+    /// directory, within `limits`. Fails if `into` exists or the tree passes a limit; after any
+    /// failure, `into` holds whatever arrived before it.
     pub fn collect(
         &mut self,
-        dir: &AbsolutePath,
+        path: &AbsolutePath,
         into: &Path,
         limits: Limits,
         by: Deadline,
     ) -> io::Result<()> {
-        let collected = self.shared.collect(dir, into, limits, by, &mut || false);
+        let collected = self.shared.collect(path, into, limits, by, &mut || false);
         collected.map(drop)
     }
 

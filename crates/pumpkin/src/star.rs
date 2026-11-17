@@ -23,6 +23,7 @@ use schema::ir::Image;
 use schema::workflow::Workflow;
 use tempfile::TempDir;
 
+use crate::bodies::{self, Keeping, Sources};
 use crate::say;
 use crate::style::Formatter;
 use crate::workspace::Workspace;
@@ -485,6 +486,8 @@ pub(crate) struct Task<'r> {
     root: &'r mut Root,
     plan: Plan,
     workflow: Workflow,
+    /// What the evaluation read, from which each of the workflow's bodies is evaluated.
+    sources: Sources,
 }
 
 impl Task<'_> {
@@ -493,20 +496,21 @@ impl Task<'_> {
     }
 
     /// Builds the task's images on `engine`, each build as `admission` admits it, and gives the
-    /// workflow with its images built, and the tag of each.
+    /// workflow with its images built, the tag of each, and the sources of its bodies.
     pub(crate) fn build(
         self,
         engine: &Engine,
         admission: &mut (dyn Admission + Send),
-    ) -> Result<(Workflow, Tags), Problems> {
+    ) -> Result<(Workflow, Tags, Sources), Problems> {
         let Self {
             root,
             plan,
             workflow: _,
+            sources,
         } = self;
         let mut builds = Builds::new(admission);
         let built = plan.build(jobs(), |ready| builds.step(&*root, engine, ready))?;
-        Ok((built, builds.tags))
+        Ok((built, builds.tags, sources))
     }
 }
 
@@ -678,15 +682,22 @@ pub(crate) fn checked<T: Send>(
     // The plan stays on the thread it was evaluated on, as what it holds can't be sent to
     // another, so `then` runs there too.
     evaluating(|| {
-        let plan = match lang::evaluate(&label, &mut root, args, lang::Bounds::WORKFLOW) {
+        let mut keeping = Keeping::new(&mut root);
+        let plan = match lang::evaluate(&label, &mut keeping, args, lang::Bounds::WORKFLOW) {
             Ok(plan) => plan,
             Err(problems) => return Ok(Err(problems)),
         };
-        match plan.check(|recipe, contexts| root.recipe(recipe, contexts)) {
-            Ok(workflow) => then(Task {
+        let sources = keeping.kept();
+        let workflow = match plan.check(|recipe, contexts| root.recipe(recipe, contexts)) {
+            Ok(workflow) => workflow,
+            Err(problems) => return Ok(Err(problems)),
+        };
+        match bodies::check(&workflow, sources, args) {
+            Ok(sources) => then(Task {
                 root: &mut root,
                 plan,
                 workflow,
+                sources,
             }),
             Err(problems) => Ok(Err(problems)),
         }

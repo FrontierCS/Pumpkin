@@ -7,15 +7,16 @@
 //! of these:
 //!
 //! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`;
-//! - `ops`, `judge <grant> <bytes>`, `submit <grant> <bytes> [final]` and `status <job>`,
-//!   each an op from the agent, whose payload is named by the op's number;
-//! - `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, `<session>.put
-//!   <lease> <tree> <to> [replace]`, `<session>.get <lease> <from> <to>`, `<session>.status
-//!   <lease>` and `<session>.close <lease>`, each an op from the agent, `-` for a command without a
-//!   timeout;
+//! - `ops`, `call <function> <bytes>`, `submit <grant> <bytes> [final]` and `status <job>`, each
+//!   an op from the agent, whose payload is named by the op's number;
+//! - `<session>.open [<seconds>]`, `.run <lease> <seconds>|- <argv>...`, `.put <lease> <tree> <to>
+//!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
+//!   from the agent, `-` for a command without a timeout;
 //! - any op after `@<job>`, from that job's call instead;
 //! - `judge_started <job>`, `judge_exited <job> [<code>]`, `judge_timed_out <job>`,
 //!   `collected <job> <result.json>`, `judge_failed <job> <reason>`;
+//! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> <object>`, whose fields
+//!   are the body's return in order, `call_failed <job> <reason>`;
 //! - `lease_ready <lease>`, `command_ended <lease> <command> <code>|timed_out|unstarted
 //!   [<stdout>]`, `transfer_ended <lease> <transfer> moved <entries> <bytes>|failed <reason>`,
 //!   `lease_ended <lease>`, `lease_failed <lease> <reason>`;
@@ -42,7 +43,7 @@ use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, Argv, CpuModel, Name, Sha256Digest};
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_DEPTH};
-use schema::workflow::{Class, JudgeCall, Offers, Workflow};
+use schema::workflow::{Class, JobOf, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -139,13 +140,45 @@ struct Run<'w> {
     /// Who makes the line's op: the agent, unless the line names a job's call.
     caller: Caller,
     /// What each job was made under, for its result's spec.
-    jobs: BTreeMap<JobId, JudgeCall>,
+    jobs: BTreeMap<JobId, JobOf>,
     /// When the core last said it next wants a tick, once it has.
     tick_due: Option<Duration>,
     transcript: String,
 }
 
+/// A job function's call's event, as the script's `words` give it.
+fn call_event(words: &[&str]) -> Event {
+    let job = JobId(words[1].parse().unwrap());
+    match words[0] {
+        "call_started" => Event::CallStarted { job },
+        "call_timed_out" => Event::CallTimedOut { job },
+        "call_returned" => {
+            let returned: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(words[2]).unwrap();
+            let returned = (returned.into_iter())
+                .map(|(name, value)| (serde_json::from_value(json!(name)).unwrap(), value))
+                .collect();
+            let result = JudgeResult::returned_by(returned).unwrap();
+            Event::CallReturned { job, result }
+        }
+        "call_failed" => Event::CallFailed {
+            job,
+            reason: words[2].to_owned(),
+        },
+        other => panic!("no call event is named `{other}`"),
+    }
+}
+
 impl Run<'_> {
+    fn collected(&self, job: JobId, result: &str) -> Event {
+        if let JobOf::Function(_) = self.jobs[&job] {
+            panic!("job {} runs a body, which writes no result", job.0);
+        }
+        let spec = &self.workflow.judge().result;
+        let result = JudgeResult::parse(spec, result.as_bytes());
+        Event::JudgeCollected { job, result }
+    }
+
     fn event(&mut self, event: &str) -> Event {
         let (caller, event) = match event.strip_prefix('@') {
             Some(called) => {
@@ -172,9 +205,9 @@ impl Run<'_> {
                 reason: words[1..].join(" "),
             },
             "ops" => self.op(Request::Ops),
-            "judge" => {
-                let (grant, payload, _) = self.call(&words[1..]);
-                self.op(Request::Judge { grant, payload })
+            "call" => {
+                let (function, payload, _) = self.call(&words[1..]);
+                self.op(Request::Call { function, payload })
             }
             "submit" => {
                 let (grant, payload, finalize) = self.call(&words[1..]);
@@ -195,23 +228,19 @@ impl Run<'_> {
                 status: words.get(2).map_or(ExitStatus::Code(0), |word| code(word)),
             },
             "judge_timed_out" => Event::JudgeTimedOut { job: job() },
-            "collected" => {
-                let slot = self.workflow.call_slot(self.jobs[&job()]);
-                let spec = &self.workflow.judge(slot.judge()).result;
-                let result = JudgeResult::parse(spec, words[2].as_bytes());
-                Event::JudgeCollected { job: job(), result }
-            }
+            "collected" => self.collected(job(), words[2]),
             "judge_failed" => Event::JudgeFailed {
                 job: job(),
                 reason: words[2].to_owned(),
             },
+            kind if kind.starts_with("call_") => call_event(&words),
             kind if kind.starts_with("lease_") || kind.ends_with("_ended") => lease_event(&words),
             "tick" => Event::Tick,
             other => panic!("no event is named `{other}`"),
         }
     }
 
-    /// The grant, payload and finalize of a judge call or a submission: `<grant> <bytes>
+    /// The function or grant, payload and finalize of a call or a submission: `<name> <bytes>
     /// [final]`. The payload is named by the number the op will have.
     fn call(&self, words: &[&str]) -> (Name, PayloadRef, bool) {
         let words: Vec<&str> = words.iter().flat_map(|w| w.split(' ')).collect();
@@ -257,7 +286,7 @@ impl Run<'_> {
                 op: OpId(op),
                 reply:
                     reply @ (OpReply::Ops(_)
-                    | OpReply::Judge(_)
+                    | OpReply::Call(_)
                     | OpReply::Submit(_)
                     | OpReply::Status(_)
                     | OpReply::Lease(_)
@@ -272,18 +301,27 @@ impl Run<'_> {
             } => format!("refuse op {op}: {message}"),
             Action::StartJudge {
                 job,
-                call,
                 payload,
                 timeout,
             } => {
-                self.jobs.insert(*job, *call);
-                let call = match call {
-                    JudgeCall::Grant(grant) => self.workflow.judge_grant(*grant).name.as_str(),
-                    JudgeCall::Score => "score",
-                };
+                self.jobs.insert(*job, JobOf::Score);
                 let payload = payload_name(payload);
                 format!(
-                    "start job {} of {call} on {payload}, with a timeout of {timeout:?}",
+                    "start job {} of score on {payload}, with a timeout of {timeout:?}",
+                    job.0
+                )
+            }
+            Action::StartCall {
+                job,
+                function,
+                payload,
+                timeout,
+            } => {
+                self.jobs.insert(*job, JobOf::Function(*function));
+                let name = &self.workflow.job_function(*function).name;
+                let payload = payload_name(payload);
+                format!(
+                    "start call {} of {name} on {payload}, with a timeout of {timeout:?}",
                     job.0
                 )
             }
@@ -510,12 +548,11 @@ fn whole_run() {
         r#"
         0 agent_started
         1000 ops
-        2000 judge train 10240
+        2000 call train 10240
         2100 status 0
-        2500 judge_started 0
+        2500 call_started 0
         3000 status 0
-        9500 judge_exited 0
-        9600 collected 0 {"raw_score": 0, "metrics": {"solved": 0}, "summary": "for the operator"}
+        9600 call_returned 0 {"raw_score":0,"metrics":{"solved":0}}
         10000 status 0
         11000 submit submit 10240
         12000 submit submit 10240 final
@@ -531,19 +568,18 @@ fn whole_run() {
             0 agent_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
-            2000 judge train 10240
-              reply to op 2: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 2's payload of 10240 bytes, with a timeout of 12000s
+              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+            2000 call train 10240
+              reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 2's payload of 10240 bytes, with a timeout of 12000s
             2100 status 0
               reply to op 3: {"kind":"status","job":0,"state":"queued","remaining":{"calls":99,"seconds":12000}}
-            2500 judge_started 0
+            2500 call_started 0
             3000 status 0
               reply to op 4: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":12000}}
-            9500 judge_exited 0
-            9600 collected 0 {"raw_score": 0, "metrics": {"solved": 0}, "summary": "for the operator"}
+            9600 call_returned 0 {"raw_score":0,"metrics":{"solved":0}}
             10000 status 0
-              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11993}}
+              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11992}}
             11000 submit submit 10240
               reply to op 6: {"kind":"submit","state":"stored","remaining_seconds":17989}
             12000 submit submit 10240 final
@@ -565,28 +601,27 @@ fn whole_run() {
 fn quotas() {
     check(
         |ir| {
-            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"];
+            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
             train["cumulative_seconds"] = json!(10);
             train["call_timeout_seconds"] = json!(6);
         },
         r#"
         0 agent_started
-        1000 judge train 4194305
-        1000 judge nothing 10
+        1000 call train 4194305
+        1000 call nothing 10
         1000 submit train 10
-        1000 judge submit 10
+        1000 call submit 10
         1000 submit submit 4194305
-        1000 judge train 10
-        2000 judge_started 0
-        6000 judge_exited 0
-        6100 collected 0 {"raw_score": null, "failure": {"code": "wrong_answer"}, "summary": "for the operator"}
+        1000 call train 10
+        2000 call_started 0
+        6100 call_returned 0 {"raw_score":null,"failure":{"code":"wrong_answer"}}
         6200 status 0
-        7000 judge train 10
-        7500 judge_started 1
-        13600 judge_timed_out 1
-        13700 collected 1 {"raw_score": 5}
+        7000 call train 10
+        7500 call_started 1
+        13600 call_timed_out 1
+        13700 call_failed 1 the call's timeout passed
         14000 status 1
-        14100 judge train 10
+        14100 call train 10
         14200 submit submit 0
         "#,
         &expect![[r#"
@@ -595,34 +630,33 @@ fn quotas() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 4194305
+            1000 call train 4194305
               refuse op 1: the payload is 4194305 bytes, over `train`'s limit of 4194304: send a smaller one
-            1000 judge nothing 10
+            1000 call nothing 10
               refuse op 2: you hold no grant named `nothing`: call one that `ops` lists
             1000 submit train 10
-              refuse op 3: `train` is a judge grant, not a submit grant: judge with it instead
-            1000 judge submit 10
-              refuse op 4: `submit` is a submit grant, not a judge grant: submit to it instead
+              refuse op 3: `train` is a job function, not a submit grant: call it instead
+            1000 call submit 10
+              refuse op 4: `submit` is a submit grant, not a function: submit to it instead
             1000 submit submit 4194305
               refuse op 5: the payload is 4194305 bytes, over `submit`'s limit of 4194304: send a smaller one
-            1000 judge train 10
-              reply to op 6: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":10}}
-              start job 0 of train on op 6's payload of 10 bytes, with a timeout of 6s
-            2000 judge_started 0
-            6000 judge_exited 0
-            6100 collected 0 {"raw_score": null, "failure": {"code": "wrong_answer"}, "summary": "for the operator"}
+            1000 call train 10
+              reply to op 6: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":10}}
+              start call 0 of train on op 6's payload of 10 bytes, with a timeout of 6s
+            2000 call_started 0
+            6100 call_returned 0 {"raw_score":null,"failure":{"code":"wrong_answer"}}
             6200 status 0
-              reply to op 7: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":6}}
-            7000 judge train 10
-              reply to op 8: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":6}}
-              start job 1 of train on op 8's payload of 10 bytes, with a timeout of 6s
-            7500 judge_started 1
-            13600 judge_timed_out 1
-            13700 collected 1 {"raw_score": 5}
+              reply to op 7: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":5}}
+            7000 call train 10
+              reply to op 8: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":5}}
+              start call 1 of train on op 8's payload of 10 bytes, with a timeout of 5.9s
+            7500 call_started 1
+            13600 call_timed_out 1
+            13700 call_failed 1 the call's timeout passed
             14000 status 1
-              reply to op 9: {"kind":"status","job":1,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":98,"seconds":0}}
-            14100 judge train 10
-              refuse op 10: `train` has no judge time left of the 10 s it allows: make no more calls to it
+              reply to op 9: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":98,"seconds":0}}
+            14100 call train 10
+              refuse op 10: `train` has no call time left of the 10 s it allows: make no more calls to it
             14200 submit submit 0
               refuse op 11: the payload is empty: send `submit` at least one byte
         "#]],
@@ -630,22 +664,74 @@ fn quotas() {
 }
 
 #[test]
-fn one_call_at_a_time() {
+fn job_functions() {
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["calls"] = json!(2),
+        |ir| {
+            let mut verifier = ir["roles"][1].clone();
+            verifier["name"] = json!("verifier");
+            verifier["runtime"] = json!({ "target": { "cwd": "/pumpkin/home" } });
+            ir["roles"].as_array_mut().unwrap().push(verifier);
+            let function = json!({ "name": "check", "job": {
+                "target": "verifier", "body": { "file": "//lib/verify.star", "def": "check" },
+                "payload_max_bytes": 20, "calls": 2, "call_timeout_seconds": 60,
+            } });
+            ir["roles"][0]["runtime"]["agent"]["grants"]
+                .as_array_mut()
+                .unwrap()
+                .push(function);
+        },
         r#"
         0 agent_started
-        1000 judge train 10
-        1100 judge train 10
+        1100 call check 10
+        1500 status 0
+        2000 call_failed 0 the target's sandbox did not connect
+        2050 status 0
+        2100 call check 10
+        2300 call_started 1
+        2600 call_returned 1 {"lines":1,"bytes":6}
+        2700 status 1
+        "#,
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 18010000)
+            0 agent_started
+              (tick due at 18000000)
+            1100 call check 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":1,"seconds":null}}
+              start call 0 of check on op 1's payload of 10 bytes, with a timeout of 60s
+            1500 status 0
+              reply to op 2: {"kind":"status","job":0,"state":"queued","remaining":{"calls":1,"seconds":null}}
+            2000 call_failed 0 the target's sandbox did not connect
+            2050 status 0
+              reply to op 3: {"kind":"status","job":0,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":2,"seconds":null}}
+            2100 call check 10
+              reply to op 4: {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
+              start call 1 of check on op 4's payload of 10 bytes, with a timeout of 60s
+            2300 call_started 1
+            2600 call_returned 1 {"lines":1,"bytes":6}
+            2700 status 1
+              reply to op 5: {"kind":"status","job":1,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":null}}
+        "#]],
+    );
+}
+
+#[test]
+fn one_call_at_a_time() {
+    check(
+        |ir| ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["calls"] = json!(2),
+        r#"
+        0 agent_started
+        1000 call train 10
+        1100 call train 10
         1200 status 0
-        2000 judge_started 0
-        3000 judge_exited 0
-        3100 judge train 10
-        3200 collected 0 {}
+        2000 call_started 0
+        3100 call train 10
+        3200 call_returned 0 {}
         3300 status 0
-        3400 judge train 10
-        4000 judge_failed 1 the judge's sandbox did not connect
-        4100 judge train 10
+        3400 call train 10
+        4000 call_failed 1 the target's sandbox did not connect
+        4100 call train 10
         4200 status 1
         "#,
         &expect![[r#"
@@ -654,29 +740,28 @@ fn one_call_at_a_time() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":1,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
-            1100 judge train 10
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":1,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1100 call train 10
               refuse op 2: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             1200 status 0
               reply to op 3: {"kind":"status","job":0,"state":"queued","remaining":{"calls":1,"seconds":12000}}
-            2000 judge_started 0
-            3000 judge_exited 0
-            3100 judge train 10
+            2000 call_started 0
+            3100 call train 10
               refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
-            3200 collected 0 {}
+            3200 call_returned 0 {}
             3300 status 0
-              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11999}}
-            3400 judge train 10
-              reply to op 6: {"kind":"judge","job":1,"remaining":{"calls":0,"seconds":11999}}
-              start job 1 of train on op 6's payload of 10 bytes, with a timeout of 11999s
-            4000 judge_failed 1 the judge's sandbox did not connect
-            4100 judge train 10
-              reply to op 7: {"kind":"judge","job":2,"remaining":{"calls":0,"seconds":11999}}
-              start job 2 of train on op 7's payload of 10 bytes, with a timeout of 11999s
+              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11998}}
+            3400 call train 10
+              reply to op 6: {"kind":"call","job":1,"remaining":{"calls":0,"seconds":11998}}
+              start call 1 of train on op 6's payload of 10 bytes, with a timeout of 11998.8s
+            4000 call_failed 1 the target's sandbox did not connect
+            4100 call train 10
+              reply to op 7: {"kind":"call","job":2,"remaining":{"calls":0,"seconds":11998}}
+              start call 2 of train on op 7's payload of 10 bytes, with a timeout of 11998.8s
             4200 status 1
-              reply to op 8: {"kind":"status","job":1,"state":"errored","failure":{"code":"judge_error","message":"the judge failed before giving a result"},"remaining":{"calls":0,"seconds":11999}}
+              reply to op 8: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":0,"seconds":11998}}
         "#]],
     );
 }
@@ -692,15 +777,15 @@ fn deadline() {
         r#"
         0 agent_started
         50000 submit submit 10
-        55000 judge train 10
-        55500 judge_started 0
+        55000 call train 10
+        55500 call_started 0
         59999 tick
         59999 model
         60000 model
         60000 tick
         60100 status 0
         60200 agent_exited 137
-        60400 judge_failed 0 stopped
+        60400 call_failed 0 stopped
         60500 judge_started 1
         180500 judge_timed_out 1
         180600 collected 1 {"raw_score": 7}
@@ -713,10 +798,10 @@ fn deadline() {
               (tick due at 60000)
             50000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
-            55000 judge train 10
-              reply to op 2: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 2's payload of 10 bytes, with a timeout of 5s
-            55500 judge_started 0
+            55000 call train 10
+              reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 2's payload of 10 bytes, with a timeout of 5s
+            55500 call_started 0
             59999 tick
             59999 model
               model requests allowed
@@ -729,7 +814,7 @@ fn deadline() {
             60100 status 0
               refuse op 3: the work phase has ended: make no more ops
             60200 agent_exited 137
-            60400 judge_failed 0 stopped
+            60400 call_failed 0 stopped
               start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
             60500 judge_started 1
             180500 judge_timed_out 1
@@ -742,8 +827,8 @@ fn deadline() {
         r"
         0 agent_started
         50000 submit submit 10
-        59999 judge train 10
-        60000 judge_failed 0 this runtime runs no judge call yet
+        59999 call train 10
+        60000 call_failed 0 the target's sandbox didn't start
         ",
         &expect![[r#"
             start
@@ -753,10 +838,10 @@ fn deadline() {
               (tick due at 60000)
             50000 submit submit 10
               reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":10}
-            59999 judge train 10
-              reply to op 2: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 2's payload of 10 bytes, with a timeout of 1ms
-            60000 judge_failed 0 this runtime runs no judge call yet
+            59999 call train 10
+              reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 2's payload of 10 bytes, with a timeout of 1ms
+            60000 call_failed 0 the target's sandbox didn't start
               stop job 0
               tear down the agent
               start job 1 of score on op 1's payload of 10 bytes, with a timeout of 120s
@@ -785,7 +870,7 @@ fn deadline_from_the_agent_start() {
             8000 agent_started
               (tick due at 68000)
             8000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 1: {"kind":"ops","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             9000 agent_started
             67999 tick
             68000 tick
@@ -807,7 +892,7 @@ fn deadline_from_the_agent_start() {
               (tick due at 70000)
             12000 agent_started
             12000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             70000 tick
               tear down the agent
               finish: work ended at the deadline; no submission
@@ -870,14 +955,13 @@ fn agent_ends() {
         |_| {},
         r#"
         0 agent_started
-        1000 judge train 10
-        1500 judge_started 0
-        3000 judge_exited 0
+        1000 call train 10
+        1500 call_started 0
         3100 submit submit 10
         3200 agent_exited 0
-        3400 collected 0 {"raw_score": 1}
+        3400 call_returned 0 {"raw_score":1}
         3500 judge_started 1
-        4000 judge_failed 0 its report came again
+        4000 call_failed 0 its report came again
         5000 judge_exited 1
         5100 collected 1 {"raw_score": "high"}
         "#,
@@ -887,20 +971,20 @@ fn agent_ends() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
-            1500 judge_started 0
-            3000 judge_exited 0
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 call_started 0
             3100 submit submit 10
               reply to op 2: {"kind":"submit","state":"stored","remaining_seconds":17996}
             3200 agent_exited 0
+              stop job 0
               tear down the agent
               (tick due at 18210000)
-            3400 collected 0 {"raw_score": 1}
+            3400 call_returned 0 {"raw_score":1}
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
             3500 judge_started 1
-            4000 judge_failed 0 its report came again
+            4000 call_failed 0 its report came again
             5000 judge_exited 1
             5100 collected 1 {"raw_score": "high"}
               finish: work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, judged, showing [score="high"], returning {"raw_score":"high"}
@@ -930,49 +1014,59 @@ fn deep_results() {
         let (open, close) = ("[".repeat(depth - 1), "]".repeat(depth - 1));
         format!(r#"{{"raw_score": 3, "deep": {open}{close}}}"#)
     };
-    let (deepest, deeper) = (nested(RESULT_MAX_DEPTH), nested(RESULT_MAX_DEPTH + 1));
+    let script = |result: String| {
+        format!(
+            "
+            0 agent_started
+            3300 submit submit 10
+            3400 agent_exited 0
+            3500 judge_started 0
+            4000 judge_exited 0
+            4100 collected 0 {result}
+            "
+        )
+    };
     check(
         |_| {},
-        &format!(
-            "
-            0 agent_started
-            1000 judge train 10
-            1500 judge_started 0
-            3000 judge_exited 0
-            3100 collected 0 {deepest}
-            3200 status 0
-            3300 submit submit 10
-            3400 agent_exited 0
-            3500 judge_started 1
-            4000 judge_exited 1
-            4100 collected 1 {deeper}
-            "
-        ),
+        &script(nested(RESULT_MAX_DEPTH)),
         &expect![[r#"
-            start
-              start the agent
-              (tick due at 18010000)
-            0 agent_started
-              (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
-            1500 judge_started 0
-            3000 judge_exited 0
-            3100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
-            3200 status 0
-              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":3},"remaining":{"calls":99,"seconds":11998}}
-            3300 submit submit 10
-              reply to op 3: {"kind":"submit","state":"stored","remaining_seconds":17996}
-            3400 agent_exited 0
-              tear down the agent
-              start job 1 of score on op 3's payload of 10 bytes, with a timeout of 120s
-              (tick due at 18210000)
-            3500 judge_started 1
-            4000 judge_exited 1
-            4100 collected 1 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 3's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
-        "#]],
+        start
+          start the agent
+          (tick due at 18010000)
+        0 agent_started
+          (tick due at 18000000)
+        3300 submit submit 10
+          reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":17996}
+        3400 agent_exited 0
+          tear down the agent
+          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+          (tick due at 18210000)
+        3500 judge_started 0
+        4000 judge_exited 0
+        4100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+          finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=3], returning {"raw_score":3}
+    "#]],
+    );
+    check(
+        |_| {},
+        &script(nested(RESULT_MAX_DEPTH + 1)),
+        &expect![[r#"
+        start
+          start the agent
+          (tick due at 18010000)
+        0 agent_started
+          (tick due at 18000000)
+        3300 submit submit 10
+          reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":17996}
+        3400 agent_exited 0
+          tear down the agent
+          start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+          (tick due at 18210000)
+        3500 judge_started 0
+        4000 judge_exited 0
+        4100 collected 0 {"raw_score": 3, "deep": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}
+          finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, got no result, InvalidResult("result.json nests arrays and objects more than 120 deep: nest them at most that deep")
+    "#]],
     );
 }
 
@@ -984,10 +1078,9 @@ fn hard_end() {
         deadline,
         r"
         0 agent_started
-        1000 judge train 10
-        1500 judge_started 0
+        1000 call train 10
+        1500 call_started 0
         270000 ops
-        270100 judge_exited 0
         ",
         &expect![[r#"
             start
@@ -995,15 +1088,14 @@ fn hard_end() {
               (tick due at 70000)
             0 agent_started
               (tick due at 60000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
-            1500 judge_started 0
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
+            1500 call_started 0
             270000 ops
               abandon the run at its hard end
               refuse op 2: the run has passed its hard end: make no more ops
               (tick due at 270000)
-            270100 judge_exited 0
         "#]],
     );
     check(
@@ -1034,8 +1126,8 @@ fn hard_end_after_work() {
         |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
         r"
         0 agent_started
-        1000 judge train 10
-        1500 judge_started 0
+        1000 call train 10
+        1500 call_started 0
         60000 tick
         269999 tick
         270000 tick
@@ -1046,10 +1138,10 @@ fn hard_end_after_work() {
               (tick due at 70000)
             0 agent_started
               (tick due at 60000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
-            1500 judge_started 0
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
+            1500 call_started 0
             60000 tick
               stop job 0
               tear down the agent
@@ -1236,11 +1328,11 @@ fn reports_for_the_log() {
         |_| {},
         r#"
         0 agent_started
-        1000 judge train 10
+        1000 submit submit 10
+        1100 agent_exited 0
         1500 judge_started 0
         3000 judge_exited 0 1
         3100 collected 0 {"raw_score": 1}
-        3200 status 0
         "#,
         &expect![[r#"
             start
@@ -1248,14 +1340,16 @@ fn reports_for_the_log() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1000 submit submit 10
+              reply to op 1: {"kind":"submit","state":"stored","remaining_seconds":17999}
+            1100 agent_exited 0
+              tear down the agent
+              start job 0 of score on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 18210000)
             1500 judge_started 0
             3000 judge_exited 0 1
             3100 collected 0 {"raw_score": 1}
-            3200 status 0
-              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
+              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, judged, showing [score=1], returning {"raw_score":1}
         "#]],
     );
 }
@@ -1266,10 +1360,9 @@ fn exact_scores() {
         |_| {},
         r#"
         0 agent_started
-        1000 judge train 10
-        1500 judge_started 0
-        2000 judge_exited 0
-        2100 collected 0 {"raw_score": 22.833062975103598}
+        1000 call train 10
+        1500 call_started 0
+        2100 call_returned 0 {"raw_score":22.833062975103598}
         2200 status 0
         3000 submit submit 10 final
         3100 agent_exited 0
@@ -1283,12 +1376,11 @@ fn exact_scores() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
-            1500 judge_started 0
-            2000 judge_exited 0
-            2100 collected 0 {"raw_score": 22.833062975103598}
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 call_started 0
+            2100 call_returned 0 {"raw_score":22.833062975103598}
             2200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
             3000 submit submit 10 final
@@ -1316,8 +1408,8 @@ fn finalize_lock() {
         |_| {},
         r"
         0 agent_started
-        1000 judge train 10
-        1500 judge_started 0
+        1000 call train 10
+        1500 call_started 0
         2000 submit submit 10 final
         2100 ops
         2200 status 0
@@ -1326,7 +1418,7 @@ fn finalize_lock() {
         61999 model
         62000 model
         62000 tick
-        62200 judge_failed 0 stopped
+        62200 call_failed 0 stopped
         ",
         &expect![[r#"
             start
@@ -1334,10 +1426,10 @@ fn finalize_lock() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
-            1500 judge_started 0
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 call_started 0
             2000 submit submit 10 final
               reply to op 2: {"kind":"submit","state":"accepted","remaining_seconds":60}
               (tick due at 62000)
@@ -1356,7 +1448,7 @@ fn finalize_lock() {
               stop job 0
               tear down the agent
               (tick due at 18210000)
-            62200 judge_failed 0 stopped
+            62200 call_failed 0 stopped
               start job 1 of score on op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
@@ -1484,7 +1576,7 @@ fn unknown_jobs() {
         |_| {},
         r"
         0 agent_started
-        1000 judge train 10
+        1000 call train 10
         1400 status 2
         1500 status 1
         ",
@@ -1494,9 +1586,9 @@ fn unknown_jobs() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1400 status 2
               refuse op 2: you have no job 2: ask about a job that one of your calls returned
             1500 status 1
@@ -1559,7 +1651,7 @@ fn leases() {
             0 agent_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             2000 gpu.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
@@ -1616,7 +1708,7 @@ fn lease_quotas() {
         1300 gpu.status 2
         1400 gpu.run 7 - true
         1500 gpu.close 9
-        1600 judge gpu 10
+        1600 call gpu 10
         1700 submit gpu 10
         1800 train.open
         1900 submit.open
@@ -1655,12 +1747,12 @@ fn lease_quotas() {
               refuse op 5: you have no lease 7: name one that `gpu.open` returned
             1500 gpu.close 9
               refuse op 6: you have no lease 9: name one that `gpu.open` returned
-            1600 judge gpu 10
-              refuse op 7: `gpu` is a session, not a judge grant: call its functions, as `gpu.open`, instead
+            1600 call gpu 10
+              refuse op 7: `gpu` is a session, not a function: call its functions, as `gpu.open`, instead
             1700 submit gpu 10
               refuse op 8: `gpu` is a session, not a submit grant: call its functions, as `gpu.open`, instead
             1800 train.open
-              refuse op 9: `train` is a judge grant, not a session: judge with it instead
+              refuse op 9: `train` is a job function, not a session: call it instead
             1900 submit.open
               refuse op 10: `submit` is a submit grant, not a session: submit to it instead
             2000 nothing.open
@@ -1992,7 +2084,7 @@ fn sessions_apart() {
 #[test]
 fn lease_start_bounds() {
     check(
-        judges_leasing,
+        holders_leasing,
         r"
         0 agent_started
         1000 gpu.open
@@ -2000,12 +2092,12 @@ fn lease_start_bounds() {
         1200 gpu.status 0
         1300 lease_failed 0 the runner's sandbox didn't start: it was given up
         1400 gpu.status 0
-        2000 judge train 10
-        3000 judge_started 0
+        2000 call train 10
+        3000 call_started 0
         3100 @0 box.open
-        53000 judge_timed_out 0
+        53000 call_timed_out 0
         53000 lease_failed 1 the runner's sandbox didn't start: it was given up
-        53100 judge_failed 0 the judge ran past its timeout
+        53100 call_failed 0 the call's timeout passed
         54000 gpu.open
         18000000 tick
         18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
@@ -2027,17 +2119,17 @@ fn lease_start_bounds() {
             1300 lease_failed 0 the runner's sandbox didn't start: it was given up
             1400 gpu.status 0
               reply to op 4: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":0,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":1200,"commands":3}}
-            2000 judge train 10
-              reply to op 5: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 5's payload of 10 bytes, with a timeout of 50s
-            3000 judge_started 0
+            2000 call train 10
+              reply to op 5: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 5's payload of 10 bytes, with a timeout of 50s
+            3000 call_started 0
             3100 @0 box.open
               reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 1 of box for job 0, as instance 0, started by 53000
-            53000 judge_timed_out 0
+            53000 call_timed_out 0
               close lease 1
             53000 lease_failed 1 the runner's sandbox didn't start: it was given up
-            53100 judge_failed 0 the judge ran past its timeout
+            53100 call_failed 0 the call's timeout passed
             54000 gpu.open
               reply to op 7: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 0, started by 18000000
@@ -2286,12 +2378,12 @@ fn lease_slots() {
             4200 gpu.open
               refuse op 6: `gpu` has 2 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `gpu.status` says one has ended
             4300 ops
-              reply to op 7: {"kind":"ops","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 7: {"kind":"ops","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             5000 lease_ended 0
             5100 gpu.status 0
               reply to op 8: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":4,"busy_seconds":1,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1198,"commands":2}}
             5200 ops
-              reply to op 9: {"kind":"ops","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"judge","name":"train","max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
+              reply to op 9: {"kind":"ops","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"submit","name":"submit","max_bytes":4194304}]}
             5300 gpu.open
               reply to op 10: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}}
               open lease 2 of gpu, as instance 0, started by 18000000
@@ -2299,15 +2391,18 @@ fn lease_slots() {
     );
 }
 
-/// [`leasing`]'s workflow, whose judges each lease a runner of their own under a grant named
-/// `box`: `train_judge` `train_box`, 1 at a time, each for 100 s, and 2 commands in all, and
-/// `final_judge` `final_box`, 1 at a time, each for 30 s; and whose train calls time out after
-/// 50 s.
-fn judges_leasing(ir: &mut Value) {
+/// [`leasing`]'s workflow, whose trainer and final judge each lease a runner of their own under a
+/// session named `box`: `trainer` `train_box`, 1 at a time, each for 100 s, and 2 commands in
+/// all, and `final_judge` `final_box`, 1 at a time, each for 30 s; and whose train calls time out
+/// after 50 s.
+fn holders_leasing(ir: &mut Value) {
     leasing(ir);
-    ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"]["call_timeout_seconds"] = json!(50);
-    let boxes = [("train_box", 1, "4", 100), ("final_box", 2, "5", 30)];
-    for (name, judge, image, seconds) in boxes {
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(50);
+    let boxes = [
+        ("train_box", 1, "target", "4", 100),
+        ("final_box", 2, "judge", "5", 30),
+    ];
+    for (name, holder, kind, image, seconds) in boxes {
         let mut runner = ir["roles"][3].clone();
         runner["name"] = json!(name);
         runner["image"] = json!(format!("sha256:{}", image.repeat(64)));
@@ -2316,10 +2411,10 @@ fn judges_leasing(ir: &mut Value) {
             "runner": name, "instances": 1, "instance_seconds": seconds,
             "transfer_bytes": 4096,
         } });
-        if judge == 1 {
+        if holder == 1 {
             grant["session"]["commands"] = json!(2);
         }
-        ir["roles"][judge]["runtime"]["judge"]["sessions"] = json!([grant]);
+        ir["roles"][holder]["runtime"][kind]["sessions"] = json!([grant]);
     }
 }
 
@@ -2328,35 +2423,34 @@ fn judges_leasing(ir: &mut Value) {
 fn call_model_routes() {
     check(
         |ir| {
-            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["judge"];
+            let train = &mut ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"];
             train["call_timeout_seconds"] = json!(10);
         },
         r#"
         0 agent_started
-        1000 judge train 10
+        1000 call train 10
         1500 @0 model
-        2000 judge_started 0
+        2000 call_started 0
         2000 @0 model
         2100 @1 model
         11999 @0 model
         12000 @0 model
         12000 model
-        12000 judge_exited 0
         12000 @0 model
-        12100 collected 0 {"raw_score": 1}
-        12200 judge train 10
-        13000 judge_started 1
+        12100 call_returned 0 {"raw_score":1}
+        12200 call train 10
+        13000 call_started 1
         13100 @1 model
-        14000 judge_timed_out 1
+        14000 call_timed_out 1
         14000 @1 model
-        14100 collected 1 {"raw_score": 1}
-        14200 judge train 10
-        15000 judge_started 2
+        14100 call_failed 1 the call's timeout passed
+        14200 call train 10
+        15000 call_started 2
         15100 submit submit 10
         15200 agent_exited 0
         15200 @2 model
         15200 model
-        15300 judge_failed 2 the call was stopped
+        15300 call_failed 2 the call was stopped
         16000 judge_started 3
         16000 @3 model
         16000 model
@@ -2369,12 +2463,12 @@ fn call_model_routes() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 10s
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 10s
             1500 @0 model
               model requests refused
-            2000 judge_started 0
+            2000 call_started 0
             2000 @0 model
               model requests allowed
             2100 @1 model
@@ -2385,24 +2479,23 @@ fn call_model_routes() {
               model requests refused
             12000 model
               model requests allowed
-            12000 judge_exited 0
             12000 @0 model
               model requests refused
-            12100 collected 0 {"raw_score": 1}
-            12200 judge train 10
-              reply to op 2: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11990}}
-              start job 1 of train on op 2's payload of 10 bytes, with a timeout of 10s
-            13000 judge_started 1
+            12100 call_returned 0 {"raw_score":1}
+            12200 call train 10
+              reply to op 2: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":11989}}
+              start call 1 of train on op 2's payload of 10 bytes, with a timeout of 10s
+            13000 call_started 1
             13100 @1 model
               model requests allowed
-            14000 judge_timed_out 1
+            14000 call_timed_out 1
             14000 @1 model
               model requests refused
-            14100 collected 1 {"raw_score": 1}
-            14200 judge train 10
-              reply to op 3: {"kind":"judge","job":2,"remaining":{"calls":97,"seconds":11989}}
-              start job 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
-            15000 judge_started 2
+            14100 call_failed 1 the call's timeout passed
+            14200 call train 10
+              reply to op 3: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11988}}
+              start call 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
+            15000 call_started 2
             15100 submit submit 10
               reply to op 4: {"kind":"submit","state":"stored","remaining_seconds":17984}
             15200 agent_exited 0
@@ -2413,7 +2506,7 @@ fn call_model_routes() {
               model requests refused
             15200 model
               model requests refused
-            15300 judge_failed 2 the call was stopped
+            15300 call_failed 2 the call was stopped
               start job 3 of score on op 4's payload of 10 bytes, with a timeout of 120s
             16000 judge_started 3
             16000 @3 model
@@ -2429,20 +2522,20 @@ fn call_model_routes() {
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
-fn judge_leases() {
+fn target_leases() {
     check(
-        judges_leasing,
+        holders_leasing,
         r#"
         0 agent_started
-        1000 judge train 10
+        1000 call train 10
         1100 @0 ops
-        2000 judge_started 0
+        2000 call_started 0
         2100 @0 ops
         2200 @0 box.open
         2300 @0 gpu.open
         2400 @0 status 0
         2500 @0 submit submit 10
-        2600 @0 judge train 10
+        2600 @0 call train 10
         2700 gpu.status 0
         2800 gpu.open
         2900 @0 box.status 1
@@ -2464,12 +2557,12 @@ fn judge_leases() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
             1100 @0 ops
-              refuse op 2: the call's command has ended: make no more ops
-            2000 judge_started 0
+              refuse op 2: the call has ended: make no more ops
+            2000 call_started 0
             2100 @0 ops
               reply to op 3: {"kind":"ops","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
             2200 @0 box.open
@@ -2481,7 +2574,7 @@ fn judge_leases() {
               refuse op 6: you have no job 0: ask about a job that one of your calls returned
             2500 @0 submit submit 10
               refuse op 7: you hold no grant named `submit`: call one that `ops` lists
-            2600 @0 judge train 10
+            2600 @0 call train 10
               refuse op 8: you hold no grant named `train`: call one that `ops` lists
             2700 gpu.status 0
               refuse op 9: you have no lease 0: name one that `gpu.open` returned
@@ -2495,7 +2588,7 @@ fn judge_leases() {
             3100 @0 box.close 1
               refuse op 13: you have no lease 1: name one that `box.open` returned
             3200 @7 ops
-              refuse op 14: the call's command has ended: make no more ops
+              refuse op 14: the call has ended: make no more ops
             4000 lease_ready 0
               (tick due at 104000)
             4100 @0 box.run 0 - check
@@ -2520,11 +2613,11 @@ fn judge_leases() {
 #[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn call_leases() {
     check(
-        judges_leasing,
+        holders_leasing,
         r#"
         0 agent_started
-        1000 judge train 10
-        2000 judge_started 0
+        1000 call train 10
+        2000 call_started 0
         2100 @0 box.open
         2200 @0 box.open
         3000 lease_ready 0
@@ -2534,27 +2627,26 @@ fn call_leases() {
         3400 @0 box.run 0 - b
         3500 command_ended 0 1 0
         3600 @0 box.run 0 - c
-        4000 judge_exited 0
+        4000 call_returned 0 {"raw_score":1}
         4100 @0 box.status 0
-        4200 collected 0 {"raw_score": 1}
         4300 status 0
-        4400 judge train 10
+        4400 call train 10
         5000 lease_ended 0
         5100 status 0
-        5200 judge train 10
-        6000 judge_started 1
+        5200 call train 10
+        6000 call_started 1
         6100 @1 box.open
         6200 lease_ready 1
         6300 @1 box.run 1 - a
-        7000 judge_failed 1 the judge's session ended
+        7000 call_failed 1 the target's session ended
         8000 lease_ended 1
-        8100 judge train 10
-        9000 judge_started 2
+        8100 call train 10
+        9000 call_started 2
         9100 @2 box.open
         9200 lease_ready 2
         9250 submit submit 10
         9300 agent_exited 0
-        9400 judge_failed 2 the call was stopped
+        9400 call_failed 2 the call was stopped
         9500 lease_ended 2
         "#,
         &expect![[r#"
@@ -2563,10 +2655,10 @@ fn call_leases() {
               (tick due at 18010000)
             0 agent_started
               (tick due at 18000000)
-            1000 judge train 10
-              reply to op 1: {"kind":"judge","job":0,"remaining":{"calls":99,"seconds":12000}}
-              start job 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
-            2000 judge_started 0
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 50s
+            2000 call_started 0
             2100 @0 box.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 0 of box for job 0, as instance 0, started by 52000
@@ -2586,23 +2678,22 @@ fn call_leases() {
             3500 command_ended 0 1 0
             3600 @0 box.run 0 - c
               refuse op 7: `box` has no commands left of the 2 it allows, a transfer counting as one: run and move no more
-            4000 judge_exited 0
+            4000 call_returned 0 {"raw_score":1}
               close lease 0
               (tick due at 18000000)
             4100 @0 box.status 0
-              refuse op 8: the call's command has ended: make no more ops
-            4200 collected 0 {"raw_score": 1}
+              refuse op 8: the call has ended: make no more ops
             4300 status 0
               reply to op 9: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":11998}}
-            4400 judge train 10
+            4400 call train 10
               refuse op 10: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             5000 lease_ended 0
             5100 status 0
               reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
-            5200 judge train 10
-              reply to op 12: {"kind":"judge","job":1,"remaining":{"calls":98,"seconds":11998}}
-              start job 1 of train on op 12's payload of 10 bytes, with a timeout of 50s
-            6000 judge_started 1
+            5200 call train 10
+              reply to op 12: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":11998}}
+              start call 1 of train on op 12's payload of 10 bytes, with a timeout of 50s
+            6000 call_started 1
             6100 @1 box.open
               reply to op 13: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 1 of box for job 1, as instance 0, started by 56000
@@ -2611,14 +2702,14 @@ fn call_leases() {
             6300 @1 box.run 1 - a
               reply to op 14: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":99,"cumulative_seconds":null,"commands":1}}
               run command 0 of lease 1, ["a"], with a timeout of None
-            7000 judge_failed 1 the judge's session ended
+            7000 call_failed 1 the target's session ended
               close lease 1
               (tick due at 18000000)
             8000 lease_ended 1
-            8100 judge train 10
-              reply to op 15: {"kind":"judge","job":2,"remaining":{"calls":97,"seconds":11997}}
-              start job 2 of train on op 15's payload of 10 bytes, with a timeout of 50s
-            9000 judge_started 2
+            8100 call train 10
+              reply to op 15: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11997}}
+              start call 2 of train on op 15's payload of 10 bytes, with a timeout of 50s
+            9000 call_started 2
             9100 @2 box.open
               reply to op 16: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 2 of box for job 2, as instance 0, started by 59000
@@ -2631,7 +2722,7 @@ fn call_leases() {
               close lease 2
               tear down the agent
               (tick due at 18210000)
-            9400 judge_failed 2 the call was stopped
+            9400 call_failed 2 the call was stopped
             9500 lease_ended 2
               start job 3 of score on op 17's payload of 10 bytes, with a timeout of 120s
         "#]],
@@ -2641,7 +2732,7 @@ fn call_leases() {
 #[test]
 fn score_leases() {
     check(
-        judges_leasing,
+        holders_leasing,
         r#"
         0 agent_started
         1000 submit submit 10

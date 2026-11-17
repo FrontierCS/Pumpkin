@@ -29,7 +29,7 @@ impl Shared {
 
     pub(crate) fn collect(
         &self,
-        dir: &AbsolutePath,
+        path: &AbsolutePath,
         into: &Path,
         limits: Limits,
         by: Deadline,
@@ -39,8 +39,8 @@ impl Shared {
         let created = fs::create_dir(into).map_err(|error| context(into.display(), &error));
         let collected = created.and_then(|()| {
             let tree = tree::Writer::new(into.to_owned(), limits, Modes::Umasked);
-            let dir = dir.clone();
-            self.send(&ToSandbox::Collect { stream, dir }, &[], by)?;
+            let path = path.clone();
+            self.send(&ToSandbox::Collect { stream, path }, &[], by)?;
             self.receive_tree(stream, &parts, tree, by, stopped)
         });
         // What `sandboxd` still sends of a tree cut short arrives on a closed stream, which the

@@ -3,7 +3,7 @@
 //! threads of their own, until the core stops allowing their caller's.
 //!
 //! One thread takes every input through a single inbox: the agent's session's arrivals, the
-//! reports of each judge call's and lease's own thread, and the log entries of the model
+//! reports of each call's and lease's own thread, and the log entries of the model
 //! threads. It gives each to the core as an [`Event`], records the event with the actions the
 //! core returned, and only then performs them. The core reads no clock, so each event carries
 //! the time since the run started, and a [`Event::Tick`] comes once the core's next act is due.
@@ -21,14 +21,16 @@ use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Reque
 use gateway::{Arrival, Dialer, GrantListener, RefusedOp, Trees};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
-use schema::ir::ModelName;
+use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
 use serde_json::json;
 use stdx::{Context, Deadline};
 
 mod agent;
+mod body;
 mod budget;
+mod call;
 mod child;
 mod host;
 mod interruption;
@@ -41,9 +43,11 @@ mod price;
 mod record;
 mod routes;
 mod sandbox;
+mod sources;
 mod start;
 
 use agent::Agent;
+pub use body::{Bodies, Target};
 use budget::Budget;
 pub use budget::{Budgets, budgets};
 use child::{Message, Report};
@@ -53,9 +57,9 @@ pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallSpan, Closed, Cost, Direction, LeaseSpan, LogFold, ModelUse,
     Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver, TakenLine, Tokens,
-    TokensCost, Unread, Used, Work, result_values,
+    TokensCost, Unread, Used, Work, result_values, returned_values,
 };
-use log::{Entry, Log};
+use log::{Entry, Log, Targeted};
 use model::Served;
 pub use model::{KeptPart, KeptRequest};
 use op::{Unanswered, accepts, finalizes, request};
@@ -71,12 +75,14 @@ use sandbox::{Published, Sandboxes};
 // second.
 const LOOK: Duration = Duration::from_millis(50);
 
-/// What a run's record holds beyond its workflow: the arguments that started the run, and what
-/// each model's tokens cost.
+/// What a run's record holds beyond its workflow: the arguments that started the run, what each
+/// model's tokens cost, and the text of each file that the workflow's evaluation read, by its
+/// label.
 #[derive(Clone, Copy)]
 pub struct Recorded<'a> {
     pub args: &'a [String],
     pub prices: &'a BTreeMap<ModelName, TokenPrices>,
+    pub sources: &'a BTreeMap<Label, String>,
 }
 
 /// The upstreams that serve each role's model route, one for each entry in the route's order, and
@@ -118,7 +124,11 @@ impl<'r, H: Host> Run<'r, H> {
         models: ModelRoutes<'_>,
         recorded: Recorded<'r>,
     ) -> Result<Self, String> {
-        let Recorded { args, prices } = recorded;
+        let Recorded {
+            args,
+            prices,
+            sources,
+        } = recorded;
         let ModelRoutes { servings, budgets } = models;
         let routes = model::routes(placed.workflow(), servings)?;
         let reserved = placed.by_provider(|name| {
@@ -128,6 +138,7 @@ impl<'r, H: Host> Run<'r, H> {
         })?;
         let (dir, lock) = record::create(host, runs, id.as_str(), args)?;
         record::write_ir(host, &dir, placed.workflow())?;
+        sources::write(host, &dir, sources)?;
         Ok(Self {
             host,
             placed,
@@ -164,9 +175,10 @@ impl<'r, H: Host> Run<'r, H> {
         sandboxd: &Path,
         private: Option<&GrantListener>,
         dialer: &Dialer,
+        bodies: &dyn Bodies,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
-        let outcome = self.run_on(sandboxd, (private, dialer), started);
+        let outcome = self.run_on(sandboxd, (private, dialer), bodies, started);
         // None if the run never began its log.
         let (outcome, usage) = match log::progress(&self.dir) {
             Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
@@ -198,6 +210,7 @@ impl<'r, H: Host> Run<'r, H> {
         &self,
         sandboxd: &Path,
         (private, dialer): (Option<&GrantListener>, &Dialer),
+        bodies: &dyn Bodies,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {
         let host = self.host;
@@ -234,6 +247,7 @@ impl<'r, H: Host> Run<'r, H> {
             budgets: self.budgets.unspent(),
             dir: &self.dir,
             sandboxes: &sandboxes,
+            bodies,
             clock,
             unix_hard_end: unix.saturating_add(lasts(&self.placed)),
             log,
@@ -294,15 +308,16 @@ impl Failure for Stopped {
     }
 }
 
-// A judge call: its thread's orders, and what the run knows of its judge.
+// A call: its thread's orders, and what the run knows of the role that runs it.
 struct Called {
     orders: Sender<Message<OpReply>>,
     // By when what the call left is collected, as a time since the run started; its leases' too.
     collect: Duration,
     // The trees of the call's sandbox that its last op came with; a transfer takes them.
     trees: Option<Trees>,
-    // The judge's role, whose model route serves once the call's command starts.
-    judge: RoleId,
+    // The role that runs the call, whose model route serves once the call's command or body
+    // starts.
+    role: RoleId,
 }
 
 enum Asked {
@@ -318,6 +333,7 @@ struct Runtime<'r, H: Host> {
     budgets: BTreeMap<RoleId, Budget<'r>>,
     dir: &'r Path,
     sandboxes: &'r Sandboxes<'r, H>,
+    bodies: &'r dyn Bodies,
     clock: H::Clock,
     unix_hard_end: UnixTime,
     log: Log<'r, H>,
@@ -370,7 +386,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.log
             .start(self.workflow(), unix, self.hard_end(), &actions)?;
         self.serve(Caller::Agent, self.workflow().agent().role);
-        // The threads of judge calls borrow the run's workflow and sandboxes, and the scope ends
+        // The threads of calls borrow the run's workflow and sandboxes, and the scope ends
         // once each has, so that no sandbox starts after the run's end, and the drain takes all
         // they reported. A stop waits so for a child whose provider's create is under way, which
         // nothing cuts short but its own deadline: a sandbox that a create made after the sweep's
@@ -416,10 +432,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let (at, event) = self.next_event(scope, core)?;
             // The decision is recorded below, before it is carried out at the top of the next turn.
             actions = core.handle(at, event.clone());
-            // A call's route is open from its command's start, as the agent's is from the run's.
-            if let Event::JudgeStarted { job } = event {
-                let judge = self.call(job).judge;
-                self.serve(Caller::Job(job), judge);
+            // A call's route is open from its command's or its body's start, as the agent's is
+            // from the run's.
+            if let Event::JudgeStarted { job } | Event::CallStarted { job } = event {
+                let role = self.call(job).role;
+                self.serve(Caller::Job(job), role);
             }
             // The keys' refusals are read as the core locks the selection, before the record of it
             // is written, so that a refusal heard after the lock leaves the run to be judged.
@@ -432,11 +449,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             self.log.event(self.workflow(), at, &event, &actions)?;
             // A route ends as the core stops allowing its model requests, the agent's at the work
-            // phase's end, a call's at its command's, before the core's actions are performed: its
-            // exchanges in flight then end while the agent's teardown, if the actions hold it,
-            // still needs the agent's session. The event that first stops the agent's ends the work
-            // phase or the run, so its record lists the agent's teardown or the run's abandon, and
-            // is synced before the route ends too.
+            // phase's end, a judge's at its command's, a body's call's at its timeout or its
+            // report, before the core's actions are performed: its exchanges in flight then end
+            // while the agent's teardown, if the actions hold it, still needs the agent's session.
+            // The event that first stops the agent's ends the work phase or the run, so its record
+            // lists the agent's teardown or the run's abandon, and is synced before the route ends
+            // too.
             self.end_routes(Some((core, at)));
         }
     }
@@ -608,6 +626,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     // run's phase.
                     other @ (Action::StartAgent
                     | Action::StartJudge { .. }
+                    | Action::StartCall { .. }
                     | Action::StopJudge { .. }
                     | Action::StartLease { .. }
                     | Action::RunCommand { .. }
@@ -628,6 +647,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         Ok(())
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per action")]
     fn perform<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -641,10 +661,15 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Action::Reply { op, reply } => self.reply(op, reply, core.phase_due())?,
                 Action::StartJudge {
                     job,
-                    call,
                     payload,
                     timeout,
-                } => self.start_judge(scope, core, job, call, &payload, timeout)?,
+                } => self.start_judge(scope, job, &payload, timeout)?,
+                Action::StartCall {
+                    job,
+                    function,
+                    payload,
+                    timeout,
+                } => self.start_call(scope, core, job, function, &payload, timeout)?,
                 Action::StopJudge { job } => self.stop_job(job),
                 Action::StartLease {
                     lease,
@@ -745,8 +770,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 payload,
                 reference,
             } => {
-                // Stored before the reply goes, since a judge call reads it, in the work phase or
-                // the final one; a refused op's bytes are never written.
+                // Stored before the reply goes, since a call reads it, in the work phase or the
+                // final one; a refused op's bytes are never written.
                 if accepts(&reply) {
                     self.payloads.store(&payload, &reference)?;
                 }
@@ -796,7 +821,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let Some(call) = self.jobs.get_mut(&job) else {
             unreachable!(
                 "job {} was stopped, answered or leased for, but never started, though the core \
-                 acts only on a job it has started, and the `StartJudge` that started it, \
+                 acts only on a job it has started, and the `StartJudge` or `StartCall` that started it, \
                  performed before, kept a sender into its call's inbox, even if the call then \
                  failed as it started",
                 job.0

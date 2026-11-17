@@ -721,16 +721,16 @@ Exit status:
      an outcome.json, which `pumpkin cancel` then records; or another error.
   2  A usage error.
 While the run goes on, `wait` says on the standard error each of its milestones
-as its record logs it: the agent's start, each judge call's start and end, each
+as its record logs it: the agent's start, each call's start and end, each
 lease's start, its runner's readiness and its end, and the end of the work
 phase. Once the run has ended, it says its summary: when it started, how long it
-ran, the agent's start and end, each judge call with how long it took and how it
+ran, the agent's start and end, each call with how long it took and how it
 ended, each lease with how long its runner lived and was charged for, and how
-much of that a command or transfer ran, its commands and how it ended, the
-model requests of an agent with a model route and the tokens reported, what
-each role spent of each entry's model budget, and the sandboxes, by provider and
-class, with how long they lasted and how many were deleted; then how it ended,
-and where its record is, then the command that runs it again, as
+much of that a command or transfer ran, its commands and how it ended, the model
+requests of an agent with a model route and the tokens reported, what each role
+spent of each entry's model budget, and the sandboxes, by provider and class,
+with how long they lasted and how many were deleted; then how it ended, and
+where its record is, then the command that runs it again, as
 `pumpkin run --help` says, and of a lost run, the commands that remove what it
 left; any other exit but 0 ends with a `pumpkin:` line that says why.
 If the final judge returned no result, its standard error is shown first, or,
@@ -757,7 +757,7 @@ Exit status:
 
 A live run's phase is `publishing` what its sandboxes run, `starting` its agent,
 `agent` at work, `ending` the work phase, or `final judge`; under it, a line for
-each judge call the agent made, by its grant, and each lease, by its grant and
+each call the agent made, by its function, and each lease, by its grant and
 state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
 ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
 `lost`, if its driver ended without an outcome.json. Its task is its workflow's
@@ -816,7 +816,7 @@ another site that the browser has open. It reads the records as `ls` and `wait`
 do, and asks nothing of a provider.
 
 A run's page links to the trace of each caller that used a model, the agent or
-a judge call: its model requests as threads of steps, each with the entries it
+a call: its model requests as threads of steps, each with the entries it
 added and the model's answer, as the record's log and the bodies it keeps say.
 
 The page's colours follow the browser's light or dark setting; the choice in its

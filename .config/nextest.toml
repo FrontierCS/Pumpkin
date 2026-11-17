@@ -10,11 +10,10 @@ slow-timeout = { period = "5s", terminate-after = 1 }
 filter = 'package(runtime) & test(=conformance::suite)'
 slow-timeout = { period = "15s", terminate-after = 1 }
 
-# Each waits about 4 s on the real clock for bounds the IR states in whole seconds, each at the
-# least that keeps the case apart: `watches_each_provider` a 4 s startup that must outlast a
-# second start at a 2 s one, and `judge_stalls` a 2 s deadline, then a 1 s startup and timeout.
+# It waits about 4 s on the real clock for bounds the IR states in whole seconds, at the least
+# that keeps the case apart: a 4 s startup that must outlast a second start at a 2 s one.
 [[profile.default.overrides]]
-filter = 'package(runtime) & (test(=execute::watches_each_provider) | test(=execute::judge_stalls))'
+filter = 'package(runtime) & test(=execute::watches_each_provider)'
 slow-timeout = { period = "10s", terminate-after = 1 }
 
 # The tests that need a Docker engine, which `cargo xtask live docker` runs: they build and run

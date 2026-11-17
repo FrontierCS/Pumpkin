@@ -788,7 +788,7 @@ fn build_first(
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
         let tags = match task.build(&engine, &mut admission) {
-            Ok((_, tags)) => tags,
+            Ok((_, tags, _)) => tags,
             Err(problems) => return Ok(Err(problems)),
         };
         // By their IDs too, until the job ends, as its run publishes them, however long it waits

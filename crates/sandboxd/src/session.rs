@@ -382,8 +382,8 @@ impl Session {
                     sender.reply(stream, commands.freeze())
                 })
             }
-            ToSandbox::Collect { stream, dir } => self.aside("collect", move |sender| {
-                files::collect(sender, stream, Path::new(dir.as_str()))
+            ToSandbox::Collect { stream, path } => self.aside("collect", move |sender| {
+                files::collect(sender, stream, Path::new(path.as_str()))
             }),
             ToSandbox::OpReply { op, reply } => self.ops.reply(op, reply),
             ToSandbox::ModelResponse {

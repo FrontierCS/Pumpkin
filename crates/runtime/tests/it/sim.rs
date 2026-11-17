@@ -7,8 +7,9 @@
 //! - `exit <code>`; `stall` (the sandbox stops answering); `crash` (its connection ends);
 //! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
 //!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
-//! - `judge <path>` scores the payload put at `path` by its length, except `slow` (it never ends),
-//!   `stall` and `large` (a result over its limit); with no payload it exits 1;
+//! - `judge <path> [<file>]` scores the payload put at `path` by its length, except `slow` (it
+//!   never ends) and `large` (a result over its limit), and puts its result at `file` too, if
+//!   named; with no payload it exits 1;
 //! - `ops <step>...` plays its steps (`step`) in turn, one op at a time, and exits 0 after the
 //!   last; any other program runs until it is killed.
 //!
@@ -104,6 +105,14 @@ pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
 /// A sandbox whose delete takes a second of real time.
 pub(crate) const DAWDLING: &str = "/sim/dawdling";
 
+/// A sandbox where a process changes `out` until a freeze kills it, so that a collect of `out`
+/// before the freeze fails, as `sandboxd`'s of a tree that changes as it is collected does.
+pub(crate) const SCRIBBLED: &str = "/sim/scribbled";
+
+/// A sandbox where a process outlives every freeze, which fails, as `sandboxd`'s does when a kill
+/// fails.
+pub(crate) const UNFREEZABLE: &str = "/sim/unfreezable";
+
 /// A sandbox whose delete waits until each other sandbox of its run is deleted, and no other
 /// delete is under way, as a platform may finish a delete that began later first.
 pub(crate) const LAST: &str = "/sim/last";
@@ -111,7 +120,7 @@ pub(crate) const LAST: &str = "/sim/last";
 // How long a delete of a `LAST` sandbox waits before the test fails instead of hanging.
 const LAST_WAITS: Duration = Duration::from_secs(60);
 
-// Far longer than a run takes to collect what a judge call's sandbox holds and delete it, and far
+// Far longer than a run takes to collect what a call's sandbox holds and delete it, and far
 // shorter than the bounds of the runs whose tests use it.
 const DAWDLE: Duration = Duration::from_secs(1);
 
@@ -168,6 +177,8 @@ struct State {
     published: Vec<String>,
     cpus: u64,
     reserved: Vec<Reserved>,
+    /// The record of the run whose sandboxes these are, once `Sim::records` names it.
+    record: Option<PathBuf>,
 }
 
 struct Reserved {
@@ -217,13 +228,46 @@ struct Status {
     connection: Option<Connection>,
     stalled: bool,
     deleted: bool,
+    freezing: Freezing,
     journal: Option<Journal>,
+    record: Option<PathBuf>,
+}
+
+/// What a sandbox's freeze meets.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Freezing {
+    /// Processes that it kills, none of which change what is collected.
+    #[default]
+    Killed,
+    /// A process that changes `out` until it is killed (`SCRIBBLED`).
+    Scribbler,
+    /// A process that it fails to kill (`UNFREEZABLE`).
+    Unkillable,
+}
+
+impl Freezing {
+    /// The answer to a freeze on `stream`, and whether the sandbox is frozen by it.
+    fn freeze(self, stream: u32) -> (FromSandbox, bool) {
+        if self == Self::Unkillable {
+            let message = "the sandbox's processes couldn't be killed: Operation not permitted \
+                           (os error 1)"
+                .to_owned();
+            return (FromSandbox::Failed { stream, message }, false);
+        }
+        (FromSandbox::Done { stream }, true)
+    }
+
+    /// Whether the tree at `path` changes as it is collected, unless the sandbox is `frozen`.
+    fn changes(self, path: &AbsolutePath, frozen: bool) -> bool {
+        self == Self::Scribbler && !frozen && *path == pumpkin_dir().join(&out_dir())
+    }
 }
 
 impl Status {
-    fn new(journal: Option<Journal>) -> Self {
+    fn new(journal: Option<Journal>, record: Option<PathBuf>) -> Self {
         Self {
             journal,
+            record,
             ..Self::default()
         }
     }
@@ -252,6 +296,7 @@ impl Sim {
                 published: Vec::new(),
                 cpus: 1 << 10,
                 reserved: Vec::new(),
+                record: None,
             })),
             journal: None,
         }
@@ -272,6 +317,12 @@ impl Sim {
 
     pub(crate) fn journal(&self) -> Option<&Journal> {
         self.journal.as_ref()
+    }
+
+    /// Names `record` as the record of the run whose sandboxes it creates, whose log `await_log`
+    /// reads.
+    pub(crate) fn records(&self, record: &Path) {
+        self.state().record = Some(record.to_owned());
     }
 
     fn holds(&self, create: &Create) -> Result<(), String> {
@@ -616,6 +667,7 @@ impl Sim {
             refusals,
             linger,
             last,
+            freezing,
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
         let hello = if dialing == Dialing::Later {
@@ -624,10 +676,12 @@ impl Sim {
             json!({ "version": PROTOCOL_VERSION, "grant": presented })
         };
         let mode = gateway.mode();
-        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone())));
+        let record = self.state().record.clone();
+        let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record)));
         // Before its thread starts, so that the console shows it once the create returns, however
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
+        status(&shared).freezing = freezing;
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
@@ -868,6 +922,7 @@ struct Faults {
     refusals: u32,
     linger: Duration,
     last: bool,
+    freezing: Freezing,
 }
 
 #[derive(PartialEq, Eq)]
@@ -937,6 +992,13 @@ impl Faults {
                 Duration::ZERO
             },
             last: names(LAST),
+            freezing: if names(SCRIBBLED) {
+                Freezing::Scribbler
+            } else if names(UNFREEZABLE) {
+                Freezing::Unkillable
+            } else {
+                Freezing::Killed
+            },
         }
     }
 }
@@ -1048,6 +1110,8 @@ enum Step {
     },
     /// A wait of that many seconds.
     Sleep(u64),
+    /// The `<kind>` of `await_log <kind>`.
+    Logged(String),
     /// The command's exit with 0.
     Exit,
     /// The answer to the collects of a `held` directory.
@@ -1091,10 +1155,12 @@ struct Caller {
     result: Option<Vec<u8>>,
     end: Option<End>,
     released: bool,
+    /// The run's record, if `Sim::records` named it.
+    record: Option<PathBuf>,
 }
 
 impl Caller {
-    fn new(stream: u32, steps: VecDeque<Step>, endpoint: bool) -> Self {
+    fn new(stream: u32, steps: VecDeque<Step>, endpoint: bool, record: Option<PathBuf>) -> Self {
         Self {
             stream,
             steps,
@@ -1112,6 +1178,7 @@ impl Caller {
             result: None,
             end: None,
             released: false,
+            record,
         }
     }
 
@@ -1173,6 +1240,13 @@ impl Caller {
                 }
                 Some(Step::Sleep(seconds)) => {
                     thread::sleep(Duration::from_secs(seconds));
+                    continue;
+                }
+                Some(Step::Logged(kind)) => {
+                    let Some(record) = &self.record else {
+                        panic!("`await_log` reads the run's record, which `Sim::records` names")
+                    };
+                    logged(record, &format!(r#""kind":"{kind}""#));
                     continue;
                 }
                 Some(Step::Exit) => {
@@ -1362,8 +1436,8 @@ fn state_name(reply: &OpReply) -> String {
     }
 }
 
-// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `judge
-// <grant> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
+// A step is an op, `ops`, which `ops at least <seconds> less` bounds, `status <job>`, `call
+// <function> <payload>`, `submit <grant> <payload>` or `finalize <grant> <payload>`, a final
 // submission, where a payload that is a number is that many bytes of `x`, and any other is its
 // own bytes; `<session>.open [<seconds>]`, `<session>.run <lease> <seconds>|- <argv>...`, without
 // a timeout for `-`, `<session>.status <lease>` or `<session>.close <lease>`; `<session>.put
@@ -1373,7 +1447,9 @@ fn state_name(reply: &OpReply) -> String {
 //
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
 // <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
-// <lease> moved|failed` until its last transfer ended so.
+// <lease> moved|failed` until its last transfer ended so. `await_log <kind>` waits until the run
+// log holds an entry of kind `kind`, in the record that `Sim::records` named: what a run's other
+// children log has an order against the agent's acts only through it.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -1403,7 +1479,7 @@ fn step(arg: &str) -> Step {
             let job = job.parse().unwrap();
             (OpCall::Status { job }, Vec::new(), None)
         }
-        ["judge", _, _] => (OpCall::Judge { grant: grant() }, payload(), None),
+        ["call", _, _] => (OpCall::Call { grant: grant() }, payload(), None),
         [kind @ ("submit" | "finalize"), _, _] => {
             let finalize = kind == "finalize";
             let grant = grant();
@@ -1435,6 +1511,7 @@ fn step(arg: &str) -> Step {
             return model_step(kind, model, &words[2..]);
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
+        ["await_log", kind] => return Step::Logged((*kind).to_owned()),
         ["exit"] => return Step::Exit,
         ["release"] => return Step::Release,
         ["result"] => return Step::Result,
@@ -1463,6 +1540,18 @@ fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
         fields,
         wait,
     }
+}
+
+/// Waits, for a minute at most, until the run log in `record` holds `part` of a line.
+pub(crate) fn logged(record: &Path, part: &str) {
+    for _ in 0..6000 {
+        let log = fs::read_to_string(record.join("log.jsonl")).unwrap_or_default();
+        if log.contains(part) {
+            return;
+        }
+        thread::sleep(AWAIT_POLL);
+    }
+    panic!("the run log held no `{part}` in a minute");
 }
 
 fn lease_status(grant: &str, lease: &str) -> OpCall {
@@ -1603,7 +1692,6 @@ fn judge(
     payload: Option<&Vec<u8>>,
     stream: u32,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
-    shared: &Mutex<Status>,
 ) -> Option<Vec<u8>> {
     let exit = |code| {
         let status = ExitStatus::Code(code);
@@ -1611,10 +1699,6 @@ fn judge(
     };
     match payload.map(Vec::as_slice) {
         Some(b"slow") => None,
-        Some(b"stall") => {
-            status(shared).stalled = true;
-            None
-        }
         Some(payload) => {
             replies.push(exit(0));
             let result = json!({ "raw_score": payload.len() });
@@ -1640,6 +1724,20 @@ fn collect(
     // A collect of a directory named `held` waits for the `release` step.
     if dir.as_str().ends_with("/held") && !served.caller.as_ref().is_some_and(|c| c.released) {
         served.held = Some((stream, dir.clone()));
+        return;
+    }
+    // A collect of a file sends the tree of that one file, by its name, as `sandboxd`'s does.
+    let printed = served.printed.get(dir.as_str()).map(String::as_bytes);
+    if let Some(body) = (served.files.by_path.get(dir.as_str()).map(Vec::as_slice)).or(printed) {
+        let (_, name) = dir.as_str().rsplit_once('/').unwrap();
+        send_file(
+            stream,
+            name,
+            served.files.mode(dir.as_str(), file_mode()),
+            body,
+            replies,
+        );
+        replies.push((FromSandbox::End { stream }, Vec::new()));
         return;
     }
     let inside = format!("{dir}/");
@@ -1678,15 +1776,25 @@ fn collect(
     tree.extend(served.files.below(dir.as_str()));
     for (path, body) in tree {
         let mode = served.files.mode(&format!("{dir}/{path}"), file_mode());
-        let path = RelativePath::try_from(path.to_owned()).unwrap();
-        let size = u64::try_from(body.len()).unwrap();
-        let entry = Entry::File { path, size, mode };
-        replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
-        for data in body.chunks(frame::MAX_BODY_BYTES) {
-            replies.push((FromSandbox::Data { stream }, data.to_vec()));
-        }
+        send_file(stream, path, mode, body, replies);
     }
     replies.push((FromSandbox::End { stream }, Vec::new()));
+}
+
+fn send_file(
+    stream: u32,
+    path: &str,
+    mode: Mode,
+    body: &[u8],
+    replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+) {
+    let path = RelativePath::try_from(path.to_owned()).unwrap();
+    let size = u64::try_from(body.len()).unwrap();
+    let entry = Entry::File { path, size, mode };
+    replies.push((FromSandbox::Entry { stream, entry }, Vec::new()));
+    for data in body.chunks(frame::MAX_BODY_BYTES) {
+        replies.push((FromSandbox::Data { stream }, data.to_vec()));
+    }
 }
 
 #[derive(Default)]
@@ -1719,12 +1827,17 @@ impl Served {
             "crash" => return true,
             "ops" => {
                 let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
-                let made = self.caller.insert(Caller::new(stream, steps, model));
+                let record = status(shared).record.clone();
+                let made = (self.caller).insert(Caller::new(stream, steps, model, record));
                 return made.next(replies);
             }
             "judge" => {
-                let payload = self.files.by_path.get(&launch.argv.args()[0]);
-                self.result = judge(payload, stream, replies, shared);
+                let args = launch.argv.args();
+                let payload = self.files.by_path.get(&args[0]);
+                self.result = judge(payload, stream, replies);
+                if let (Some(file), Some(result)) = (args.get(1), &self.result) {
+                    self.files.by_path.insert(file.clone(), result.clone());
+                }
             }
             "list" => {
                 let dir = &launch.argv.args()[0];
@@ -1782,8 +1895,7 @@ impl Served {
 fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
     let (mut replies, mut crashed) = (Vec::<(FromSandbox, Vec<u8>)>::new(), false);
     let mut served = Served::default();
-    // The stream of a freeze that waits for a model response to end.
-    let mut freezing = None;
+    let (freezing, mut frozen) = (status(shared).freezing, false);
     // A connection that ends, cleanly or not, ends the session, as a delete's does.
     while let Ok(Some((request, body))) = frame::read::<ToSandbox>(&mut connection) {
         if status(shared).stalled {
@@ -1805,15 +1917,23 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             ToSandbox::Entry { entry, .. } => files.entry(entry),
             ToSandbox::Data { .. } => files.data(&body),
             ToSandbox::End { stream } => files.end(stream, &mut replies),
-            // A freeze waits for the response to the model request in flight, if any, to end, so
-            // that a run that cuts it short before the agent's teardown, as it must, sees its
-            // freeze done, and one that would cut it after waits out its freeze's deadline.
-            ToSandbox::Freeze { stream } => freezing = Some(stream),
+            ToSandbox::Freeze { stream } => {
+                let (reply, froze) = freezing.freeze(stream);
+                frozen |= froze;
+                replies.push((reply, Vec::new()));
+            }
             ToSandbox::Start { stream, launch } => {
                 crashed = served.start(stream, &launch, model, &mut replies, shared);
             }
             ToSandbox::Kill { stream, command } => served.kill(stream, command, &mut replies),
-            ToSandbox::Collect { stream, dir } => collect(stream, &dir, &mut served, &mut replies),
+            ToSandbox::Collect { stream, path } if freezing.changes(&path, frozen) => {
+                let message =
+                    format!("{path} changed while it was collected: freeze the sandbox first");
+                replies.push((FromSandbox::Failed { stream, message }, Vec::new()));
+            }
+            ToSandbox::Collect { stream, path } => {
+                collect(stream, &path, &mut served, &mut replies);
+            }
             ToSandbox::OpReply { op, reply } => match caller {
                 Some(caller) if caller.op == op => {
                     if let Some(journal) = &status(shared).journal {
@@ -1844,12 +1964,6 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             collect(stream, &dir, &mut served, &mut replies);
         }
         let caller = served.caller.as_ref();
-        if let Some(stream) = freezing
-            && !caller.is_some_and(|caller| caller.open)
-        {
-            replies.push((FromSandbox::Done { stream }, Vec::new()));
-            freezing = None;
-        }
         let close = caller.and_then(|caller| caller.end) == Some(End::Close);
         if !send(&mut connection, &mut replies, crashed, close) {
             return;

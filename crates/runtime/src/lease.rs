@@ -67,20 +67,28 @@ struct Running {
     timed_out: bool,
 }
 
-pub(super) fn run<H: Host>(lease: LeaseId, runner: &Runner, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, None, |child, session| {
-        drive(lease, runner, child, session)
-    });
+/// A lease, as its thread drives it.
+#[derive(Clone, Copy)]
+pub(super) struct Leased<'r> {
+    pub(super) lease: LeaseId,
+    pub(super) runner: &'r Runner,
+    /// By when what the lease puts in its sandbox, each command's start and each kill are done,
+    /// as a time since the run started.
+    pub(super) start: Duration,
+}
+
+pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>) {
+    super::child::run(child, None, |child, session| drive(leased, child, session));
 }
 
 /// Runs the commands the core orders in `child`'s sandbox, whose session is `session`, until the
 /// core's stop, and returns the report of the lease's end.
 fn drive<H: Host>(
-    lease: LeaseId,
-    runner: &Runner,
+    leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
     session: &mut Session,
 ) -> Event {
+    let lease = leased.lease;
     let failed = |reason: String| Event::LeaseFailed { lease, reason };
     if child.stopped() {
         return Event::LeaseEnded { lease };
@@ -91,7 +99,7 @@ fn drive<H: Host>(
         ));
     }
     child.event(Event::LeaseReady { lease });
-    let running = match serve(lease, runner, child, session) {
+    let running = match serve(leased, child, session) {
         Ok(running) => running,
         Err(reason) => return failed(reason),
     };
@@ -115,11 +123,15 @@ fn drive<H: Host>(
 /// `session`, one at a time, until the core's stop, and returns the command that still runs then,
 /// if one does; or why the runner failed first.
 fn serve<H: Host>(
-    lease: LeaseId,
-    runner: &Runner,
+    leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
     session: &mut Session,
 ) -> Result<Option<Running>, String> {
+    let Leased {
+        lease,
+        runner,
+        start: by_start,
+    } = *leased;
     let mut running: Option<Running> = None;
     // What a transfer took from the inbox as it cut it short, to act on next.
     let mut held = None;
@@ -131,7 +143,7 @@ fn serve<H: Host>(
         match message {
             None => {
                 if let Some(running) = &mut running {
-                    kill(child, running, session);
+                    kill(child, by_start, running, session);
                 }
             }
             Some(Message::Stop) => return Ok(running),
@@ -144,21 +156,23 @@ fn serve<H: Host>(
                     end,
                 });
             }
-            Some(Message::Order(Order::Run(run))) => match start(runner, child, &run, session) {
-                Ok(process) => {
-                    let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
-                    running = Some(Running {
-                        command: run.command,
-                        process,
-                        kill_at,
-                        timed_out: false,
-                    });
+            Some(Message::Order(Order::Run(run))) => {
+                match start(runner, child, (&run, by_start), session) {
+                    Ok(process) => {
+                        let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
+                        running = Some(Running {
+                            command: run.command,
+                            process,
+                            kill_at,
+                            timed_out: false,
+                        });
+                    }
+                    Err(error) => {
+                        let ended = (CommandEnd::Unstarted, String::new(), error);
+                        child.event(command_ended(lease, run.command, ended));
+                    }
                 }
-                Err(error) => {
-                    let ended = (CommandEnd::Unstarted, String::new(), error);
-                    child.event(command_ended(lease, run.command, ended));
-                }
-            },
+            }
             Some(Message::Session(Arrival::Exited { process, status })) => {
                 let Some(ran) = running.take_if(|running| running.process == process) else {
                     continue;
@@ -190,8 +204,13 @@ fn serve<H: Host>(
 
 /// Kills `running`, whose timeout has passed, in the runner's sandbox, whose session is
 /// `session`. A command that isn't killed runs on until it exits, or the lease ends.
-fn kill<H: Host>(child: &Child<'_, H, Order>, running: &mut Running, session: &mut Session) {
-    let by = deadline(&child.clock, child.deadlines.start);
+fn kill<H: Host>(
+    child: &Child<'_, H, Order>,
+    by_start: Duration,
+    running: &mut Running,
+    session: &mut Session,
+) {
+    let by = deadline(&child.clock, by_start);
     running.kill_at = None;
     match session.kill(running.process, by) {
         Ok(()) => running.timed_out = true,
@@ -206,11 +225,11 @@ fn kill<H: Host>(child: &Child<'_, H, Order>, running: &mut Running, session: &m
 fn start<H: Host>(
     runner: &Runner,
     child: &Child<'_, H, Order>,
-    run: &Run,
+    (run, by_start): (&Run, Duration),
     session: &mut Session,
 ) -> Result<Process, String> {
     let dir = command_dir(run.command);
-    let by = deadline(&child.clock, child.deadlines.start);
+    let by = deadline(&child.clock, by_start);
     let put = session.put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
     put.context(format_args!("making {dir} failed"))?;
     let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
@@ -374,8 +393,8 @@ fn command_ended(lease: LeaseId, command: u64, ended: (CommandEnd, String, Strin
     }
 }
 
-/// `log/<command>`, the directory of a lease's `command`th command's output.
-fn command_dir(command: u64) -> RelativePath {
+/// `log/<command>`, the directory of the `command`th command's output of a lease's, or of a body's.
+pub(crate) fn command_dir(command: u64) -> RelativePath {
     log_dir().join(&RelativePath::from(command))
 }
 

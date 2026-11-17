@@ -8,19 +8,20 @@
 //! run's clock.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use std::{fmt, fs};
 
 use provider::UnixTime;
-use schema::ir::{Api, Gpu, Name};
+use schema::ir::{Api, Gpu};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde_json::Value;
 use stdx::Context;
 
 use super::Direction;
-use super::logged::{self, Collected, Line};
+use super::call::{CallEnd, CallSpan};
+use super::logged::{self, Collected, CommandOf, Line};
 use super::roles::{Grant, Roles};
 use crate::sandbox::SandboxName;
 use crate::{TokenPrices, record};
@@ -46,7 +47,7 @@ pub struct Progress {
     /// When the latest line read was written.
     pub last: Duration,
     pub agent: AgentSpan,
-    /// Each judge call, in the order the log started them.
+    /// Each call, in the order the log started them.
     pub calls: Vec<CallSpan>,
     /// Each lease, in the order the log started them.
     pub leases: Vec<LeaseSpan>,
@@ -108,8 +109,8 @@ impl fmt::Display for Unread {
     }
 }
 
-/// A sandbox of the run, which one of the agent, a judge call or a lease holds. Its times are those
-/// the log gave it, and `None` while it hasn't.
+/// A sandbox of the run, which one of the agent, a call or a lease holds. Its times are those the
+/// log gave it, and `None` while it hasn't.
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     /// Where its role is placed; `None` if `provider.json` doesn't place it.
@@ -125,7 +126,7 @@ pub struct Sandbox {
     /// When its command started, or its runner was ready.
     pub started: Option<Duration>,
     /// When the run was done with it: once it had collected what the agent's work phase left, or
-    /// the agent failed; once a judge call or a lease ended; else once it was deleted, as one is
+    /// the agent failed; once a call or a lease ended; else once it was deleted, as one is
     /// when the run stops short of the core's end.
     pub gone: Option<Duration>,
     /// Whether its `sandbox.json` records the provider's delete as done; `None` if it has no
@@ -153,41 +154,14 @@ pub enum AgentEnd {
     Failed(String),
 }
 
-/// A judge call: the final judge's, which scores the selected submission, or a call that the agent
-/// made.
-#[derive(Clone, Debug)]
-pub struct CallSpan {
-    /// Its number in the run.
-    pub job: u64,
-    /// The agent's grant it answers, by name; `None` for the final judge.
-    pub grant: Option<String>,
-    /// The role of its judge.
-    pub role: Option<String>,
-    pub sandbox: Sandbox,
-    /// How long the core gave it.
-    pub timeout: Duration,
-    /// Whether the core ordered it stopped.
-    pub stopped: bool,
-    /// Whether it ran past its timeout.
-    pub timed_out: bool,
-    /// How the call ended, collected or failed, at its sandbox's `gone`.
-    pub end: Option<CallEnd>,
-    /// Its judge's standard error in the record, if the judge wrote any when the readout was made.
-    pub stderr: Option<PathBuf>,
-    /// The directory in the record that holds its judge's evidence, if there is one.
-    pub evidence: Option<PathBuf>,
-    /// Its own model requests, which the run's (`Progress::model`) count too.
-    pub model: ModelUse,
-}
-
-/// A lease: a runner that the agent or a judge call holds, to run commands and move trees on.
+/// A lease: a runner that the agent or a call holds, to run commands and move trees on.
 #[derive(Clone, Debug)]
 pub struct LeaseSpan {
     /// Its number in the run.
     pub lease: u64,
     /// The grant that gave it, by name.
     pub grant: String,
-    /// The judge call that holds it, by `job`; `None` if the agent does.
+    /// The call that holds it, by `job`; `None` if the agent does.
     pub holder: Option<u64>,
     pub sandbox: Sandbox,
     /// How long it may last: its grant's `instance_seconds`, or less if its open asked for less.
@@ -211,7 +185,7 @@ pub enum Closed {
     Asked,
     /// The work phase ended, which tears down the agent that held it.
     WorkEnded,
-    /// The judge call that held it ended.
+    /// The call that held it ended.
     CallEnded,
     /// The lease's time, or its grant's, ran out.
     Expired,
@@ -306,18 +280,6 @@ impl LeaseSpan {
             self.busy += self.until(at).saturating_sub(since);
         }
     }
-}
-
-/// How a judge call ended.
-#[derive(Clone, Debug)]
-pub enum CallEnd {
-    /// The judge gave a result, which shows these values, each by its name, in the order its
-    /// judge's spec names them.
-    Result(Vec<(Name, Value)>),
-    /// The judge's output was no result its spec reads, for this reason.
-    Invalid(String),
-    /// The run couldn't start the call or keep its sandbox, for this reason.
-    Failed(String),
 }
 
 /// The model requests of a role, or of the whole run: each has been answered, or is in flight.
@@ -418,8 +380,8 @@ pub(super) fn readout(
         prices: roles.prices.clone(),
         token_prices: roles.token_prices.clone(),
     };
-    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a judge call's standard
-    // error and evidence are collected as it ends, so they are read now.
+    // Each sandbox's `sandbox.json` is rewritten as the run deletes it, and a call's standard error
+    // and evidence are collected as it ends, so they are read now.
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
@@ -495,8 +457,8 @@ impl Reading {
         } else {
             Closed::Expired
         };
-        // A judge call's end closes the leases it holds.
-        let ended = event.and_then(logged::Event::judge_job);
+        // A job's end closes the leases it holds.
+        let ended = event.and_then(logged::Event::job);
         // A holder may ask, at open, for a shorter life than its grant's.
         let asked = match request {
             Some(logged::Request::LeaseOpen { instance_seconds }) => {
@@ -548,12 +510,12 @@ impl Reading {
                 self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
                 self.agent.sandbox.gone.get_or_insert(at);
             }
-            logged::Event::JudgeStarted { job } => {
+            logged::Event::JudgeStarted { job } | logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
                 }
             }
-            logged::Event::JudgeTimedOut { job } => {
+            logged::Event::JudgeTimedOut { job } | logged::Event::CallTimedOut { job } => {
                 if let Some(call) = self.call(*job) {
                     call.timed_out = true;
                 }
@@ -571,7 +533,19 @@ impl Reading {
                     call.end(at, end);
                 }
             }
-            logged::Event::JudgeFailed { job, reason } => {
+            logged::Event::CallReturned { job, returned } => {
+                let returned = returned.iter();
+                let end = CallEnd::Result(
+                    returned
+                        .map(|shown| (shown.name.clone(), shown.value.clone()))
+                        .collect(),
+                );
+                if let Some(call) = self.call(*job) {
+                    call.end(at, end);
+                }
+            }
+            logged::Event::JudgeFailed { job, reason }
+            | logged::Event::CallFailed { job, reason } => {
                 if let Some(call) = self.call(*job) {
                     call.end(at, CallEnd::Failed(reason.clone()));
                 }
@@ -581,7 +555,10 @@ impl Reading {
                     lease.sandbox.started = Some(at);
                 }
             }
-            logged::Event::CommandEnded { lease, end } => {
+            logged::Event::CommandEnded {
+                of: CommandOf::Lease { lease },
+                end,
+            } => {
                 if let Some(lease) = self.lease(*lease) {
                     lease.command_ended(at, *end);
                 }
@@ -657,19 +634,17 @@ impl Reading {
                     sandbox.gone.get_or_insert(at);
                 }
             }
-            logged::Event::JudgeExited { .. }
+            // A call's commands show in no line of its own.
+            logged::Event::CommandEnded {
+                of: CommandOf::Job { .. },
+                ..
+            }
+            | logged::Event::JudgeExited { .. }
             | logged::Event::OpArrived { .. }
             | logged::Event::OpRefused
             | logged::Event::Tick
             | logged::Event::Unknown => {}
         }
-    }
-}
-
-impl CallSpan {
-    fn end(&mut self, at: Duration, end: CallEnd) {
-        self.end = Some(end);
-        self.sandbox.gone = Some(at);
     }
 }
 
@@ -700,31 +675,21 @@ impl Reading {
         roles: &Roles,
     ) {
         match action {
-            logged::Action::StartJudge {
+            logged::Action::StartJudge { job, timeout_ns } => {
+                let role = roles.score_role.clone();
+                let sandbox = roles.sandbox(role.as_deref(), at);
+                (self.calls).push(CallSpan::new(*job, None, role, sandbox, *timeout_ns));
+            }
+            logged::Action::StartCall {
                 job,
                 grant,
                 timeout_ns,
             } => {
-                let role = match grant {
-                    Some(grant) => {
-                        let key = (roles.agent_role.clone(), grant.clone());
-                        roles.grants.get(&key).cloned().unwrap_or_default().role
-                    }
-                    None => roles.score_role.clone(),
-                };
-                self.calls.push(CallSpan {
-                    job: *job,
-                    grant: grant.clone(),
-                    sandbox: roles.sandbox(role.as_deref(), at),
-                    role,
-                    timeout: *timeout_ns,
-                    stopped: false,
-                    timed_out: false,
-                    end: None,
-                    stderr: None,
-                    evidence: None,
-                    model: ModelUse::default(),
-                });
+                let key = (roles.agent_role.clone(), grant.clone());
+                let granted = roles.grants.get(&key).cloned().unwrap_or_default();
+                let (function, role) = (Some(grant.clone()), granted.role);
+                let sandbox = roles.sandbox(role.as_deref(), at);
+                (self.calls).push(CallSpan::new(*job, function, role, sandbox, *timeout_ns));
             }
             logged::Action::StopJudge { job } => {
                 if let Some(call) = self.call(*job) {

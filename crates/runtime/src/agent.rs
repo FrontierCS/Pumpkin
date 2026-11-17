@@ -154,11 +154,12 @@ fn put(
     Ok(Some(pumpkin_dir().join(&stdin)))
 }
 
-/// The largest payload the agent may send: the largest `max_bytes` of its judge grants' slots
-/// and of the score's slot, which caps its submissions.
+/// The largest payload the agent may send: the largest `max_bytes` of the score's slot, which
+/// caps its submissions, and of its job functions.
 fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
-    let slots = workflow.judge_grants().map(|(_, grant)| grant.slot);
-    let limit = |slot| workflow.slot(slot).payload_limit();
-    let score = limit(workflow.score().slot);
-    slots.map(limit).fold(score, OpPayloadLimit::max)
+    let score = workflow.slot(workflow.score().slot).payload_limit();
+    workflow
+        .job_functions()
+        .map(|(_, function)| function.payload_limit())
+        .fold(score, OpPayloadLimit::max)
 }

@@ -57,12 +57,17 @@ impl Drop for Runs {
     }
 }
 
-/// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its
-/// own, with an upstream that serves each model it names, if it names any, as started with the
-/// args `--config /pumpkin.toml`, and checks what becomes of each: whether the run is prepared,
-/// named by its id, or how it is refused; and its record, if it has one: its name, its files,
-/// and what they hold, with the build it names shown as `<this build>` if it is this one, as
-/// [`Record::other_build`] says. Each is [placed](placed) on the simulated provider.
+/// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its own,
+/// with an upstream that serves each model it names, if it names any, as started with the args
+/// `--config /pumpkin.toml` from one source, `//task.star`, and checks what becomes of each:
+/// whether the run is prepared, named by its id, or how it is refused; and its record, if it has
+/// one: its name, its files, and what they hold, with the build it names shown as `<this build>` if
+/// it is this one, as [`Record::other_build`] says. Each is [placed](placed) on the simulated
+/// provider.
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it says what each record holds"
+)]
 fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
@@ -70,6 +75,7 @@ fn check(
     let runs = Runs::new("prepare");
     let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
     let unpriced = BTreeMap::new();
+    let sources = BTreeMap::from([(ir::Label::parse("//task.star").unwrap(), String::new())]);
     let mut lines = Vec::new();
     for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
         let ir: ir::Workflow = serde_json::from_value(value).unwrap();
@@ -89,6 +95,7 @@ fn check(
             let recorded = Recorded {
                 args: &args,
                 prices: &unpriced,
+                sources: &sources,
             };
             let budgets = runtime::budgets(placed.workflow(), &unpriced)?;
             let models = ModelRoutes { servings, budgets };
@@ -247,7 +254,7 @@ fn build() {
     }
 }
 
-// The agent and the train judge run at once, and the final judge after, so `wide` needs 1100 CPUs
+// The agent and the trainer run at once, and the final judge after, so `wide` needs 1100 CPUs
 // at once, more than the provider holds, though each role fits its class.
 #[test]
 fn prepare() {
@@ -277,7 +284,7 @@ fn prepare() {
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
+            20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: `agent` has a model route, but no upstream serves its `responses` entry: give one, or remove the `egress.model` of `agent`'s runtime to run without one; runs directory made: false
@@ -285,13 +292,13 @@ fn prepare() {
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
+            20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
-            21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json
+            21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
@@ -633,10 +640,9 @@ fn reads_core_times() {
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
-    let train = serde_json::json!({
-        "role": "trainer", "slot": "payload", "call_timeout_seconds": 60,
-    });
-    let ir = solver(serde_json::json!([{ "name": "train", "judge": train }, lease("runner")]));
+    let workflow: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let train = workflow["roles"][0]["runtime"]["agent"]["grants"][0].clone();
+    let ir = solver(serde_json::json!([train, lease("runner")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
     let provided = serde_json::json!({ "roles": {
@@ -644,9 +650,9 @@ fn reads_core_times() {
     } });
     fs::write(record.join("provider.json"), provided.to_string()).unwrap();
     let log = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}
-{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"judge","grant":"train"}},"actions":[{"kind":"start_judge","job":0,"grant":"train","timeout_ns":"60000000000"}]}
+{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"call","grant":"train"}},"actions":[{"kind":"start_call","job":0,"grant":"train","timeout_ns":"60000000000"}]}
 {"seq":2,"at_ns":"3000000000","observed_ns":"1000000000","event":{"kind":"tick"},"actions":[{"kind":"start_lease","grant":"runner","holder":"agent","lease":0},{"kind":"start_lease","grant":"runner","holder":"agent","lease":1}]}
-{"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"judge_started","job":0},"actions":[]}
+{"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"call_started","job":0},"actions":[]}
 {"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
 {"seq":5,"at_ns":"9000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":1},"actions":[]}
 {"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","request":{"kind":"lease_run","lease":0,"argv":[]}},"actions":[{"kind":"run_command","lease":0,"command":0}]}
@@ -654,8 +660,8 @@ fn reads_core_times() {
 {"seq":8,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0,"end":{"exited":{"code":0}}},"actions":[]}
 {"seq":9,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
 {"seq":10,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
-{"seq":11,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"judge_exited","job":0},"actions":[]}
-{"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"judge_collected","job":0,"result":{"returned":{}}},"actions":[]}
+{"seq":11,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"tick"},"actions":[]}
+{"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"call_returned","job":0,"returned":[]},"actions":[]}
 {"seq":13,"at_ns":"25000000000","event":{"kind":"sandbox_deleted","sandbox":"lease-1"},"actions":[]}
 "#;
     fs::write(record.join("log.jsonl"), log).unwrap();

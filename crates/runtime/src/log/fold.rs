@@ -96,7 +96,7 @@ pub(crate) fn final_judge(dir: &Path) -> Result<u64, String> {
         )),
         (Some(unread), None) => {
             let mut error = format!(
-                "{} names no final judge: expected a `start_judge` without a grant",
+                "{} names no final judge: expected a `start_judge`",
                 path.display()
             );
             if let Some(first) = unread.first() {

@@ -1,5 +1,5 @@
-//! The ops that the agent and the judge calls send, as the core takes them: the request that an
-//! op makes, what stays of the op to answer it, and what a reply says of the op.
+//! The ops that the agent and the calls send, as the core takes them: the request that an op
+//! makes, what stays of the op to answer it, and what a reply says of the op.
 
 use std::mem;
 
@@ -13,7 +13,7 @@ use crate::record;
 // alone.
 pub(crate) fn accepts(reply: &OpReply) -> bool {
     match reply {
-        OpReply::Judge(_) | OpReply::Submit(_) => true,
+        OpReply::Call(_) | OpReply::Submit(_) => true,
         OpReply::Ops(_)
         | OpReply::Status(_)
         | OpReply::Lease(_)
@@ -58,10 +58,10 @@ impl Unanswered {
 pub(crate) fn request(mut incoming: IncomingOp) -> (Request, Unanswered) {
     // The request takes the op's fields, and what stays of the op only answers it.
     let (request, call) = match mem::replace(&mut incoming.op, Op::Ops) {
-        Op::Judge { grant, payload } => {
+        Op::Call { function, payload } => {
             let reference = record::reference(&payload);
-            let request = Request::Judge {
-                grant,
+            let request = Request::Call {
+                function,
                 payload: reference.clone(),
             };
             (request, Some((payload, reference)))

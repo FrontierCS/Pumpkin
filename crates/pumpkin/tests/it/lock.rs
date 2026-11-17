@@ -91,7 +91,10 @@ fn refusals() {
     );
     let task = fs::read_to_string(scratch.0.join("pair/task.star")).unwrap();
     let other = "OTHER = image(\"Dockerfile\", args = {\"MODE\": \"other\"})\n";
-    scratch.write("pair/task.star", &format!("{other}{task}"));
+    scratch.write(
+        "pair/task.star",
+        &task.replacen("IMAGE = ", &format!("{other}IMAGE = "), 1),
+    );
     // A `docker` that says whether it ran.
     fs::create_dir(scratch.0.join("bin")).unwrap();
     scratch.write_executable("bin/docker", b"#!/bin/sh\ntouch \"$0.ran\"\nexit 1\n");

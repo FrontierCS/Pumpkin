@@ -31,9 +31,9 @@ use recipe::Given;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use schema::sandbox::op::{
-    CommandEnd, CommandStatus, Failure, FailureCode, JobState, JudgeReply, Last, LeaseRemaining,
-    LeaseReply, LeaseState, LeaseStatusReply, OpReply, OpsReply, Remaining, Returned, SessionOp,
-    StatusReply, SubmitReply, SubmitState,
+    CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
+    LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, OpReply, OpsReply, Remaining,
+    Returned, SessionOp, StatusReply, SubmitReply, SubmitState,
 };
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -619,10 +619,7 @@ fn cpus() {
             };
             let mut started = [
                 ("the agent", start(first, "agent", sized("agent", 2), 0)),
-                (
-                    "the train judge",
-                    start(first, "train", sized("train", 1), 0),
-                ),
+                ("the trainer", start(first, "train", sized("train", 1), 0)),
                 ("a runner", start(first, "runner-0", runners(), 0)),
                 ("another runner", start(first, "runner-1", runners(), 1)),
                 (
@@ -676,7 +673,7 @@ fn cpus() {
         },
         &expect![[r#"
             the agent: on whole cores: true, as it sees them: true
-            the train judge: on whole cores: true, as it sees them: true
+            the trainer: on whole cores: true, as it sees them: true
             a runner: on whole cores: true, as it sees them: true
             another runner: on whole cores: true, as it sees them: true
             another run's judge: on whole cores: true, as it sees them: true
@@ -999,14 +996,14 @@ fn ops() {
                 cp payload big && printf '!' >> big && ln -s payload link
                 ctl ops
                 /.pumpkin/bin/sandboxctl ops > /dev/full; echo "\$ sandboxctl ops > /dev/full: exit $?"
-                ctl judge train payload
+                ctl call train payload
                 ctl submit submit ../home/payload --finalize
                 ctl submit submit payload
-                ctl judge train link
+                ctl call train link
                 ctl status 1
                 ctl status 2
                 ctl status 3
-                ctl judge train big
+                ctl call train big
                 ctl call gpu.open
                 ctl call gpu.open --seconds 30
                 ctl call gpu.open --seconds 0
@@ -1035,21 +1032,21 @@ fn ops() {
             $ sandboxctl ops: exit 0
               {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
             $ sandboxctl ops > /dev/full: exit 0
-            $ sandboxctl judge train payload: exit 0
-              {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl call train payload: exit 0
+              {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl submit submit ../home/payload --finalize: exit 0
               {"kind":"submit","state":"accepted","remaining_seconds":60}
             $ sandboxctl submit submit payload: exit 0
               {"kind":"submit","state":"stored","remaining_seconds":60}
-            $ sandboxctl judge train link: exit 0
-              {"kind":"judge","job":1,"remaining":{"calls":1,"seconds":null}}
+            $ sandboxctl call train link: exit 0
+              {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 1: exit 0
               {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 2: exit 2
-              {"kind":"status","job":2,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+              {"kind":"status","job":2,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 3: exit 1
-              {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
-            $ sandboxctl judge train big: exit 1
+              {"kind":"refused","message":"there is no job 3: name one a call returned"}
+            $ sandboxctl call train big: exit 1
               {"kind":"refused","message":"the payload is 2621441 bytes, more than the limit of 2621440: send at most 2621440"}
             $ sandboxctl call gpu.open: exit 0
               {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":60,"cumulative_seconds":null,"commands":3}}
@@ -1081,14 +1078,14 @@ fn ops() {
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
             owner: ops
-            owner: judge train: 2621440 bytes, intact: true
+            owner: call train: 2621440 bytes, intact: true
             owner: submit submit, finalize true: 2621440 bytes, intact: true
             owner: submit submit, finalize false: 2621440 bytes, intact: true
-            owner: judge train: 2621440 bytes, intact: true
+            owner: call train: 2621440 bytes, intact: true
             owner: status 1
             owner: status 2
             owner: status 3
-            owner: refused Judge { grant: Name("train") }, over 2621440 bytes
+            owner: refused Call { grant: Name("train") }, over 2621440 bytes
             owner: gpu.open None
             owner: gpu.open Some(30)
             owner: gpu.run 0: ["echo","-n","hi"], Some(5)
@@ -1105,6 +1102,10 @@ fn ops() {
 // be opened, as `sandboxd` is non-dumpable.
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the script and its snapshot"
+)]
 fn refused_calls() {
     check(
         "refused",
@@ -1123,14 +1124,15 @@ fn refused_calls() {
                 truncate -s {huge} huge
                 mkfifo fifo
                 ctl submit submit huge
-                ctl judge train missing
-                ctl judge train .
-                ctl judge train fifo
-                ctl judge train /proc/1/mem
-                ctl judge train ''
-                ctl judge Train huge
+                ctl call train missing
+                ctl call train .
+                ctl call train fifo
+                ctl call train /proc/1/mem
+                ctl call train ''
+                ctl call Train huge
                 ctl status soon
-                ctl call train huge
+                ctl call train
+                ctl call train --seconds 5 huge
                 ctl status 1
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
                 echo "a second sandboxd: exit $?: $second""#,
@@ -1157,22 +1159,24 @@ fn refused_calls() {
             Code(0)
             $ sandboxctl submit submit huge: exit 1
               sandboxctl: /pumpkin/home/huge holds more than 67108864 bytes: send at most that
-            $ sandboxctl judge train missing: exit 1
+            $ sandboxctl call train missing: exit 1
               sandboxctl: missing: No such file or directory (os error 2): name a file this user can reach
-            $ sandboxctl judge train .: exit 1
+            $ sandboxctl call train .: exit 1
               sandboxctl: /pumpkin/home is not a regular file: name one
-            $ sandboxctl judge train fifo: exit 1
+            $ sandboxctl call train fifo: exit 1
               sandboxctl: /pumpkin/home/fifo is not a regular file: name one
-            $ sandboxctl judge train /proc/1/mem: exit 1
+            $ sandboxctl call train /proc/1/mem: exit 1
               sandboxctl: /proc/1/mem: Permission denied (os error 13)
-            $ sandboxctl judge train : exit 1
+            $ sandboxctl call train : exit 1
               sandboxctl: the payload file's path is empty: name a file
-            $ sandboxctl judge Train huge: exit 1
+            $ sandboxctl call Train huge: exit 1
               sandboxctl: `Train` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             $ sandboxctl status soon: exit 1
-              sandboxctl: `soon` is not a job: name one by the number a judge call returned
-            $ sandboxctl call train huge: exit 1
-              sandboxctl: `train` names no session's op: give the session's name, as `ops` lists it, a dot and the op, as `<session>.open`
+              sandboxctl: `soon` is not a job: name one by the number a call returned
+            $ sandboxctl call train: exit 1
+              sandboxctl: `train` takes the file that holds the payload, and no flag: call it as `sandboxctl call train <file>`
+            $ sandboxctl call train --seconds 5 huge: exit 1
+              sandboxctl: `train` takes the file that holds the payload, and no flag: call it as `sandboxctl call train <file>`
             $ sandboxctl status 1: exit 0
               {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
@@ -1205,13 +1209,13 @@ fn turns() {
                 printf ledger > payload && cp payload swapped
                 $ctl status 2 > 2.out 2>&1 & second=$!
                 $ctl status 3 > 3.out 2>&1 & third=$!
-                $ctl judge train swapped > swapped.out 2>&1 & fourth=$!
+                $ctl call train swapped > swapped.out 2>&1 & fourth=$!
                 sent $second; sent $third; sent $fourth
                 ln -sf payload swapped
                 touch ready
                 wait $second; echo "status 2: exit $?: $(cat 2.out)"
                 wait $third; echo "status 3: exit $?: $(cat 3.out)"
-                wait $fourth; echo "judge train swapped: exit $?: $(cat swapped.out)"
+                wait $fourth; echo "call train swapped: exit $?: $(cat swapped.out)"
                 ninth=$($ctl status 9 2>&1); echo "status 9: exit $?: $ninth""#;
             // The owner holds the first op, and puts `in/held`, while the other callers arrive. In
             // the script, `sent` waits until a caller's `sandboxctl` sleeps, which it does only as
@@ -1245,10 +1249,10 @@ fn turns() {
             Code(0)
             the caller of status 1, which left with its op in flight: exit 143
             the caller of status 4, which left as it waited its turn: exit 143
-            status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"judge_timeout","message":"the judge ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
-            status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a judge call returned"}
-            judge train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
-            status 9: exit 1: {"kind":"refused","message":"there is no job 9: name one a judge call returned"}
+            status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
+            status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a call returned"}
+            call train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
+            status 9: exit 1: {"kind":"refused","message":"there is no job 9: name one a call returned"}
             owner: status 1
             owner: status 2
             owner: status 3
@@ -1486,9 +1490,10 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
             };
             ("ops".to_owned(), OpReply::Ops(ops))
         }
-        Op::Judge { grant, payload } => {
-            let asked = format!("judge {grant}: {}", intact(payload));
-            (asked, OpReply::Judge(JudgeReply { job: 1, remaining }))
+        Op::Call { function, payload } => {
+            let asked = format!("call {function}: {}", intact(payload));
+            let job = JobReply { job: 1, remaining };
+            (asked, OpReply::Call(CallReply::Job(job)))
         }
         Op::Submit {
             grant,
@@ -1592,13 +1597,13 @@ fn status(job: u64, remaining: Remaining) -> OpReply {
         }
         2 => {
             let failure = Failure {
-                code: FailureCode::JudgeTimeout,
-                message: "the judge ran past its timeout".to_owned(),
+                code: FailureCode::CallTimeout,
+                message: "the call ran past its timeout".to_owned(),
             };
             JobState::Errored { failure }
         }
         _ => {
-            let message = format!("there is no job {job}: name one a judge call returned");
+            let message = format!("there is no job {job}: name one a call returned");
             return OpReply::Refused { message };
         }
     };

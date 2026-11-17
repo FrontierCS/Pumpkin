@@ -371,7 +371,7 @@ impl Plan {
 
     fn workflow(&self, images: &[ir::Image]) -> Result<Workflow, Vec<Problem>> {
         let fields = &self.workflow.fields;
-        let ir = crate::ir::workflow(fields, images)?;
+        let ir = crate::ir::workflow(fields, images, &self.sources)?;
         Workflow::parse(&ir).map_err(|errors| {
             let faults = crate::ir::locate(fields, errors.as_slice());
             faults.into_iter().map(Problem::At).collect()
