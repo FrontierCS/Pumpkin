@@ -40,10 +40,10 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   punctuation, backticks, links), `# Panics` on a public function that can panic, no `TODO`,
   `FIXME`, `XXX` or code commented out, no line of a doc or comment past 100 columns but a table
   row or a single word, no link in `ARCHITECTURE.md` to code or to a document the
-  repository lacks, no image in a document but a figure in `docs/figures/` with alt text, no
-  figure that no document embeds, a `<title>` and a `<desc>` in each figure and no `<image>`,
-  `<script>` or `@font-face`, no name set as code in a figure that the workspace lacks, and the
-  figure of the crates as `cargo xtask figures` draws it
+  repository lacks, no image in a document, a Markdown image or an HTML `<img>`, but a figure in
+  `docs/figures/` with alt text, no figure that no document embeds, a `<title>` and a `<desc>` in
+  each figure and no `<image>`, `<script>` or `@font-face`, no name set as code in a figure that
+  the workspace lacks, and the figure of the crates as `cargo xtask figures` draws it
 - WRITE commit subjects in lowercase imperative, with bodies that explain what and why to a
   reader without other context
 - LIST schema changes in the pull request description
