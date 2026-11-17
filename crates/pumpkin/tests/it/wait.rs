@@ -162,6 +162,15 @@ fn waits() {
     );
 }
 
+// Writes run `id`'s `outcome.json` as its driver does, beside it then renamed over it: a `wait`
+// that follows the run reads the file once it exists, and would read a plain write in part.
+fn end_run(scratch: &Scratch, id: &str, outcome: &Value) {
+    let partial = format!("runs/{id}/.outcome.json.partial");
+    scratch.write(&partial, outcome);
+    let outcome = scratch.0.join(format!("runs/{id}/outcome.json"));
+    fs::rename(scratch.0.join(partial), outcome).unwrap();
+}
+
 #[test]
 fn follows() {
     let scratch = Scratch::new("follows");
@@ -178,7 +187,7 @@ fn follows() {
     stderr.read_line(&mut said).unwrap();
     // After `wait`'s line that it follows the run, which comes before it blocks.
     let outcome = returned(7.0);
-    scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
+    end_run(&scratch, id, &outcome);
     drop(driver);
     stderr.read_to_string(&mut said).unwrap();
     let mut output = child.wait_with_output().unwrap();
@@ -753,7 +762,7 @@ fn follows_milestones() {
         }
     }
     let outcome = returned(49.36);
-    scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
+    end_run(&scratch, id, &outcome);
     drop(driver);
     stderr.read_to_string(&mut said).unwrap();
     child.wait().unwrap();
