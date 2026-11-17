@@ -29,6 +29,7 @@ use self::notes::{
     BUILD_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
     LOCK_NOTES, LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
+use crate::ending::Printed;
 use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
@@ -69,8 +70,8 @@ Build a task as `pumpkin build` does, then start a run of its workflow, and prin
 the run's id once it has started.")]
     #[command(after_help = RUN_NOTES)]
     Run(Run),
-    #[command(about = "Wait until a run has ended, and print its outcome")]
-    #[command(long_about = "Wait until a run has ended, then print its outcome.json.")]
+    #[command(about = "Wait until a run has ended, and say how it ended")]
+    #[command(long_about = "Wait until a run has ended, then say how it ended.")]
     #[command(after_help = WAIT_NOTES)]
     Wait(Wait),
     #[command(about = "List the runs and their states")]
@@ -85,8 +86,7 @@ how long it ran, its task, and the values its result shows.")]
     Ls(Ls),
     #[command(about = "Stop a run, and remove what it left")]
     #[command(long_about = "\
-Stop a run, wait until it has ended, remove what it left, and print its
-outcome.json.")]
+Stop a run, wait until it has ended, remove what it left, and say how it ended.")]
     #[command(after_help = CANCEL_NOTES)]
     Cancel(Cancel),
     #[command(about = "Serve the runs' records to this machine's browser")]
@@ -309,6 +309,71 @@ impl FromArgMatches for TaskArgs {
     }
 }
 
+const OUTCOME: &str = "outcome";
+
+impl Args for Printed {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        let outcome = Arg::new(OUTCOME).long(OUTCOME).action(ArgAction::SetTrue);
+        command.arg(outcome.help(
+            "\
+Also print the run's outcome.json on the standard output once it has
+ended.",
+        ))
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        Self::augment_args(command)
+    }
+}
+
+impl FromArgMatches for Printed {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        Ok(if matches.get_flag(OUTCOME) {
+            Self::Outcome
+        } else {
+            Self::Nothing
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+const WAIT: &str = "wait";
+
+/// Whether `run` follows the run to its end (`Some`), and what it then prints.
+pub(crate) struct Waiting(pub(crate) Option<Printed>);
+
+impl Args for Waiting {
+    fn augment_args(command: clap::Command) -> clap::Command {
+        let wait = Arg::new(WAIT).long(WAIT).action(ArgAction::SetTrue).help(
+            "\
+Follow the run to its end, as `pumpkin wait` does, rather than print
+its id.",
+        );
+        let command = Printed::augment_args(command.arg(wait));
+        command.mut_arg(OUTCOME, |outcome| outcome.requires(WAIT))
+    }
+
+    fn augment_args_for_update(command: clap::Command) -> clap::Command {
+        Self::augment_args(command)
+    }
+}
+
+impl FromArgMatches for Waiting {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let printed = Printed::from_arg_matches(matches)?;
+        Ok(Self(matches.get_flag(WAIT).then_some(printed)))
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
 /// Parses a UTF-8 value, and refuses another with `it isn't UTF-8` followed by `why`, which
 /// starts with the punctuation that joins the two.
 fn utf8(why: &'static str) -> impl TypedValueParser<Value = String> {
@@ -355,13 +420,8 @@ instances boot with.
 Default: the one beside this pumpkin, where `cargo xtask install` puts
 both")]
     pub(crate) sandboxd: Option<String>,
-    #[arg(
-        long,
-        help = "\
-Follow the run to its end, as `pumpkin wait` does, and print its
-outcome.json instead of its id."
-    )]
-    pub(crate) wait: bool,
+    #[command(flatten)]
+    pub(crate) wait: Waiting,
 }
 
 impl Run {
@@ -401,6 +461,8 @@ pub(crate) struct Wait {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
+    #[command(flatten)]
+    pub(crate) printed: Printed,
 }
 
 /// What `pumpkin view` is asked for, as `pumpkin view --help` says.

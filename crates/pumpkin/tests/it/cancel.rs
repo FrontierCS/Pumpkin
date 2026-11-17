@@ -1,6 +1,6 @@
-//! `cancel`: it stops a live run, waits until it has ended, removes what it left, and prints its
-//! outcome; of a run that has ended, or is lost, it only removes what it left. The live runs
-//! reach a stand-in `docker` ([`StandIn`]), which holds each driver at `create` after the start.
+//! `cancel`: it stops a live run, waits until it has ended, removes what it left, and says how it
+//! ended; of a run that has ended, or is lost, it only removes what it left. The live runs reach a
+//! stand-in `docker` ([`StandIn`]), which holds each driver at `create` after the start.
 
 use std::io::{BufRead as _, BufReader};
 use std::process::Stdio;
@@ -9,7 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    Scratch, StandIn, Step, check, ended, invocation, ran, record, report, write_gone, write_record,
+    Scratch, StandIn, Step, check, ended, invocation, outcome_line, ran, record, report,
+    write_gone, write_record,
 };
 
 const LOST: &str = "20261108-120000-0b000001";
@@ -33,7 +34,7 @@ fn live(name: &str, force: &[&str]) -> String {
     let mut run = stand_in.run("stand-in/task.star", &[]);
     let output = run.output().unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let (id, _) = record(&stderr).unwrap();
+    let (id, dir) = record(&stderr).unwrap();
     stand_in.held("create");
     let mut cancel = scratch.pumpkin(&["cancel"]);
     cancel.args(force).args([id, "--runs", "runs"]);
@@ -48,7 +49,9 @@ fn live(name: &str, force: &[&str]) -> String {
     stderr.read_line(&mut said).unwrap();
     stand_in.release("create");
     let output = ended(child, stderr, said);
-    let text = report(invoked, &output, &scratch.0, false).replace(id, "<id>");
+    let reported = report(invoked, &output, &scratch.0, false);
+    let text = format!("{reported}\n{}", outcome_line(&scratch.0.join(dir)));
+    let text = text.replace(id, "<id>");
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
@@ -96,7 +99,7 @@ fn cancels() {
               sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
+            outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin cancel --force <id> --runs runs
             exit status: Some(0)
             pumpkin: killing the driver of run <id>, recorded in <scratch>/runs/<id>
@@ -107,18 +110,16 @@ fn cancels() {
               sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
+            outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ pumpkin cancel 20261108-120000-0b000001 --runs runs
             exit status: Some(0)
             pumpkin: run 20261108-120000-0b000001 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120000-0b000001 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120000-0b000001
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ pumpkin cancel 20261108-120100-0b000002 --runs runs
             exit status: Some(0)
             pumpkin: run 20261108-120100-0b000002 failed: r; its record is <scratch>/runs/20261108-120100-0b000002
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin cancel 0b0000 --runs runs
             exit status: Some(1)
             pumpkin: `0b0000` matches 3 runs: name one by more of its id
@@ -137,7 +138,6 @@ fn cancels() {
             pumpkin: run 20261108-120300-0c000004 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120300-0c000004 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120300-0c000004
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}"#]],
+            pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs"#]],
     );
 }

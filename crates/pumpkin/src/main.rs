@@ -162,7 +162,7 @@ fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
 }
 
 fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
-    let cli::Wait { run, runs } = flags;
+    let cli::Wait { run, runs, printed } = flags;
     if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
         && let Some(client) = config::client(None)?
     {
@@ -170,12 +170,13 @@ fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
         if let Ok(record) = Record::find(Path::new(&default_runs()?), prefix)
             && let Some(ending) = record.ending()?
         {
-            return end(&record, &ending, None, &controller::here(&record, None)?);
+            let args = controller::here(&record, None)?;
+            return end(&record, &ending, printed, None, &args);
         }
-        return controller::wait(&client, prefix);
+        return controller::wait(&client, prefix, printed);
     }
     let (record, named) = found(run, runs)?;
-    follow(&record, "wait", named.as_deref())
+    follow(&record, "wait", named.as_deref(), printed)
 }
 
 fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
@@ -485,12 +486,6 @@ fn engine(context: ContextName, reader: Reader) -> Result<Engine, String> {
         ));
     }
     Ok(engine)
-}
-
-fn print_outcome(dir: &Path) -> Result<(), String> {
-    let recorded = dir.join("outcome.json");
-    let printed = fs::read(&recorded).context(recorded.display())?;
-    print(&printed).context("printing the outcome failed")
 }
 
 fn print(bytes: &[u8]) -> io::Result<()> {

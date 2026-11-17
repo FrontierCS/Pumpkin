@@ -822,10 +822,6 @@ fn cancels_a_run() {
             GET /api/runs/<id>/cancelling once ended: exit 0
             pumpkin: stopping run <id>, recorded in <scratch>/runs/<id>: it ends once its sandboxes are deleted
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            {
-              "reason": "its driver ended without an outcome",
-              "state": "failed"
-            }
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
 
@@ -833,10 +829,6 @@ fn cancels_a_run() {
             POST /api/runs/<id>/cancel from the page
             HTTP/1.1 202 Accepted
             GET /api/runs/<id>/cancelling once ended: exit 0
-            {
-              "reason": "its driver ended without an outcome",
-              "state": "failed"
-            }
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
 

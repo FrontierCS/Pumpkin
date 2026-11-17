@@ -167,7 +167,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
         cli::JobCommand::Run(run) => {
             let run = cli::Run {
                 config: Some(config),
-                wait: false,
+                wait: cli::Waiting(None),
                 ..run
             };
             // Only one who follows the run reads the job's log.
