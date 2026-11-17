@@ -412,8 +412,12 @@ export function usd(usd) {
   return "$" + usd.toFixed(2 - Math.floor(Math.log10(usd)));
 }
 
-/** @param {number} count @param {string} noun */
-export const plural = (count, noun) => count.toLocaleString("en-US") + " " + noun + (count === 1 ? "" : "s");
+/**
+ * @param {number} count
+ * @param {string} noun
+ * @param {string} [nouns] its plural, if not `noun` with an `s`
+ */
+export const plural = (count, noun, nouns = noun + "s") => count.toLocaleString("en-US") + " " + (count === 1 ? noun : nouns);
 
 // The state a run's mark takes its colour from: a finish without a result is a warning, not an ok.
 /** @param {{ live: boolean, state: string, has_result: boolean }} run */

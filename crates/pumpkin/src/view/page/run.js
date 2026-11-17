@@ -3,11 +3,12 @@
 //
 // The log is read from its start in windows (`/log?at=<byte>`) up to the byte that the run's
 // reply was read to, then, while the run is live, polled from where the last read ended
-// (`/since?log=<byte>`): a reply of only `end` and `live` changes nothing; one with records
-// replaces the run and appends them. A refusal of the byte, or a log shorter than it, means the
-// log started over, and the run is read again from its start. In the static mode, where no
-// file answers `/since`, the run is read again at each poll, and the log's last window is read
-// again from the byte it starts at, its records past the last read taken.
+// (`/since?log=<byte>`): a reply with the run replaces it, and appends the records it holds; one
+// of only `end` and `live` is of a run that ended with no record past those read. A refusal of
+// the byte, or a log shorter than it, means the log started over, and the run is read again from
+// its start. In the static mode, where no file answers `/since`, the run is read again at each
+// poll, and the log's last window is read again from the byte it starts at, its records past the
+// last read taken.
 
 import {
   POLL_MS,
@@ -264,10 +265,11 @@ export async function runView(id) {
       for (const item of folded(shown, new Set())) if ("fold" in item && item.fold.includes(holder)) state.open.add(item.fold[0].byte);
     }
     state.shown = shown;
+    const lit = litOf(data, { lane, role, needle }, holder, shown);
+    // Before the list, whose pane a lane added shrinks, so that a list kept to its end lands there.
+    drawLanes(lanes, data, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), (l) => inspectLane(l, inspector, nearest, data));
     const items = folded(shown, state.open);
     list.set(items, holder ? items.indexOf(holder) : -1);
-    const lit = litOf(data, { lane, role, needle }, holder, shown);
-    drawLanes(lanes, data, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), (l) => inspectLane(l, inspector, nearest, data));
     drawTalk(talk, data, lit, role, (name) => {
       setQuery({ role: name === role ? null : name, lane: null, sel: null });
       redraw();
@@ -278,11 +280,16 @@ export async function runView(id) {
     state.selected = selected;
   };
 
-  // Draws the run: its verdict, facts, the command that runs it again, its cancel.
-  const drawRun = () => {
+  // Draws the run's verdict and facts, which change with its clock.
+  const drawHeading = () => {
     const data = /** @type {Run} */ (state.data);
     fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.verdict));
     drawFacts(facts, data);
+  };
+  // Draws the run: its heading, the command that runs it again, its cancel.
+  const drawRun = () => {
+    const data = /** @type {Run} */ (state.data);
+    drawHeading();
     if (STATIC) fill(again);
     else drawAgain(again, data);
     drawTraces(traces, data);
@@ -472,7 +479,6 @@ export async function runView(id) {
     if (!current()) return null;
     if (since.end < state.cursor) return again0(), 0;
     if (!since.run) {
-      if (since.live) return POLL_MS;
       // It ended with no record after the last: its ending is in the run alone.
       state.data = await get(base);
       if (!current()) return null;
@@ -481,7 +487,13 @@ export async function runView(id) {
       return null;
     }
     state.data = since.run;
-    take(since.records || [], since.next ?? since.end);
+    if (!since.records) {
+      // The heading alone is drawn: drawn again, the log's rows, the lanes and the buttons would
+      // lose a reader's selection, focus, hover or press in them.
+      drawHeading();
+      return POLL_MS;
+    }
+    take(since.records, since.next ?? since.end);
     drawRun();
     redraw();
     if (state.cursor < since.end) return 0;

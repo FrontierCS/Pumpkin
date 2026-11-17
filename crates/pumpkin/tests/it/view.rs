@@ -416,10 +416,10 @@ fn serves_runs() {
             {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}
             GET /api/runs/run-1 []
             HTTP/1.1 404 Not Found
-            {"error":"runs/run-1 is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `run-1`: name the id of one that its list shows"}
             GET /api/runs/20261110-140000-0000000f []
             HTTP/1.1 404 Not Found
-            {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `20261110-140000-0000000f`: name the id of one that its list shows"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
             {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9222: expected 0, or a byte that an answer gave"}"#]],
@@ -676,7 +676,12 @@ fn follows_a_live_run() {
         answered[0],
         answered[answered.len() - 1]
     ));
-    said.push(format!("then: {}\n{}", nothing.0, nothing.1));
+    let quiet: Value = serde_json::from_str(&nothing.1).unwrap();
+    let clock = quiet["run"]["times"]["now"].is_f64();
+    said.push(format!(
+        "then: {}, end {}, live {}, the run's end {} and its clock on: {clock}",
+        nothing.0, quiet["end"], quiet["live"], quiet["run"]["end"],
+    ));
     said.push(format!("once ended: {ended}"));
     check(
         &scratch,
@@ -706,8 +711,7 @@ fn follows_a_live_run() {
             took: {"count":1500,"median":0.0}
 
             the agent's lane: answers {"count":1500,"failed":0}, 500 times of them, the first 1.0 and the last 1497.0
-            then: HTTP/1.1 200 OK
-            {"end":431109,"live":true}
+            then: HTTP/1.1 200 OK, end 431109, live true, the run's end 431109 and its clock on: true
             once ended: {"end":431109,"live":false}"#]],
     );
 }
@@ -813,7 +817,7 @@ fn cancels_a_run() {
             {"error":"the page started no cancel of run <id>: cancel it from the page, by POST /api/runs/<id>/cancel"}
             POST /api/runs/20261110-170000-00000012/cancel [("Origin", "<page>")]
             HTTP/1.1 404 Not Found
-            {"error":"runs/20261110-170000-00000012 is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `20261110-170000-00000012`: name the id of one that its list shows"}
             POST /api/runs/<id>/cancel from the page
             HTTP/1.1 202 Accepted
             POST /api/runs/<id>/cancel from the page while that goes on
@@ -1532,6 +1536,27 @@ fn traces_a_caller() {
     event.insert("upstream_status".to_owned(), Value::Null);
     event.insert("model".to_owned(), json!("glm-5.3-flash"));
     log.push(abandoned);
+    // Barred before it went upstream, which keeps its body whole and starts no request.
+    let body =
+        json!({ "model": "glm-5.3-flash", "messages": [{ "role": "user", "content": "and?" }] });
+    let body = body.to_string();
+    let refusal = "{\"error\":{\"message\":\"the model budget is exhausted\"}}";
+    fs::write(dir.join("model/10.request"), &body).unwrap();
+    fs::write(dir.join("model/10.response"), refusal).unwrap();
+    let kept = json!({
+        "request": { "path": "model/10.request", "bytes": body.len(), "body_bytes": body.len() },
+        "response": { "path": "model/10.response", "bytes": refusal.len() },
+    });
+    let mut barred = answered(18, "job-0", 10, 0, kept, Some("chat"));
+    let event = barred["event"].as_object_mut().unwrap();
+    for field in ["usage", "model", "first_byte_ns", "first_token_ns"] {
+        event.remove(field);
+    }
+    let answer = json!({ "kind": "barred", "bar": "budget", "status": 400,
+        "message": "the model budget is exhausted" });
+    event.insert("answer".to_owned(), answer);
+    event.insert("upstream_status".to_owned(), Value::Null);
+    log.push(barred);
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
         &scratch,
@@ -1657,7 +1682,7 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="cut" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
             caller: "agent"
-            end: 5863
+            end: 6248
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -1718,12 +1743,13 @@ fn traces_a_caller() {
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="abandoned" answers=0 back_bytes=49 calls=[] differs=[] end_ns="17000000000" items=4 kept_bytes=391 model_ns=1000000001 parent=6 repeat_of=8 request=9 sent_bytes=100 start_ns="15999999999" thread=6 tools=0 turn=6 whole=true
+            added_entries=1 answer="barred" answers=0 api="chat" back_bytes=53 calls=[] end_ns="18000000000" kept_bytes=71 notes=["the record kept its body whole, so its conversation is compared with no other"] request=10 sent_bytes=71 thread=10 turn=10 upstream="zai" whole=true
             caller: "job-0"
-            end: 5863
+            end: 6248
             live: false
             log_epoch: 0
-            thread_spans: {"span_ns":[1000000001],"thread":[6]}
-            threads: 1
+            thread_spans: {"span_ns":[1000000001,null],"thread":[6,10]}
+            threads: 2
             tool_lists: [{"digest":null,"names":["grep"]}]
 
             its entries:
@@ -1746,15 +1772,17 @@ fn traces_a_caller() {
             cache_hit=0.07142857142857142 cached=50 calls={"grep":1} input=700 outcome="ok" output=10 repeat_of=6 request=7 status=200 thread=6 turn=6
             cache_hit=0.0625 cached=50 calls={} input=800 outcome="ok" output=10 request=8 status=200 thread=6 turn=6
             calls={} model_ns=1000000001 outcome="refused" queue_ns=2999999999 repeat_of=8 request=9 thread=6 turn=6
+            calls={} outcome="refused" request=10 thread=10 turn=10
             by: "step"
             caller: "job-0"
-            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":4,"cached":150,"cached_unknown":1,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":4,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":1,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":4,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":4,"model_ns":1000000001,"model_ns_unknown":3,"output":30,"output_unknown":1,"queue_ns":2999999999,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":4,"refusals":1,"repeats":2,"retries":0,"span_ns":1000000001,"steps":4,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":4}
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":5,"cached":150,"cached_unknown":2,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":5,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":2,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":5,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":5,"model_ns":1000000001,"model_ns_unknown":4,"output":30,"output_unknown":2,"queue_ns":2999999999,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":5,"refusals":2,"repeats":2,"retries":0,"span_ns":2000000001,"steps":5,"threads":2,"tok_s":null,"turns":2,"usd":null,"usd_unknown":5}
 
             by thread:
             cache_hit=0.07142857142857142 cache_write_unknown=4 cached=150 cached_unknown=1 calls={"grep":2} decode_ns_unknown=4 failures=0 first_request=6 in_flight=0 input=2100 input_unknown=1 median_to_first_byte_ns_unknown=4 median_to_first_token_ns_unknown=4 model_ns=1000000001 model_ns_unknown=3 output=30 output_unknown=1 queue_ns=2999999999 queue_ns_unknown=3 reasoning_unknown=4 refusals=1 repeats=2 retries=0 span_ns=1000000001 steps=4 thread=6 usd_unknown=4
+            cache_write_unknown=1 cached_unknown=1 calls={} decode_ns_unknown=1 failures=0 first_request=10 in_flight=0 input_unknown=1 median_to_first_byte_ns_unknown=1 median_to_first_token_ns_unknown=1 model_ns_unknown=1 output_unknown=1 queue_ns_unknown=1 reasoning_unknown=1 refusals=1 repeats=0 retries=0 steps=1 thread=10 usd_unknown=1
             by: "thread"
             caller: "job-0"
-            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":4,"cached":150,"cached_unknown":1,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":4,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":1,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":4,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":4,"model_ns":1000000001,"model_ns_unknown":3,"output":30,"output_unknown":1,"queue_ns":2999999999,"queue_ns_unknown":3,"reasoning":null,"reasoning_unknown":4,"refusals":1,"repeats":2,"retries":0,"span_ns":1000000001,"steps":4,"threads":1,"tok_s":null,"turns":1,"usd":null,"usd_unknown":4}
+            totals: {"cache_hit":0.07142857142857142,"cache_write":null,"cache_write_unknown":5,"cached":150,"cached_unknown":2,"calls":{"grep":2},"decode_ns":null,"decode_ns_unknown":5,"failures":0,"first_request":6,"in_flight":0,"input":2100,"input_unknown":2,"median_to_first_byte_ns":null,"median_to_first_byte_ns_unknown":5,"median_to_first_token_ns":null,"median_to_first_token_ns_unknown":5,"model_ns":1000000001,"model_ns_unknown":4,"output":30,"output_unknown":2,"queue_ns":2999999999,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":5,"refusals":2,"repeats":2,"retries":0,"span_ns":2000000001,"steps":5,"threads":2,"tok_s":null,"turns":2,"usd":null,"usd_unknown":5}
 
             exchange 1:
             answer: {"kind":"forwarded"}

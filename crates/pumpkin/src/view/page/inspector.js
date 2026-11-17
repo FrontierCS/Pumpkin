@@ -16,10 +16,12 @@ import { Steps } from "./steps.js";
  * @property {string | null} request_id
  * @property {string | null} api
  * @property {string | null} upstream
+ * @property {Answer | null} answer null in flight
  * @property {Record<string, any>} usage
  * @property {{ request?: Record<string, any>, response?: Record<string, any> }} kept
  * @property {Record<string, any>} config
  * @property {StepStats | null} stats the step's row of `stats`
+ * @typedef {{ kind: "forwarded" | "cut" | "abandoned" } | { kind: "barred", bar: "rules" | "ended" | "budget", status: number, message: string } | { kind: "refused", status: number, message: string }} Answer
  * @typedef {object} Context
  * @property {Steps} steps
  * @property {string} base the run's address in the server's API
@@ -35,6 +37,8 @@ import { Steps } from "./steps.js";
  * @typedef {{ k: "none" } | { k: "thread", root: number } | { k: "step", s: number } | { k: "entry", e: Entry }} Selected
  */
 
+// What barred a request, by the bar that the route names.
+const BARS = { rules: "the route's rules", ended: "the route's end", budget: "a spent model budget" };
 // How much of a text the inspector shows before "show all", as the server cuts strings.
 const SHOWN_BYTES = 8192;
 // How much of a kept request or response the inspector shows at once.
@@ -236,7 +240,17 @@ function inspectStep(node, s, ctx) {
   const measured = h("div", {}, h("p", { class: "dim" }, "Reading the exchange…"));
   exchange(ctx.base, n).then(
     (ex) => {
-      fill(held, facts([["Request ID", ex.request_id ?? "-"], ["API", ex.api ?? "-"], ["Upstream", ex.upstream ?? "-"]]));
+      const barred = ex.answer?.kind === "barred" ? ex.answer : null;
+      fill(
+        held,
+        facts([
+          ["Barred by", barred ? BARS[barred.bar] : null],
+          ["The route said", barred ? barred.message : null],
+          ["Request ID", ex.request_id ?? "-"],
+          ["API", ex.api ?? "-"],
+          ["Upstream", ex.upstream ?? "-"],
+        ]),
+      );
       if (ex.stats) {
         const d = steps.measured(s, ex.stats);
         fill(
@@ -263,6 +277,11 @@ function inspectStep(node, s, ctx) {
   );
   const parent = c.parent[s];
   const again = steps.again(s);
+  const items = () => {
+    const added = c.added_entries[s];
+    if (c.items[s] !== null) return c.items[s] + " sent, " + (c.added[s] ?? "-") + " added";
+    return added === null ? "-" : plural(added, "entry", "entries") + " added, no count of the items it sent";
+  };
   const link = (/** @type {number} */ to, /** @type {string} */ label) => h("button", { class: "mono", title: "Select request " + to, onclick: () => ctx.go(String(to)) }, label);
   const summary = () => [
     facts([
@@ -275,7 +294,7 @@ function inspectStep(node, s, ctx) {
       ["Again", again],
       ["Differs", c.differs[s] && c.differs[s]?.length ? h("button", { title: "Show how, in the Diff tab", onclick: () => ctx.setTab("Diff") }, "Its " + (c.differs[s] || []).join(" and ") + " from its parent's") : null],
       ["Calls", steps.calls(s) || "-"],
-      ["Items", c.items[s] === null ? "-" : c.items[s] + " sent, " + (c.added[s] ?? "-") + " added"],
+      ["Items", items()],
       ["Notes", c.notes[s] ? (c.notes[s] || []).join("; ") : null],
     ]),
     held,
