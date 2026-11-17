@@ -469,13 +469,13 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"completed","returned":{"metrics":{"solved":3},"raw_score":3},"remaining":{"calls":99,"seconds":11993}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"remaining":{"calls":98,"seconds":11990}}"#,
+                r#"{"kind":"status","job":2,"state":"completed","returned":{"failure":"wrong answer","raw_score":null},"model_requests_over_budget":1,"remaining":{"calls":98,"seconds":11990}}"#,
             ),
             Reply(
                 r#"{"kind":"status","job":3,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":97,"seconds":0}}"#,
             ),
             Reply(
-                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":96,"seconds":0}}"#,
+                r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"model_requests_over_budget":3,"remaining":{"calls":96,"seconds":0}}"#,
             ),
             Reply(r#"{"kind":"call","returned":{"state":"stored"},"remaining_seconds":120}"#),
             Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
@@ -507,6 +507,9 @@ fn op_replies() {
                 r#"{"kind":"status","job":1,"state":"running","returned":{},"remaining":{"calls":null,"seconds":null}}"#,
             ),
             Reply(
+                r#"{"kind":"status","job":1,"state":"running","model_requests_over_budget":1,"remaining":{"calls":null,"seconds":null}}"#,
+            ),
+            Reply(
                 r#"{"kind":"status","job":1,"state":"completed","remaining":{"calls":null,"seconds":null}}"#,
             ),
             Reply(
@@ -518,10 +521,10 @@ fn op_replies() {
             Call(Job(JobReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } }))
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
-            Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}) }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
-            Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
-            Status(StatusReply { job: 3, state: Errored { failure: Failure { code: CallTimeout, message: "the call ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
-            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: CallError, message: "the call's body failed: the run's record says why" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
+            Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}), model_requests_over_budget: None }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
+            Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}), model_requests_over_budget: Some(1) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
+            Status(StatusReply { job: 3, state: Errored { failure: Failure { code: CallTimeout, message: "the call ran past its timeout" }, model_requests_over_budget: None }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
+            Status(StatusReply { job: 4, state: Errored { failure: Failure { code: CallError, message: "the call's body failed: the run's record says why" }, model_requests_over_budget: Some(3) }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
             Call(Now(NowReply { returned: Returned({"state": String("stored")}), remaining_seconds: 120 }))
             Refused { message: "`train` has no calls left: it allows 100" }
             Lease(LeaseReply { lease: 0, remaining: LeaseRemaining { instances: 1, instance_seconds: 900, cumulative_seconds: Some(1200), commands: None } })
@@ -533,6 +536,7 @@ fn op_replies() {
             LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 43, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 2, end: Some(Failed("putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist")) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 896, cumulative_seconds: Some(1196), commands: Some(29) } })
             LeaseStatus(LeaseStatusReply { lease: 2, state: Failed, elapsed_seconds: 61, busy_seconds: 0, idle_seconds: 0, failure: Some("the runner's sandbox didn't start: ResourceExhaustedError"), last: None, remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: None, commands: None } })
             a job that hasn't ended has no result: give it neither `returned` nor `failure`
+            a job that hasn't ended has no count of model requests over budget yet: give it no `model_requests_over_budget`
             a completed job has a result: give it `returned`, and no `failure`
             an errored job has no result: give it `failure`, and no `returned`"#]],
     );

@@ -22,7 +22,7 @@ mod upstream;
 mod usage;
 
 pub use closure::{Headers, MAX_DROPPED_HEADERS, Route};
-pub use upstream::{Admission, Answer, Key, Serving, Upstream, UpstreamUrl, serve};
+pub use upstream::{Admission, Answer, Bar, Key, Serving, Upstream, UpstreamUrl, serve};
 
 /// Where [`serve`] keeps a model exchange as it passes, for the run's record.
 pub trait Keep {

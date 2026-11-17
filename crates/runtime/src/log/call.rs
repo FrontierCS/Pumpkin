@@ -1,5 +1,6 @@
 //! A run's calls, as its log tells them.
 
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use schema::ir::Name;
@@ -24,8 +25,9 @@ pub struct CallSpan {
     pub stopped: bool,
     /// Whether it ran past its timeout.
     pub timed_out: bool,
-    /// How the call ended, collected or failed, at its sandbox's `gone`.
-    pub end: Option<CallEnd>,
+    /// How the call ended, collected or failed, at its sandbox's `gone`, with how many of its
+    /// model requests a spent model budget barred, as its end said: none if it barred none.
+    pub end: Option<(CallEnd, Option<NonZeroU64>)>,
     /// Its own model requests, which the run's (`Progress::model`) count too.
     pub model: ModelUse,
 }
@@ -52,8 +54,13 @@ impl CallSpan {
         }
     }
 
-    pub(super) fn end(&mut self, at: Duration, end: CallEnd) {
-        self.end = Some(end);
+    pub(super) fn end(
+        &mut self,
+        at: Duration,
+        end: CallEnd,
+        model_requests_over_budget: Option<NonZeroU64>,
+    ) {
+        self.end = Some((end, model_requests_over_budget));
         self.sandbox.gone = Some(at);
     }
 }

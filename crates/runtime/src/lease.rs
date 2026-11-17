@@ -27,7 +27,7 @@ use schema::sandbox::{
 use schema::workflow::Runner;
 use stdx::{Context, Deadline};
 
-use super::child::{Child, Message};
+use super::child::{Child, End, Message};
 use super::host::deadline;
 use super::sandbox::{ENTRIES, collect};
 use super::{Clock, Host, Inbox};
@@ -78,7 +78,9 @@ pub(super) struct Leased<'r> {
 }
 
 pub(super) fn run<H: Host>(leased: &Leased<'_>, child: &mut Child<'_, H, Order>) {
-    super::child::run(child, None, |child, session| drive(leased, child, session));
+    super::child::run(child, None, |child, session| {
+        End::Event(drive(leased, child, session))
+    });
 }
 
 /// Runs the commands the core orders in `child`'s sandbox, whose session is `session`, until the

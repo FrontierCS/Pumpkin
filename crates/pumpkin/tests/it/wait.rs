@@ -158,6 +158,55 @@ fn waits() {
     );
 }
 
+// `whole_log()` with the model requests of job 2, a stopped call of `train`, that spend the $0.10
+// of `over_budget_task()`'s budget at $0.45, and then one that the budget bars.
+fn over_budget() -> Vec<Value> {
+    let mut log = whole_log();
+    let started = |request: u64| json!({ "kind": "model_request_started", "caller": "job-2", "request": request });
+    let spent = json!({
+        "kind": "model_answered", "caller": "job-2", "request": 4, "model": "model-a",
+        "api": "responses", "answer": { "kind": "forwarded" }, "upstream_status": 200,
+        "usage": { "input_tokens": 1000, "output_tokens": 100 },
+    });
+    let message = "the model budget of the role's entry for `model-a`, $0.10 at the configured \
+                   prices, is exhausted: make no more requests for its models";
+    let barred = json!({
+        "kind": "model_answered", "caller": "job-2", "request": 5, "api": "responses",
+        "answer": { "kind": "barred", "bar": "budget", "status": 400, "message": message },
+        "upstream_status": null,
+    });
+    let call_started = json!({ "kind": "call_started", "job": 2 });
+    let after = 1
+        + (log.iter())
+            .position(|record| record["event"] == call_started)
+            .unwrap();
+    log.splice(
+        after..after,
+        [
+            logged(312, started(4), json!([])),
+            logged(314, spent, json!([])),
+            logged(315, started(5), json!([])),
+            logged(316, barred, json!([])),
+        ],
+    );
+    for record in &mut log {
+        let event = &mut record["event"];
+        if event["kind"] == "call_failed" && event["job"] == 2 {
+            event["model_requests_over_budget"] = json!(1);
+        }
+    }
+    log
+}
+
+// `lease_task()` whose trainer has a model route for `model-a` alone, with a budget of $0.10.
+fn over_budget_task() -> Value {
+    let mut task = lease_task();
+    task["roles"][1]["runtime"]["target"]["egress"] = json!({ "model": [
+        { "api": "responses", "models": ["model-a"], "budget": { "microusd": 100_000 } },
+    ] });
+    task
+}
+
 // Writes run `id`'s `outcome.json` as its driver does, beside it then renamed over it: a `wait`
 // that follows the run reads the file once it exists, and would read a plain write in part.
 fn end_run(scratch: &Scratch, id: &str, outcome: &Value) {
@@ -508,7 +557,8 @@ fn states() {
 )]
 fn summarizes() {
     let scratch = Scratch::new("summarizes");
-    // A run that went the whole way, priced but for its box's class, whose train call was stopped.
+    // A run that went the whole way, priced but for its box's class, whose train call was stopped,
+    // with model requests over budget.
     let whole = "20261110-100000-0000000a";
     let outcome = returned(49.36);
     let priced = lease_places(Prices::Both);
@@ -516,12 +566,12 @@ fn summarizes() {
         &scratch,
         whole,
         asked(whole, 30),
-        &whole_log(),
+        &over_budget(),
         Some(outcome),
         &priced,
     );
     // With a model budget for the agent, spent.
-    let mut budgeted = lease_task();
+    let mut budgeted = over_budget_task();
     budgeted["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] =
         json!({ "microusd": 500_000 });
     scratch.write(&format!("runs/{whole}/ir.json"), &budgeted);
@@ -687,15 +737,17 @@ fn summarizes() {
                  2:00 gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
                  2:00 cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended
                  3:20 train job 1 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
-                 5:00 train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)
+                 5:00 train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped); 1 model request barred by trainer's model budget
+                        model: 2 requests, answered 1 200, 1 barred; tokens 1000 in, 100 out, as 1 response reported them; $0.45 at the models' prices; of 1 good answer, by the median, 2.00s to the end
                  6:40 train job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)
                  8:20 gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
                 16:46 final call job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
                         model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
-              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; $0.66 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              model: 6 requests, answered 5 200, 1 barred; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 4500 in (2600 cached, 150 written to the cache), 450 out (40 reasoning), as 4 responses reported them; $1.11 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 4 good answers, by the median, 1.38s to the first token (of 2) and 3.50s to the end
               budget solver (model-a, model-b): at least $0.66 of $0.50, exhausted
+              budget trainer (model-a): $0.45 of $0.10, exhausted
               sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
-              cost: $1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
+              cost: $1.55, $1.11 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
             pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261110-100000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-110000-0000000b
@@ -724,17 +776,19 @@ fn summarizes() {
 // `wait` of a live run says each milestone its log records, and once the part that doesn't read;
 // the test ends the run once it has said the last, so `wait` reads the log again a poll later.
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
 fn follows_milestones() {
     let scratch = Scratch::new("follows-milestones");
     let id = "20261110-100000-0000000a";
     let priced = lease_places(Prices::Both);
-    let mut log = whole_log();
+    let mut log = over_budget();
     log.push(logged(
         1,
         json!({ "kind": "tick" }),
         json!([{ "kind": "close_lease" }]),
     ));
     let dir = write_run(&scratch, id, asked(id, 30), &log, None, &priced);
+    scratch.write(&format!("runs/{id}/ir.json"), &over_budget_task());
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
     let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
@@ -765,7 +819,7 @@ fn follows_milestones() {
         &[],
         &expect![[r#"
             $ pumpkin wait 20261110-100000-0000000a --runs runs
-            pumpkin: run 20261110-100000-0000000a: 1 part of its log can't be read by this pumpkin, the first at line 60, its action 1: missing field `lease`
+            pumpkin: run 20261110-100000-0000000a: 1 part of its log can't be read by this pumpkin, the first at line 64, its action 1: missing field `lease`
             pumpkin:    0:05 the agent started on aws/judge
             pumpkin:    0:40 train job 0 asked on modal/a100_80
             pumpkin:    0:46 train job 0 started with unknown GPUs
@@ -782,7 +836,7 @@ fn follows_milestones() {
             pumpkin:    4:20 train job 1 ended: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports
             pumpkin:    5:00 train job 2 asked on modal/a100_80
             pumpkin:    5:10 train job 2 started with NVIDIA A100-SXM4-80GB
-            pumpkin:    5:30 train job 2 ended: failed: the call was stopped
+            pumpkin:    5:30 train job 2 ended: failed: the call was stopped; 1 model request barred by trainer's model budget
             pumpkin:    6:40 train job 3 asked on modal/a100_80
             pumpkin:    6:45 train job 3 started with unknown GPUs
             pumpkin:    6:55 train job 3 ended: a result
@@ -794,7 +848,7 @@ fn follows_milestones() {
             pumpkin:   16:46 final call job 4 asked on modal/a100_80
             pumpkin:   16:50 final call job 4 started with NVIDIA A100-SXM4-80GB
             pumpkin:   18:20 final call job 4 ended: score=49.36 metrics={"solved":3}
-              1 part of its log can't be read by this pumpkin, the first at line 60, its action 1: missing field `lease`"#]],
+              1 part of its log can't be read by this pumpkin, the first at line 64, its action 1: missing field `lease`"#]],
     );
 }
 

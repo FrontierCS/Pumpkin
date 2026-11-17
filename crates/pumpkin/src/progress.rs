@@ -22,7 +22,7 @@ mod child;
 pub(crate) mod cost;
 mod model;
 
-use child::{STOPPED, call_name, command, exited, lease_end, lease_name};
+use child::{STOPPED, call_name, command, exited, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
@@ -880,11 +880,15 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
         }
         if let Some(at) = call.sandbox.gone {
             let ended = match &call.end {
-                Some(CallEnd::Result(values)) => result(values),
-                Some(CallEnd::Failed(reason)) => format!("failed: {}", crate::escaped(reason)),
+                Some((CallEnd::Result(values), _)) => result(values),
+                Some((CallEnd::Failed(reason), _)) => format!("failed: {}", crate::escaped(reason)),
                 None => STOPPED.to_owned(),
             };
-            milestones.push((at, format!("{} ended: {ended}", call_name(call))));
+            let over_budget = over_budget(call);
+            milestones.push((
+                at,
+                format!("{} ended: {ended}{over_budget}", call_name(call)),
+            ));
         }
     }
     // By time, stably, so that a call asked and ended at once keeps its order.

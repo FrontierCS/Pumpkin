@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use decision::{Event, JobId, Request};
+use decision::{CallResult, Event, JobId, Request};
 use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
@@ -64,6 +64,13 @@ pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a child's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
+    /// Job `job`'s call has ended, at the time `at` the thread observed it, its target gone or
+    /// never created: its body returned, or the call failed for the reason given.
+    CallEnded {
+        at: Duration,
+        job: JobId,
+        end: Result<CallResult, String>,
+    },
     /// An op that job `job`'s sandbox made, at the time `at` the thread took it, which the loop
     /// numbers, and whose reply it sends back as an order, with the sandbox's `trees`, which a
     /// transfer the op asks for moves.
@@ -84,15 +91,42 @@ pub(super) enum Report {
     Undeleted(String),
 }
 
+/// How a child ended, which its last report says.
+pub(super) enum End {
+    /// The event of its end: a lease's, or the agent's failure.
+    Event(Event),
+    /// A call's end: what its body returned, or why the call failed.
+    Call(JobId, Result<CallResult, String>),
+}
+
+impl End {
+    /// The end of `which`'s child, failed for `reason`.
+    pub(super) fn failed(which: Which, reason: String) -> Self {
+        match which {
+            Which::Agent => Self::Event(Event::AgentFailed { reason }),
+            Which::Call(job, _) => Self::Call(job, Err(reason)),
+            Which::Lease(lease, ..) => Self::Event(Event::LeaseFailed { lease, reason }),
+        }
+    }
+
+    /// The report of the end at `at`, a time since the run started.
+    pub(super) fn report(self, at: Duration) -> Report {
+        match self {
+            Self::Event(event) => Report::Event(at, event),
+            Self::Call(job, end) => Report::CallEnded { at, job, end },
+        }
+    }
+}
+
 /// Runs `child` to its end, reporting as it goes: starts its sandbox, whose session takes ops
-/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose event is
+/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose end is
 /// the child's last report once the sandbox is deleted. A child whose start is due by a time that
 /// has passed fails at once, with nothing created, as one whose sandbox doesn't start does
-/// ([`Which::failed`]).
+/// ([`End::failed`]).
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session) -> Event,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
@@ -102,7 +136,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     if child.clock.now() >= child.deadlines.startup {
         let reason =
             format!("{noun} sandbox wasn't created: its start was due by a time that had passed");
-        return child.event(which.failed(reason));
+        return child.end(End::failed(which, reason));
     }
     let by = deadline(&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
@@ -110,7 +144,8 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
         Err(error) => {
-            return child.event(which.failed(format!("{noun} sandbox didn't start: {error}")));
+            let reason = format!("{noun} sandbox didn't start: {error}");
+            return child.end(End::failed(which, reason));
         }
     };
     let last = drive(child, &mut sandbox.session);
@@ -119,7 +154,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
         let _ = child.reports.send(Input::Logged(entry));
     }
     match deleted {
-        Ok(()) => child.event(last),
+        Ok(()) => child.end(last),
         Err(error) => child.report(Report::Undeleted(error)),
     }
 }
@@ -134,6 +169,10 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
 
     pub(super) fn event(&self, event: Event) {
         self.report(Report::Event(self.clock.now(), event));
+    }
+
+    fn end(&self, end: End) {
+        self.report(end.report(self.clock.now()));
     }
 
     pub(super) fn note(&self, note: String) {
