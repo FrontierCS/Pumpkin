@@ -134,11 +134,12 @@ pub fn log_dir() -> RelativePath {
     const { RelativePath::from_static("log") }
 }
 
-/// The most bytes a body may get from its target in one file: a larger one is refused whole
-/// rather than cut short.
+/// The most bytes a body may get from its target in one file, and that its return takes as JSON:
+/// a larger file is refused whole rather than cut short, and a larger return is no result.
 // The host collects the file, then reads it whole into memory for the body, which may parse it
 // as a document: the bound keeps what the host holds for it small, and a document cut short is no
-// document. 1 MiB holds a result that a body returns fields of with room to spare.
+// document. A return is held whole in a line of the run's log and in a reply or `outcome.json`.
+// 1 MiB holds a result that a body returns fields of with room to spare.
 pub const RESULT_MAX_BYTES: u64 = 1 << 20;
 
 /// How deep a body's return may nest lists, tuples and dicts, the returned dict included: a
