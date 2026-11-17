@@ -121,6 +121,18 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
     })
 }
 
+/// The values a run's result shows, each by its name, in their order, and how its work phase
+/// ended, for a run that finished with a result; `null` for any other.
+fn result_json(ending: Option<&Ending>) -> Value {
+    let Some(Ending::Returned { values, after }) = ending else {
+        return Value::Null;
+    };
+    let values: Vec<Value> = (values.iter())
+        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .collect();
+    json!({ "values": values, "after": after })
+}
+
 fn how(ending: &Ending) -> String {
     match ending {
         Ending::Returned { values, after } => crate::ending::returned(values, after),
@@ -190,6 +202,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "state": state,
         "has_result": listed.has_result(),
         "verdict": verdict,
+        "result": result_json(held.ending.as_ref()),
         "other_build": record.other_build(),
         "times": times,
         "lanes": progress.as_ref().map(|progress| lanes(progress, held.talk.as_ref())),

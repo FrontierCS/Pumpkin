@@ -123,9 +123,28 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .title { margin: 0; font-size: var(--fs-verdict); line-height: var(--lh-verdict); font-weight: 600; color: var(--text); }
 .within { color: var(--dim); }
 .within .mark { margin-right: var(--s1); }
-.facts { display: flex; flex-wrap: wrap; gap: 0 var(--s4); }
-.fact .name, .again .name { color: var(--dim); margin-right: var(--s1); }
-.fact .value { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); }
+/* The run's facts in a row that wraps, each name above its value, each as wide as its value. */
+.facts { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }
+.fact { display: flex; flex-direction: column; min-width: 0; }
+.fact .name { color: var(--dim); font-size: var(--fs-mono); }
+.again .name { color: var(--dim); margin-right: var(--s1); }
+.fact .value { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); overflow-wrap: anywhere; }
+/* A result's values: how its work phase ended, then each value under its name, between hairlines,
+   and each object folded under its name. */
+.result { display: flex; flex-direction: column; gap: var(--s2); }
+.result:empty { display: none; }
+.result .ended { color: var(--dim); }
+.result .values { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: var(--s1) var(--s5); padding: var(--s2) 0; border-block: 1px solid var(--line-soft); }
+.result .kv { display: flex; flex-direction: column; min-width: 0; }
+.result .k { font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
+.result .v { color: var(--text); overflow-wrap: anywhere; }
+.result .v.num { font-family: var(--mono); font-size: var(--fs-mono); }
+.result summary, .dropped summary { cursor: pointer; color: var(--accent); }
+.result summary .mono { color: var(--text-2); }
+.result summary .hint { color: var(--dim); margin-left: var(--s2); }
+.result pre.json { margin: var(--s2) 0 0; padding: var(--s2) var(--s3); background: var(--hover); border-radius: var(--r-box); overflow-x: auto; }
+.dropped:empty { display: none; }
+.dropped code { display: block; margin-top: var(--s1); overflow-wrap: anywhere; color: var(--dim); }
 .again { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 .again code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .again .why { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
