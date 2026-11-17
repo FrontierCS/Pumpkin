@@ -189,6 +189,10 @@ fn images() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the cases and their snapshot"
+)]
 fn sources() {
     check(
         &[
@@ -202,6 +206,11 @@ fn sources() {
             (
                 "add-git",
                 "FROM scratch\nADD \u{a0}--x@example.com:notes /notes\n",
+            ),
+            // Docker reads a JSON array as an `ADD`'s sources and destination.
+            (
+                "add-json",
+                "FROM scratch\nADD [\"https://example.com/notes\",\"/notes\"]\n",
             ),
             // `ADD` fetches each of its sources that is a URL.
             (
@@ -253,6 +262,7 @@ fn sources() {
             add-local: passes
             add:2: `https://example.com/notes` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
             add-git:2: `--x@example.com:notes` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
+            add-json:2: `["https://example.com/notes","/notes"]` holds `"`, which Docker may split, unquote or unescape: write it in printable ASCII, with no quote or `\`
             add-second:2: `https://example.com/notes` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
             checksum: passes
             checksum-two:2: `https://example.com/a` may be a URL, for `ADD` to fetch, that no checksum pins: copy files from the build's context with `COPY`, or fetch one `https://` URL with `ADD --checksum=sha256:<64 hexadecimal digits>`
