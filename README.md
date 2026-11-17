@@ -5,7 +5,7 @@
 <h1 align="center">Pumpkin</h1>
 
 <p align="center">
-  Pumpkin runs agent benchmarks as workflows, each run in sandboxes that reach only what the
+  Pumpkin runs agents as workflows, each run in sandboxes that reach only what the
   workflow grants, and each leaving a record that no sandbox can alter.
 </p>
 
@@ -33,14 +33,14 @@ The agent's code is untrusted: it may be buggy, and it uses whatever it can reac
 task or raise its score. So:
 
 - **A sandbox's only way out is its session** with the run's driver, the process that runs the run.
-  It has no network of its own and no credential, and the driver authorizes each call it makes
+  It has no network of its own and no credentials, and the driver authorizes each call it makes
   against the workflow.
 - **Every bound is the workflow's**: the agent's deadline, each function's calls and seconds, each
   model entry's budget. The run's hard end follows from them, and every sandbox ends by it.
 - **A model key stays on the host.** The route adds it to each request it admits, and the record
   keeps every exchange as it passed.
 - **The same sources and arguments give the same workflow.** Evaluation reads no clock, no
-  environment and no network, and a recipe must pin what Docker fetches for its image.
+  environment, and no network, and a recipe must pin what Docker fetches for its image.
 
 ## A workflow
 
@@ -314,7 +314,7 @@ the gateway's address and port, and a Modal sandbox opens no connection but DNS.
 The driver writes each run's record as the run goes, in a directory of its own: the IR and the
 text of the files it came from, the run log of every event and what was done about it, each
 sandbox's output, each model exchange, and how the run ended. `pumpkin wait`, `pumpkin ls` and the
-page read only the record, so each says the same of a run, wherever it ran.
+page reads only the record, so each says the same about a run, wherever it ran.
 
 Details: [workflows](docs/workflows.md) · [language](docs/language.md) ·
 [running](docs/running.md) · [records](docs/record.md) ·
@@ -323,7 +323,7 @@ Details: [workflows](docs/workflows.md) · [language](docs/language.md) ·
 ## Providers and the controller
 
 A provider makes a run's sandboxes. Each role is placed in the smallest class of sandbox, of every
-provider's, that offers what it needs, such as its CPUs, its memory or its GPU.
+provider that offers what it needs, such as its CPUs, its memory or its GPU.
 
 | Provider | A sandbox is | What the machine needs |
 | --- | --- | --- |
