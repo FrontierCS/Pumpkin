@@ -50,7 +50,7 @@ use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 mod ending;
 
 pub use ending::Ending;
-use ending::finished;
+use ending::{State, finished, read_outcome};
 
 const LOST: &str = "its driver ended without an outcome";
 
@@ -607,7 +607,7 @@ impl Record {
         // lock stays the driver's alone, which `driver` reads as a live run.
         let dir = File::open(&self.dir).context(self.dir.display())?;
         dir.lock().context(self.dir.display())?;
-        let lost = self.ended()?.is_none();
+        let lost = State::read(&self.dir)?.is_none();
         if lost {
             // A reap is no run's, so it syncs on the machine.
             write_json(
@@ -655,9 +655,9 @@ impl Record {
     /// that a reap would find of it only what a create that gave up made after the end's sweep,
     /// which ends by the run's hard end ([`Creator::create`](provider::Creator::create)).
     pub fn ended_clean(&self) -> Result<bool, String> {
-        let finished = match self.ended()? {
-            Some(Ending::Returned { .. } | Ending::NoResult(_)) => true,
-            Some(Ending::Failed(_) | Ending::Interrupted(_) | Ending::Lost) | None => false,
+        let finished = match State::read(&self.dir)? {
+            Some(State::Finished) => true,
+            Some(State::Failed | State::Interrupted) | None => false,
         };
         Ok(finished && self.undeleted()?.is_empty())
     }
@@ -822,10 +822,9 @@ impl Record {
     /// one without what the run used, as a reap writes of a lost run.
     pub fn used(&self) -> Result<Option<Used>, String> {
         let path = self.dir.join("outcome.json");
-        let Some(bytes) = read_optional(&path)? else {
+        let Some(outcome) = read_outcome(&path)? else {
             return Ok(None);
         };
-        let outcome: Value = serde_json::from_slice(&bytes).context(path.display())?;
         match outcome.get("usage") {
             None => Ok(None),
             Some(usage) => log::used(usage).map(Some).context(path.display()),
@@ -840,17 +839,16 @@ impl Record {
 
     fn ended(&self) -> Result<Option<Ending>, String> {
         let path = self.dir.join("outcome.json");
-        let Some(bytes) = read_optional(&path)? else {
+        let Some(outcome) = read_outcome(&path)? else {
             return Ok(None);
         };
-        let outcome: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
         let reason = outcome["reason"]
             .as_str()
             .unwrap_or("no reason is recorded");
-        match outcome["state"].as_str() {
-            Some("finished") => Ok(Some(finished(&outcome, &self.dir)?)),
-            Some("failed") => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
-            Some("interrupted") => {
+        match State::of(&outcome, &path)? {
+            State::Finished => Ok(Some(finished(&outcome, &self.dir)?)),
+            State::Failed => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
+            State::Interrupted => {
                 let signal = outcome["signal"].as_str().and_then(Signal::named);
                 let signal = signal.ok_or_else(|| {
                     format!(
@@ -862,11 +860,6 @@ impl Record {
                 let stopped = Stopped::Interrupted(signal);
                 Ok(Some(Ending::Interrupted(stopped.to_string())))
             }
-            Some(_) | None => Err(format!(
-                "{}'s state is not one pumpkin knows: expected `finished`, `failed` or \
-                 `interrupted`",
-                path.display()
-            )),
         }
     }
 }

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::{
     Prices, Scratch, Step, asked, check, cut, invocation, lease_places, lease_task, logged,
-    payload, ran, report, returned, submission, whole_log, write_record, write_run,
+    older_finished, payload, ran, report, returned, submission, whole_log, write_record, write_run,
 };
 
 #[test]
@@ -44,10 +44,7 @@ fn waits() {
         "20261107-120200-2c9b0002",
         json!({ "state": "failed", "reason": "r" }),
     );
-    ended(
-        "20261107-120300-3d0c0003",
-        json!({ "state": "finished", "verdict": { "kind": "graded" } }),
-    );
+    ended("20261107-120300-3d0c0003", older_finished());
     // Made by another build.
     let made = scratch.0.join("runs/20261107-120200-2c9b0002/record.json");
     let mut record: Value = serde_json::from_slice(&fs::read(&made).unwrap()).unwrap();

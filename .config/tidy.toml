@@ -5,4 +5,4 @@
 "crates/pumpkin/src/cli.rs" = 1375
 "crates/pumpkin/src/controller.rs" = 1024
 "crates/pumpkin/src/job.rs" = 1014
-"crates/runtime/src/record.rs" = 1307
+"crates/runtime/src/record.rs" = 1300

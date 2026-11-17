@@ -17,8 +17,8 @@ use test_support::BUSYBOX;
 use super::view::Served;
 use super::{
     BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Prices, Scratch, StandIn, asked, cpu_list, cut,
-    docker_table, ended, install, invocation, lease_places, poll, report, returned, whole_log,
-    workflow, write_run,
+    docker_table, ended, install, invocation, lease_places, older_finished, poll, report, returned,
+    whole_log, workflow, write_run,
 };
 
 fn parameter() -> String {
@@ -1023,22 +1023,26 @@ fn boot() {
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let home = scratch.0.join("home");
-    let (clean, local, lost) = (
+    let (clean, local, lost, older, older_left) = (
         id_ago(2, "0b000007"),
         id_ago(1, "0b000005"),
         id_ago(1, "0b000008"),
+        id_ago(2, "0b000009"),
+        id_ago(1, "0b00000a"),
     );
     let runs = [
-        (&clean, "local", docker_table("default") + LOCAL, true),
-        (&local, "local", docker_table("default") + LOCAL, false),
-        (
-            &lost,
-            "aws",
-            format!("{}\n{EC2}", docker_table("default")),
-            false,
-        ),
+        (&clean, "local", Some(returned(1.0)), true),
+        (&local, "local", None, false),
+        (&lost, "aws", None, false),
+        // On a provider that the boot can't reach, so that a reap of it would say so.
+        (&older, "aws", Some(older_finished()), true),
+        (&older_left, "local", Some(older_finished()), false),
     ];
-    for (run, provider, config, ended) in runs {
+    for (run, provider, outcome, deleted) in runs {
+        let config = match provider {
+            "local" => docker_table("default") + LOCAL,
+            _ => format!("{}\n{EC2}", docker_table("default")),
+        };
         let path = home.join(format!("jobs/{run}/pumpkin.toml"));
         scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), &config);
         let record = format!("home/.pumpkin/runs/{run}");
@@ -1060,9 +1064,11 @@ fn boot() {
         );
         let mut sandbox =
             json!({ "provider": provider, "id": format!("sandbox-{run}"), "report": {} });
-        if ended {
+        if deleted {
             sandbox["delete"] = json!({ "state": "deleted" });
-            scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
+        }
+        if let Some(outcome) = outcome {
+            scratch.write(&format!("{record}/outcome.json"), &outcome);
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
@@ -1087,6 +1093,8 @@ fn boot() {
             (clean.as_str(), "<clean>"),
             (local.as_str(), "<local>"),
             (lost.as_str(), "<lost>"),
+            (older.as_str(), "<older>"),
+            (older_left.as_str(), "<older left>"),
         ],
         &expect![[r#"
             $ HOME=<scratch>/home PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/root-run pumpkin controller boot
@@ -1095,9 +1103,11 @@ fn boot() {
             pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
             pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run <older left>'s sandbox sandbox-<older left> on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             printed:
               <local>
               <lost>
+              <older left>
             aws --version
             aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
             <clean>'s outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
