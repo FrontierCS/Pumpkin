@@ -48,6 +48,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {string} state
  * @property {boolean} has_result
  * @property {string} verdict
+ * @property {{ values: { name: string, value: any }[], after: string } | null} result the values a run that finished with a result shows, in their order, and how its work phase ended
  * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build
  * @property {Times | null} times
@@ -134,7 +135,9 @@ export async function runView(id) {
   const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
   const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
   const verdict = h("div", { class: "verdict" });
+  const result = h("div", { class: "result" });
   const facts = h("div", { class: "facts" });
+  const dropped = h("div", { class: "dropped" });
   const again = h("div", { class: "again" });
   const traces = h("div", { class: "traces" });
   const cancelBox = h("div", { class: "cancel" });
@@ -165,7 +168,7 @@ export async function runView(id) {
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
   fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(verdict, facts, again, traces, cancelBox, unread, startedOver, split);
+  show(verdict, result, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -275,8 +278,11 @@ export async function runView(id) {
   // Draws the run's verdict and facts, which change with its clock.
   const drawHeading = () => {
     const data = /** @type {Run} */ (state.data);
-    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.verdict));
+    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : data.verdict));
+    drawOnce(result, data.result, () => drawResult(result, data.result));
     drawFacts(facts, data);
+    const headers = data.model ? data.model.dropped_headers : [];
+    drawOnce(dropped, [headers, data.model?.more_dropped_headers], () => drawDropped(dropped, headers, !!data.model?.more_dropped_headers));
   };
   // Draws the run: its heading, the command that runs it again, its cancel.
   const drawRun = () => {
@@ -548,6 +554,59 @@ function litOf(data, view, holder, shown) {
 // The run's facts in a line, each a muted name and its value: its task, when it started, how
 // long it ran of its hard end, what its model requests took, and what it cost.
 /** @param {HTMLElement} facts @param {Run} data */
+// Draws `node` with `draw` only when `key` differs from what it was last drawn for, so that what
+// a reader opened in it stays open while the heading is drawn again with the run's clock.
+/** @param {HTMLElement} node @param {any} key @param {() => void} draw */
+function drawOnce(node, key, draw) {
+  const text = JSON.stringify(key ?? null);
+  if (node.dataset.key === text) return;
+  node.dataset.key = text;
+  draw();
+}
+
+// A number as `pumpkin ls` shows one: two decimals from 1 up, four below, no trailing zeros.
+/** @param {number} number */
+function shownNumber(number) {
+  const shown = number.toFixed(Math.abs(number) >= 1 ? 2 : 4).replace(/0+$/, "").replace(/\.$/, "");
+  return shown === "-0" ? "0" : shown;
+}
+
+// Draws the values that a run's result shows, in their order, each under its name, and how its
+// work phase ended above them. A value that is an object or a list folds under its name, as
+// JSON; the page reads no meaning into any value. Nothing for a run without a result.
+/** @param {HTMLElement} node @param {Run["result"]} result */
+function drawResult(node, result) {
+  if (!result) return fill(node);
+  const scalar = (/** @type {any} */ value) => value === null || typeof value !== "object";
+  const ended = result.after.replace(/^after /, "");
+  const values = result.values.filter(({ value }) => scalar(value));
+  const objects = result.values.filter(({ value }) => !scalar(value));
+  fill(
+    node,
+    h("p", { class: "ended" }, ended.charAt(0).toUpperCase() + ended.slice(1) + "."),
+    values.length
+      ? h(
+          "div",
+          { class: "values" },
+          values.map(({ name, value }) =>
+            h("div", { class: "kv" }, h("span", { class: "k" }, name), h("span", { class: typeof value === "number" ? "v num" : "v" }, typeof value === "number" ? shownNumber(value) : typeof value === "string" ? value : String(value))),
+          ),
+        )
+      : null,
+    objects.map(({ name, value }) => {
+      const fields = Array.isArray(value) ? plural(value.length, "item") : plural(Object.keys(value).length, "field");
+      return h("details", { class: "object" }, h("summary", {}, h("span", { class: "mono" }, name), h("span", { class: "hint" }, fields)), h("pre", { class: "json" }, jsonText(value)));
+    }),
+  );
+}
+
+// The request headers that the route left behind, folded under their count.
+/** @param {HTMLElement} node @param {string[]} headers @param {boolean} more */
+function drawDropped(node, headers, more) {
+  if (!headers.length) return fill(node);
+  fill(node, h("details", {}, h("summary", {}, plural(headers.length, "request header") + (more ? " and more" : "") + " the route dropped"), h("code", {}, headers.join(", ") + (more ? ", and more" : ""))));
+}
+
 function drawFacts(facts, data) {
   const times = data.times;
   const model = data.model;
@@ -582,7 +641,6 @@ function drawFacts(facts, data) {
           flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", "),
         )
       : null,
-    model && model.dropped_headers.length ? fact("Dropped request headers", model.dropped_headers.join(", ") + (model.more_dropped_headers ? ", and more" : ""), "The request headers that the route left behind") : null,
     data.other_build ? fact("Made by", "pumpkin " + data.other_build) : null,
   );
 }
