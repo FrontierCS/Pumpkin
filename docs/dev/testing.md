@@ -6,6 +6,7 @@ The rules for writing Pumpkin's tests and their snapshots.
   compares against an `expect![[...]]` snapshot; do not test what the type system or serde
   already guarantees
 - EARN each test: it pins what a user, a task or a later change relies on, and no other test pins
+- PREFER testing a decision as a function of values to running it through a stand-in
 - START a snapshot as `expect![[""]]`, fill it with
   `cargo xtask refill --package <crate> [<test>]`, and read the diff before keeping it
 - ASSERT in a file's `check` helper what holds of every case, such as files left or modes; show
@@ -18,16 +19,19 @@ The rules for writing Pumpkin's tests and their snapshots.
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once
 - WRITE a test's scratch into a `tempfile::TempDir` in the system's temporary directory: no other
   test shares it, and its paths fit a socket's, which holds 107 bytes at most
-- RUN `cargo xtask mutants crates/decision crates/schema crates/route` at review of a change to
-  the decision core, to the schema's refusals or to the route's request rules, which guard the
-  operator's key, and read each mutant it reports missed, as ci doesn't run it
+- RUN `cargo xtask mutants crates/decision crates/schema crates/route` on demand, when tests of
+  the decision core, the schema's refusals or the route's request rules, which guard the
+  operator's key, are deleted or rewritten, with `CARGO_MUTANTS_JOBS=2` at most, and read each
+  mutant it reports missed, as ci doesn't run it
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
   files, Pumpkin's own processes and loopback sockets are fine. IGNORE each test that needs a Docker engine, the static `sandboxd` or
   a server elsewhere (`#[ignore = "…: run cargo xtask live docker"]`)
 - SET each bound that a test chooses at its floor, and script the clock (`SimHost`) for a case
   past a bound; wait on the real clock only for a bound that production states in whole seconds
-- NEVER test against an invented model of a cloud or a service, which pins what the model answers:
-  test a provider by `cargo xtask live ec2` and `cargo xtask live modal` instead; RUN them at
+- NEVER test against an invented model of a cloud or a service, which pins what the model answers,
+  and NEVER add a stand-in that answers for another program either, though one may record that it
+  ran: what a program really answers is tested by `cargo xtask live`, or not at all; test a
+  provider by `cargo xtask live ec2` and `cargo xtask live modal` instead; RUN them at
   review of a change to a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s
   listen, dial or user drop, `ec2-boot`, the EC2 entry or the Modal helper, and give the run's id
   in the pull request

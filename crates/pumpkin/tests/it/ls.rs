@@ -1,6 +1,4 @@
-//! `ls`, and the commands that a user learns beside it: `run` of a task's entry, which builds and
-//! starts a run, printing its id, or with `--wait` its outcome; and `ls`, which lists the runs
-//! in their states.
+//! `ls`, which lists the runs in their states.
 
 use std::fs::{self, File};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,97 +7,9 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, StandIn, Step, asked, check, cut, lease_places, lease_task, logged, masked,
-    poll, ran, returned, whole_log, write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, lease_places, lease_task, logged, masked, ran,
+    returned, whole_log, write_record, write_run,
 };
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the steps and their snapshot"
-)]
-fn runs_a_task() {
-    let scratch = Scratch::new("runs-a-task");
-    let stand_in = StandIn::new(&scratch);
-    stand_in.hold("create");
-    let ls = || {
-        ran(
-            scratch.pumpkin(&["ls", "--runs", "runs"]),
-            &scratch.0,
-            false,
-        )
-    };
-    let mut steps = vec![ran(
-        stand_in.run("stand-in/task.star", &[]),
-        &scratch.0,
-        false,
-    )];
-    let id = fs::read_dir(scratch.0.join("runs"))
-        .unwrap()
-        .next()
-        .unwrap();
-    let id = id.unwrap().file_name().into_string().unwrap();
-    // Once the agent's create holds, as a slow one does, the run is starting its agent.
-    stand_in.held("create");
-    steps.push(masked(&ls(), &id));
-    stand_in.release("create");
-    // Ended, so that `wait` has nothing to follow.
-    let outcome = scratch.0.join("runs").join(&id).join("outcome.json");
-    poll(|| outcome.exists().then_some(()));
-    let wait = scratch.pumpkin(&["wait", &id, "--runs", "runs"]);
-    steps.push(ran(wait, &scratch.0, false));
-    steps.push(ls());
-    steps.push(ran(
-        stand_in.run("stand-in/task.star", &["--wait"]),
-        &scratch.0,
-        false,
-    ));
-    check(
-        &scratch,
-        steps.into_iter().map(Step::Ran),
-        false,
-        &[(&id, "<first>")],
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(0)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> started
-            pumpkin: to follow it: pumpkin wait --runs <scratch>/runs <id>
-            pumpkin: to stop it: pumpkin cancel --runs <scratch>/runs <id>
-            outcome.json: none
-            printed the id alone: true
-            $ pumpkin ls --runs runs
-            exit status: Some(0)
-            printed:
-              <first> starting        <t>  of 9m           -  example/task: the agent on local/container
-              1 run: 1 running; every live run ends by <t> UTC
-            $ pumpkin wait <first> --runs runs
-            exit status: Some(3)
-            pumpkin: run <first> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
-              sandboxes: 1 on local/container, <t> in all, none created
-            pumpkin: run <first> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<first>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            $ pumpkin ls --runs runs
-            exit status: Some(0)
-            printed:
-              <first> finished         0s  -               -  example/task
-              1 run: 1 finished (1 without a result)
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml --wait
-            exit status: Some(3)
-            pumpkin: run <id> records into <scratch>/runs/<id>
-            pumpkin: run <id> started
-            pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the work phase ended
-            pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; the work phase ended at <t>
-              sandboxes: 1 on local/container, <t> in all, none created
-            pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/final.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}"#]],
-    );
-}
 
 #[test]
 fn lists() {

@@ -86,15 +86,6 @@ fn unlogged(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-fn unbuilt(name: &str) -> String {
-    let scratch = Scratch::new(name);
-    let stand_in = StandIn::new(&scratch);
-    let text = ran(stand_in.run("unbuilt/task.star", &[]), &scratch.0, false);
-    let made = scratch.0.join("runs").exists();
-    let text = format!("{text}\na record was made: {made}");
-    text.replace(&scratch.0.display().to_string(), "<scratch>")
-}
-
 fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
     let scratch = Scratch::new(name);
     let stand_in = StandIn::with(&scratch, info, image);
@@ -137,22 +128,6 @@ fn loses_its_log() {
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
         record: driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/final.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
         outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}"#]].assert_eq(&unlogged("unlogged"));
-}
-
-#[test]
-fn fails_its_build() {
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        exit status: Some(1)
-        pumpkin: building an image in pumpkin/unbuilt
-        the stand-in creates nothing
-        pumpkin: the build of an image in pumpkin/unbuilt failed
-        unbuilt/task.star:5:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
-            5 | IMAGE = image("Dockerfile")
-              |         ^^^^^^^^^^^^^^^^^^^
-        pumpkin: unbuilt/task.star: the task has 1 problem
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/unbuilt/task.star
-        a record was made: false"#]].assert_eq(&unbuilt("unbuilt"));
 }
 
 #[test]
@@ -239,34 +214,6 @@ fn unstarted_context_run_term() {
 #[test]
 fn unstarted_context_both_int() {
     let shown = unstarted("unstarted", "context", Whom::Both, "INT", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        ended by signal: 2
-        the driver is gone, and made no record: true"#]].assert_eq(&shown);
-}
-
-#[test]
-fn unstarted_lookup_driver_kill() {
-    let shown = unstarted("unstarted", "lookup", Whom::Driver, "KILL", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        exit status: Some(1)
-        pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-        the driver is gone, and made no record: true"#]].assert_eq(&shown);
-}
-
-#[test]
-fn unstarted_lookup_run_term() {
-    let shown = unstarted("unstarted", "lookup", Whom::Run, "TERM", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        ended by signal: 15
-        the driver is gone, and made no record: true"#]].assert_eq(&shown);
-}
-
-#[test]
-fn unstarted_lookup_both_int() {
-    let shown = unstarted("unstarted", "lookup", Whom::Both, "INT", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         ended by signal: 2
