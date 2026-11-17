@@ -13,7 +13,7 @@ use schema::sandbox::op::OpReply;
 use schema::workflow::{JobFunctionId, RoleId, SessionId};
 use stdx::Context;
 
-use crate::child::{Child, Deadlines, Message, Report};
+use crate::child::{Child, Deadlines, End, Message};
 use crate::sandbox::Which;
 use crate::{Called, Clock, Host, Inbox, Input, Runtime, body, call, lease};
 
@@ -111,6 +111,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             collect: deadlines.collect,
             trees: None,
             role,
+            model_requests_over_budget: 0,
         };
         self.jobs.insert(job, called);
     }
@@ -186,7 +187,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         if let Err(error) = spawned {
             // Reported as the child's thread would have, behind what reached the host before.
             let reason = format!("{} thread didn't start: {error}", which.noun());
-            let failed = Report::Event(self.clock.now(), which.failed(reason));
+            let failed = End::failed(which, reason).report(self.clock.now());
             // The inbox holds its receiver, so the send can't fail.
             let _ = self.inbox.sender().send(Input::Child(failed));
         }

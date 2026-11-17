@@ -39,7 +39,7 @@ pub(crate) fn called(call: &CallSpan) -> String {
         ),
     };
     let mut line = format!("{} on {}, {took}: ", call_name(call), placed(&call.sandbox));
-    let Some(end) = &call.end else {
+    let Some((end, _)) = &call.end else {
         line.push_str(STOPPED);
         return line;
     };
@@ -54,7 +54,19 @@ pub(crate) fn called(call: &CallSpan) -> String {
             let _ = write!(line, " ({what})");
         }
     }
+    line.push_str(&over_budget(call));
     line
+}
+
+/// What ends the line of a call's end if its route barred any of its model requests for a spent
+/// model budget, as `; 1 model request barred by judge's model budget`; else nothing.
+pub(super) fn over_budget(call: &CallSpan) -> String {
+    let Some((_, Some(count))) = call.end else {
+        return String::new();
+    };
+    let role = call.role.as_deref().unwrap_or("its role");
+    let barred = crate::counted(count.get(), "model request");
+    format!("; {barred} barred by {role}'s model budget")
 }
 
 /// The line of a lease; `now` is a time since the run started, by which an open one is charged.

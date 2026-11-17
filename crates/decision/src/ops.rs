@@ -546,13 +546,16 @@ impl Core<'_> {
             State::Ended { .. } if self.leases.holds(Caller::Job(id)) => JobState::Running,
             State::Ended {
                 outcome: Ok(result),
+                model_requests_over_budget,
                 ..
-            } => result.job_state(),
+            } => result.job_state(*model_requests_over_budget),
             State::Ended {
                 outcome: Err(failure),
+                model_requests_over_budget,
                 ..
             } => JobState::Errored {
                 failure: failure.reply(),
+                model_requests_over_budget: *model_requests_over_budget,
             },
         };
         StatusReply {

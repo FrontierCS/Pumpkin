@@ -96,9 +96,11 @@ function said(record) {
       text = "request " + event.request + " of " + (event.caller || "?") + ": " + event.answer.kind + " " + (event.upstream_status ?? "") + failure(event.failed) + usage;
       return [event.kind, text, event.failed ? "failed" : event.answer.kind === "forwarded" ? "" : "refused"];
     }
-    case "call_returned":
-      text = "job " + event.job + ": " + event.returned.map((shown) => shown.name + "=" + JSON.stringify(shown.value)).join(" ");
+    case "call_returned": {
+      const over = event.model_requests_over_budget ? " · " + plural(event.model_requests_over_budget, "model request") + " over budget" : "";
+      text = "job " + event.job + ": " + event.returned.map((shown) => shown.name + "=" + JSON.stringify(shown.value)).join(" ") + over;
       break;
+    }
     case "run_started":
       text = "hard end at " + clock(Number(event.hard_end_ns) / 1e9);
       break;

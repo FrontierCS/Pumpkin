@@ -25,6 +25,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use decision::{
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
-use route::{Answer, Usage};
+use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
 use schema::workflow::Workflow;
@@ -135,11 +136,11 @@ impl<'h, H: Host> Log<'h, H> {
     /// `upstream` and `api` of the entry that took it, if one did, `upstream_status`, null if no
     /// response came, and `model`, `request_id`, `usage` and `failed` (with the `code` of its
     /// failure, if it gave one), each if there is one. `answer` is named by its `kind`: `forwarded`
-    /// or `cut` short, for an upstream's response; `barred`, refused before an upstream; `refused`,
-    /// in place of the upstream's response; the last two with `status` and `message`, never a body;
-    /// `abandoned`, given up on as the route ended, once handed to the upstream, with its `model`.
-    /// `first_byte_ns` is when a response began to arrive, and `first_token_ns` when its output
-    /// did; `kept` says what the exchange left in the record's `model/`.
+    /// or `cut` short, for an upstream's response; `barred` before an upstream, by its `bar`
+    /// (`rules`, `ended` or `budget`), or `refused` in place of the upstream's response, each with
+    /// `status` and `message`, never a body; `abandoned`, given up on as the route ended, once
+    /// handed to the upstream, with its `model`. `first_byte_ns` is when a response began to
+    /// arrive, `first_token_ns` when its output did, and `kept` what the exchange left in `model/`.
     #[expect(
         clippy::too_many_lines,
         reason = "one place for each field of the record"
@@ -184,8 +185,22 @@ impl<'h, H: Host> Log<'h, H> {
                 (usage, failed),
                 json!({ "kind": "cut" }),
             ),
-            Answer::Barred { status, message } => {
-                let barred = json!({ "kind": "barred", "status": status, "message": message });
+            Answer::Barred {
+                bar,
+                status,
+                message,
+            } => {
+                let bar = match bar {
+                    Bar::Rules => "rules",
+                    Bar::Ended => "ended",
+                    Bar::Budget => "budget",
+                };
+                let barred = json!({
+                    "kind": "barred",
+                    "bar": bar,
+                    "status": status,
+                    "message": message,
+                });
                 (None, None, &None, (&None, &None), barred)
             }
             Answer::Refused {
@@ -447,13 +462,27 @@ fn event_json(event: &Event) -> Value {
         }),
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
         Event::CallTimedOut { job } => json!({ "kind": "call_timed_out", "job": job.0 }),
-        Event::CallReturned { job, result } => json!({
-            "kind": "call_returned",
-            "job": job.0,
-            "returned": shown_json(result.values()),
-        }),
-        Event::CallFailed { job, reason } => {
-            json!({ "kind": "call_failed", "job": job.0, "reason": reason })
+        Event::CallReturned {
+            job,
+            result,
+            model_requests_over_budget,
+        } => {
+            let mut json = json!({
+                "kind": "call_returned",
+                "job": job.0,
+                "returned": shown_json(result.values()),
+            });
+            over_budget(&mut json, *model_requests_over_budget);
+            json
+        }
+        Event::CallFailed {
+            job,
+            reason,
+            model_requests_over_budget,
+        } => {
+            let mut json = json!({ "kind": "call_failed", "job": job.0, "reason": reason });
+            over_budget(&mut json, *model_requests_over_budget);
+            json
         }
         Event::LeaseReady { lease } => json!({ "kind": "lease_ready", "lease": lease.0 }),
         Event::CommandEnded {
@@ -484,6 +513,13 @@ fn event_json(event: &Event) -> Value {
             json!({ "kind": "lease_failed", "lease": lease.0, "reason": reason })
         }
         Event::Tick => json!({ "kind": "tick" }),
+    }
+}
+
+// Gives a call's end `event` its count of model requests over budget, if it has one.
+fn over_budget(event: &mut Value, model_requests_over_budget: Option<NonZeroU64>) {
+    if let Some(count) = model_requests_over_budget {
+        event["model_requests_over_budget"] = json!(count);
     }
 }
 

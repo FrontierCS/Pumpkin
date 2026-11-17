@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
 
-use super::upstream::Answer;
+use super::upstream::{Answer, Bar};
 use super::{read, usage};
 use crate::Apart;
 
@@ -482,9 +482,10 @@ impl Refusal {
         }
     }
 
-    /// The answer for a request that never reached the upstream.
-    pub(crate) fn barred(&self) -> Answer {
+    /// The answer for a request that never reached the upstream, barred for `bar`.
+    pub(crate) fn barred(&self, bar: Bar) -> Answer {
         Answer::Barred {
+            bar,
             status: self.status.code(),
             message: self.message.clone(),
         }

@@ -94,8 +94,12 @@ pub enum Answer {
         failed: Option<Failure>,
     },
     /// With a refusal of the route's own, with `status` and `message`, before the request
-    /// reached the upstream: the route's rules refused it, or the route had ended.
-    Barred { status: u16, message: String },
+    /// reached the upstream, for the reason `bar`.
+    Barred {
+        bar: Bar,
+        status: u16,
+        message: String,
+    },
     /// With a refusal of the route's own, with `status` and `message`, in place of the
     /// upstream's response with the status `upstream_status`, if one came.
     Refused {
@@ -107,6 +111,17 @@ pub enum Answer {
     /// With the route's end, after the request for `model` was handed to the upstream's
     /// connection, which may have sent it whole, and before the response's head came.
     Abandoned { model: ModelName },
+}
+
+/// Why the route barred a request before it reached the upstream.
+#[derive(Debug)]
+pub enum Bar {
+    /// The route's rules refused it: its endpoint, its model or its body.
+    Rules,
+    /// The route had ended, or the model provider had refused its key, which ends it.
+    Ended,
+    /// The model budget of the entry that took it was spent ([`Admission::Spent`]).
+    Budget,
 }
 
 /// How a run serves a model route's entry for one API: the upstream that its requests reach, of
@@ -384,13 +399,13 @@ impl Upstream {
         route: &'r Route,
         request: &ModelRequest,
         body: Result<Map<String, Value>, Refusal>,
-    ) -> Result<Closed<'r>, Refusal> {
+    ) -> Result<Closed<'r>, (Bar, Refusal)> {
         if self.was_shut_down() {
-            Err(Refusal::ended())
+            Err((Bar::Ended, Refusal::ended()))
         } else if self.key_was_refused() {
-            Err(Refusal::key_refused())
+            Err((Bar::Ended, Refusal::key_refused()))
         } else {
-            route.close(request, body)
+            (route.close(request, body)).map_err(|refusal| (Bar::Rules, refusal))
         }
     }
 
@@ -404,14 +419,14 @@ impl Upstream {
         answered: impl FnOnce(Answer),
     ) {
         let taken = match admission {
-            Admission::Ended => Err(Refusal::ended()),
+            Admission::Ended => Err((Bar::Ended, Refusal::ended())),
             Admission::Open => self.close(route, &client.request.request, body),
-            Admission::Spent { .. } if self.was_shut_down() => Err(Refusal::ended()),
-            Admission::Spent { budget } => Err(Refusal::spent(budget, route)),
+            Admission::Spent { .. } if self.was_shut_down() => Err((Bar::Ended, Refusal::ended())),
+            Admission::Spent { budget } => Err((Bar::Budget, Refusal::spent(budget, route))),
         };
         let _ = match taken {
             Ok(closed) => self.forward(&closed, client, forwarding, answered),
-            Err(refusal) => barred(refusal, route.api(), client, answered),
+            Err((bar, refusal)) => barred((bar, refusal), route.api(), client, answered),
         };
     }
 
@@ -492,7 +507,9 @@ pub fn serve<'b>(
         } else {
             Api::Responses
         };
-        let _ = barred(refusal, api, client, |answer| answered(None, answer));
+        let _ = barred((Bar::Rules, refusal), api, client, |answer| {
+            answered(None, answer);
+        });
         return;
     };
     let body = parsed(&request.body);
@@ -507,7 +524,9 @@ pub fn serve<'b>(
             let allowed = taking().flat_map(|(_, (route, _))| route.models());
             let refusal = Refusal::unallowed(named, allowed);
             let api = entries[first].0.api();
-            let _ = barred(refusal, api, client, |answer| answered(None, answer));
+            let _ = barred((Bar::Rules, refusal), api, client, |answer| {
+                answered(None, answer);
+            });
             return;
         };
         index
@@ -523,10 +542,11 @@ pub(crate) struct Client<'k> {
     keep: &'k dyn Keep,
 }
 
-/// Answers `client`'s request, of `api`, with `refusal`, before it reached the upstream, once the
-/// request as its client sent it and the refusal are kept, and `answered` is told so.
+/// Answers `client`'s request, of `api`, with `refusal`, which bars it for `bar` before it reached
+/// the upstream, once the request as its client sent it and the refusal are kept, and `answered`
+/// is told so.
 fn barred(
-    refusal: Refusal,
+    (bar, refusal): (Bar, Refusal),
     api: Api,
     client: Client<'_>,
     answered: impl FnOnce(Answer),
@@ -534,7 +554,7 @@ fn barred(
     let Client { request, by, keep } = client;
     keep.request(&request.request.body, None);
     keep.response(refusal.body(api).as_bytes());
-    answered(refusal.barred());
+    answered(refusal.barred(bar));
     refusal.answer(api, request, by)
 }
 
