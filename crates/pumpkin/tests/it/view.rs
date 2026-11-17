@@ -390,7 +390,7 @@ fn serves_runs() {
             other_build: null
             state: "finished"
             summary: "<as `wait` says it>"
-            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":3,"count":1,"from":"solver","kind":"final call","to":"scorer"},{"back_bytes":null,"bytes":12,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"roles":[{"final_target":false,"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}]},{"final_target":false,"kind":"target","name":"trainer","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":true,"kind":"target","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}]},{"final_target":false,"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[]}]}
+            talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":3,"count":1,"from":"solver","kind":"final call","to":"scorer"},{"back_bytes":null,"bytes":12,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"grants":[{"from":"solver","kind":"job","to":"trainer"},{"from":"solver","kind":"lease","to":"gpu"},{"from":"solver","kind":"lease","to":"cpu"},{"from":"trainer","kind":"lease","to":"box"},{"from":"solver","kind":"final","to":"scorer"}],"roles":[{"final_target":false,"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}]},{"final_target":false,"kind":"target","name":"trainer","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":true,"kind":"target","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}]},{"final_target":false,"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[]}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
@@ -1060,12 +1060,14 @@ fn serves_the_page() {
             head: <link rel="modulepreload" href="/<digest>/ledger.js">
             head: <link rel="modulepreload" href="/<digest>/list.js">
             head: <link rel="modulepreload" href="/<digest>/log.js">
+            head: <link rel="modulepreload" href="/<digest>/payload.js">
             head: <link rel="modulepreload" href="/<digest>/records.js">
             head: <link rel="modulepreload" href="/<digest>/rows.js">
             head: <link rel="modulepreload" href="/<digest>/run.js">
             head: <link rel="modulepreload" href="/<digest>/search.js">
             head: <link rel="modulepreload" href="/<digest>/stats.js">
             head: <link rel="modulepreload" href="/<digest>/steps.js">
+            head: <link rel="modulepreload" href="/<digest>/talk.js">
             head: <link rel="modulepreload" href="/<digest>/timeline.js">
             head: <link rel="modulepreload" href="/<digest>/trace.js">
             /<digest>/style.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
@@ -1077,12 +1079,14 @@ fn serves_the_page() {
             /<digest>/ledger.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/list.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/payload.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/search.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/stats.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/steps.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/talk.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/timeline.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable

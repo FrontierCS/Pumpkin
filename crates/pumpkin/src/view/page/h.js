@@ -163,6 +163,21 @@ export async function getText(path) {
   return text;
 }
 
+// The bytes at `path`, as the server keeps them; a `Refused` if it refuses them, or in an export,
+// which keeps no payloads.
+/** @param {string} path @returns {Promise<Uint8Array>} */
+export async function getBytes(path) {
+  if (STATIC) throw new Refused(404, "An export of the view keeps no payloads");
+  const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN } }).catch((error) => {
+    throw unarrived(path, error);
+  });
+  if (!response.ok) {
+    const refusal = await response.json().catch(() => ({}));
+    throw new Refused(response.status, refusal.error || response.status + " " + response.statusText);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 // A POST to `path`: the status and the JSON that the server answers, which for a refusal is
 // `{ error }`, or `{}` if it answers no JSON.
 /** @param {string} path @returns {Promise<{ status: number, body: any }>} */

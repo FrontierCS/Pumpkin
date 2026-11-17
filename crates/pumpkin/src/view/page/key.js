@@ -6,7 +6,7 @@
 
 import { byId, fill, h } from "./h.js";
 
-/** @typedef {"list" | "run" | "trace"} Page */
+/** @typedef {"list" | "run" | "trace" | "payload"} Page */
 /**
  * A colour's swatch: `look` is `box` for a mark's square, `bar` for a lane's bar, `tick` for a
  * line, `ink` for words in the colour; `alpha` is the share of it the page draws, if not whole.

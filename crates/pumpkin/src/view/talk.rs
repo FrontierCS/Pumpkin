@@ -44,6 +44,9 @@ struct Work {
 /// The talk of one run, to which each record of its log is `take`n in order.
 pub(super) struct Talk {
     roles: Vec<Value>,
+    /// Each grant that names a role, and the final call, as JSON: the role that may call, the
+    /// role it reaches, and its kind.
+    grants: Vec<Value>,
     edges: BTreeMap<(String, String, &'static str), Traffic>,
     /// Each lease's runner role, for the leases started so far.
     pub(super) runners: BTreeMap<u64, String>,
@@ -66,6 +69,7 @@ impl Talk {
         let roles = ir.roles.as_slice();
         let final_target = ir.final_call.target.as_str();
         let mut granted = BTreeMap::new();
+        let mut grants = Vec::new();
         for role in roles {
             // Each grant that names a role: a job function its target, a session its runner; and
             // how the page names a call of it.
@@ -87,7 +91,16 @@ impl Talk {
             for (name, target, call) in named {
                 let key = (role.name.to_string(), name.to_string());
                 granted.insert(key, (target.to_string(), call));
+                let kind = if call == "lease" { "lease" } else { "job" };
+                grants.push(json!({ "from": role.name, "to": target, "kind": kind }));
             }
+        }
+        // The agent makes the final call.
+        let agent = roles
+            .iter()
+            .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)));
+        if let Some(agent) = agent {
+            grants.push(json!({ "from": agent.name, "to": final_target, "kind": "final" }));
         }
         let routes = |role: &ir::Role| {
             routes.map(|routes| {
@@ -100,6 +113,7 @@ impl Talk {
             roles: (roles.iter())
                 .map(|role| role_json(role, final_target, places, routes(role)))
                 .collect(),
+            grants,
             edges: BTreeMap::new(),
             runners: BTreeMap::new(),
             work: BTreeMap::new(),
@@ -289,7 +303,7 @@ impl Talk {
         }
     }
 
-    /// The roles and edges as the page reads them.
+    /// The roles, the grants and the edges as the page reads them.
     pub(super) fn json(&self) -> Value {
         let edges: Vec<Value> = (self.edges.iter())
             .map(|((from, to, kind), traffic)| {
@@ -303,7 +317,7 @@ impl Talk {
                 })
             })
             .collect();
-        json!({ "roles": self.roles, "edges": edges })
+        json!({ "roles": self.roles, "grants": self.grants, "edges": edges })
     }
 
     /// The commands and transfers of `lease`'s runner so far, with when each began and ended.

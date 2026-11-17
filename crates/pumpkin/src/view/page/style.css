@@ -212,6 +212,11 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node.on rect { fill: var(--select); stroke-width: 2.5; }
 .talk .dim { opacity: 0.25; }
 .talk line, .talk path { stroke: var(--edge); fill: none; }
+.talk line.idle, .talk path.idle { stroke-dasharray: 4 4; }
+.talk .node rect.stack { stroke-opacity: 0.5; }
+.talk .node.idle > rect:not(.final):not(.chip) { stroke-dasharray: 4 3; }
+.talk .node rect.chip { fill: var(--line-soft); stroke: none; }
+.talk .node text.chip { font-size: 10.5px; font-weight: 600; fill: var(--text-2); }
 .talk ul { list-style: none; margin: var(--s2) 0 0; padding: 0; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
 .talk li { line-height: var(--lh); }
 .talk li .pair { color: var(--text); }
@@ -391,3 +396,40 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .tl-tip { position: absolute; z-index: 2; pointer-events: none; padding: var(--s1) var(--s2); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-box); box-shadow: var(--pop); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--lh); color: var(--text-2); white-space: nowrap; }
 .tl-tip .head { color: var(--text); font-weight: 600; }
 .lrow.out { opacity: 0.4; }
+
+/* A payload's page: its files, each under its path, with no frame. */
+.payload-page { max-width: 1200px; margin: 0 auto; padding: var(--s4) var(--s5); }
+.payload-page h2 { font-size: var(--fs-title); font-weight: 600; margin: 0 0 var(--s4); }
+.payload-file + .payload-file { margin-top: var(--s5); }
+.payload-file > h3 { font-size: var(--fs); font-weight: 600; margin: 0 0 var(--s2); }
+.payload-file > h3 .num { color: var(--dim); font-weight: 400; }
+/* A patch as the FrontierCS site's patch viewer draws one (its `fcs2-patch.css`), in Claude Code's
+   diff colours: rows on the dim tone, changed words on the full one, signs and numbers in the word
+   tone; the dark theme's tones are the light ones' darkened. */
+.cc { --add: light-dark(rgb(199, 225, 203), rgb(31, 60, 38)); --add-w: light-dark(rgb(105, 219, 124), rgb(46, 110, 62));
+  --add-t: light-dark(rgb(47, 157, 68), rgb(105, 219, 124)); --del: light-dark(rgb(253, 210, 216), rgb(74, 33, 38));
+  --del-w: light-dark(rgb(255, 168, 180), rgb(128, 48, 58)); --del-t: light-dark(rgb(209, 69, 75), rgb(255, 140, 150));
+  font: var(--fs-mono)/1.6 var(--mono); color: var(--text); overflow-x: auto; }
+.ccf + .ccf { margin-top: var(--s3); }
+.ccf > summary { cursor: pointer; list-style: none; }
+.ccf[open] > summary { margin-bottom: var(--s2); }
+.cct { display: block; position: relative; padding-left: 18px; overflow-wrap: anywhere; }
+.cct::before { content: ""; position: absolute; left: 0; top: .55em; width: 8px; height: 8px; border-radius: 50%; background: var(--add-t); }
+.cct b { font-weight: 700; }
+.ccs { display: block; position: relative; margin-top: 2px; padding-left: 18px; color: var(--dim); }
+.ccs::before { content: ""; position: absolute; left: 3px; top: 0; width: 8px; height: .8em; border-left: 1.5px solid var(--line); border-bottom: 1.5px solid var(--line); }
+.ccs b { color: var(--text); font-weight: 700; }
+.ccd { margin-left: 18px; }
+.ccd .r { display: grid; grid-template-columns: var(--nw) 2ch minmax(0, 1fr); }
+.ccd .n { padding-right: 1ch; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; user-select: none; }
+.ccd .s { text-align: center; user-select: none; }
+.ccd .c { min-height: 1.6em; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.ccd .add { background: var(--add); } .ccd .add .n, .ccd .add .s { color: var(--add-t); }
+.ccd .del { background: var(--del); } .ccd .del .n, .ccd .del .s { color: var(--del-t); }
+.ccd mark { color: inherit; border-radius: 2px; } .ccd .add mark { background: var(--add-w); } .ccd .del mark { background: var(--del-w); }
+.ccd .gap .c { color: var(--dim); }
+/* JSON in the FrontierCS site's colours of code: keys and `true`, `false` and `null` in the accent,
+   strings green, numbers brown. */
+.jsonview .j-key, .jsonview .j-literal { color: var(--accent); }
+.jsonview .j-string { color: light-dark(#3d6b4f, #81c995); }
+.jsonview .j-number { color: light-dark(#8a5a12, #e6b36a); }

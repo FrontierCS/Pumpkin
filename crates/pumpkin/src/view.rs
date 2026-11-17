@@ -545,7 +545,12 @@ fn asked(request: &Request) -> Result<Asked, Response> {
         }),
         ["", _, "cancel"] => Ok(Asked::Cancel { id: id()? }),
         ["", _, "cancelling"] => Ok(Asked::Cancelling { id: id()? }),
-        ["", _, "trace" | "exchange" | "item" | "diff", ..] => Ok(Asked::Trace {
+        [
+            "",
+            _,
+            "trace" | "exchange" | "item" | "payload" | "diff",
+            ..,
+        ] => Ok(Asked::Trace {
             id: id()?,
             asked: trace::asked(&parts[2..], request)?,
         }),

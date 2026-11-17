@@ -37,6 +37,8 @@ import {
 } from "./h.js";
 import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf, windowAt } from "./records.js";
 import { RowList } from "./rows.js";
+import { jsonText, payloadLink, payloadOf } from "./payload.js";
+import { drawTalk, laneRole } from "./talk.js";
 
 /**
  * @typedef {object} Run `/api/runs/<id>`
@@ -91,7 +93,8 @@ import { RowList } from "./rows.js";
  * @property {{ count: number, failed: number }} [answers] how many model answers it has, and failed
  * @property {Work[] | null} [work]
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
- * @typedef {{ roles: Role[], edges: Edge[] }} Talk
+ * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
+ * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches
  * @typedef {{ name: string, kind: string | null, place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown" }} Role
  * @typedef {{ api: string, upstream: string, models: Record<string, string> }} Route an entry of a role's model route: each model by the name the upstream takes it as
  * @typedef {{ from: string, to: string, kind: string, count: number, bytes: number | null, back_bytes: number | null }} Edge
@@ -101,9 +104,6 @@ import { RowList } from "./rows.js";
  * @typedef {import("./records.js").Item} Item
  */
 
-// The widths of a character of the diagram's names and places, in its font, `--fs-diagram`.
-const NAME_CHAR_PX = 7.3;
-const PLACE_CHAR_PX = 7.3;
 // The bounds of the characters of the lanes' names and places before the tracks, which the style
 // turns into `--label` in its monospace.
 const LABEL_MIN_CHARS = 18;
@@ -116,15 +116,6 @@ const CANCEL_POLL_MS = 1000;
 /** What a call's lane calls, as words. @param {{ function: string } | "final"} of */
 function calls(of) {
   return of === "final" ? "the final call" : "job function " + of.function;
-}
-
-/** @param {Lane} lane @param {Run} data */
-function laneRole(lane, data) {
-  if (lane.kind === "agent") {
-    const agent = data.talk && data.talk.roles.find((role) => role.kind === "agent");
-    return agent ? agent.name : null;
-  }
-  return lane.role ?? null;
 }
 
 // ---- the run's page
@@ -271,9 +262,10 @@ export async function runView(id) {
     const items = folded(shown, state.open);
     list.set(items, holder ? items.indexOf(holder) : -1);
     drawTalk(talk, data, lit, role, (name) => {
-      setQuery({ role: name === role ? null : name, lane: null, sel: null });
+      const off = name === null || name === role;
+      setQuery({ role: off ? null : name, lane: null, sel: null });
       redraw();
-      if (name === role) fill(inspector, unselected());
+      if (off) fill(inspector, unselected());
       else inspectRole(name, inspector, data);
     });
     if (selected !== state.selected) lanes.querySelector(".lane.lit")?.scrollIntoView({ block: "nearest" });
@@ -714,105 +706,6 @@ function drawLanes(node, data, view, picked, change, inspect) {
   node.replaceChildren(axis, tracks);
 }
 
-// Who talks to whom: the agent, with the model upstream under it, in the left column and the
-// targets then the runners in the right one; a line for each pair that the log shows talking, one
-// within a column bowed out past its side so that it passes no box, and below, what went between
-// them. What a selection lights is lit, the rest dim; a role picked lights the lines it has.
-/** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {(name: string) => void} pick */
-function drawTalk(node, data, lit, picked, pick) {
-  if (!data.talk) return fill(node, h("p", { class: "empty" }, "The record has no roles yet."));
-  const { roles, edges } = data.talk;
-  /** @type {Record<string, number>} */
-  const order = { agent: 0, target: 1, runner: 2 };
-  const shown = roles.map((role) => ({ ...role, column: role.kind === "agent" ? 0 : 1 }));
-  if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === "model")) {
-    shown.push({ name: "model", kind: "model", place: "The route's upstream", routed: false, final_target: false, routes: [], column: 0 });
-  }
-  shown.sort((a, b) => a.column - b.column || (order[a.kind ?? ""] ?? 3) - (order[b.kind ?? ""] ?? 3));
-  const [boxH, gapX, gapY, bow] = [34, 72, 12, 28];
-  const widthOf = (/** @type {Role} */ n) => Math.ceil(Math.max(n.name.length * NAME_CHAR_PX + (n.final_target ? 14 : 0), (n.place || "-").length * PLACE_CHAR_PX)) + 14;
-  const columnW = [0, 1].map((column) => Math.max(0, ...shown.filter((n) => n.column === column).map(widthOf)));
-  const xs = [bow, bow + columnW[0] + gapX];
-  /** @typedef {Role & { column: number, x: number, y: number, w: number, row: number }} Box */
-  /** @type {Map<string, Box>} */
-  const nodes = new Map();
-  const rows = [0, 0];
-  for (const n of shown) {
-    nodes.set(n.name, { ...n, x: xs[n.column], y: 4 + rows[n.column] * (boxH + gapY), w: columnW[n.column], row: rows[n.column] });
-    rows[n.column] += 1;
-  }
-  const width = xs[1] + columnW[1] + bow;
-  const height = Math.max(0, ...[...nodes.values()].map((n) => n.y + boxH)) + 4;
-  /** @type {Map<string, Edge[]>} */
-  const pairs = new Map();
-  for (const edge of edges) {
-    const key = edge.from + "\u0000" + edge.to;
-    pairs.set(key, [...(pairs.get(key) || []), edge]);
-  }
-  const touches = (/** @type {string} */ from, /** @type {string} */ to) => !lit || (lit.focus ? from === lit.focus || to === lit.focus : lit.roles.has(from) && lit.roles.has(to));
-  const touch = (/** @type {string} */ a, /** @type {string} */ b) => pairs.has(a + "\u0000" + b) || pairs.has(b + "\u0000" + a);
-  // Each left box's lines to the right column leave its side spread out, in the order of the boxes
-  // they reach, rather than from one point.
-  /** @type {Map<string, string[]>} */
-  const fans = new Map();
-  for (const key of pairs.keys()) {
-    const [a, b] = key.split("\u0000").map((name) => nodes.get(name));
-    if (!a || !b || a.column === b.column) continue;
-    const [l, r] = a.column < b.column ? [a, b] : [b, a];
-    const fan = fans.get(l.name) || [];
-    fans.set(l.name, fan);
-    if (!fan.includes(r.name)) fan.push(r.name);
-  }
-  const y = (/** @type {string} */ name) => nodes.get(name)?.y ?? 0;
-  for (const fan of fans.values()) fan.sort((p, q) => y(p) - y(q));
-  const lines = [...pairs.entries()].map(([key, list]) => {
-    const [from, to] = key.split("\u0000");
-    const [a, b] = [nodes.get(from), nodes.get(to)];
-    if (!a || !b) return null;
-    const count = list.reduce((sum, edge) => sum + edge.count, 0);
-    const look = { "stroke-width": Math.min(6, 1 + Math.log2(count)), class: touches(from, to) ? "" : "dim" };
-    if (a.column !== b.column) {
-      const [l, r] = a.column < b.column ? [a, b] : [b, a];
-      const fan = fans.get(l.name) || [r.name];
-      const y1 = l.y + (boxH * (fan.indexOf(r.name) + 1)) / (fan.length + 1);
-      return svg("line", { x1: l.x + l.w, y1, x2: r.x, y2: r.y + boxH / 2, ...look });
-    }
-    const [top, bottom] = a.row < b.row ? [a, b] : [b, a];
-    if (bottom.row - top.row === 1) return svg("line", { x1: top.x + top.w / 2, y1: top.y + boxH, x2: top.x + top.w / 2, y2: bottom.y, ...look });
-    const [side, out] = a.column === 0 ? [a.x, -bow] : [a.x + a.w, bow];
-    const [y1, y2] = [top.y + boxH / 2, bottom.y + boxH / 2];
-    return svg("path", { d: "M" + side + " " + y1 + " C" + (side + out) + " " + y1 + " " + (side + out) + " " + y2 + " " + side + " " + y2, ...look });
-  });
-  const boxes = [...nodes.values()].map((n) =>
-    svg(
-      "g",
-      { class: "node " + n.kind + (n.name === picked ? " on" : "") + (lit && !lit.roles.has(n.name) && !(lit.focus && touch(lit.focus, n.name)) ? " dim" : ""), transform: "translate(" + n.x + "," + n.y + ")", onclick: () => pick(n.name) },
-      svg("title", {}, n.name + (n.final_target ? " (the final call's target)" : "") + (n.place ? " on " + n.place : "")),
-      svg("rect", { width: n.w, height: boxH, rx: 6 }),
-      n.final_target ? svg("rect", { class: "final", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
-      svg("text", { x: n.final_target ? 20 : 6, y: 14 }, n.name),
-      svg("text", { x: 6, y: 27, class: "place" }, n.place || "-"),
-    ),
-  );
-  const items = [...pairs.entries()]
-    .filter(([key]) => touches(...(/** @type {[string, string]} */ (key.split("\u0000")))))
-    .map(([key, list]) => {
-      const [from, to] = key.split("\u0000");
-      const what = list.map((edge) => {
-        let text = plural(edge.count, edge.kind);
-        if (edge.bytes !== null) text += " " + bytes(edge.bytes);
-        if (edge.back_bytes !== null) text += ", " + bytes(edge.back_bytes) + " back";
-        return text;
-      });
-      return h("li", {}, h("span", { class: "pair" }, from + " → " + to), " " + what.join(" · "));
-    });
-  fill(
-    node,
-    svg("svg", { viewBox: "0 0 " + width + " " + height, width, height }, lines, boxes),
-    items.length ? h("ul", {}, items) : h("p", { class: "empty" }, lit ? "No line joins the lit roles." : "The log shows no op or model request between roles yet."),
-  );
-}
-
 // Shows role `name` in the inspector: its kind, its place, and its model route, each entry's API,
 // upstream and models, by the name the upstream takes each as; the model upstream, each role's
 // route that reaches it.
@@ -904,13 +797,15 @@ function inspectLane(lane, inspector, nearest, data) {
 }
 
 // Shows `record` in the inspector: its kind and time, its fields that are no object, the buttons
-// `links`, then the record whole, as the log holds it, its strings cut.
+// `links`, a link to the payload it names, if any, then the record whole, as the log holds it,
+// its strings cut, coloured.
 /** @param {LogRecord} record @param {HTMLElement} inspector @param {Array<HTMLElement | false | null | undefined>} links @param {Run | null} data */
 function inspectRecord(record, inspector, links, data) {
   const [kind] = saidOf(record);
   const started = data && data.times && data.times.started_unix;
   const { byte, when, ...kept } = record;
   const event = /** @type {Record<string, any>} */ (record.event || {});
+  const payload = data && payloadOf(record);
   /** @type {Array<[string, any]>} */
   const scalars = [
     ["seq", record.seq],
@@ -924,6 +819,7 @@ function inspectRecord(record, inspector, links, data) {
     h("h3", {}, h("span", { class: "kind" }, kind), " ", h("span", { class: "t", title: utc(started, when) }, clock(when))),
     h("dl", {}, scalars.filter(([, value]) => value !== undefined && value !== "").flatMap(([name, value]) => [h("dt", {}, name), h("dd", {}, String(value))])),
     links.some(Boolean) ? h("p", { class: "links" }, links) : null,
-    h("pre", {}, JSON.stringify(kept, null, 2)),
+    payload && data ? payloadLink(data.id, payload) : null,
+    jsonText(kept),
   );
 }
