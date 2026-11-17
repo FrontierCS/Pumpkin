@@ -1135,7 +1135,9 @@ const KEY: &str = "sk-client-stand-in";
 // controller's user. A file in `bin` shapes it: `refused-M` closes the connection that opens
 // master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
 // command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
-// holds, `cut-out-M` ends any other command's output so, and `answer` is one command's output.
+// holds, `cut-out-M` ends any other command's output so, and `answer` is one command's output;
+// `count-out` notes in `counted` the bytes of each other command's output, but for a listing's
+// first line, the machine's uptime, which is as long as the machine has been up.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1167,7 +1169,7 @@ if [ "$first" != 'cd "$HOME/store/incoming"' ]; then
     fi
     [ -e "$dir/count-out" ] || exec sh -c "$*"
     sh -c "$*" > "$dir/out-$$"; status=$?
-    cat "$dir/out-$$"; wc --bytes < "$dir/out-$$" >> "$dir/counted"; exit "$status"
+    cat "$dir/out-$$"; sed '1{/^up /d}' "$dir/out-$$" | wc --bytes >> "$dir/counted"; exit "$status"
 fi
 if [ -e "$dir/cut-$master" ]; then
     head --bytes="$(cat "$dir/cut-$master")" | sh -c "$*"
@@ -2761,46 +2763,46 @@ fn ls_by_offsets() {
         &shown,
         &expect![[r#"
             first, with no copies:
-            ls: exit status: 0, 4 rows, 48764 bytes
+            ls: exit status: 0, 4 rows, 48750 bytes
               <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             again, with nothing new:
-            ls: exit status: 0, 4 rows, 1160 bytes
+            ls: exit status: 0, 4 rows, 1146 bytes
               <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             run 0 grown by 2 lines and part of a third:
-            ls: exit status: 0, 4 rows, 2696 bytes
+            ls: exit status: 0, 4 rows, 2682 bytes
               <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             run 1's log replaced by a shorter one, run 2's copy cut inside a line:
-            ls: exit status: 0, 4 rows, 8835 bytes
+            ls: exit status: 0, 4 rows, 8821 bytes
               <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             run 0 ended:
-            ls: exit status: 0, 4 rows, 3719 bytes
+            ls: exit status: 0, 4 rows, 3705 bytes
               <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
               <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             again, run 2's copy ending in a part of a line longer than a read:
-            ls: exit status: 0, 4 rows, 1122 bytes
+            ls: exit status: 0, 4 rows, 1108 bytes
               <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
               <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            runs 1 and 2 grown by 100 lines, then two ls at once: exit status: 0, exit status: 0; bytes 1124 and 23650
+            runs 1 and 2 grown by 100 lines, then two ls at once: exit status: 0, exit status: 0; bytes 1110 and 23636
               <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
               <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: live, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
             run 1's log unreadable, as a directory:
-            ls: exit status: 1, 0 rows, 56 bytes
+            ls: exit status: 1, 0 rows, 42 bytes
               tail: error reading '.pumpkin/runs/<run 1>/log.jsonl': Is a directory
               reading the log of run <run 1> for the listing failed, as said above: run the command again
               pumpkin: listing the runs on controller `alice` failed (exit status: 1), as said above
             run 2 ended, and `wait` copied it (exit status: 0):
-            ls: exit status: 0, 4 rows, 1088 bytes
+            ls: exit status: 0, 4 rows, 1074 bytes
               <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
               <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
               <run 2>: runs, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json"#]],
@@ -2832,16 +2834,16 @@ fn ls_before_a_line() {
         &[(id.as_str(), "<run>")],
         &expect![[r#"
             no line yet, listed three times:
-            ls: exit status: 0, 2 rows, 6204 bytes
+            ls: exit status: 0, 2 rows, 6190 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 6204 bytes
+            ls: exit status: 0, 2 rows, 6190 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 6204 bytes
+            ls: exit status: 0, 2 rows, 6190 bytes
               <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
             its line finished, twice:
-            ls: exit status: 0, 2 rows, 7228 bytes
+            ls: exit status: 0, 2 rows, 7214 bytes
               <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            ls: exit status: 0, 2 rows, 1085 bytes
+            ls: exit status: 0, 2 rows, 1071 bytes
               <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json"#]],
     );
 }
