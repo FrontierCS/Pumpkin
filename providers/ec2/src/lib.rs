@@ -34,7 +34,7 @@ use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
 use schema::sandbox::TcpDial;
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 mod launch;
 
@@ -181,7 +181,7 @@ pub struct Ec2<'e> {
     repositories: Repositories<Repository>,
     /// The timer's role, which each instance's schedule runs with.
     timer_role: RoleArn,
-    /// What [`Provider::ready`] gives: no report, and the classes of sandbox.
+    /// What [`Provider::ready`] gives: what names the account, and the classes of sandbox.
     ready: Ready,
     dir: PathBuf,
 }
@@ -200,9 +200,18 @@ impl<'e> Ec2<'e> {
             timer,
         } = settings;
         let cli = Cli::connect(region.clone())?;
-        let Identity {} = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let Identity { account, arn } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
         let repositories = described_repositories(&cli, repositories)?;
         let Timer { group, role_arn } = timer.clone();
+        let report = json!({
+            "account": account,
+            "caller": arn,
+            "repositories": {
+                "roles": repositories.roles.uri(),
+                "sandboxd": repositories.sandboxd.uri(),
+            },
+            "timer": { "group": group.0, "role_arn": role_arn },
+        });
         Ok(Self {
             reached: Reached { cli, group },
             pusher,
@@ -210,7 +219,7 @@ impl<'e> Ec2<'e> {
             classes: classes.clone(),
             repositories,
             timer_role: role_arn,
-            ready: ready(classes),
+            ready: ready(report, classes),
             dir: dir.to_owned(),
         })
     }
@@ -222,7 +231,7 @@ impl Ec2<'_> {
     /// the settings' region, as [`connect`](Self::connect) has it answer.
     pub fn reach(settings: &Settings) -> Result<Reached, String> {
         let cli = Cli::connect(settings.region.clone())?;
-        let Identity {} = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let Identity { .. } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
         let group = settings.timer.group.clone();
         Ok(Reached { cli, group })
     }
@@ -299,9 +308,9 @@ impl Creator<TcpDial> for Ec2<'_> {
     }
 }
 
-/// What [`Provider::ready`] gives of an envelope of instance classes `classes`: no report, as a
-/// reap reaches the envelope by the settings.
-fn ready(classes: &BTreeMap<Name, InstanceClass>) -> Ready {
+/// What [`Provider::ready`] gives of an envelope of instance classes `classes`, whose account
+/// `report` names.
+fn ready(report: Value, classes: &BTreeMap<Name, InstanceClass>) -> Ready {
     // Each instance class is a class of sandbox, which offers a role what its instance type
     // leaves one ([`InstanceClass::role_limits`]), and the CPU's flags and model that the
     // settings state.
@@ -322,14 +331,19 @@ fn ready(classes: &BTreeMap<Name, InstanceClass>) -> Ready {
         (name.clone(), class)
     });
     Ready {
-        report: Value::Null,
+        report,
         classes: classes.collect(),
     }
 }
 
-/// What `aws sts get-caller-identity` prints, which a call answers if the credentials work.
+/// What `aws sts get-caller-identity` prints, which a call answers if the credentials work: the
+/// account that they are in, and whose they are, as an ARN.
 #[derive(Deserialize)]
-struct Identity {}
+#[serde(rename_all = "PascalCase")]
+struct Identity {
+    account: String,
+    arn: String,
+}
 
 /// `repositories`, with their URIs.
 fn described_repositories(

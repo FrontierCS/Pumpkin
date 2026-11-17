@@ -12,8 +12,9 @@ use serde_json::Value;
 /// What a provider declares when a run connects to it, which holds while the run is connected.
 #[derive(Debug, Serialize)]
 pub struct Ready {
-    /// What the run's record keeps of the provider, in a form of its own, for a reap to reach it
-    /// again; `null` if the configuration that ran the run is enough.
+    /// What the run's record keeps of the provider, in a form of its own: what a reap needs to
+    /// reach it again beside the configuration that ran the run, and each string that names its
+    /// account, which an export replaces; `null` if neither.
     pub report: Value,
     pub classes: BTreeMap<Name, Class>,
 }
