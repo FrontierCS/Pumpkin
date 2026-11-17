@@ -411,6 +411,16 @@ impl From<String> for Failed {
     }
 }
 
+impl Failed {
+    fn response(self) -> Response {
+        match self {
+            Self::NotFound(error) => Response::refused("404 Not Found", &error),
+            Self::Unreadable(error) => Response::refused("500 Internal Server Error", &error),
+            Self::Refused(refused) => refused,
+        }
+    }
+}
+
 fn route(request: &Request, local: &mut Local) -> Response {
     // The browser's own requests for the page's files can't carry the token header.
     if request.method == Method::Get
@@ -489,9 +499,7 @@ fn answered(asked: Asked, view: &mut View) -> Response {
     view.drop_ended();
     match answered {
         Ok(json) => Response::json(&json),
-        Err(Failed::NotFound(error)) => Response::refused("404 Not Found", &error),
-        Err(Failed::Unreadable(error)) => Response::refused("500 Internal Server Error", &error),
-        Err(Failed::Refused(refused)) => refused,
+        Err(failed) => failed.response(),
     }
 }
 
@@ -712,12 +720,24 @@ impl View {
         let record = if self.held.contains_key(id) {
             None
         } else {
-            Some(Record::open(&self.runs.join(id)).map_err(Failed::NotFound)?)
+            Some(self.record(id)?)
         };
         let reads = self.reads;
         let held = self.looked(id, record)?;
         held.read = reads;
         Ok(held)
+    }
+
+    fn record(&self, id: &str) -> Result<Record, Failed> {
+        let dir = self.runs.join(id);
+        // Said without the runs directory, which is the server's, not the page's.
+        if !dir.try_exists().context(dir.display())? {
+            return Err(Failed::NotFound(format!(
+                "no run that this view serves matches `{id}`: name the id of one that its list \
+                 shows"
+            )));
+        }
+        Record::open(&dir).map_err(Failed::NotFound)
     }
 
     /// Run `id`, held, or else of `record`, looked at again. Its fold is dropped if the look
@@ -808,8 +828,8 @@ impl Local {
     fn cancel(&mut self, id: &RunTag) -> Response {
         match &self.source {
             Source::Here { view, runs_given } => {
-                if let Err(error) = Record::open(&view.runs.join(id.as_str())) {
-                    return Response::refused("404 Not Found", &error);
+                if let Err(failed) = view.record(id.as_str()) {
+                    return failed.response();
                 }
                 self.cancels.start(id, Some(runs_given))
             }

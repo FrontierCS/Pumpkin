@@ -416,10 +416,10 @@ fn serves_runs() {
             {"error":"the request names the host `pumpkin.example:80`: expected one of 127.0.0.1, localhost, [::1], this machine's loopback, at which the view is served"}
             GET /api/runs/run-1 []
             HTTP/1.1 404 Not Found
-            {"error":"runs/run-1 is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `run-1`: name the id of one that its list shows"}
             GET /api/runs/20261110-140000-0000000f []
             HTTP/1.1 404 Not Found
-            {"error":"runs/20261110-140000-0000000f is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `20261110-140000-0000000f`: name the id of one that its list shows"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
             {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9222: expected 0, or a byte that an answer gave"}"#]],
@@ -817,7 +817,7 @@ fn cancels_a_run() {
             {"error":"the page started no cancel of run <id>: cancel it from the page, by POST /api/runs/<id>/cancel"}
             POST /api/runs/20261110-170000-00000012/cancel [("Origin", "<page>")]
             HTTP/1.1 404 Not Found
-            {"error":"runs/20261110-170000-00000012 is not a directory: expected the directory of a run's record"}
+            {"error":"no run that this view serves matches `20261110-170000-00000012`: name the id of one that its list shows"}
             POST /api/runs/<id>/cancel from the page
             HTTP/1.1 202 Accepted
             POST /api/runs/<id>/cancel from the page while that goes on
