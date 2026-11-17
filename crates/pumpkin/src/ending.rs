@@ -1,23 +1,48 @@
-//! Following a run until it ends, and saying how it ended: its outcome, its summary, and the
-//! commands to run next.
+//! Following a run until it ends, and saying how it ended: its outcome, if asked for, its
+//! summary, and the commands to run next.
 
-use std::fmt;
 use std::path::Path;
 use std::process::ExitCode;
+use std::{fmt, fs};
 
 use runtime::{BUILD, Ending, Record};
 use schema::ir::Name;
 use serde_json::Value;
 use stdx::Context;
 
-use crate::{Reader, advise, next, print_outcome, progress, say, tell, to_stderr};
+use crate::{Reader, advise, next, print, progress, say, tell, to_stderr};
 
-/// Says how `record`'s run ended, following it first if it is live. `command` is the command that
-/// follows it, which the following names, and `runs` is as [`crate::runs_dir`]'s second.
+/// What a command that says how a run ended prints on the standard output.
+#[derive(Clone, Copy)]
+pub(crate) enum Printed {
+    /// The run's `outcome.json`, the file's bytes.
+    Outcome,
+    Nothing,
+}
+
+impl Printed {
+    /// Prints what `self` asks for of the run whose record is `dir`, which fails if that is an
+    /// `outcome.json` the record lacks.
+    pub(crate) fn print(self, dir: &Path) -> Result<(), String> {
+        match self {
+            Self::Outcome => {
+                let recorded = dir.join("outcome.json");
+                let printed = fs::read(&recorded).context(recorded.display())?;
+                print(&printed).context("printing the outcome failed")
+            }
+            Self::Nothing => Ok(()),
+        }
+    }
+}
+
+/// Says how `record`'s run ended, following it first if it is live, after printing what
+/// `printed` asks for. `command` is the command that follows it, which the following names, and
+/// `runs` is as [`crate::runs_dir`]'s second.
 pub(crate) fn follow(
     record: &Record,
     command: &str,
     runs: Option<&str>,
+    printed: Printed,
 ) -> Result<ExitCode, String> {
     let ending = if let Some(ending) = record.ending()? {
         ending
@@ -25,7 +50,7 @@ pub(crate) fn follow(
         following(record, command);
         followed(record, Reader::Operator)?
     };
-    end(record, &ending, runs, record.args())
+    end(record, &ending, printed, runs, record.args())
 }
 
 // A milestone said within a second is timely, and each poll reads only what the log gained, and
@@ -84,12 +109,13 @@ pub(crate) fn following(record: &Record, command: &str) {
     ));
 }
 
-/// Prints the run's outcome and says how it ended, with the commands to run next, and gives the
-/// exit code: success if the run finished with a result, 3 if it finished without one, and
-/// failure if it failed, was interrupted or was lost. `args` are those that run it again.
+/// Prints what `printed` asks for, then says how the run ended, with the commands to run next,
+/// and gives the exit code: success if the run finished with a result, 3 if it finished without
+/// one, and failure if it failed, was interrupted or was lost. `args` are those that run it again.
 pub(crate) fn end(
     record: &Record,
     ending: &Ending,
+    printed: Printed,
     runs: Option<&str>,
     args: &[String],
 ) -> Result<ExitCode, String> {
@@ -113,7 +139,7 @@ pub(crate) fn end(
             return Ok(ExitCode::FAILURE);
         }
     };
-    print_outcome(record.dir())?;
+    printed.print(record.dir())?;
     summarize(record);
     say(closing(id, &how, record.dir()));
     again(record, args);

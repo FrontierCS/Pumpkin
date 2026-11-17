@@ -80,7 +80,6 @@ fn runs_a_task() {
               sandboxes: 1 on local/container, <t> in all, none created
             pumpkin: run <first> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<first>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-            printed outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
@@ -98,8 +97,7 @@ fn runs_a_task() {
             pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent failed: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             record: driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/final.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}
-            printed outcome.json: true"#]],
+            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}"#]],
     );
 }
 
@@ -528,13 +526,11 @@ fn says_unread_lines() {
               4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
             pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait --runs runs 20261110-110000-0000000c
             exit status: Some(1)
             pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
             pumpkin: run 20261110-110000-0000000c failed: the agent's sandbox didn't start; its record is <scratch>/runs/20261110-110000-0000000c
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"reason":"the agent's sandbox didn't start","state":"failed"}"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }
 

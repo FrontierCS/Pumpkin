@@ -2561,6 +2561,66 @@ fn follow_cut_before_a_line() {
     );
 }
 
+#[test]
+fn follow_prints_the_outcome() {
+    let scratch = Scratch::new("controller-follow-prints-the-outcome");
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000004");
+    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let followed = |job: &str| {
+        let mut lines = Vec::new();
+        for args in [&["wait", &id][..], &["wait", "--outcome", &id]] {
+            // Else `wait` would say the run's ending from the copy that the last one made.
+            let _ = fs::remove_dir_all(&copy);
+            let waited = on_client(&scratch, &client, args).output().unwrap();
+            let stderr = String::from_utf8(waited.stderr).unwrap();
+            let ended = stderr.lines().find(|line| line.contains(" finished "));
+            let copied = fs::read(copy.join("outcome.json")).unwrap();
+            let printed = match &waited.stdout {
+                printed if printed.is_empty() => "nothing",
+                printed if *printed == copied => "the copy's outcome.json",
+                _ => "something else",
+            };
+            lines.extend([
+                format!("followed by {job}: $ pumpkin {}", args.join(" ")),
+                format!("  {}", waited.status),
+                format!("  said: {}", ended.unwrap()),
+                format!("  printed: {printed}"),
+            ]);
+        }
+        lines
+    };
+    let mut lines = followed("its own pumpkin");
+    fs::remove_file(scratch.0.join(format!("home/jobs/{id}/pumpkin"))).unwrap();
+    let current = "#!/bin/sh\necho \"pumpkin: run $2 finished with a result\" >&2\n";
+    scratch.write_executable("home/current-pumpkin", current.as_bytes());
+    lines.extend(followed("the controller's current pumpkin"));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            followed by its own pumpkin: $ pumpkin wait <id>
+              exit status: 0
+              said: pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+              printed: nothing
+            followed by its own pumpkin: $ pumpkin wait --outcome <id>
+              exit status: 0
+              said: pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+              printed: the copy's outcome.json
+            followed by the controller's current pumpkin: $ pumpkin wait <id>
+              exit status: 0
+              said: pumpkin: run <id> finished with a result
+              printed: nothing
+            followed by the controller's current pumpkin: $ pumpkin wait --outcome <id>
+              exit status: 0
+              said: pumpkin: run <id> finished with a result
+              printed: the copy's outcome.json"#]],
+    );
+}
+
 fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
     let record = format!("home/.pumpkin/runs/{id}");
     let args = ["stand-in/task.star"];

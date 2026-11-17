@@ -15,6 +15,7 @@ use stdx::Context as _;
 
 use super::send::{send, tree};
 use super::{Reached, SSH_FAILED};
+use crate::ending::Printed;
 use crate::job::{BUILDS, JOBS};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
@@ -125,7 +126,7 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
         runs,
         config,
         sandboxd,
-        wait,
+        wait: cli::Waiting(wait),
     } = flags;
     unsendable(
         client,
@@ -154,8 +155,8 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
     say(format_args!(
         "run {id} is a job on controller `{name}`, which builds it, then runs it"
     ));
-    if wait {
-        return follow(&reached, id, config.as_deref());
+    if let Some(printed) = wait {
+        return follow(&reached, id, config.as_deref(), printed);
     }
     crate::advise("follow it", &next::of_run("wait", None, id));
     crate::advise("stop it", &next::of_run("cancel", None, id));
@@ -165,19 +166,29 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
 }
 
 /// Follows the run that `run` names on the controller to its end, copies its record here, and
-/// ends as the run ended. A connection that ends meanwhile is opened again, and the log goes on
-/// where it stopped.
-pub(crate) fn wait(client: &config::Client, run: &str) -> Result<ExitCode, String> {
+/// ends as the run ended, having printed what `printed` asks for. A connection that ends
+/// meanwhile is opened again, and the log goes on where it stopped.
+pub(crate) fn wait(
+    client: &config::Client,
+    run: &str,
+    printed: Printed,
+) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let id = reached.resolve(run)?;
-    follow(&reached, &id, None)
+    follow(&reached, &id, None, printed)
 }
 
-fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode, String> {
+fn follow(
+    reached: &Reached,
+    id: &str,
+    config: Option<&str>,
+    printed: Printed,
+) -> Result<ExitCode, String> {
     // A job prints its run's id once it has said all it says of the run's start.
     let started = "[ -s out ]";
     // A job with no `pumpkin` of its own is followed by the controller's current one, whose `wait`
-    // says the run's ending as the controller would run it again.
+    // says the run's ending as the controller would run it again. All that the remote command
+    // says is commentary, so it goes to the standard error, whatever build `current` is.
     let then = format!(
         "cd\n[ -d {runs}/{id} ] || exit {UNSTARTED}\n\
          [ ! -x {JOBS}/{id}/{own} ] || exec {JOBS}/{id}/{own} controller follow {id} 2>&1\n\
@@ -217,17 +228,30 @@ fn follow(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode,
              again: {}",
             next::of_run("wait", None, id)
         )),
-        code if code == i32::from(crate::job::ENDED) => said_here(reached, id, config),
+        code if code == i32::from(crate::job::ENDED) => said_here(reached, id, config, printed),
         code => {
             reached.copy(id)?;
+            // The follow ended without the run's ending said here, so what `printed` asks for
+            // comes from the copy, which has no `outcome.json` if the run is lost.
+            let copy = PathBuf::from(crate::default_runs()?).join(id);
+            let recorded = copy.join("outcome.json");
+            if recorded.try_exists().context(recorded.display())? {
+                printed.print(&copy)?;
+            }
             Ok(exit(code))
         }
     }
 }
 
 /// Copies the record of run `id`, which has ended, and says its ending from the copy, as `wait`
-/// does, ending with the command that runs it again from here.
-fn said_here(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCode, String> {
+/// does, after printing what `printed` asks for, ending with the command that runs it again from
+/// here.
+fn said_here(
+    reached: &Reached,
+    id: &str,
+    config: Option<&str>,
+    printed: Printed,
+) -> Result<ExitCode, String> {
     reached.copy(id)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let record = runtime::Record::open(&runs.join(id))?;
@@ -239,7 +263,7 @@ fn said_here(reached: &Reached, id: &str, config: Option<&str>) -> Result<ExitCo
             next::of_run("wait", None, id)
         ));
     };
-    crate::end(&record, &ending, None, &here(&record, config)?)
+    crate::end(&record, &ending, printed, None, &here(&record, config)?)
 }
 
 /// The command line of a run that went to the controller, for this machine: the task's entry as
@@ -364,11 +388,11 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
         // `cancel`'s exit says only that the run has ended, however that was, and whether what it
         // left on its provider is gone, as a local one's does.
         code if code == i32::from(crate::job::ENDED) => {
-            said_here(&reached, &id, None)?;
+            said_here(&reached, &id, None, Printed::Nothing)?;
             Ok(ExitCode::SUCCESS)
         }
         code if code == i32::from(crate::job::ENDED_UNREACHED) => {
-            said_here(&reached, &id, None)?;
+            said_here(&reached, &id, None, Printed::Nothing)?;
             crate::advise(
                 "remove what it left once its provider can be reached",
                 &next::reap(None),

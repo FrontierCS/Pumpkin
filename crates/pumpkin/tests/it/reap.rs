@@ -149,7 +149,6 @@ fn reaps() {
             exit status: Some(1)
             pumpkin: run 20261108-120000-0a000001 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120000-0a000001
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
@@ -410,7 +409,6 @@ esac
             pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml
             pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs
-            printed outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120700-0a000008's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120700-0a000008, to stop reaping it

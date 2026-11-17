@@ -83,6 +83,7 @@ fn usage() {
         pumpkin(&["run", "a.json"]),
         pumpkin(&["run", "a.star", "--arg", "model"]),
         pumpkin(&["run", "a.star", "--arg", "a=1", "--arg", "a=2"]),
+        pumpkin(&["run", "--outcome", "a.star"]),
         pumpkin(&["cancel", "--force=yes", "6a"]),
         pumpkin(&["reap", "6a"]),
         not_utf8("wait $'\\xff'", &[b"wait", b"\xff"]),
@@ -123,7 +124,7 @@ fn usage() {
                 check   Check tasks' sources, building and running nothing
                 fmt     Format the workflow language's `.star` files
                 run     Build a task's images, and start a run of it
-                wait    Wait until a run has ended, and print its outcome
+                wait    Wait until a run has ended, and say how it ended
                 ls      List the runs and their states
                 cancel  Stop a run, and remove what it left
                 view    Serve the runs' records to this machine's browser
@@ -179,19 +180,24 @@ fn usage() {
                         both
 
                     --wait
-                        Follow the run to its end, as `pumpkin wait` does, and print its
-                        outcome.json instead of its id.
+                        Follow the run to its end, as `pumpkin wait` does, rather than print
+                        its id.
+
+                    --outcome
+                        Also print the run's outcome.json on the standard output once it has
+                        ended.
 
                 -h, --help
                         Print this help.
 
               Examples:
                 pumpkin run tasks/bench/task.star --arg model=model-a
-                pumpkin run tasks/bench/task.star --arg model=model-a --wait > outcome.json
+                pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome > outcome.json
 
               Exit status:
                 0  The run has started.
-                1  An error; a run that failed to start prints its outcome.json first.
+                1  An error; with --outcome, a run that failed to start prints its
+                   outcome.json first.
                 2  A usage error.
               With --wait, `run` exits as `pumpkin wait` does once the run has started. Every
               exit but 0 ends with a `pumpkin:` line on the standard error, which says why.
@@ -242,7 +248,7 @@ fn usage() {
             $ pumpkin wait -h
             exit status: Some(0)
             printed:
-              Wait until a run has ended, then print its outcome.json.
+              Wait until a run has ended, then say how it ended.
 
               Usage: pumpkin wait [OPTIONS] <run>
 
@@ -257,6 +263,10 @@ fn usage() {
                         The directory that <run> is looked up in.
                         Default: runs/ in the .pumpkin directory that this pumpkin is in
 
+                    --outcome
+                        Also print the run's outcome.json on the standard output once it has
+                        ended.
+
                 -h, --help
                         Print this help.
 
@@ -264,6 +274,7 @@ fn usage() {
                 pumpkin wait 20261108-000905-126a21e9
                 pumpkin wait 126a
                 pumpkin wait runs/20261108-000905-126a21e9
+                pumpkin wait --outcome 126a > outcome.json
 
               Exit status:
                 0  The run finished with a result.
@@ -346,8 +357,7 @@ fn usage() {
             $ pumpkin cancel --help
             exit status: Some(0)
             printed:
-              Stop a run, wait until it has ended, remove what it left, and print its
-              outcome.json.
+              Stop a run, wait until it has ended, remove what it left, and say how it ended.
 
               Usage: pumpkin cancel [OPTIONS] <run>
 
@@ -387,8 +397,7 @@ fn usage() {
               `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
               signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
               provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
-              and prints its outcome.json, then says how the run ended, as `pumpkin wait`
-              does.
+              then says how the run ended, as `pumpkin wait` does.
 
               With [controller] in the configuration, and no --runs, `cancel` stops the job
               of a run that is yet to start on the controller, and cancels one that has
@@ -766,7 +775,7 @@ fn usage() {
               check   Check tasks' sources, building and running nothing
               fmt     Format the workflow language's `.star` files
               run     Build a task's images, and start a run of it
-              wait    Wait until a run has ended, and print its outcome
+              wait    Wait until a run has ended, and say how it ended
               ls      List the runs and their states
               cancel  Stop a run, and remove what it left
               view    Serve the runs' records to this machine's browser
@@ -841,6 +850,13 @@ fn usage() {
             error: `--arg a=2` names an arg given already: give each arg once
 
             Usage: pumpkin run [OPTIONS] <entry>
+            pumpkin: to read how to use it: pumpkin help run
+            $ pumpkin run --outcome a.star
+            exit status: Some(2)
+            error: the following required arguments were not provided:
+              --wait
+
+            Usage: pumpkin run --wait --outcome <entry>
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin cancel --force=yes 6a
             exit status: Some(2)
@@ -1035,7 +1051,6 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
             pumpkin: run <id> finished with a result (score=1), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
-            printed outcome.json: {"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait <id> --runs runs
             exit status: Some(0)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
@@ -1044,7 +1059,6 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
             pumpkin: run <id> finished with a result (score=3), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/submits/task.star
-            printed outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
@@ -1055,8 +1069,7 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
                 15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
                    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `final_call()`, called at fails/final.star:3:5), after the work phase ended when the agent exited with status 0; its commands' logs are in <scratch>/runs/<id>/jobs/0/log; its record is <scratch>/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star
-            printed outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {\"score\": json.decode(target.get(\"/pumpkin/out/result.json\"))[\"raw_score\"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star"#]],
     );
 }
 
@@ -1139,15 +1152,13 @@ fn ancestors() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/sticky/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
             outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
-            printed outcome.json: true
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs link/runs --config pumpkin.toml
             exit status: Some(1)
             pumpkin: run <id> records into <scratch>/own/runs/<id>
             pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/own/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/link/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
-            printed outcome.json: true"#]],
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}"#]],
     );
     for runs in ["shared/runs", "shared/sealed"] {
         let records = fs::read_dir(scratch.0.join(runs)).unwrap().count();
@@ -1170,8 +1181,7 @@ fn ancestors_writable_by_their_group() {
             pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/private/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/private/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
             record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
-            printed outcome.json: true"#]]
+            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}"#]]
     } else {
         expect![[r#"
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs private/runs --config pumpkin.toml
@@ -2029,7 +2039,6 @@ fn runs_on_docker() {
             the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
             the final call's answer: data: POST /v1/chat/completions HTTP/1.1 Some("Bearer sk-test") {"messages":[{"content":"grade","role":"user"}],"model":"vendor/gpt-6-astra"}\n\n
             outcome.json: {"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            printed outcome.json: true
             $ DOCKER_CONFIG=<docker config> HOME=<scratch>/home pumpkin run exits/task.star --sandboxd <sandboxd> --wait
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
@@ -2045,7 +2054,6 @@ fn runs_on_docker() {
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/exits/final.star, sources/task/exits/submit.star, sources/task/exits/task.star, sources/task/lib/train.star
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            printed outcome.json: true
             $ pumpkin run submits/task.star --sandboxd <sandboxd> --wait --runs runs --config conf/pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -2066,7 +2074,6 @@ fn runs_on_docker() {
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            printed outcome.json: true
             $ pumpkin run fails/task.star --sandboxd <sandboxd> --wait --runs runs --config conf/pumpkin.toml
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/runs/<id>
@@ -2089,8 +2096,7 @@ fn runs_on_docker() {
             record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/fails/final.star, sources/task/fails/submit.star, sources/task/fails/task.star, sources/task/lib/train.star
             the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {\"score\": json.decode(target.get(\"/pumpkin/out/result.json\"))[\"raw_score\"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            printed outcome.json: true"#]],
+            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {\"score\": json.decode(target.get(\"/pumpkin/out/result.json\"))[\"raw_score\"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
     );
     upstream.stop();
     wait_for_each_run(&scratch, &sandboxd);
@@ -2181,7 +2187,6 @@ fn writes_only_in_its_workspace() {
         job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":3,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6},{"name":"lines","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-        printed outcome.json: true
         HOME's new files: []
         TMPDIR holds: []
         .pumpkin holds: bin, docker, runs
@@ -2611,7 +2616,6 @@ fn ops_on_docker() {
             job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 2's sandbox, jobs/2/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            printed outcome.json: true
             listed once it ended: []
             the agent's socket's path is over 107 bytes: true
             socket directory left: false

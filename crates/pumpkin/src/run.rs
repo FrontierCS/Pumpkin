@@ -23,13 +23,12 @@ use stdx::Context;
 
 use crate::bodies::{Bodies, Sources};
 use crate::driver::{ARGV0, Driver, Handoff};
-use crate::ending::{closing, end, follow, followed, following};
+use crate::ending::{Printed, closing, end, follow, followed, following};
 use crate::sandboxd::Sandboxd;
 use crate::workspace::Workspace;
 use crate::{
     Reader, absolute_utf8, advise, arg_flags, cli, closing_problems, config, config_path,
-    controller, driver, modal_helper, next, print, print_outcome, runs_dir, say, star,
-    task_problems,
+    controller, driver, modal_helper, next, print, runs_dir, say, star, task_problems,
 };
 
 pub(crate) fn run(flags: cli::Run) -> Result<ExitCode, String> {
@@ -51,7 +50,7 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
     // any directory. A runs directory not given is left for the driver to find as `run` does,
     // so that the driver's flags are those that the operator gave.
     let (runs, named) = runs_dir(flags.runs.clone())?;
-    let wait = flags.wait;
+    let cli::Waiting(wait) = flags.wait;
     let flags = cli::Run {
         runs: named.clone(),
         ..flags
@@ -70,12 +69,12 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
         Handoff::Started(record) => {
             let id = record.id();
             say(format_args!("run {id} started"));
-            if wait {
+            if let Some(printed) = wait {
                 // Whether the run is still live by now depends on how fast it went, which tells
                 // the operator nothing: `run` follows the run it started however soon it ends.
                 following(&record, "run");
                 let ending = followed(&record, reader)?;
-                return end(&record, &ending, named, record.args());
+                return end(&record, &ending, printed, named, record.args());
             }
             if reader == Reader::Operator {
                 advise("follow it", &next::of_run("wait", named, id));
@@ -86,7 +85,10 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
             ))?;
             Ok(ExitCode::SUCCESS)
         }
-        Handoff::Ended(status, record) => unstarted(status, record.as_ref(), named),
+        Handoff::Ended(status, record) => {
+            let printed = wait.unwrap_or(Printed::Nothing);
+            unstarted(status, record.as_ref(), named, printed)
+        }
     }
 }
 
@@ -94,12 +96,13 @@ fn unstarted(
     status: ExitStatus,
     record: Option<&Record>,
     runs: Option<&str>,
+    printed: Printed,
 ) -> Result<ExitCode, String> {
     if status.code().is_some() {
         if let Some(record) = record {
             let recorded = record.dir().join("outcome.json");
             if recorded.try_exists().context(recorded.display())? {
-                print_outcome(record.dir())?;
+                printed.print(record.dir())?;
             }
         }
         return Ok(ExitCode::FAILURE);
@@ -109,7 +112,7 @@ fn unstarted(
         None => Err(ended),
         Some(record) => {
             say(ended);
-            follow(record, "run", runs)
+            follow(record, "run", runs, printed)
         }
     }
 }
@@ -197,9 +200,8 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     begun(&id, &dir, &names, reader);
     driver::locked(&id)?;
-    // `execute` records why the run stopped in its `outcome.json`, which `run` prints if the run
-    // didn't start; these lines, the driver's last, then close that ending, which a controller's
-    // client says from its copy instead.
+    // `execute` records why the run stopped in its `outcome.json`; these lines, the driver's last,
+    // then close that ending, which a controller's client says from its copy instead.
     // Binds nothing, so every run has one, whether or not a role's sandboxes listen.
     let dialer = Dialer::new(tls::Client::web_pki());
     let bodies = Bodies::new(&sources, &args);

@@ -70,11 +70,12 @@ which reads no configuration, so that every `.star` file is written alike.";
 pub(super) const RUN_NOTES: &str = "\
 Examples:
   pumpkin run tasks/bench/task.star --arg model=model-a
-  pumpkin run tasks/bench/task.star --arg model=model-a --wait > outcome.json
+  pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome > outcome.json
 
 Exit status:
   0  The run has started.
-  1  An error; a run that failed to start prints its outcome.json first.
+  1  An error; with --outcome, a run that failed to start prints its
+     outcome.json first.
   2  A usage error.
 With --wait, `run` exits as `pumpkin wait` does once the run has started. Every
 exit but 0 ends with a `pumpkin:` line on the standard error, which says why.
@@ -128,6 +129,7 @@ Examples:
   pumpkin wait 20261108-000905-126a21e9
   pumpkin wait 126a
   pumpkin wait runs/20261108-000905-126a21e9
+  pumpkin wait --outcome 126a > outcome.json
 
 Exit status:
   0  The run finished with a result.
@@ -201,8 +203,7 @@ the run stops as `pumpkin run --help` says, which `cancel` waits for; ending
 `pumpkin cancel` doesn't end the stop. A run that has ended, or is lost, gets no
 signal. Then `cancel` removes what `pumpkin reap` would of the run, on each
 provider that it ran on, Docker, EC2 or Modal, as `pumpkin reap --help` says,
-and prints its outcome.json, then says how the run ended, as `pumpkin wait`
-does.
+then says how the run ended, as `pumpkin wait` does.
 
 With [controller] in the configuration, and no --runs, `cancel` stops the job
 of a run that is yet to start on the controller, and cancels one that has

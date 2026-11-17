@@ -15,7 +15,7 @@ use rustix::process::{Pid, Signal};
 use schema::ir::Name;
 use stdx::Context;
 
-use crate::ending::end;
+use crate::ending::{Printed, end};
 use crate::workspace::Workspace;
 use crate::{
     Reader, advise, cli, config, controller, counted, default_config, found, modal_helper, next,
@@ -33,7 +33,8 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     let named = named.as_deref();
     // `cancel`'s exit says only that the run has ended, however that was, and whether what it
     // left on its provider is gone.
-    end(&record, &record.wait(|| {})?, named, record.args())?;
+    let ending = record.wait(|| {})?;
+    end(&record, &ending, Printed::Nothing, named, record.args())?;
     if !reached {
         advise(
             "remove what it left once its provider can be reached",

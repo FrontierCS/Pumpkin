@@ -385,7 +385,7 @@ fn report(invoked: String, output: &Output, dir: &Path, rootful: bool) -> String
     lines.extend(steady(&said));
     let stdout = String::from_utf8(output.stdout.clone()).unwrap();
     let Some((id, record)) = record(&stderr) else {
-        // `wait` prints an `outcome.json` without having started its run.
+        // `wait --outcome` prints an `outcome.json` without having started its run.
         if let Ok(outcome) = serde_json::from_str::<Value>(&stdout) {
             lines.push(format!("printed outcome.json: {}", steady_outcome(outcome)));
         } else if !stdout.is_empty() {
@@ -481,9 +481,14 @@ fn record(stderr: &str) -> Option<(&str, &str)> {
     })
 }
 
-fn recorded(record: &Path, stdout: &str) -> Vec<String> {
+/// The line that shows the `outcome.json` of `record`, made steady.
+fn outcome_line(record: &Path) -> String {
     let outcome = fs::read_to_string(record.join("outcome.json")).unwrap();
     let compact = serde_json::from_str::<Value>(&outcome).unwrap();
+    format!("outcome.json: {}", steady_outcome(compact))
+}
+
+fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     let mut lines = vec![format!("record: {}", files(record).join(", "))];
     lines.extend(sandboxes(record));
     // A run that didn't start has no `provider.json`.
@@ -519,8 +524,11 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
     if !said.is_empty() {
         lines.push(format!("driver.log: {}", said.replace('\n', "\\n")));
     }
-    lines.push(format!("outcome.json: {}", steady_outcome(compact)));
-    lines.push(format!("printed outcome.json: {}", stdout == outcome));
+    lines.push(outcome_line(record));
+    if !stdout.is_empty() {
+        let printed = fs::read_to_string(record.join("outcome.json")).unwrap();
+        lines.push(format!("printed outcome.json: {}", stdout == printed));
+    }
     lines
 }
 

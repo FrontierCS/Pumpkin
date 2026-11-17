@@ -71,7 +71,7 @@ fn waits() {
     let wait = |run| scratch.pumpkin(&["wait", run, "--runs", "runs"]);
     let commands = [
         wait("20261107-120000-1b8a6389"),
-        wait("1b8a"),
+        scratch.pumpkin(&["wait", "--outcome", "1b8a", "--runs", "runs"]),
         wait("20261107-1201"),
         scratch.pumpkin(&["wait", "runs/20261107-120200-2c9b0002"]),
         wait("2c9b"),
@@ -98,8 +98,7 @@ fn waits() {
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7.5},{"name":"status","value":"passed"}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":1}}}
-            $ pumpkin wait 1b8a --runs runs
+            $ pumpkin wait --outcome 1b8a --runs runs
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
@@ -108,13 +107,11 @@ fn waits() {
             exit status: Some(0)
             pumpkin: run 20261107-120100-2c9b0001 finished with a result, after the work phase ended when signal 9 killed the agent; its record is <scratch>/runs/20261107-120100-2c9b0001
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"signal":9}}}
             $ pumpkin wait runs/20261107-120200-2c9b0002
             exit status: Some(1)
             pumpkin: run 20261107-120200-2c9b0002 failed: r; its record is <scratch>/runs/20261107-120200-2c9b0002
             pumpkin: run 20261107-120200-2c9b0002 was made by pumpkin 0.0.0 (0f3a2b1c9 2026-01-02), and this is pumpkin <this>: to run it as it ran, run it with the pumpkin that made it
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait 2c9b --runs runs
             exit status: Some(1)
             pumpkin: `2c9b` matches 2 runs: name one by more of its id
@@ -149,7 +146,6 @@ fn waits() {
             exit status: Some(0)
             pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7.5 status="passed"), after the work phase ended when the agent exited with status 1; its record is <scratch>/runs/20261107-120000-1b8a6389
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7.5},{"name":"status","value":"passed"}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":1}}}
             $ pumpkin wait 6a --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
@@ -203,8 +199,7 @@ fn follows() {
             exit status: Some(0)
             pumpkin: following run 20261107-120000-1b8a6389, recorded in <scratch>/runs/20261107-120000-1b8a6389: ending `pumpkin wait` does not stop it
             pumpkin: run 20261107-120000-1b8a6389 finished with a result (score=7 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/20261107-120000-1b8a6389
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }
 
@@ -319,7 +314,6 @@ fn states() {
             exit status: Some(0)
             pumpkin: run <returned, free, v0> finished with a result (score=7 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<returned, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait <returned, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<returned, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -330,7 +324,6 @@ fn states() {
             exit status: Some(0)
             pumpkin: run <returned, locked, v0> finished with a result (score=7 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<returned, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":7.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait <returned, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<returned, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -350,7 +343,6 @@ fn states() {
             exit status: Some(3)
             pumpkin: run <unsubmitted, free, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unsubmitted, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait <unsubmitted, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unsubmitted, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -361,7 +353,6 @@ fn states() {
             exit status: Some(3)
             pumpkin: run <unsubmitted, locked, v0> finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/<unsubmitted, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}
             $ pumpkin wait <unsubmitted, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unsubmitted, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -381,7 +372,6 @@ fn states() {
             exit status: Some(1)
             pumpkin: run <failed, free, v0> failed: r; its record is <scratch>/runs/<failed, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait <failed, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<failed, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -392,7 +382,6 @@ fn states() {
             exit status: Some(1)
             pumpkin: run <failed, locked, v0> failed: r; its record is <scratch>/runs/<failed, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"reason":"r","state":"failed"}
             $ pumpkin wait <failed, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<failed, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -412,7 +401,6 @@ fn states() {
             exit status: Some(1)
             pumpkin: run <interrupted, free, v0> was interrupted by SIGHUP; its record is <scratch>/runs/<interrupted, free, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
             $ pumpkin wait <interrupted, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<interrupted, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -423,7 +411,6 @@ fn states() {
             exit status: Some(1)
             pumpkin: run <interrupted, locked, v0> was interrupted by SIGHUP; its record is <scratch>/runs/<interrupted, locked, v0>
             pumpkin: to run it again: pumpkin run task.star
-            printed outcome.json: {"signal":"SIGHUP","state":"interrupted"}
             $ pumpkin wait <interrupted, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<interrupted, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -926,32 +913,26 @@ fn final_call_logs() {
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000a finished without a result: the final call gave none (error: the body's command failed), after the work phase ended when the agent exited with status 0; its commands' logs are in <scratch>/runs/20261108-120000-0000000a/jobs/1/log; its record is <scratch>/runs/20261108-120000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"the body's command failed"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000d --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000d finished without a result: the final call gave none (timeout), after the work phase ended when the agent exited with status 0; its commands' logs are in <scratch>/runs/20261108-120000-0000000d/jobs/1/log; its record is <scratch>/runs/20261108-120000-0000000d
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"timeout"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000e --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000e finished without a result: the final call gave none (error: the job's sandbox didn't start: no capacity), after the work phase ended when the agent exited with status 0; it ran no command; its record is <scratch>/runs/20261108-120000-0000000e
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: no capacity"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000f --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000f finished without a result: the final call gave none (error: final.star:2:16: getting /pumpkin/out/result.json failed), after the work phase ended when the agent exited with status 0; it ran no command; its record is <scratch>/runs/20261108-120000-0000000f
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"final.star:2:16: getting /pumpkin/out/result.json failed"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000b --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000b finished without a result: the final call gave none (error: r), after the work phase ended when the agent exited with status 0; its commands' logs can't be found: <scratch>/runs/20261108-120000-0000000b/log.jsonl doesn't exist: expected a run's log; its record is <scratch>/runs/20261108-120000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
             $ pumpkin wait 20261108-120000-0000000c --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120000-0000000c finished without a result: the final call gave none (error: r), after the work phase ended when the agent exited with status 0; its commands' logs can't be found: <scratch>/runs/20261108-120000-0000000c/log.jsonl names no final call: expected a `start_final_call`; its record is <scratch>/runs/20261108-120000-0000000c
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            printed outcome.json: {"state":"finished","verdict":{"failure":{"kind":"error","reason":"r"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
 }
 
