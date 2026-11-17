@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 700" width="880" height="700" role="img" aria-labelledby="title desc">
 <title id="title">The data between a machine and its controller</title>
-<desc id="desc">Between the person's machine and the controller, over ssh through SSM, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. What ls reads of each run comes back into what ls keeps, and an ended run's record into the runs directory. The view's requests for the runs' data go to the view on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
+<desc id="desc">Between the operator's machine and the controller, over ssh through SSM, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. What ls reads of each run comes back into what ls keeps, and an ended run's record into the runs directory. The view's requests for the runs' data go to the view on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -22,7 +22,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <rect class="bg" width="880" height="700"/>
 <text class="note" x="440" y="36" text-anchor="middle">over ssh through SSM, on the connections that the workspace's commands share</text>
 <rect class="zone" x="16" y="56" width="260" height="624" rx="12"/>
-<text class="zone-label" x="30" y="76">THE PERSON'S MACHINE</text>
+<text class="zone-label" x="30" y="76">THE OPERATOR'S MACHINE</text>
 <rect class="box" x="32" y="100" width="228" height="276" rx="8"/>
 <text class="name mid" x="146" y="120"><tspan class="code">pumpkin</tspan> <tspan class="code">run</tspan> or <tspan class="code">build</tspan></text>
 <text class="note mid" x="146" y="137">hashes the task's tree, sends</text>
