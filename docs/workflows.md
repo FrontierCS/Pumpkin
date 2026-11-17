@@ -237,6 +237,14 @@ what the body `returned`, or `errored`, with a `failure` whose `code` is `call_t
 {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":119}}
 ```
 
+Once a job has ended, `model_requests_over_budget` says how many of its target's model requests a
+spent model budget barred, if any. `hello`'s target makes none; a job whose target's budget ran out
+shows:
+
+```json
+{"kind":"status","job":1,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"model_requests_over_budget":3,"remaining":{"calls":0,"seconds":80}}
+```
+
 A now function's call answers with what the body returned and the time left to work, which, once
 the call has ended the work, is at most the grace:
 

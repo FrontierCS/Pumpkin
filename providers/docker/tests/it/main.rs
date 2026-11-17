@@ -1600,14 +1600,20 @@ fn status(job: u64, remaining: Remaining) -> OpReply {
     let state = match job {
         1 => {
             let returned = Returned::from_iter([("score".to_owned(), 1.into())]);
-            JobState::Completed { returned }
+            JobState::Completed {
+                returned,
+                model_requests_over_budget: None,
+            }
         }
         2 => {
             let failure = Failure {
                 code: FailureCode::CallTimeout,
                 message: "the call ran past its timeout".to_owned(),
             };
-            JobState::Errored { failure }
+            JobState::Errored {
+                failure,
+                model_requests_over_budget: None,
+            }
         }
         _ => {
             let message = format!("there is no job {job}: name one a call returned");

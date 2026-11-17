@@ -13,8 +13,9 @@
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
 //! - any op after `@<job>`, from that job's call instead;
-//! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [<name>=<value>]…`, the
-//!   body's return in its order, `call_failed <job> <reason>`;
+//! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
+//!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
+//!   barred `n` of the call's model requests over budget;
 //! - `lease_ready <lease>`, `command_ended <lease> <command> <code>|timed_out|unstarted
 //!   [<stdout>]`, `transfer_ended <lease> <transfer> moved <entries> <bytes>|failed <reason>`,
 //!   `lease_ended <lease>`, `lease_failed <lease> <reason>`;
@@ -146,12 +147,20 @@ struct Run<'w> {
 /// A job function's call's event, as the script's `words` give it.
 fn call_event(words: &[&str]) -> Event {
     let job = JobId(words[1].parse().unwrap());
+    let rest = words.get(2).copied().unwrap_or_default();
+    let (model_requests_over_budget, rest) = match rest.strip_prefix('+') {
+        Some(counted) => {
+            let (count, rest) = counted.split_once(' ').unwrap_or((counted, ""));
+            (Some(count.parse().unwrap()), rest)
+        }
+        None => (None, rest),
+    };
     match words[0] {
         "call_started" => Event::CallStarted { job },
         "call_timed_out" => Event::CallTimedOut { job },
         "call_returned" => {
-            let returned = (words[2..].iter())
-                .flat_map(|fields| fields.split(' '))
+            let returned = (rest.split(' '))
+                .filter(|field| !field.is_empty())
                 .map(|field| {
                     let (name, value) = field.split_once('=').unwrap();
                     let name = serde_json::from_value(json!(name)).unwrap();
@@ -159,11 +168,16 @@ fn call_event(words: &[&str]) -> Event {
                 })
                 .collect();
             let result = CallResult::returned_by(returned).unwrap();
-            Event::CallReturned { job, result }
+            Event::CallReturned {
+                job,
+                result,
+                model_requests_over_budget,
+            }
         }
         "call_failed" => Event::CallFailed {
             job,
-            reason: words[2].to_owned(),
+            reason: rest.to_owned(),
+            model_requests_over_budget,
         },
         other => panic!("no call event is named `{other}`"),
     }
@@ -622,12 +636,12 @@ fn quotas() {
         1000 now submit 4194305 select
         1000 call train 10
         2000 call_started 0
-        6100 call_returned 0 raw_score=null failure={"code":"wrong_answer"}
+        6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
         6200 status 0
         7000 call train 10
         7500 call_started 1
         13600 call_timed_out 1
-        13700 call_failed 1 the call's timeout passed
+        13700 call_failed 1 +2 the call's timeout passed
         14000 status 1
         14100 call train 10
         14200 now submit 0 select
@@ -648,17 +662,17 @@ fn quotas() {
               reply to op 4: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":10}}
               start call 0 of train on op 4's payload of 10 bytes, with a timeout of 6s
             2000 call_started 0
-            6100 call_returned 0 raw_score=null failure={"code":"wrong_answer"}
+            6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
             6200 status 0
-              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"remaining":{"calls":99,"seconds":5}}
+              reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"model_requests_over_budget":1,"remaining":{"calls":99,"seconds":5}}
             7000 call train 10
               reply to op 6: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":5}}
               start call 1 of train on op 6's payload of 10 bytes, with a timeout of 5.9s
             7500 call_started 1
             13600 call_timed_out 1
-            13700 call_failed 1 the call's timeout passed
+            13700 call_failed 1 +2 the call's timeout passed
             14000 status 1
-              reply to op 7: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":98,"seconds":0}}
+              reply to op 7: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"model_requests_over_budget":2,"remaining":{"calls":98,"seconds":0}}
             14100 call train 10
               refuse op 8: `train` has no call time left of the 10 s it allows: make no more calls to it
             14200 now submit 0 select

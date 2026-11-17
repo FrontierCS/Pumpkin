@@ -129,8 +129,8 @@ in its sandbox makes, the gateway hands each to the session's owner as an `Arriv
 runtime answers each with the core's `Action::Reply`.
 
 **Architecture Invariant:** the agent learns of a call only its state, what its function has left,
-and what its body returns, so the workflow decides the agent's feedback. The status reply's types
-hold nothing else.
+how many of its target's model requests a budget barred, and what its body returns, so the
+workflow decides the agent's feedback. The status reply's types hold nothing else.
 
 **Architecture Invariant:** the final call starts only once the agent's sandbox, its jobs and
 every lease that they held have ended, so nothing the agent started runs while its submission is

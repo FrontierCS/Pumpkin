@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fmt, io, iter};
 
-use decision::{Event, JobId, LeaseId};
+use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
 use provider::{
     Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
@@ -177,14 +177,6 @@ impl Which {
         match self {
             Self::Agent | Self::Call(..) => 0,
             Self::Lease(_, _, instance) => instance,
-        }
-    }
-
-    pub(super) fn failed(self, reason: String) -> Event {
-        match self {
-            Self::Agent => Event::AgentFailed { reason },
-            Self::Call(job, _) => Event::CallFailed { job, reason },
-            Self::Lease(lease, ..) => Event::LeaseFailed { lease, reason },
         }
     }
 

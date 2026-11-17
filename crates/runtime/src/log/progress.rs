@@ -514,7 +514,11 @@ impl Reading {
                     call.timed_out = true;
                 }
             }
-            logged::Event::CallReturned { job, returned } => {
+            logged::Event::CallReturned {
+                job,
+                returned,
+                model_requests_over_budget,
+            } => {
                 let returned = returned.iter();
                 let end = CallEnd::Result(
                     returned
@@ -522,12 +526,17 @@ impl Reading {
                         .collect(),
                 );
                 if let Some(call) = self.call(*job) {
-                    call.end(at, end);
+                    call.end(at, end, *model_requests_over_budget);
                 }
             }
-            logged::Event::CallFailed { job, reason } => {
+            logged::Event::CallFailed {
+                job,
+                reason,
+                model_requests_over_budget,
+            } => {
                 if let Some(call) = self.call(*job) {
-                    call.end(at, CallEnd::Failed(reason.clone()));
+                    let end = CallEnd::Failed(reason.clone());
+                    call.end(at, end, *model_requests_over_budget);
                 }
             }
             logged::Event::LeaseReady { lease } => {

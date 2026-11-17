@@ -20,7 +20,8 @@
 //!
 //! A reply is an object whose `kind` is its [`OpReply`]'s variant, `refused` answering any op. Its
 //! fields are its type's, under the same names; a limit or a quota that doesn't exist is `null`. A
-//! status has `returned` once its job has given a result, and `failure` only if it gave none.
+//! status has `returned` once its job has given a result, and `failure` only if it gave none; once
+//! its job has ended, it has `model_requests_over_budget` only if that is 1 or more.
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -271,16 +272,26 @@ pub struct StatusReply {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Where a job is, with what came of it once it has ended. Its JSON form is the status's `state`,
-/// with `returned`, or `failure`, beside it.
+/// with the fields of its variant beside it.
+///
+/// An ended job's `model_requests_over_budget` is how many of its target's model requests the
+/// route had barred, by the time the call ended, for a spent
+/// [`ModelBudget`](crate::ir::ModelBudget): a request barred after the end is not counted.
 pub enum JobState {
     /// Accepted; its body hasn't started.
     Queued,
     /// Its body is running, or has ended and its target is being cleaned up.
     Running,
     /// The body returned.
-    Completed { returned: Returned },
+    Completed {
+        returned: Returned,
+        model_requests_over_budget: Option<NonZeroU64>,
+    },
     /// The body didn't return.
-    Errored { failure: Failure },
+    Errored {
+        failure: Failure,
+        model_requests_over_budget: Option<NonZeroU64>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +461,8 @@ struct StatusJson {
     returned: Option<Returned>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_requests_over_budget: Option<NonZeroU64>,
     remaining: Remaining,
 }
 
@@ -471,21 +484,38 @@ impl TryFrom<StatusJson> for StatusReply {
             state,
             returned,
             failure,
+            model_requests_over_budget,
             remaining,
         } = json;
-        let state = match (state, returned, failure) {
-            (StateName::Queued, None, None) => JobState::Queued,
-            (StateName::Running, None, None) => JobState::Running,
-            (StateName::Completed, Some(returned), None) => JobState::Completed { returned },
-            (StateName::Errored, None, Some(failure)) => JobState::Errored { failure },
-            (StateName::Queued | StateName::Running, _, _) => {
+        let state = match (state, returned, failure, model_requests_over_budget) {
+            (StateName::Queued, None, None, None) => JobState::Queued,
+            (StateName::Running, None, None, None) => JobState::Running,
+            (StateName::Completed, Some(returned), None, model_requests_over_budget) => {
+                JobState::Completed {
+                    returned,
+                    model_requests_over_budget,
+                }
+            }
+            (StateName::Errored, None, Some(failure), model_requests_over_budget) => {
+                JobState::Errored {
+                    failure,
+                    model_requests_over_budget,
+                }
+            }
+            (StateName::Queued | StateName::Running, None, None, Some(_)) => {
+                return Err(
+                    "a job that hasn't ended has no count of model requests over \
+                            budget yet: give it no `model_requests_over_budget`",
+                );
+            }
+            (StateName::Queued | StateName::Running, _, _, _) => {
                 return Err("a job that hasn't ended has no result: give it neither \
                             `returned` nor `failure`");
             }
-            (StateName::Completed, _, _) => {
+            (StateName::Completed, _, _, _) => {
                 return Err("a completed job has a result: give it `returned`, and no `failure`");
             }
-            (StateName::Errored, _, _) => {
+            (StateName::Errored, _, _, _) => {
                 return Err("an errored job has no result: give it `failure`, and no `returned`");
             }
         };
@@ -504,17 +534,34 @@ impl From<StatusReply> for StatusJson {
             state,
             remaining,
         } = reply;
-        let (state, returned, failure) = match state {
-            JobState::Queued => (StateName::Queued, None, None),
-            JobState::Running => (StateName::Running, None, None),
-            JobState::Completed { returned } => (StateName::Completed, Some(returned), None),
-            JobState::Errored { failure } => (StateName::Errored, None, Some(failure)),
+        let (state, returned, failure, model_requests_over_budget) = match state {
+            JobState::Queued => (StateName::Queued, None, None, None),
+            JobState::Running => (StateName::Running, None, None, None),
+            JobState::Completed {
+                returned,
+                model_requests_over_budget,
+            } => (
+                StateName::Completed,
+                Some(returned),
+                None,
+                model_requests_over_budget,
+            ),
+            JobState::Errored {
+                failure,
+                model_requests_over_budget,
+            } => (
+                StateName::Errored,
+                None,
+                Some(failure),
+                model_requests_over_budget,
+            ),
         };
         Self {
             job,
             state,
             returned,
             failure,
+            model_requests_over_budget,
             remaining,
         }
     }

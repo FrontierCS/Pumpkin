@@ -21,6 +21,7 @@
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 use core::time::Duration;
 
 use schema::sandbox::op::{self, FailureCode};
@@ -78,11 +79,12 @@ pub(super) enum State {
     /// is how long it ran, none if it didn't start.
     Ending { used: Duration, end: End },
     /// Its sandbox is gone. It is `charged` against its function's calls unless it failed before
-    /// it started.
+    /// it started. `model_requests_over_budget` is as its report said.
     Ended {
         used: Duration,
         outcome: Result<CallResult, Failure>,
         charged: bool,
+        model_requests_over_budget: Option<NonZeroU64>,
     },
 }
 
@@ -124,7 +126,12 @@ impl State {
 
     /// A report that skips a step, such as a failure before the body started, ends the job all
     /// the same, its body's time running until the report if it had started.
-    pub(super) fn report(&mut self, at: Duration, outcome: Result<CallResult, Failure>) {
+    pub(super) fn report(
+        &mut self,
+        at: Duration,
+        outcome: Result<CallResult, Failure>,
+        model_requests_over_budget: Option<NonZeroU64>,
+    ) {
         let charged = !matches!((&*self, &outcome), (Self::Queued, Err(_)));
         let (used, outcome) = match *self {
             Self::Queued => (Duration::ZERO, outcome),
@@ -141,6 +148,7 @@ impl State {
             used,
             outcome,
             charged,
+            model_requests_over_budget,
         };
     }
 }
