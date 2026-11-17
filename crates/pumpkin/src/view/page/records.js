@@ -88,7 +88,7 @@ function said(record) {
       break;
     case "transfer_ended": {
       const moved = event.end && event.end.moved;
-      text = "lease " + event.lease + " transfer " + event.transfer + ": " + (moved ? plural(moved.entries, "entry") + ", " + bytes(moved.bytes) : JSON.stringify(event.end));
+      text = "lease " + event.lease + " transfer " + event.transfer + ": " + (moved ? plural(moved.entries, "entry", "entries") + ", " + bytes(moved.bytes) : JSON.stringify(event.end));
       return [event.kind, text, moved ? "" : "failed"];
     }
     case "model_answered": {

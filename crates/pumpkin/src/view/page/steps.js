@@ -33,8 +33,8 @@ import { count, seconds } from "./h.js";
  * @property {Array<number | null>} sent_bytes
  * @property {Array<number | null>} kept_bytes
  * @property {Array<number | null>} back_bytes
- * @property {Array<number | null>} items
- * @property {Array<number | null>} added the items past its parent's list, echoes of its answer included
+ * @property {Array<number | null>} items null in flight, or for a body the record kept whole
+ * @property {Array<number | null>} added the items past its parent's list, echoes of its answer included; null as `items` is
  * @property {Array<number | null>} added_entries the entries `entries` gives of those it added
  * @property {Array<number | null>} answers its answer's entries; in flight, those so far
  * @property {string[][]} calls
@@ -241,10 +241,15 @@ export class Steps {
     return [count(input[row], "tok") + " in", share, count(output[row], "out")];
   }
 
-  // Why a time of the step is unknown: it is in flight, or its record's build didn't time it.
+  // Why a time of the step is unknown: it is in flight, it never reached a model, the route ended
+  // or it was cut before that time came, or its record's build didn't time it.
   /** @param {number} row @param {boolean} token whether the time is of a first token */
   untimed(row, token = false) {
+    const answer = this.cols.answer[row];
     if (this.inFlight(row)) return "in flight";
+    if (answer === "barred") return "the route barred it, so it reached no model";
+    if (answer === "abandoned") return "the route ended before its response came";
+    if (answer === "cut") return token && this.cols.first_byte_ns[row] !== null ? "it was cut short before its output began" : "it was cut short before any of its response was kept";
     return token ? "this record's build didn't time first tokens" : "this record's build didn't time it";
   }
 

@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 use super::super::Failed;
 use super::super::json::cut;
-use super::{Address, Exchanges, Said, Step, Trace, api_of, diff, stats};
+use super::{Address, Exchanges, Form, Said, Step, Trace, api_of, diff, stats};
 
 /// The most bytes of one entry's text that `entry_json` gives; `text_bytes` gives the whole.
 const ENTRY_TEXT_BYTES: usize = 1 << 20;
@@ -145,6 +145,11 @@ impl Trace {
             .parent
             .map_or(0, |parent| self.steps[parent].list.len());
         let placed = (step.placed && step.thread.is_some()).then_some(());
+        // A body kept whole holds no list apart, so it sent items that no list counts.
+        let listed = placed.filter(|()| match step.form {
+            Some(Form::Apart) => true,
+            Some(Form::Whole) | None => false,
+        });
         let cache_hit = (usage["cached_tokens"].as_u64())
             .zip(usage["input_tokens"].as_u64())
             .and_then(|(cached, input)| stats::share(cached, input));
@@ -178,8 +183,8 @@ impl Trace {
             event["kept"]["request"]["body_bytes"].clone(),
             event["kept"]["request"]["bytes"].clone(),
             event["kept"]["response"]["bytes"].clone(),
-            json!(placed.map(|()| step.list.len())),
-            json!(placed.map(|()| step.list.len().saturating_sub(parent_len))),
+            json!(listed.map(|()| step.list.len())),
+            json!(listed.map(|()| step.list.len().saturating_sub(parent_len))),
             json!(placed.map(|()| step.added.len())),
             json!(step.answer.len()),
             json!(calls),
