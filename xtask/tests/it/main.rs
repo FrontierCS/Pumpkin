@@ -418,7 +418,9 @@ fn figures() {
                ![A gone one.](docs/figures/gone.svg), with `#![no_std]` and `expect![[\"\"]]`.\n"
         .to_owned();
     let guide = "![Again.](../figures/good.svg) and ![Out.](../../../good.svg) and \
-                 ![Far.](https://example.com/a.svg)\n"
+                 ![Far.](https://example.com/a.svg)\n\
+                 <p align=\"center\"><img alt=\"A mark.\" width=\"160\" src=\"../figures/mark.svg\"></p> \
+                 <img src=\"../figures/good.svg\"> <img src=\"../chart.png\" alt=\"A chart.\"> <imgs>\n"
         .to_owned();
     let code = "enum Command {\n    InstallTools,\n    #[expect(dead_code)]\n    Run(Run),\n}\n\
                 struct Run;\nfn prepare() {}\nconst OUTCOME: &str = \"outcome.json\";\n"
@@ -431,6 +433,11 @@ fn figures() {
             ("docs/dev/guide.md", guide, Tracked),
             ("docs/figures/good.svg", good, Tracked),
             ("docs/figures/bad.svg", bad, Tracked),
+            (
+                "docs/figures/mark.svg",
+                figure("<title>A mark</title>", ""),
+                Tracked,
+            ),
             (
                 "docs/figures/orphan.svg",
                 figure("<title id=\"t\">An orphan</title>", ""),
@@ -447,6 +454,8 @@ fn figures() {
             ARCHITECTURE.md:5:1: an image of `docs/figures/gone.svg`, which isn't in the repository: embed a figure that is, or remove the image
             docs/dev/guide.md:1:36: an image of `../../../good.svg`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
             docs/dev/guide.md:1:67: an image of `https://example.com/a.svg`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
+            docs/dev/guide.md:2:81: an image of `../figures/good.svg` has no alt text: say in it what the figure shows, for a reader who can't see it
+            docs/dev/guide.md:2:113: an image of `../chart.png`, which isn't an SVG in `docs/figures/`: draw it as one there, and embed that
             docs/figures/bad.svg: the figure has no `<title>`: add one that names what it shows, which a screen reader reads
             docs/figures/bad.svg: the figure has no `<desc>`: add one that says it in prose, which a screen reader reads
             docs/figures/bad.svg:2: the figure holds `@font-face`: remove it, as a figure is text and shapes alone, in the system's fonts
