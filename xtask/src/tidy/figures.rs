@@ -131,9 +131,11 @@ fn figure(path: &str, text: &str, names: &BTreeSet<String>) -> Vec<String> {
     problems
 }
 
-/// Each image that `line` of Markdown embeds: the column its `!` is at, counted from 1, its alt
-/// text and its target.
+/// Each image that `line` of Markdown embeds, as a Markdown image or as an HTML `<img>` whose tag
+/// the line holds whole, in the order they start: the column its `!` or `<` is at, counted from
+/// 1, its alt text and its target. An `<img>` without an `alt` or a `src` has an empty one.
 fn images(line: &str) -> Vec<(usize, &str, &str)> {
+    let column = |at: usize| line[..at].chars().count() + 1;
     let mut images = Vec::new();
     for (at, _) in line.match_indices("![") {
         let rest = &line[at + 2..];
@@ -144,9 +146,35 @@ fn images(line: &str) -> Vec<(usize, &str, &str)> {
             continue;
         };
         let target = &target[..target.find(')').unwrap_or(target.len())];
-        images.push((line[..at].chars().count() + 1, &rest[..close], target));
+        images.push((column(at), &rest[..close], target));
     }
+    for (at, _) in line.match_indices("<img") {
+        let rest = &line[at + "<img".len()..];
+        let Some(close) = rest.find('>') else {
+            continue;
+        };
+        let tag = &rest[..close];
+        if !tag.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let alt = attribute(tag, "alt").unwrap_or_default();
+        images.push((column(at), alt, attribute(tag, "src").unwrap_or_default()));
+    }
+    images.sort_by_key(|(column, _, _)| *column);
     images
+}
+
+/// The value of the attribute `name` that `tag`, the inside of an HTML tag after its name, gives
+/// in double quotes.
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let opening = format!("{name}=\"");
+    tag.match_indices(&opening).find_map(|(at, _)| {
+        if !tag[..at].ends_with(char::is_whitespace) {
+            return None;
+        }
+        let value = &tag[at + opening.len()..];
+        value.find('"').map(|end| &value[..end])
+    })
 }
 
 /// The path from the repository's root of `target`, which `document` names relative to its own
