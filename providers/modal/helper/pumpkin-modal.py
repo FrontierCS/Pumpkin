@@ -77,7 +77,7 @@ def main() -> None:
 def ready(modal, request: dict) -> dict:
     workspace = modal.Workspace.from_context()
     workspace.hydrate()
-    return {}
+    return {"workspace": workspace.name}
 
 
 def imported(modal, request: dict) -> str:

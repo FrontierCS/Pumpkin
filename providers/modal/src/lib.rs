@@ -36,7 +36,7 @@ use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::json;
 use stdx::Deadline;
 
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
@@ -196,15 +196,18 @@ pub struct Modal<'e> {
     repository: Repository,
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
-    /// What `Provider::ready` gives: no report, as a reap reaches the workspace by the settings,
-    /// and the classes of sandbox.
+    /// What `Provider::ready` gives: what names the workspace and the repository's account, and
+    /// the classes of sandbox.
     ready: Ready,
 }
 
-/// What the helper's `ready` returns.
+/// What the helper's `ready` returns: the name of the workspace that the profile reaches, if
+/// Modal gives it one.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Described {}
+struct Described {
+    workspace: Option<String>,
+}
 
 impl<'e> Modal<'e> {
     /// Reaches the workspace that `settings`' profile reaches, through the helper at `script`,
@@ -225,13 +228,20 @@ impl<'e> Modal<'e> {
             classes,
         } = settings;
         let helper = Helper::new(script, dir, profile.clone(), config.clone());
-        let Described {} = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
+        let Described { workspace } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         let cli = Cli::connect(images.region.clone())?;
         let [repository] = cli.repositories([&images.repository])?;
+        let repository = repository?;
         let declared =
             (classes.iter()).map(|(name, sandbox)| (name.clone(), sandbox.class.clone()));
         let ready = Ready {
-            report: Value::Null,
+            report: json!({
+                "profile": profile,
+                "workspace": workspace,
+                "images": { "role_arn": images.role_arn },
+                "repository": repository.uri(),
+                "dials_from": dials_from,
+            }),
             classes: declared.collect(),
         };
         Ok(Self {
@@ -239,7 +249,7 @@ impl<'e> Modal<'e> {
             cli,
             pusher,
             images: images.clone(),
-            repository: repository?,
+            repository,
             dials_from: *dials_from,
             classes: classes.clone(),
             ready,
@@ -262,7 +272,7 @@ impl<'e> Modal<'e> {
             None => settings.config.clone(),
         };
         let helper = Helper::new(script, dir, settings.profile.clone(), config);
-        let Described {} = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
+        let Described { .. } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         Ok(Reached { helper })
     }
 }
