@@ -1,20 +1,20 @@
 //! The ops a session's owner is handed.
 
+use std::collections::BTreeMap;
+
 use schema::ir::Name;
 use schema::sandbox::op::{OpCall, SessionOp};
 
 /// What an op asks of the session's owner: an [`OpCall`], with the payload that a function's call
-/// or a submission takes, of at most the session's limit.
+/// takes, of at most the session's limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
     /// See [`OpCall::Ops`].
     Ops,
     /// See [`OpCall::Call`], whose payload is `payload`.
-    Call { function: Name, payload: Vec<u8> },
-    /// See [`OpCall::Submit`], whose payload is `payload`.
-    Submit {
-        grant: Name,
-        finalize: bool,
+    Call {
+        function: Name,
+        arguments: BTreeMap<Name, String>,
         payload: Vec<u8>,
     },
     /// See [`OpCall::Status`].
@@ -26,13 +26,9 @@ pub enum Op {
 pub(crate) fn whole(call: OpCall, payload: Vec<u8>) -> Op {
     match call {
         OpCall::Ops => Op::Ops,
-        OpCall::Call { grant } => Op::Call {
+        OpCall::Call { grant, arguments } => Op::Call {
             function: grant,
-            payload,
-        },
-        OpCall::Submit { grant, finalize } => Op::Submit {
-            grant,
-            finalize,
+            arguments,
             payload,
         },
         OpCall::Status { job } => Op::Status { job },

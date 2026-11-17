@@ -6,6 +6,7 @@
 //! exits, or at the call's end if the call is cut short while it runs. At the end of a call whose
 //! body started, the target is frozen, and its `out` is collected there too.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 use std::{fs, io};
 
@@ -36,8 +37,9 @@ pub trait Bodies: Sync {
     /// The stack that a thread calling a body needs.
     fn stack_bytes(&self) -> usize;
 
-    /// Calls the job's body `body`, given `keywords`, with a handle on `target` and the payload,
-    /// on the calling thread, whose stack is [`stack_bytes`](Self::stack_bytes).
+    /// Calls the job's body `body`, given `keywords` and its caller's `arguments`, with a handle on
+    /// `target` and the payload, on the calling thread, whose stack is
+    /// [`stack_bytes`](Self::stack_bytes).
     ///
     /// # Errors
     ///
@@ -47,8 +49,32 @@ pub trait Bodies: Sync {
         &self,
         body: &ir::Body,
         keywords: &Map<String, Value>,
+        arguments: &BTreeMap<Name, ir::ArgumentValue>,
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
+
+    /// Calls the now function's body `body`, given its caller's `arguments`, with a handle on
+    /// `run` and the payload, on the calling thread, whose stack is
+    /// [`stack_bytes`](Self::stack_bytes).
+    ///
+    /// # Errors
+    ///
+    /// Why the body didn't return: what its evaluation refused or failed on.
+    fn now(
+        &self,
+        body: &ir::Body,
+        arguments: &BTreeMap<Name, ir::ArgumentValue>,
+        run: &mut dyn RunState,
+    ) -> Result<Vec<(Name, Value)>, String>;
+}
+
+/// The run's state, as a now function's body proposes effects on it, which the core applies.
+pub trait RunState {
+    /// Proposes that the call's payload become the run's selection, replacing the last.
+    fn select(&mut self);
+
+    /// Proposes that the caller's work end, its selection locked.
+    fn end_work(&mut self);
 }
 
 /// The target of a job's call, as its body drives it. A method's `Err` is why it failed, which
@@ -77,6 +103,7 @@ pub(crate) struct Call<'c> {
     pub(crate) target: &'c workflow::Target,
     pub(crate) body: &'c ir::Body,
     pub(crate) keywords: &'c Map<String, Value>,
+    pub(crate) arguments: &'c BTreeMap<Name, ir::ArgumentValue>,
     pub(crate) payload: Stored,
     /// The longest the body may drive the target, from its start.
     pub(crate) timeout: Duration,
@@ -121,7 +148,7 @@ pub(crate) fn evaluate<H: Host>(
         runs_count: 0,
         gets_count: 0,
     };
-    let returned = bodies.job(call.body, call.keywords, &mut target);
+    let returned = bodies.job(call.body, call.keywords, call.arguments, &mut target);
     target.end();
     match (target.cut, returned) {
         (Some((Cut::TimedOut, _)), _) => Ended::TimedOut,

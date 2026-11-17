@@ -76,7 +76,7 @@ impl Talk {
                         ir::Function::Session(session) => {
                             Some((&grant.name, &session.runner, "lease"))
                         }
-                        ir::Function::Submit(_) => None,
+                        ir::Function::Now(_) => None,
                     })
                     .collect(),
                 ir::Runtime::Judge(ir::JudgeRuntime { sessions, .. })

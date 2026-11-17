@@ -1,9 +1,11 @@
 //! A job function's call: the call starts the function's target, calls its body on it
 //! ([`body::evaluate`](crate::body::evaluate)), and reports what the body returned.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use decision::{Event, JobId, JudgeResult};
+use schema::ir::{ArgumentValue, Name};
 use schema::sandbox::OpPayloadLimit;
 use schema::sandbox::op::OpReply;
 use schema::workflow::{Holder, JobFunction};
@@ -18,6 +20,7 @@ pub(crate) struct Call<'r> {
     pub(crate) job: JobId,
     pub(crate) function: &'r JobFunction,
     pub(crate) payload: Stored,
+    pub(crate) arguments: BTreeMap<Name, ArgumentValue>,
     /// The longest the body may drive the target.
     pub(crate) timeout: Duration,
 }
@@ -27,6 +30,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         job,
         function,
         payload,
+        arguments,
         timeout,
     } = call;
     let workflow = child.sandboxes.workflow();
@@ -40,6 +44,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         target: workflow.target(function.target),
         body: &function.body,
         keywords: &function.keywords,
+        arguments: &arguments,
         payload,
         timeout,
     };

@@ -1,6 +1,7 @@
 """A neutral workflow written as literals: an agent, two job functions it calls while it works,
 whose bodies verify on targets, and the judge that scores what it submits."""
 
+load("//lib/submit.star", "submit")
 load("//lib/verify.star", "verify")
 
 # The agent's user and group, unpacked from one tuple, on two lines joined.
@@ -61,7 +62,7 @@ joined\n',
                         "payload_max_bytes": 16 * KiB,
                         "call_timeout_seconds": 60,
                     }},
-                    {"name": "final", "submit": {}},
+                    {"name": "final", "now": {"body": submit, "payload_max_bytes": 16 * KiB}},
                 ],
             }},
         },

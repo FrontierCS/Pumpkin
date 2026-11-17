@@ -22,7 +22,7 @@ and final tar layouts, and for how to submit with `/.pumpkin/bin/sandboxctl`. Wo
 `sandboxctl`, and iterate while useful. Do not write a replacement submission client.
 
 When the answer is ready, create the final tar in the task-defined format, run
-`/.pumpkin/bin/sandboxctl submit final <tar> --finalize` exactly once as your last platform
+`/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true` exactly once as your last platform
 action, then exit.
 Web search is disabled; use only local task files and tools.
 ";
@@ -33,7 +33,7 @@ Web search is disabled; use only local task files and tools.
 #[expect(clippy::too_many_lines, reason = "it is the cases")]
 fn cases() -> Vec<[&'static str; 7]> {
     let greeting = "Write a greeting to the file `greeting`, then submit it with \
-                    `/.pumpkin/bin/sandboxctl submit final greeting --finalize`.\n";
+                    `/.pumpkin/bin/sandboxctl call final greeting --arg finalize=true`.\n";
     let fixture = "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n";
     let mut cases = vec![
         [
@@ -571,15 +571,15 @@ fn refusals() {
             @pumpkin//harness/codex/codex.star:172:9: fail: `extreme` is not a reasoning effort: use one of none, minimal, low, medium, high, xhigh, max, ultra
                 172 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:13:9
+                in `codex()`, called at task.star:14:9
             @pumpkin//harness/codex/codex.star:189:9: fail: `both` is not a way to send Codex's tools: use one of native, functions
                 189 |         fail("`{}` is not a way to send Codex's tools: use one of {}".format(tools, ", ".join(_TOOLS)))
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:13:9
+                in `codex()`, called at task.star:14:9
             @pumpkin//harness/codex/codex.star:186:13: fail: Codex's catalog entry for `gpt-6.1-sol` isn't carried, and sending its tools as functions needs it: use `gpt-6.1-terra` or `glm-5.3`
                 186 |             fail(message.format(model, slugs))
                     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:13:9
+                in `codex()`, called at task.star:14:9
             @pumpkin//harness/codex/codex.star:196:12: `/pumpkin/home/.codex` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 196 |     home = below + "/.codex"
                     |            ^^^^^^^^^^^^^^^^^
@@ -587,7 +587,7 @@ fn refusals() {
             @pumpkin//harness/codex/codex.star:174:9: fail: `None` is not a prompt: give a string, which may be empty
                 174 |         fail("`None` is not a prompt: give a string, which may be empty")
                     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `codex()`, called at task.star:13:9"#]],
+                in `codex()`, called at task.star:14:9"#]],
     );
 }
 

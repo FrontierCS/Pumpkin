@@ -205,7 +205,8 @@ impl Relay {
                 }
             }
             Message::Session(Arrival::Op(incoming)) => {
-                let (request, unanswered) = request(incoming);
+                // A call's target holds no now function.
+                let (request, unanswered) = request(incoming, |_, _| None);
                 self.asked = Some(unanswered.into_incoming());
                 let (at, trees) = (child.clock.now(), session.trees());
                 child.report(Report::Op {

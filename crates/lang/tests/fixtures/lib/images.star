@@ -2,6 +2,8 @@
 its images: the agent's, on the package's build tools with its toolchain copied in, with its
 harness added on it, and the trainer's and the judge's, each a stage of one recipe."""
 
+load("//lib/submit.star", "submit")
+
 # The run's choices, each given as `--arg <name>=<value>`, or else its default.
 MODEL = arg("model", str, default = "model-small")
 DEADLINE = arg("deadline", int, default = 5 * 3600)
@@ -84,7 +86,7 @@ def images_task(*, agent):
                             "calls": 10,
                             "call_timeout_seconds": 600,
                         }},
-                        {"name": "final", "submit": {}},
+                        {"name": "final", "now": {"body": submit, "payload_max_bytes": 64 * KiB}},
                     ],
                 }},
             },

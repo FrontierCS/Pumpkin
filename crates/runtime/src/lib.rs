@@ -47,7 +47,7 @@ mod sources;
 mod start;
 
 use agent::Agent;
-pub use body::{Bodies, Target};
+pub use body::{Bodies, RunState, Target};
 use budget::Budget;
 pub use budget::{Budgets, budgets};
 use child::{Message, Report};
@@ -62,7 +62,7 @@ pub use log::{
 use log::{Entry, Log, Targeted};
 use model::Served;
 pub use model::{KeptPart, KeptRequest};
-use op::{Unanswered, accepts, finalizes, request};
+use op::{Unanswered, accepts, request};
 pub use price::TokenPrices;
 pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
@@ -431,6 +431,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             let (at, event) = self.next_event(scope, core)?;
             // The decision is recorded below, before it is carried out at the top of the next turn.
+            let locked = core.selection_locked();
             actions = core.handle(at, event.clone());
             // A call's route is open from its command's or its body's start, as the agent's is
             // from the run's.
@@ -440,7 +441,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             // The keys' refusals are read as the core locks the selection, before the record of it
             // is written, so that a refusal heard after the lock leaves the run to be judged.
-            if finalizes(&actions) {
+            if !locked && core.selection_locked() {
                 let held = self
                     .served
                     .iter()
@@ -532,7 +533,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // answer wasn't sent.
         let event = match arrival {
             Arrival::Op(incoming) => {
-                let (request, unanswered) = request(incoming);
+                let (workflow, bodies) = (self.workflow(), self.bodies);
+                // The agent's now function's body is evaluated as its call arrives.
+                let (request, unanswered) = request(incoming, |function, arguments| {
+                    let mut now = workflow.now_functions();
+                    let (_, now) = now.find(|(_, now)| now.name == *function)?;
+                    Some(call::now::evaluate(now, arguments, bodies))
+                });
                 Some(self.op(Asked::Agent(unanswered), request))
             }
             Arrival::Refused(refused) => {
@@ -668,8 +675,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     job,
                     function,
                     payload,
+                    arguments,
                     timeout,
-                } => self.start_call(scope, core, job, function, &payload, timeout)?,
+                } => {
+                    let call = (&payload, arguments);
+                    self.start_call(scope, core, job, function, call, timeout)?;
+                }
                 Action::StopJudge { job } => self.stop_job(job),
                 Action::StartLease {
                     lease,

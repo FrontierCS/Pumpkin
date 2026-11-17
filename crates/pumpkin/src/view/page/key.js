@@ -55,7 +55,7 @@ const KEY = [
       { token: "--runner", look: "bar", words: "Tools and the harness, between two steps", alpha: 0.55 },
       { token: "--runner", look: "bar", words: "A lease's op" },
       { token: "--judge", look: "bar", words: "A judge's op" },
-      { token: "--agent", look: "bar", words: "A submission" },
+      { token: "--agent", look: "bar", words: "A now function's call" },
       { token: "--fail-bar", look: "bar", words: "A failed op" },
     ],
   },

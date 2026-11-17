@@ -36,7 +36,7 @@ SHARED = {"shared": "//shared"}
 PROMPT = """Solve the task in /task/README.md, working in /workspace.
 
 Submit a tar for a train call with `sandboxctl`, read its score and the calls left, and go on
-while it helps. Submit the final tar with `sandboxctl submit final <tar> --finalize` once, as
+while it helps. Submit the final tar with `sandboxctl call final <tar> --arg finalize=true` once, as
 your last step, then exit.
 """
 
@@ -136,7 +136,7 @@ def bench_task(
                             "cumulative_seconds": train_seconds,
                             "call_timeout_seconds": TRAIN_TIMEOUT,
                         }},
-                        {"name": "final", "submit": {}},
+                        {"name": "final", "now": {"body": submit, "payload_max_bytes": MiB}},
                     ],
                 }},
             },
@@ -176,6 +176,12 @@ def train(target: Target, payload: Payload, *, metrics: list[str]):
     target.run(["/opt/judge/run"])
     found = json.decode(target.get("/pumpkin/out/result.json"))
     return {"score": found["score"]} | {name: found["metrics"][name] for name in metrics}
+
+def submit(run: Run, payload: Payload, finalize: bool = False):
+    run.select(payload)
+    if finalize:
+        run.end_work()
+    return {}
 "##;
 
 /// A task's entry file, which the library writes the workflow of, with `cpu_millis` for its
@@ -575,29 +581,29 @@ def _helper():
             tasks/bench/task.star:3:41: this name is loaded, but never used: drop it from the `load`
                 3 | load("//lib/bench.star", "bench_task", "sometimes")
                   |                                         ^^^^^^^^^
-            lib/bench.star:162:1: this function returns a value on some paths, but not on others: return one on every path, or on none
-                162 | def sometimes(x):
+            lib/bench.star:168:1: this function returns a value on some paths, but not on others: return one on every path, or on none
+                168 | def sometimes(x):
                     | ^^^^^^^^^^^^^^^^^
-            lib/bench.star:168:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
-                168 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:174:5: this docstring's `Args:` doesn't name the function's parameters: give each a line, and no other name
+                174 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:168:5: this docstring doesn't say what the function returns: say it under `Returns:`
-                168 |     """`calls`, as a binding that a path may leave unbound."""
+            lib/bench.star:174:5: this docstring doesn't say what the function returns: say it under `Returns:`
+                174 |     """`calls`, as a binding that a path may leave unbound."""
                     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            lib/bench.star:169:5: this is bound, but never used: use it, or drop it
-                169 |     unused = calls
+            lib/bench.star:175:5: this is bound, but never used: use it, or drop it
+                175 |     unused = calls
                     |     ^^^^^^
-            lib/bench.star:170:5: this expression's value is never used: use it, or drop the statement
-                170 |     calls == 100
+            lib/bench.star:176:5: this expression's value is never used: use it, or drop the statement
+                176 |     calls == 100
                     |     ^^^^^^^^^^^^
-            lib/bench.star:173:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
-                173 |     return bound
+            lib/bench.star:179:12: this name may be unbound here, as a path to this use doesn't bind it: bind it on every path to this use
+                179 |     return bound
                     |            ^^^^^
-            lib/bench.star:174:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
-                174 |     fail("never")
+            lib/bench.star:180:5: this statement is never reached, as one before it ends its block: drop it, or move it before that one
+                180 |     fail("never")
                     |     ^^^^^^^^^^^^^
-            lib/bench.star:176:1: this is bound, but never used: use it, or drop it
-                176 | def _helper():
+            lib/bench.star:182:1: this is bound, but never used: use it, or drop it
+                182 | def _helper():
                     | ^^^^^^^^^^^^^^
             pumpkin: tasks/bench/task.star: the task has 9 problems
             pumpkin: to check it again: pumpkin check --arg model=model-a <scratch>/tasks/bench/task.star"#]],
@@ -1003,11 +1009,18 @@ def verify(target: Target, payload: Payload, *, metric: str = "score"):
 "#;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the library's and the snapshot's text"
+)]
 fn bodies() {
+    // The `def` line of `LIBRARY`'s now function's body.
+    const SUBMIT: &str = "def submit(run: Run, payload: Payload, finalize: bool = False):";
     let scratch = Scratch::new("check-bodies");
     // A task below `dir` whose library gives the agent a job function, `check`, whose body is
-    // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image.
-    let write = |dir: &str, verify: &str, body: &str| {
+    // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image,
+    // and a now function, `final`, whose body's `def` line is `submit`.
+    let write = |dir: &str, verify: &str, body: &str, submit: &str| {
         write_repository(&scratch, dir);
         let target = r#"{
             "name": "checker",
@@ -1023,7 +1036,7 @@ fn bodies() {
                         "payload_max_bytes": submission_bytes,
                         "call_timeout_seconds": TRAIN_TIMEOUT,
                     }}}},
-                    {{"name": "final", "submit": {{}}}},"#
+                    {{"name": "final", "now": {{"body": submit, "payload_max_bytes": MiB}}}},"#
         );
         let library = LIBRARY
             .replace(
@@ -1031,21 +1044,36 @@ fn bodies() {
                 "load(\"@pumpkin//harness/codex/codex.star\", \"codex\")\n\
                  load(\"//lib/verify.star\", \"verify\")\n",
             )
-            .replace(r#"{"name": "final", "submit": {}},"#, &function)
-            .replace("] + judges,", &format!("] + judges + [{target}],"));
+            .replace(
+                r#"{"name": "final", "now": {"body": submit, "payload_max_bytes": MiB}},"#,
+                &function,
+            )
+            .replace("] + judges,", &format!("] + judges + [{target}],"))
+            .replace(SUBMIT, submit);
         scratch.write(&format!("{dir}lib/bench.star"), &library);
         scratch.write(&format!("{dir}lib/verify.star"), verify);
     };
-    write("", VERIFY, "verify");
-    write("one/", "def verify(target):\n    pass\n", "verify");
-    write("int/", VERIFY, "3");
+    write("", VERIFY, "verify", SUBMIT);
+    write("one/", "def verify(target):\n    pass\n", "verify", SUBMIT);
+    write("int/", VERIFY, "3", SUBMIT);
+    write(
+        "now/",
+        VERIFY,
+        "verify",
+        "def submit(run: Run, payload: Payload, finalize: float = 0.0):",
+    );
     let pumpkin = |dir: &str| {
         let entry = format!("{dir}tasks/bench/task.star");
         Step::from(scratch.pumpkin(&["check", &entry, "--arg=model=m"]))
     };
     check(
         &scratch,
-        [pumpkin(""), pumpkin("one/"), pumpkin("int/")],
+        [
+            pumpkin(""),
+            pumpkin("one/"),
+            pumpkin("int/"),
+            pumpkin("now/"),
+        ],
         false,
         &[],
         &expect![[r#"
@@ -1065,6 +1093,13 @@ fn bodies() {
                     |                                 ^
                 the IR's /roles/0/runtime/agent/grants/1/job/body
             pumpkin: int/tasks/bench/task.star: the task has 1 problem
-            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/int/tasks/bench/task.star"#]],
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/int/tasks/bench/task.star
+            $ pumpkin check now/tasks/bench/task.star --arg=model=m
+            exit status: Some(1)
+            lib/bench.star:175:40: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
+                175 | def submit(run: Run, payload: Payload, finalize: float = 0.0):
+                    |                                        ^^^^^^^^
+            pumpkin: now/tasks/bench/task.star: the task has 1 problem
+            pumpkin: to check it again: pumpkin check --arg model=m <scratch>/now/tasks/bench/task.star"#]],
     );
 }

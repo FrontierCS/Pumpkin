@@ -17,15 +17,14 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use schema::ir::{ArgumentType, ArgumentValue};
 use schema::sandbox::{MAX_MODEL_REQUESTS_IN_FLIGHT, RelativePath, model_url};
 
 use crate::builtins::{Call, Universal, called, lacks, place, string};
 use crate::plan::{Image, Place, Planned, Recipe, WorkflowCall, declare};
 use crate::problem::Fault;
 use crate::syntax::{Def, is_name};
-use crate::value::{
-    Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Span, Text, Value, escape, quote,
-};
+use crate::value::{Budget, Builtin, Dict, Entry, ImageId, Key, Kind, Span, Text, Value, escape};
 use crate::{Label, Root};
 
 // `MAX_MODEL_REQUESTS_IN_FLIGHT`, as an int of the language.
@@ -275,20 +274,17 @@ fn arg(call: &Call<'_>, planned: &mut Planned<'_>) -> Result<Value, Fault> {
     })
 }
 
+// How `arg()` takes its `type`, the builtin that names an [`ArgumentType`], and its default.
 #[derive(Clone, Copy)]
-enum Type {
-    Str,
-    Int,
-    Bool,
-}
+struct Type(ArgumentType);
 
 impl Type {
     fn of(value: &Value) -> Result<Self, Fault> {
         let kind = match &value.kind {
             Kind::Builtin(Builtin::Universal(universal)) => match universal {
-                Universal::Str => Some(Self::Str),
-                Universal::Int => Some(Self::Int),
-                Universal::Bool => Some(Self::Bool),
+                Universal::Str => Some(ArgumentType::Str),
+                Universal::Int => Some(ArgumentType::Int),
+                Universal::Bool => Some(ArgumentType::Bool),
                 Universal::Float => {
                     let message = "an arg can't be a float: give `arg`'s `type` as the builtin \
                                    `str`, `int` or `bool`";
@@ -310,7 +306,7 @@ impl Type {
             | Kind::Module(_)
             | Kind::Hosted(_) => None,
         };
-        kind.ok_or_else(|| {
+        kind.map(Self).ok_or_else(|| {
             let message = format!(
                 "`arg`'s `type` can't be {}: give the builtin `str`, `int` or `bool`",
                 value.shown()
@@ -320,10 +316,10 @@ impl Type {
     }
 
     fn words(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Str => ("str", "a string"),
-            Self::Int => ("int", "an int"),
-            Self::Bool => ("bool", "a bool"),
+        match self.0 {
+            ArgumentType::Str => ("str", "a string"),
+            ArgumentType::Int => ("int", "an int"),
+            ArgumentType::Bool => ("bool", "a bool"),
         }
     }
 
@@ -331,11 +327,11 @@ impl Type {
         // `None` leaves the program to pick the value of an arg not given, from what it knows, such
         // as a task's own values.
         let fits = matches!(
-            (self, &default.kind),
+            (self.0, &default.kind),
             (_, Kind::None)
-                | (Self::Str, Kind::Str(_))
-                | (Self::Int, Kind::Int(_))
-                | (Self::Bool, Kind::Bool(_))
+                | (ArgumentType::Str, Kind::Str(_))
+                | (ArgumentType::Int, Kind::Int(_))
+                | (ArgumentType::Bool, Kind::Bool(_))
         );
         if fits {
             return Ok(default);
@@ -349,29 +345,11 @@ impl Type {
     }
 
     fn read(self, name: &str, text: &str, at: Span, budget: &Budget) -> Result<Value, Fault> {
-        let shown = quote(text);
-        let kind = match self {
-            Self::Str => Kind::Str(Text::new(text, at, budget)?),
-            Self::Int => {
-                let Ok(int) = text.parse::<i64>() else {
-                    let message = format!(
-                        "`--arg {name}` is `{shown}`, which `int` can't read: give it decimal \
-                         digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1"
-                    );
-                    return Err(Fault::new(at, message));
-                };
-                Kind::Int(int)
-            }
-            Self::Bool => match text {
-                "true" => Kind::Bool(true),
-                "false" => Kind::Bool(false),
-                _ => {
-                    let message = format!(
-                        "`--arg {name}` is `{shown}`, which is no bool: give it `true` or `false`"
-                    );
-                    return Err(Fault::new(at, message));
-                }
-            },
+        let kind = match self.0.read(name, text) {
+            Ok(ArgumentValue::Str(text)) => Kind::Str(Text::new(&text, at, budget)?),
+            Ok(ArgumentValue::Int(int)) => Kind::Int(int),
+            Ok(ArgumentValue::Bool(bool)) => Kind::Bool(bool),
+            Err(message) => return Err(Fault::new(at, message)),
         };
         Ok(Value { kind, span: at })
     }

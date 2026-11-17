@@ -32,8 +32,8 @@ use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
 use schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
-    LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, OpReply, OpsReply, Remaining,
-    Returned, SessionOp, StatusReply, SubmitReply, SubmitState,
+    LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
+    Remaining, Returned, SessionOp, StatusReply,
 };
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -997,8 +997,8 @@ fn ops() {
                 ctl ops
                 /.pumpkin/bin/sandboxctl ops > /dev/full; echo "\$ sandboxctl ops > /dev/full: exit $?"
                 ctl call train payload
-                ctl submit submit ../home/payload --finalize
-                ctl submit submit payload
+                ctl call submit ../home/payload --arg finalize=true
+                ctl call submit payload
                 ctl call train link
                 ctl status 1
                 ctl status 2
@@ -1034,10 +1034,10 @@ fn ops() {
             $ sandboxctl ops > /dev/full: exit 0
             $ sandboxctl call train payload: exit 0
               {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
-            $ sandboxctl submit submit ../home/payload --finalize: exit 0
-              {"kind":"submit","state":"accepted","remaining_seconds":60}
-            $ sandboxctl submit submit payload: exit 0
-              {"kind":"submit","state":"stored","remaining_seconds":60}
+            $ sandboxctl call submit ../home/payload --arg finalize=true: exit 0
+              {"kind":"call","returned":{"finalize":"true"},"remaining_seconds":60}
+            $ sandboxctl call submit payload: exit 0
+              {"kind":"call","returned":{},"remaining_seconds":60}
             $ sandboxctl call train link: exit 0
               {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl status 1: exit 0
@@ -1078,14 +1078,14 @@ fn ops() {
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
             owner: ops
-            owner: call train: 2621440 bytes, intact: true
-            owner: submit submit, finalize true: 2621440 bytes, intact: true
-            owner: submit submit, finalize false: 2621440 bytes, intact: true
-            owner: call train: 2621440 bytes, intact: true
+            owner: call train {}: 2621440 bytes, intact: true
+            owner: call submit {Name("finalize"): "true"}: 2621440 bytes, intact: true
+            owner: call submit {}: 2621440 bytes, intact: true
+            owner: call train {}: 2621440 bytes, intact: true
             owner: status 1
             owner: status 2
             owner: status 3
-            owner: refused Call { grant: Name("train") }, over 2621440 bytes
+            owner: refused Call { grant: Name("train"), arguments: {} }, over 2621440 bytes
             owner: gpu.open None
             owner: gpu.open Some(30)
             owner: gpu.run 0: ["echo","-n","hi"], Some(5)
@@ -1123,7 +1123,7 @@ fn refused_calls() {
                 r#"{CTL}
                 truncate -s {huge} huge
                 mkfifo fifo
-                ctl submit submit huge
+                ctl call submit huge
                 ctl call train missing
                 ctl call train .
                 ctl call train fifo
@@ -1133,6 +1133,9 @@ fn refused_calls() {
                 ctl status soon
                 ctl call train
                 ctl call train --seconds 5 huge
+                ctl call submit huge --arg finalize
+                ctl call submit huge --arg a=1 --arg a=2
+                ctl call gpu.open --arg a=1
                 ctl status 1
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
                 echo "a second sandboxd: exit $?: $second""#,
@@ -1157,7 +1160,7 @@ fn refused_calls() {
         },
         &expect![[r#"
             Code(0)
-            $ sandboxctl submit submit huge: exit 1
+            $ sandboxctl call submit huge: exit 1
               sandboxctl: /pumpkin/home/huge holds more than 67108864 bytes: send at most that
             $ sandboxctl call train missing: exit 1
               sandboxctl: missing: No such file or directory (os error 2): name a file this user can reach
@@ -1174,9 +1177,15 @@ fn refused_calls() {
             $ sandboxctl status soon: exit 1
               sandboxctl: `soon` is not a job: name one by the number a call returned
             $ sandboxctl call train: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag: call it as `sandboxctl call train <file>`
+              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
             $ sandboxctl call train --seconds 5 huge: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag: call it as `sandboxctl call train <file>`
+              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
+            $ sandboxctl call submit huge --arg finalize: exit 1
+              sandboxctl: `--arg finalize` has no `=`: give it as `--arg <name>=<value>`
+            $ sandboxctl call submit huge --arg a=1 --arg a=2: exit 1
+              sandboxctl: `--arg a=2` names an arg given already: give each arg once
+            $ sandboxctl call gpu.open --arg a=1: exit 1
+              sandboxctl: a session's `open` takes no `--arg`: give its own words and flags
             $ sandboxctl status 1: exit 0
               {"kind":"status","job":1,"state":"completed","returned":{"score":1},"remaining":{"calls":1,"seconds":null}}
             a second sandboxd: exit 1: sandboxd: serving ops failed: the control socket's directory /pumpkin/sandboxctl can't be made: File exists (os error 17): expected nothing there yet, in a directory this user can write to
@@ -1490,28 +1499,26 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
             };
             ("ops".to_owned(), OpReply::Ops(ops))
         }
-        Op::Call { function, payload } => {
-            let asked = format!("call {function}: {}", intact(payload));
-            let job = JobReply { job: 1, remaining };
-            (asked, OpReply::Call(CallReply::Job(job)))
-        }
-        Op::Submit {
-            grant,
-            finalize,
+        Op::Call {
+            function,
+            arguments,
             payload,
         } => {
-            let asked = format!("submit {grant}, finalize {finalize}: {}", intact(payload));
-            let state = if *finalize {
-                SubmitState::Accepted
+            let asked = format!("call {function} {arguments:?}: {}", intact(payload));
+            // `train` answers as a job function, and any other function as a now function, whose
+            // body returns the caller's arguments.
+            let reply = if function.as_str() == "train" {
+                CallReply::Job(JobReply { job: 1, remaining })
             } else {
-                SubmitState::Stored
+                let returned = (arguments.iter())
+                    .map(|(name, text)| (name.as_str().to_owned(), text.as_str().into()))
+                    .collect();
+                CallReply::Now(NowReply {
+                    returned,
+                    remaining_seconds: 60,
+                })
             };
-            let remaining_seconds = 60;
-            let submitted = SubmitReply {
-                state,
-                remaining_seconds,
-            };
-            (asked, OpReply::Submit(submitted))
+            (asked, OpReply::Call(reply))
         }
         &Op::Status { job } => (format!("status {job}"), status(job, remaining)),
         Op::Session { grant, op } => session_reply(grant, op),

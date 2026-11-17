@@ -81,7 +81,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             qwen3.8-max high /workspace 1000000 65536 {"enable_thinking": true, "temperature": 1}:
-            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
+            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.qwen-home TMPDIR=/workspace/.qwen-home/tmp QWEN_HOME=/workspace/.qwen-home/qwen PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off
             cwd: /workspace
             dir 0700 /workspace/.qwen-home
@@ -167,11 +167,11 @@ fn refusals() {
             @pumpkin//harness/qwen_code/qwen_code.star:62:9: fail: `none` is not a reasoning level of Qwen Code's: use one of low, medium, high, xhigh, max
                 62 |         fail("`{}` is not a reasoning level of Qwen Code's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:62:9: fail: `High` is not a reasoning level of Qwen Code's: use one of low, medium, high, xhigh, max
                 62 |         fail("`{}` is not a reasoning level of Qwen Code's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:72:13: `/pumpkin/home/.qwen-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 72 |     home = ("" if workspace == "/" else workspace) + "/.qwen-home"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -179,36 +179,36 @@ fn refusals() {
             @pumpkin//harness/qwen_code/qwen_code.star:64:9: fail: Qwen Code runs only on a prompt: give a string that is not empty
                 64 |         fail("Qwen Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:66:9: fail: `0` is not a number of tokens: give a positive int
                 66 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:68:9: fail: `0` is not a number of tokens: give a positive int
                 68 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:64:9: fail: Qwen Code runs only on a prompt: give a string that is not empty
                 64 |         fail("Qwen Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:65:23: `<` can't take `None` and an int: give it two numbers or two strings
                 65 |     if context_tokens < 1:
                    |                       ^
-                the left operand, `None`, is made at task.star:23:22
+                the left operand, `None`, is made at task.star:24:22
                 the right operand, `1`, is made at @pumpkin//harness/qwen_code/qwen_code.star:65:25
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:67:26: `<` can't take `None` and an int: give it two numbers or two strings
                 67 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:24:25
+                the left operand, `None`, is made at task.star:25:25
                 the right operand, `1`, is made at @pumpkin//harness/qwen_code/qwen_code.star:67:28
-                in `qwen_code()`, called at task.star:15:9
+                in `qwen_code()`, called at task.star:16:9
             @pumpkin//harness/qwen_code/qwen_code.star:75:23: `|` can't take `None` and a dict: give it two dicts
                 75 |     body = extra_body | {"reasoning_effort": effort, "max_tokens": max_output_tokens}
                    |                       ^
-                the left operand, `None`, is made at task.star:25:18
+                the left operand, `None`, is made at task.star:26:18
                 the right operand, a dict, is made at @pumpkin//harness/qwen_code/qwen_code.star:75:25
-                in `qwen_code()`, called at task.star:15:9"#]],
+                in `qwen_code()`, called at task.star:16:9"#]],
     );
 }

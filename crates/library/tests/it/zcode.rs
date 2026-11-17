@@ -73,7 +73,7 @@ fn roles() {
         &shown,
         &expect![[r#"
             glm-5.3 max /workspace 1048576 262144:
-            argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd /workspace --disallowed-tools WebSearch,WebFetch "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl submit final <tar> --finalize`.\n"
+            argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd /workspace --disallowed-tools WebSearch,WebFetch "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.zcode-home TMPDIR=/workspace/.zcode-home/tmp ZCODE_DATA_BASE_DIR=/workspace/.zcode-home ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=/workspace/.zcode-home/provider_config.json ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/harness/zcode-0.16.9/provider/zcode-builtin.json
             cwd: /workspace
             dir 0700 /workspace/.zcode-home
@@ -165,11 +165,11 @@ fn refusals() {
             @pumpkin//harness/zcode/zcode.star:59:9: fail: `medium` is not a reasoning level of ZCode's: use one of low, high, max
                 59 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:59:9: fail: `High` is not a reasoning level of ZCode's: use one of low, high, max
                 59 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:69:13: `/pumpkin/home/.zcode-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
                 69 |     home = ("" if workspace == "/" else workspace) + "/.zcode-home"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -177,30 +177,30 @@ fn refusals() {
             @pumpkin//harness/zcode/zcode.star:61:9: fail: ZCode runs only on a prompt: give a string that is not empty
                 61 |         fail("ZCode runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:63:9: fail: `0` is not a number of tokens: give a positive int
                 63 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:65:9: fail: `0` is not a number of tokens: give a positive int
                 65 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:61:9: fail: ZCode runs only on a prompt: give a string that is not empty
                 61 |         fail("ZCode runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:62:23: `<` can't take `None` and an int: give it two numbers or two strings
                 62 |     if context_tokens < 1:
                    |                       ^
-                the left operand, `None`, is made at task.star:22:22
+                the left operand, `None`, is made at task.star:23:22
                 the right operand, `1`, is made at @pumpkin//harness/zcode/zcode.star:62:25
-                in `zcode()`, called at task.star:14:9
+                in `zcode()`, called at task.star:15:9
             @pumpkin//harness/zcode/zcode.star:64:26: `<` can't take `None` and an int: give it two numbers or two strings
                 64 |     if max_output_tokens < 1:
                    |                          ^
-                the left operand, `None`, is made at task.star:23:25
+                the left operand, `None`, is made at task.star:24:25
                 the right operand, `1`, is made at @pumpkin//harness/zcode/zcode.star:64:28
-                in `zcode()`, called at task.star:14:9"#]],
+                in `zcode()`, called at task.star:15:9"#]],
     );
 }

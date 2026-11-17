@@ -1,6 +1,8 @@
 """A neutral library: `judged_task` writes the workflow of a task whose agent may call the judge's
 train mode while it works, and whose final judge, of the same image, scores what it submits."""
 
+load("//lib/submit.star", "submit")
+
 AGENT_IMAGE = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
 JUDGE_IMAGE = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -103,7 +105,7 @@ def judged_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mod
                             "calls": _calls(calls),
                             "call_timeout_seconds": 600,
                         }},
-                        {"name": "final", "submit": {}},
+                        {"name": "final", "now": {"body": submit, "payload_max_bytes": MiB}},
                     ],
                 } | egress},
             },

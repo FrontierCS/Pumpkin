@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use decision::{
-    Action, Caller, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef, Request, Submission,
-    Verdict, WorkEnd,
+    Action, Caller, Effect, Evaluated, Event, Failure, JobId, JudgeResult, Outcome, PayloadRef,
+    Request, Submission, Unevaluated, Verdict, WorkEnd,
 };
 use gateway::RefusedOp;
 use provider::UnixTime;
@@ -503,23 +503,50 @@ fn event_json(event: &Event) -> Value {
     }
 }
 
+// A now function's evaluation: its effects and what it returned, or why it gave neither.
+fn evaluated_json(evaluated: &Result<Evaluated, Unevaluated>) -> Value {
+    match evaluated {
+        Ok(Evaluated { effects, returned }) => {
+            let effects: Vec<&str> = (effects.iter())
+                .map(|effect| match effect {
+                    Effect::Select => "select",
+                    Effect::EndWork => "end_work",
+                })
+                .collect();
+            json!({ "effects": effects, "returned": shown_json(returned.values()) })
+        }
+        Err(Unevaluated::Unread(words)) => json!({ "unread": words }),
+        Err(Unevaluated::Failed(reason)) => json!({ "failed": reason }),
+    }
+}
+
 fn request_json(request: &Request) -> Value {
     match request {
         Request::Ops => json!({ "kind": "ops" }),
-        Request::Call { function, payload } => json!({
-            "kind": "call",
+        Request::Call {
+            function,
+            payload,
+            arguments,
+        } => {
+            let mut call = json!({
+                "kind": "call",
+                "grant": function.as_str(),
+                "payload": payload_json(payload),
+            });
+            if !arguments.is_empty() {
+                call["arguments"] = json!(arguments);
+            }
+            call
+        }
+        Request::Now {
+            function,
+            payload,
+            evaluated,
+        } => json!({
+            "kind": "now",
             "grant": function.as_str(),
             "payload": payload_json(payload),
-        }),
-        Request::Submit {
-            grant,
-            finalize,
-            payload,
-        } => json!({
-            "kind": "submit",
-            "grant": grant.as_str(),
-            "finalize": finalize,
-            "payload": payload_json(payload),
+            "evaluated": evaluated_json(evaluated),
         }),
         // A decimal string, as a time is, since the agent may give any number, past 2^53 too.
         Request::Status { job } => json!({ "kind": "status", "job": job.to_string() }),
@@ -587,7 +614,6 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
                 OpReply::LeaseStatus(_) => json!({ "kind": "lease_status" }),
                 OpReply::Ops(_)
                 | OpReply::Call(_)
-                | OpReply::Submit(_)
                 | OpReply::Lease(_)
                 | OpReply::Refused { .. } => json!(reply),
             };
@@ -607,6 +633,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             job,
             function,
             payload,
+            // The call's request holds them, as its caller gave them.
+            arguments: _,
             timeout,
         } => json!({
             "kind": "start_call",

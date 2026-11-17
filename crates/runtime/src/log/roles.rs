@@ -118,7 +118,7 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
                 ready_for: None,
             },
             ir::Function::Session(held) => session(held),
-            ir::Function::Submit(_) => Grant {
+            ir::Function::Now(_) => Grant {
                 role: None,
                 ready_for: None,
             },

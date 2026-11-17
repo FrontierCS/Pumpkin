@@ -453,7 +453,7 @@ fn op_replies() {
     check(
         [
             Reply(
-                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"submit","name":"submit","max_bytes":4194304}]}"#,
+                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}"#,
             ),
             Reply(r#"{"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
             Reply(
@@ -474,8 +474,7 @@ fn op_replies() {
             Reply(
                 r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":96,"seconds":0}}"#,
             ),
-            Reply(r#"{"kind":"submit","state":"stored","remaining_seconds":120}"#),
-            Reply(r#"{"kind":"submit","state":"accepted","remaining_seconds":60}"#),
+            Reply(r#"{"kind":"call","returned":{"state":"stored"},"remaining_seconds":120}"#),
             Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
             Reply(
                 r#"{"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":null}}"#,
@@ -512,7 +511,7 @@ fn op_replies() {
             ),
         ],
         &expect![[r#"
-            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Job(JobFunction { name: Name("train"), payload_max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600 }), Submit(SubmitGrant { name: Name("submit"), max_bytes: 4194304 })] })
+            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Job(JobFunction { name: Name("train"), payload_max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600, arguments: {} }), Now(NowFunction { name: Name("submit"), payload_max_bytes: 4194304, arguments: {Name("finalize"): Bool { default: Some(false) }} })] })
             Call(Job(JobReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } }))
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
@@ -520,8 +519,7 @@ fn op_replies() {
             Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
             Status(StatusReply { job: 3, state: Errored { failure: Failure { code: CallTimeout, message: "the call ran past its timeout" } }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
             Status(StatusReply { job: 4, state: Errored { failure: Failure { code: CallError, message: "the call's body failed: the run's record says why" } }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
-            Submit(SubmitReply { state: Stored, remaining_seconds: 120 })
-            Submit(SubmitReply { state: Accepted, remaining_seconds: 60 })
+            Call(Now(NowReply { returned: Returned({"state": String("stored")}), remaining_seconds: 120 }))
             Refused { message: "`train` has no calls left: it allows 100" }
             Lease(LeaseReply { lease: 0, remaining: LeaseRemaining { instances: 1, instance_seconds: 900, cumulative_seconds: Some(1200), commands: None } })
             LeaseStatus(LeaseStatusReply { lease: 0, state: Running, elapsed_seconds: 40, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Command(CommandStatus { command: 0, end: None, stdout: "", stderr: "" })), remaining: LeaseRemaining { instances: 1, instance_seconds: 899, cumulative_seconds: Some(1199), commands: Some(31) } })
@@ -736,7 +734,8 @@ fn parsed() {
     let workflow = Workflow::parse(&ir).unwrap();
     let name = |role| workflow.sandbox(role).name.as_str();
     assert_eq!(name(workflow.agent().role), "agent");
-    assert_eq!(workflow.submit_grant().name.as_str(), "submit");
+    let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
+    assert_eq!(now.collect::<Vec<_>>(), ["submit"]);
     assert_eq!(name(workflow.score().slot.judge().role()), "final_judge");
     let model = workflow.agent().model.as_ref();
     let route = model.unwrap();
@@ -844,7 +843,7 @@ fn checked_values() {
             `/metrics/` would return the empty key: point to a field with a name
             `/x/a~1b` and `/a~1b` would both return `a/b`: return each key once
             /roles/2/runtime/judge/slots/0/max_bytes: slot `payload`'s `max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
-            `score` is shown more than once: show each name once at line 88 column 84"#]],
+            `score` is shown more than once: show each name once at line 98 column 84"#]],
     );
     assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }
@@ -1073,7 +1072,7 @@ fn grant_forms() {
     };
     check(
         [
-            with(|grant| grant["submit"] = json!({})),
+            with(|grant| grant["now"] = json!({})),
             with(|grant| *grant = json!({ "name": "train", "lease": {} })),
             with(|grant| *grant = json!({ "name": "train" })),
             with(|grant| {
@@ -1081,15 +1080,15 @@ fn grant_forms() {
             }),
         ],
         &expect![[r#"
-            `submit` follows `job`, the function's kind: give a grant its `name` and one function
-            unknown variant `lease`, expected one of `job`, `session`, `submit`
+            `now` follows `job`, the function's kind: give a grant its `name` and one function
+            unknown variant `lease`, expected one of `job`, `session`, `now`
             the grant gives no function: give one, under its kind's key
             missing field `name`"#]],
     );
 }
 
 /// [`WORKFLOW`] with a runner, `gpu`, of an image of its own, that the agent leases under grant
-/// `gpu`, before its submit grant.
+/// `gpu`, before its now function.
 fn leasing() -> Value {
     let mut ir = fixture();
     let mut runner = ir["roles"][1].clone();
@@ -1106,6 +1105,13 @@ fn leasing() -> Value {
         .unwrap()
         .insert(1, grant);
     ir
+}
+
+// A now function named `name`, of a body in the entry file.
+fn now(name: &str) -> Value {
+    json!({ "name": name, "now": {
+        "body": { "file": "//task.star", "def": "submit" }, "payload_max_bytes": 4096,
+    } })
 }
 
 #[test]
@@ -1305,39 +1311,74 @@ fn broken_roles() {
     ir["roles"][2]["runtime"]["judge"]["egress"] =
         ir["roles"][0]["runtime"]["agent"]["egress"].clone();
     let grants = &mut ir["roles"][0]["runtime"]["agent"]["grants"];
-    let submit = json!({ "name": "resubmit", "submit": {} });
+    let mut submit = now("resubmit");
+    submit["now"]["payload_max_bytes"] = json!(67_108_865);
     let mut retrain = grants[0].clone();
     retrain["name"] = json!("retrain");
     grants.as_array_mut().unwrap().extend([submit, retrain]);
     ir["score"]["role"] = json!("trainer");
     let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
-    let mut unsubmitted = fixture();
-    unsubmitted["roles"][0]["runtime"]["agent"]["grants"]
-        .as_array_mut()
-        .unwrap()
-        .remove(1);
-    let mut ungranted = fixture();
-    ungranted["roles"][0]["runtime"]["agent"]
-        .as_object_mut()
-        .unwrap()
-        .remove("grants");
     let mut untimed = fixture();
     untimed["roles"][0]["runtime"]["agent"]["grants"][0]["job"]
         .as_object_mut()
         .unwrap()
         .remove("call_timeout_seconds");
     check(
-        [ir, none, unsubmitted, ungranted, untimed],
+        [ir, none, untimed],
         &expect![[r#"
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
+            /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
-            /roles/0/runtime/agent/grants/2/submit: `resubmit` is a second submit grant, after `submit`: give the agent exactly one
             /score/role: `trainer` is a target: name a judge
             /roles: no role is an agent: a workflow has exactly one
-            /roles/0/runtime/agent/grants: no submit grant: give the agent exactly one
-            /roles/0/runtime/agent: no submit grant: give the agent exactly one
-            /roles/1: `trainer` is a target that no job function names: name it from one
             missing field `call_timeout_seconds`"#]],
+    );
+}
+
+/// The texts that a caller of `submit` gives its arguments, each `(name, text)`, and what
+/// reading them against `submit`'s parameters gives.
+struct Given(&'static [(&'static str, &'static str)]);
+
+impl Case for Given {
+    fn outcome(self) -> String {
+        let function = ir::Name::from_static("submit");
+        let parameters: BTreeMap<ir::Name, ir::Argument> = serde_json::from_value(json!({
+            "finalize": { "type": "bool", "default": false },
+            "seed": { "type": "int" },
+            "note": { "type": "str", "default": "none" },
+        }))
+        .unwrap();
+        let given = (self.0.iter())
+            .map(|(name, text)| {
+                let name = ir::Name::try_from((*name).to_owned()).unwrap();
+                (name, (*text).to_owned())
+            })
+            .collect();
+        match ir::argument::read(&function, &parameters, &given) {
+            Ok(values) => format!("{values:?}"),
+            Err(refused) => refused,
+        }
+    }
+}
+
+#[test]
+fn caller_arguments() {
+    check(
+        [
+            Given(&[("seed", "-3")]),
+            Given(&[("seed", "+3"), ("finalize", "true"), ("note", "")]),
+            Given(&[("seed", "3"), ("finalize", "yes")]),
+            Given(&[("seed", "3.5")]),
+            Given(&[]),
+            Given(&[("seed", "3"), ("mode", "fast")]),
+        ],
+        &expect![[r#"
+            {Name("finalize"): Bool(false), Name("note"): Str("none"), Name("seed"): Int(-3)}
+            {Name("finalize"): Bool(true), Name("note"): Str(""), Name("seed"): Int(3)}
+            `--arg finalize` is `"yes"`, which is no bool: give it `true` or `false`
+            `--arg seed` is `"3.5"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
+            `--arg seed` is required, as `submit` gives it no default: give it as `--arg seed=<value>`
+            `--arg mode` is given, and `submit` takes no such argument: give only those that `ops` lists"#]],
     );
 }

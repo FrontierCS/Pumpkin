@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::{fmt, fs, io, iter, panic, thread};
+use std::{fmt, fs, io, iter, thread};
 
 use engine::{BuildContext, Building, Built, Engine, Started};
 use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
@@ -705,18 +705,8 @@ pub(crate) fn checked<T: Send>(
 }
 
 fn evaluating<T: Send>(evaluate: impl FnOnce() -> T + Send) -> Result<T, String> {
-    thread::scope(|scope| {
-        // A thread of its own for its stack alone: the main thread's is as large as the process's
-        // limit makes it, which may be less.
-        let thread = (thread::Builder::new())
-            .name("evaluation".to_owned())
-            .stack_size(lang::STACK_BYTES);
-        let evaluating = thread.spawn_scoped(scope, evaluate).map_err(|error| {
-            format!("a thread to evaluate the task on can't be started: {error}")
-        })?;
-        // A panic of the evaluation is the process's: pass it on.
-        Ok(evaluating
-            .join()
-            .unwrap_or_else(|panic| panic::resume_unwind(panic)))
-    })
+    // A thread of its own for its stack alone: the main thread's is as large as the process's
+    // limit makes it, which may be less.
+    stdx::on_stack("evaluation", lang::STACK_BYTES, evaluate)
+        .map_err(|error| format!("a thread to evaluate the task on can't be started: {error}"))
 }

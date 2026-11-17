@@ -18,15 +18,19 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
+pub mod argument;
 mod grant;
 mod job;
 mod label;
+mod now;
 mod session;
 pub(crate) mod values;
 
+pub use argument::{Argument, ArgumentType, ArgumentValue};
 pub use grant::{Body, Function, Grant};
 pub use job::JobFunction;
 pub use label::{Label, Root};
+pub use now::NowFunction;
 pub use session::{NamedSession, Session};
 pub use values::{
     AbsolutePath, Argv, CpuFlag, CpuModel, Env, EnvVar, GpuModel, HeaderName, Image, JsonPointer,
@@ -36,11 +40,11 @@ pub use values::{
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
 ///
 /// A run has two phases. In the work phase, the run starts the agent, which works until it
-/// exits, finalizes a submission or reaches its deadline, calls the judges its grants name and
-/// leases their runners. In the final phase, which starts once the agent's sandbox and every call
-/// and lease it made, and every lease its calls made, are gone, the [`Score`] judge judges the
-/// selection: the finalized submission, else the latest one stored. Only the run, which keeps the
-/// submissions, lives through both phases.
+/// exits, ends its work or reaches its deadline, calls the judges its grants name and the now
+/// functions that select a payload, and leases runners. In the final phase, which starts once the
+/// agent's sandbox and every call and lease it made, and every lease its calls made, are gone,
+/// the [`Score`] judge judges the selection: the last payload selected. Only the run, which keeps
+/// the selection, lives through both phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
@@ -187,16 +191,15 @@ pub struct AgentRuntime {
     /// Judging the selected submission comes after the deadline, bounded instead by the
     /// score's [`timeout_seconds`](Score::timeout_seconds).
     pub deadline_seconds: NonZeroU64,
-    /// How long the agent may keep running after its final submission is accepted. Its ops are
+    /// How long the agent may keep running after a call of its ends its work. Its ops are
     /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
     /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
-    /// comes first. 0 ends the work phase at the final submission.
+    /// comes first. 0 ends the work phase in that call's step.
     pub finalize_grace_seconds: u64,
     /// The agent's routes out, open while it works; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The functions the agent may call while it works: job functions, sessions and submit grants,
-    /// of which [`Workflow::parse`](crate::workflow::Workflow::parse) takes exactly one.
+    /// The functions the agent may call while it works.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<Grant>,
 }
@@ -308,8 +311,7 @@ pub struct Slot {
     pub name: Name,
     /// The most bytes a payload into the slot may hold, at most
     /// [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), since every payload
-    /// reaches its judge through an op. The [`Score`] slot's also caps every submission, so that
-    /// whatever is selected fits it.
+    /// reaches its judge through an op. The [`Score`] slot's also caps every selection.
     pub max_bytes: NonZeroU64,
 }
 
@@ -477,12 +479,6 @@ impl fmt::Display for Api {
         })
     }
 }
-
-/// Stores submissions, of which the [`Score`] judges the one selected. A submission may hold as
-/// many bytes as the [`Score`] slot takes, its [`max_bytes`](Slot::max_bytes).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitGrant {}
 
 /// The judge call that scores the selected submission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

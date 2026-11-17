@@ -6,6 +6,8 @@ in its own sandbox too, and scores each of its lines that says the sandbox is co
 be: 5 for each sandbox, so 15 without a GPU runner, and 20 with one.
 """
 
+load("//submit.star", "submit")
+
 DEADLINE = arg("deadline_seconds", int, default = 600)
 GPU_MODEL = arg("gpu_model", str, default = "")
 
@@ -41,7 +43,7 @@ workflow(
                 "command": {"argv": ["python3", "-u", "/opt/smoke/agent.py"] + (["hold"] if HOLD else []), "cwd": "/workspace"},
                 "deadline_seconds": DEADLINE,
                 "finalize_grace_seconds": 0,
-                "grants": [CPU_SESSION] + ([GPU_SESSION] if GPU_MODEL else []) + [{"name": "final", "submit": {}}],
+                "grants": [CPU_SESSION] + ([GPU_SESSION] if GPU_MODEL else []) + [{"name": "final", "now": {"body": submit, "payload_max_bytes": 64 * KiB}}],
             }},
         },
         {

@@ -3,22 +3,21 @@ use std::time::Duration;
 
 use super::errors::{Errors, Reported};
 use super::{
-    Agent, Holder, JobFunction, Judge, JudgeId, ParseErrors, RoleId, Runner, RunnerId, Sandbox,
-    Score, Session, Slot, SlotId, SubmitGrant, Target, TargetId, Workflow,
+    Agent, Holder, JobFunction, Judge, JudgeId, NowFunction, ParseErrors, RoleId, Runner, RunnerId,
+    Sandbox, Score, Session, Slot, SlotId, Target, TargetId, Workflow,
 };
 use crate::ir::{self, JsonPointer, Name, RolePath};
 use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 
 impl Workflow {
     /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
-    /// [at](super::ParseError::at) its place. The rules: one agent and one submit grant; names
-    /// unique among roles, among a role's slots and among its grants; the agent's `dirs` and
-    /// `files` give each path once, none below a file; a slot's `max_bytes` and a session's
-    /// `transfer_bytes` are within the protocol's limits; each grant names a role of its kind that
-    /// no other grant of its kind names; an agent's runner has an image no judge or target has;
-    /// every runner is leased, and every target called; the score names a judge's slot, and no
-    /// other judge is listed. A rule about parts that fail to resolve goes unchecked, so fixing
-    /// these errors may reveal others.
+    /// [at](super::ParseError::at) its place. The rules: one agent; names unique among roles,
+    /// among a role's slots and among its grants; the agent's `dirs` and `files` give each path
+    /// once, none below a file; each limit of bytes is within the protocol's; each grant names a
+    /// role of its kind that no other grant of its kind names; an agent's runner has an image no
+    /// judge or target has; every runner is leased, and every target called; the score names a
+    /// judge's slot, and no other judge is listed. A rule about parts that fail to resolve goes
+    /// unchecked, so fixing these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -46,7 +45,7 @@ struct Holding<'ir> {
 
 type Grants = (
     Result<Vec<JobFunction>, Reported>,
-    Result<SubmitGrant, Reported>,
+    Result<Vec<NowFunction>, Reported>,
 );
 
 impl<'ir> Parser<'ir> {
@@ -68,7 +67,7 @@ impl<'ir> Parser<'ir> {
                     ir::Function::Session(session) => {
                         Some((list.token(index).token("session"), &grant.name, session))
                     }
-                    ir::Function::Job(_) | ir::Function::Submit(_) => None,
+                    ir::Function::Job(_) | ir::Function::Now(_) => None,
                 });
                 // The agent's sessions come first, as [`Workflow::sessions`] says.
                 let holding = Holding {
@@ -91,12 +90,12 @@ impl<'ir> Parser<'ir> {
             runners,
             ..
         } = self;
-        let parsed = agent.and_then(|(agent, (job_functions, submit_grant))| {
-            let grants = (job_functions?, sessions?, submit_grant?);
+        let parsed = agent.and_then(|(agent, (job_functions, now_functions))| {
+            let grants = (job_functions?, sessions?, now_functions?);
             Ok((agent, grants, score?))
         });
         let (agent, grants, (score, judge)) = errors.finish(parsed)?;
-        let (job_functions, sessions, submit_grant) = grants;
+        let (job_functions, sessions, now_functions) = grants;
         Ok(Workflow {
             ir: ir.clone(),
             roles,
@@ -106,7 +105,7 @@ impl<'ir> Parser<'ir> {
             runners,
             job_functions,
             sessions,
-            submit_grant,
+            now_functions,
             score,
         })
     }
@@ -302,7 +301,7 @@ impl<'ir> Parser<'ir> {
     fn grants(&mut self, agent: &JsonPointer, grants: &'ir [ir::Grant]) -> Grants {
         let list = agent.token("grants");
         let mut job_functions = Vec::new();
-        let mut submit_grants = Vec::new();
+        let mut now_functions = Vec::new();
         for (index, grant) in grants.iter().enumerate() {
             let at = place(&list, index, grant);
             match &grant.function {
@@ -310,13 +309,13 @@ impl<'ir> Parser<'ir> {
                     job_functions.push(self.job_function(&at, &grant.name, job));
                 }
                 ir::Function::Session(_) => {}
-                ir::Function::Submit(ir::SubmitGrant {}) => submit_grants.push((at, &grant.name)),
+                ir::Function::Now(now) => {
+                    now_functions.push(self.now_function(&at, &grant.name, now));
+                }
             }
         }
-        // An absent list has no place in the IR's JSON, so its absence is the agent's.
-        let at = if grants.is_empty() { agent } else { &list };
-        let submit_grant = self.submit_grant(at, &submit_grants);
-        (job_functions.into_iter().collect(), submit_grant)
+        let job_functions = job_functions.into_iter().collect();
+        (job_functions, now_functions.into_iter().collect())
     }
 
     fn job_function(
@@ -550,26 +549,32 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    fn submit_grant(
+    fn now_function(
         &mut self,
         at: &JsonPointer,
-        grants: &[(JsonPointer, &Name)],
-    ) -> Result<SubmitGrant, Reported> {
-        let Some(((_, first), others)) = grants.split_first() else {
-            return Err(self
-                .errors
-                .report(at.clone(), "no submit grant: give the agent exactly one"));
-        };
-        let mut parsed = Ok(SubmitGrant {
-            name: (*first).clone(),
-        });
-        for (at, other) in others {
-            let message = format!(
-                "`{other}` is a second submit grant, after `{first}`: give the agent exactly one"
-            );
-            parsed = Err(self.errors.report(at.clone(), message));
+        name: &Name,
+        now: &ir::NowFunction,
+    ) -> Result<NowFunction, Reported> {
+        let ir::NowFunction {
+            body,
+            payload_max_bytes,
+        } = now;
+        let max_bytes = payload_max_bytes.get();
+        // A call's payload comes in an op, which carries no more.
+        if max_bytes > MAX_OP_PAYLOAD_BYTES {
+            return Err(self.errors.report(
+                at.token("payload_max_bytes"),
+                format!(
+                    "`{name}`'s `payload_max_bytes` is {max_bytes}, over the op payload limit of \
+                     {MAX_OP_PAYLOAD_BYTES}: give at most that"
+                ),
+            ));
         }
-        parsed
+        Ok(NowFunction {
+            name: name.clone(),
+            body: body.clone(),
+            payload_max_bytes: *payload_max_bytes,
+        })
     }
 
     /// The score, and its judge, the workflow's one.
@@ -625,7 +630,7 @@ fn place(list: &JsonPointer, index: usize, grant: &ir::Grant) -> JsonPointer {
     let kind = match grant.function {
         ir::Function::Job(_) => "job",
         ir::Function::Session(_) => "session",
-        ir::Function::Submit(_) => "submit",
+        ir::Function::Now(_) => "now",
     };
     list.token(index).token(kind)
 }

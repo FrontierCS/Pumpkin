@@ -39,13 +39,12 @@ mod flags {
     )]
 
     use std::ffi::OsString;
-    use std::path::PathBuf;
 
     xflags::xflags! {
         src "./src/ctl.rs"
 
         /// Makes an op through the sandbox's sandboxd, and prints the reply as one line of
-        /// JSON, whose `kind` names it: `ops`, `call`, `submit`, `status`, `lease`,
+        /// JSON, whose `kind` names it: `ops`, `call`, `status`, `lease`,
         /// `lease_status` or `refused`. Exits with 0, with 2 for the status of a job that gave
         /// no result, and with 1 for a refused op.
         /// Reports any other error on standard error, with nothing printed, and exits with 1.
@@ -80,16 +79,9 @@ mod flags {
                 optional --seconds seconds: OsString
                 /// With `put`, removes whatever is at <to> in the runner first.
                 optional --replace
-            }
-
-            /// Submits the payload in a file to a submit grant.
-            cmd submit {
-                /// The submit grant's name, as `ops` lists it.
-                required grant: OsString
-                /// The file that holds the payload, or a symbolic link to it.
-                required file: PathBuf
-                /// Marks the submission as the final one.
-                optional --finalize
+                /// With a function's call, one of its caller's arguments, as `<name>=<value>`,
+                /// read as `ops` lists its type.
+                repeated --arg arg: OsString
             }
 
             /// Shows how a job that a call of a job function started is doing.
@@ -111,7 +103,6 @@ mod flags {
     pub enum SandboxctlCmd {
         Ops(Ops),
         Call(Call),
-        Submit(Submit),
         Status(Status),
     }
 
@@ -126,14 +117,7 @@ mod flags {
         pub timeout: Option<OsString>,
         pub seconds: Option<OsString>,
         pub replace: bool,
-    }
-
-    #[derive(Debug)]
-    pub struct Submit {
-        pub grant: OsString,
-        pub file: PathBuf,
-
-        pub finalize: bool,
+        pub arg: Vec<OsString>,
     }
 
     #[derive(Debug)]
@@ -196,11 +180,7 @@ pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
 /// The exit code that `reply` gives, as `sandboxctl --help` lists them ([`flags`]).
 fn exit_code(reply: &OpReply) -> u8 {
     match reply {
-        OpReply::Ops(_)
-        | OpReply::Call(_)
-        | OpReply::Submit(_)
-        | OpReply::Lease(_)
-        | OpReply::LeaseStatus(_) => 0,
+        OpReply::Ops(_) | OpReply::Call(_) | OpReply::Lease(_) | OpReply::LeaseStatus(_) => 0,
         OpReply::Status(StatusReply { state, .. }) => match state {
             JobState::Queued | JobState::Running | JobState::Completed { .. } => 0,
             JobState::Errored { .. } => 2,
@@ -223,20 +203,12 @@ fn run(flags: flags::Sandboxctl) -> Result<OpReply, String> {
     }
 }
 
-/// Parses the arguments into the op's call and the request's body: for a function's call or a
-/// submission, the payload file's absolute path ([`payload_path`]).
+/// Parses the arguments into the op's call and the request's body: for a function's call, the
+/// payload file's absolute path ([`payload_path`]).
 fn parse(flags: flags::Sandboxctl) -> Result<(OpCall, Vec<u8>), String> {
     match flags.subcommand {
         flags::SandboxctlCmd::Ops(flags::Ops) => Ok((OpCall::Ops, Vec::new())),
         flags::SandboxctlCmd::Call(call) => call::call(call),
-        flags::SandboxctlCmd::Submit(flags::Submit {
-            grant,
-            file,
-            finalize,
-        }) => {
-            let grant = parse_grant(&grant)?;
-            Ok((OpCall::Submit { grant, finalize }, payload_path(&file)?))
-        }
         flags::SandboxctlCmd::Status(flags::Status { job }) => {
             let job = job
                 .to_str()

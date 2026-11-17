@@ -59,7 +59,7 @@ impl<L: Loader> Loader for Keeping<'_, L> {
     }
 }
 
-/// Checks, without calling it, that each job function's body of `workflow` takes a job's call,
+/// Checks, without calling it, that each body of `workflow`'s functions takes a call of its kind,
 /// on an evaluation of its file from `sources` with `args`, and gives `sources` back.
 ///
 /// # Errors
@@ -73,6 +73,11 @@ pub(crate) fn check(
     for (_, function) in workflow.job_functions() {
         let body = body(&function.body, &function.keywords);
         lang::check(&body, BodyKind::Job, &mut &sources, args, Bounds::WORKFLOW)?;
+    }
+    let keywords = Map::new();
+    for (_, function) in workflow.now_functions() {
+        let body = body(&function.body, &keywords);
+        lang::check(&body, BodyKind::Now, &mut &sources, args, Bounds::WORKFLOW)?;
     }
     Ok(sources)
 }
@@ -109,13 +114,43 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::Body,
         keywords: &Map<String, Value>,
+        arguments: &BTreeMap<Name, ir::ArgumentValue>,
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let body = self::body(body, keywords);
         let host = Host::Job(&mut Driven(target));
         let mut sources = self.sources;
-        let returned = lang::call(&body, host, &mut sources, self.args, Bounds::WORKFLOW);
+        let bounds = Bounds::WORKFLOW;
+        let returned = lang::call(&body, host, arguments, &mut sources, self.args, bounds);
         returned.map_err(|problems| problems.to_string())
+    }
+
+    fn now(
+        &self,
+        body: &ir::Body,
+        arguments: &BTreeMap<Name, ir::ArgumentValue>,
+        run: &mut dyn runtime::RunState,
+    ) -> Result<Vec<(Name, Value)>, String> {
+        let keywords = Map::new();
+        let body = self::body(body, &keywords);
+        let host = Host::Now(&mut Proposing(run));
+        let mut sources = self.sources;
+        let bounds = Bounds::WORKFLOW;
+        let returned = lang::call(&body, host, arguments, &mut sources, self.args, bounds);
+        returned.map_err(|problems| problems.to_string())
+    }
+}
+
+/// The run's state, as a now function's body proposes effects on it.
+struct Proposing<'r>(&'r mut dyn runtime::RunState);
+
+impl lang::Run for Proposing<'_> {
+    fn select(&mut self) {
+        self.0.select();
+    }
+
+    fn end_work(&mut self) {
+        self.0.end_work();
     }
 }
 

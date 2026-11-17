@@ -15,12 +15,12 @@ keep a record of the run that no sandbox can alter.
 
 A workflow is data, the workflow IR. It names its roles, one agent, the targets its job functions
 start, the runners that sessions lease and one judge; the grants each role holds, such as the
-agent's job functions, its sessions and its submission; each role's model route; and the score,
+agent's job functions, its sessions and its now functions; each role's model route; and the score,
 the judge whose verdict on the selected submission ends the run. A task's source, in Pumpkin's
 workflow language, a subset of Starlark, evaluates to that IR and to the images its roles run. The
-IR is the only input the runtime reads, and the bodies of its job functions reach it as `Bodies`,
-which the driver gives; so any other program may write the IR of a workflow without job
-functions.
+IR is the only input the runtime reads, and the bodies of its job and now functions reach it as
+`Bodies`, which the driver gives; so any other program may write the IR of a workflow without
+functions with bodies, though one without a now function selects nothing to judge.
 
 Each instance of a role is a sandbox, which a provider makes: a container on the operator's Docker
 engine, a container on an EC2 instance of its own, or a Modal sandbox. In every sandbox,

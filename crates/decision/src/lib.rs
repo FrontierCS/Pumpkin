@@ -17,13 +17,14 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use core::time::Duration;
 
-use schema::ir::{AbsolutePath, Argv, Name, Sha256Digest};
+use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
 use schema::workflow::{JobFunctionId, JobOf, Placed, SessionId, Workflow};
@@ -77,18 +78,53 @@ pub struct PayloadRef {
 pub enum Request {
     /// See [`OpCall::Ops`](schema::sandbox::op::OpCall::Ops).
     Ops,
-    /// See [`OpCall::Call`](schema::sandbox::op::OpCall::Call).
-    Call { function: Name, payload: PayloadRef },
-    /// See [`OpCall::Submit`](schema::sandbox::op::OpCall::Submit).
-    Submit {
-        grant: Name,
-        finalize: bool,
+    /// See [`OpCall::Call`](schema::sandbox::op::OpCall::Call): a call of any function but a now
+    /// function.
+    Call {
+        function: Name,
         payload: PayloadRef,
+        arguments: BTreeMap<Name, String>,
+    },
+    /// A call of the now function named `function`, as [`OpCall::Call`] makes it, with what its
+    /// body's evaluation gave, or why it gave nothing.
+    ///
+    /// [`OpCall::Call`]: schema::sandbox::op::OpCall::Call
+    Now {
+        function: Name,
+        payload: PayloadRef,
+        evaluated: Result<Evaluated, Unevaluated>,
     },
     /// See [`OpCall::Status`](schema::sandbox::op::OpCall::Status).
     Status { job: u64 },
     /// See [`OpCall::Session`](schema::sandbox::op::OpCall::Session).
     Session { grant: Name, op: SessionOp },
+}
+
+/// What a now function's body gave: the effects it proposes, in order, and what it returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Evaluated {
+    pub effects: Vec<Effect>,
+    /// See [`JudgeResult::returned_by`].
+    pub returned: JudgeResult,
+}
+
+/// Why a now function's call gave no evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unevaluated {
+    /// One of its caller's arguments didn't read, in the words its caller hears.
+    Unread(String),
+    /// Its body failed, for this reason, which the record keeps, and its caller hears a fixed
+    /// sentence of.
+    Failed(String),
+}
+
+/// An effect on the run's state that a now function's body proposes, which its call applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// The call's payload becomes the selection, replacing the last: `run.select(payload)`.
+    Select,
+    /// The caller's work ends once its grace has run out, the selection locked: `run.end_work()`.
+    EndWork,
 }
 
 /// What the runtime observed.
@@ -184,16 +220,17 @@ pub enum Action {
         timeout: Duration,
     },
     /// Runs a call of job function `function`: a fresh sandbox of the function's target, and the
-    /// function's body on it with `payload`, whose every step on the target is to be done within
-    /// `timeout` of the body's start: the call is cut short at the body's first step past it, or
-    /// as it passes while a command runs, and when the core stops it. The runtime
-    /// reports [`Event::CallStarted`] when the body starts, [`Event::CallTimedOut`] if its timeout
-    /// passes, and last [`Event::CallReturned`], or [`Event::CallFailed`] at any point, once the
-    /// target is gone.
+    /// function's body on it with `payload` and its caller's `arguments`, whose every step on the
+    /// target is to be done within `timeout` of the body's start: the call is cut short at the
+    /// body's first step past it, or as it passes while a command runs, and when the core stops
+    /// it. The runtime reports [`Event::CallStarted`] when the body starts,
+    /// [`Event::CallTimedOut`] if its timeout passes, and last [`Event::CallReturned`], or
+    /// [`Event::CallFailed`] at any point, once the target is gone.
     StartCall {
         job: JobId,
         function: JobFunctionId,
         payload: PayloadRef,
+        arguments: BTreeMap<Name, ArgumentValue>,
         timeout: Duration,
     },
     /// Stops a job wherever it is, and destroys its sandbox. Its last report follows as usual.
@@ -275,10 +312,10 @@ pub enum WorkEnd {
     /// The work phase's deadline passed, which counts from the agent's start
     /// ([`Event::AgentStarted`]).
     Deadline,
-    /// The agent finalized a submission, and was still running when the grace after it ran out
-    /// ([`finalize_grace`](schema::workflow::Agent::finalize_grace)). An agent that exits within
-    /// it ends the work phase with [`AgentExited`](Self::AgentExited), and its submission is
-    /// still the finalized one.
+    /// A call ended the agent's work, and the agent was still running when the grace after it ran
+    /// out ([`finalize_grace`](schema::workflow::Agent::finalize_grace)). An agent that exits
+    /// within it ends the work phase with [`AgentExited`](Self::AgentExited), and its selection
+    /// is still the locked one.
     Finalized,
     AgentExited(ExitStatus),
     AgentFailed(String),
@@ -377,8 +414,8 @@ enum Phase {
         /// The work phase's deadline, since the run started, as [`Event::AgentStarted`] says.
         deadline: Duration,
     },
-    /// The agent finalized a submission of `payload`, which is locked as the selection; unless
-    /// the agent ends it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
+    /// A call ended the agent's work with `payload` selected, which is locked as the selection;
+    /// unless the agent ends it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
     Finalized {
         payload: PayloadRef,
         end: Duration,
@@ -397,9 +434,7 @@ enum Phase {
         submission: Submission,
         job: JobId,
     },
-    Finished {
-        work_end: WorkEnd,
-    },
+    Finished(Outcome),
     Abandoned,
 }
 
@@ -514,6 +549,23 @@ impl<'w> Core<'w> {
         self.leases_due().map_or(phase, |lease| phase.min(lease))
     }
 
+    /// Whether the selection is locked: the agent's work has been ended, by a call's effect,
+    /// with what was selected.
+    pub fn selection_locked(&self) -> bool {
+        match &self.phase {
+            Phase::Finalized { .. } => true,
+            Phase::Teardown { submission, .. } => submission.as_ref().is_some_and(|s| s.finalized),
+            Phase::Final { submission, .. } => submission.finalized,
+            Phase::Finished(Outcome { verdict, .. }) => match verdict {
+                Verdict::NoSubmission => false,
+                Verdict::Judged { submission, .. } | Verdict::NoResult { submission, .. } => {
+                    submission.finalized
+                }
+            },
+            Phase::Work { .. } | Phase::Abandoned => false,
+        }
+    }
+
     /// When the core next ends a phase, or the run, without another event, as a time since the
     /// run started: while the agent works, when the work phase ends; then at the hard end, also
     /// once the run has ended.
@@ -550,7 +602,7 @@ impl<'w> Core<'w> {
             Phase::Finalized { .. }
             | Phase::Teardown { .. }
             | Phase::Final { .. }
-            | Phase::Finished { .. }
+            | Phase::Finished(_)
             | Phase::Abandoned => {}
         }
     }
@@ -561,7 +613,7 @@ impl<'w> Core<'w> {
             | Phase::Finalized { .. }
             | Phase::Teardown { .. }
             | Phase::Final { .. } => {}
-            Phase::Finished { .. } | Phase::Abandoned => return,
+            Phase::Finished(_) | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
         actions.push(Action::Abandon);
@@ -575,7 +627,7 @@ impl<'w> Core<'w> {
             Phase::Finalized { end, work_end, .. } => Some((*end, work_end.clone())),
             Phase::Teardown { .. }
             | Phase::Final { .. }
-            | Phase::Finished { .. }
+            | Phase::Finished(_)
             | Phase::Abandoned => None,
         }
     }
@@ -600,7 +652,7 @@ impl<'w> Core<'w> {
             }),
             Phase::Teardown { .. }
             | Phase::Final { .. }
-            | Phase::Finished { .. }
+            | Phase::Finished(_)
             | Phase::Abandoned => return,
         };
         self.phase = Phase::Teardown {
@@ -654,7 +706,7 @@ impl<'w> Core<'w> {
             Phase::Work { .. }
             | Phase::Finalized { .. }
             | Phase::Teardown { .. }
-            | Phase::Finished { .. }
+            | Phase::Finished(_)
             | Phase::Abandoned => {}
         }
     }
@@ -704,9 +756,7 @@ impl<'w> Core<'w> {
     }
 
     fn finish(&mut self, outcome: Outcome, actions: &mut Vec<Action>) {
-        self.phase = Phase::Finished {
-            work_end: outcome.work_end.clone(),
-        };
+        self.phase = Phase::Finished(outcome.clone());
         actions.push(Action::Finish { outcome });
     }
 }

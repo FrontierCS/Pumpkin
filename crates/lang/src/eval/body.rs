@@ -16,6 +16,7 @@
 //! `Evaluator::extra_mut`, but typed, where starlark-rust downcasts:
 //! <https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark/src/eval/runtime/evaluator.rs#L173-L177>.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -27,7 +28,7 @@ use super::call::refusal_inside;
 use super::{Evaluation, Purpose};
 use crate::builtins::{Call, Takes, origin, positional, string};
 use crate::problem::{Fault, Problem, count, list};
-use crate::syntax::{Misfit, Name, Type};
+use crate::syntax::{Def, Misfit, Name, Type};
 use crate::value::{self, FileId, Function, Hosted, Key, Span, Text, Value};
 use crate::{Label, Loader, json};
 
@@ -143,6 +144,7 @@ impl<L: Loader> Evaluation<'_, '_, L> {
     pub(crate) fn returned(
         &mut self,
         read: &Read,
+        arguments: &BTreeMap<ir::Name, ir::ArgumentValue>,
     ) -> Result<Vec<(ir::Name, serde_json::Value)>, Fault> {
         let (handle, _, _) = read.kind.handle();
         let at = read.function.def.name.span;
@@ -153,9 +155,15 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                 (at, Value { kind, span: at })
             })
             .collect();
-        let keywords = (read.keywords.iter())
+        let mut keywords: Vec<(&Name, Value)> = (read.keywords.iter())
             .map(|(name, value)| (name, value.clone()))
             .collect();
+        keywords.extend(caller_arguments(
+            &read.function.def,
+            arguments,
+            at,
+            self.budget,
+        )?);
         let call = Call::of(at, positional, keywords, self.budget);
         let returned = self.function(&read.function, &call, 0)?;
         let def = &read.function.def.name.text;
@@ -331,6 +339,44 @@ impl<L: Loader> Evaluation<'_, '_, L> {
     }
 }
 
+// `arguments`, each the value of the positional parameter after the payload of `def`'s that it
+// names, as a keyword argument made at `at`.
+fn caller_arguments<'d>(
+    def: &'d Def,
+    arguments: &BTreeMap<ir::Name, ir::ArgumentValue>,
+    at: Span,
+    budget: &value::Budget,
+) -> Result<Vec<(&'d Name, Value)>, Fault> {
+    let [_, _, caller @ ..] = &def.params[..def.positional] else {
+        unreachable!(
+            "`{}` takes fewer positional parameters than its handle and the payload, though \
+             reading a body refuses such a `def`",
+            def.name.text
+        )
+    };
+    let mut bound = Vec::with_capacity(arguments.len());
+    for (name, argument) in arguments {
+        let Some(param) = caller
+            .iter()
+            .find(|param| *param.name.text == *name.as_str())
+        else {
+            let message = format!(
+                "`{}` takes no `{name}` after the payload, which its caller gives: give only \
+                 those it takes",
+                def.name.text
+            );
+            return Err(Fault::new(at, message));
+        };
+        let kind = match argument {
+            ir::ArgumentValue::Str(text) => value::Kind::Str(Text::new(text, at, budget)?),
+            ir::ArgumentValue::Int(int) => value::Kind::Int(*int),
+            ir::ArgumentValue::Bool(bool) => value::Kind::Bool(*bool),
+        };
+        bound.push((&param.name, Value { kind, span: at }));
+    }
+    Ok(bound)
+}
+
 // The refusals of `function`'s positional parameters, against a call of `kind`, that
 // `crate::check`'s doc names.
 fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
@@ -385,14 +431,6 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
             let message = format!(
                 "`{name}`'s `{}` follows the payload, so its caller gives it: annotate it `str`, \
                  `int` or `bool`",
-                param.name.text
-            );
-            faults.push(Fault::new(param.name.span, message));
-        }
-        if param.default.is_none() {
-            let message = format!(
-                "`{name}`'s `{}` follows the payload, and a call gives {words} only its \
-                 `{written}` and the payload: give it a default",
                 param.name.text
             );
             faults.push(Fault::new(param.name.span, message));

@@ -38,7 +38,7 @@ pub struct Workflow {
     runners: BTreeMap<RoleId, Runner>,
     job_functions: Vec<JobFunction>,
     sessions: Vec<Session>,
-    submit_grant: SubmitGrant,
+    now_functions: Vec<NowFunction>,
     score: Score,
 }
 
@@ -123,9 +123,13 @@ impl Workflow {
         &self.sessions[id.0]
     }
 
-    /// The agent's one submit grant.
-    pub fn submit_grant(&self) -> &SubmitGrant {
-        &self.submit_grant
+    /// The agent's now functions, in the IR's order.
+    pub fn now_functions(&self) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
+        (self.now_functions.iter().enumerate()).map(|(index, now)| (NowFunctionId(index), now))
+    }
+
+    pub fn now_function(&self, id: NowFunctionId) -> &NowFunction {
+        &self.now_functions[id.0]
     }
 
     /// How the selected submission is judged.
@@ -330,6 +334,9 @@ pub struct SessionId(usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JobFunctionId(usize);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NowFunctionId(usize);
+
 /// What a job runs: a call of one of the agent's job functions, or the workflow's [`Score`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JobOf {
@@ -503,14 +510,23 @@ impl Session {
     }
 }
 
-/// The agent's submit grant; see [`ir::SubmitGrant`](crate::ir::SubmitGrant).
+/// One of the agent's now functions; see [`ir::NowFunction`](crate::ir::NowFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SubmitGrant {
+pub struct NowFunction {
     pub name: Name,
+    pub body: crate::ir::Body,
+    pub payload_max_bytes: NonZeroU64,
+}
+
+impl NowFunction {
+    /// The op payload limit of a session whose payloads the function takes.
+    pub fn payload_limit(&self) -> OpPayloadLimit {
+        OpPayloadLimit(self.payload_max_bytes.get())
+    }
 }
 
 /// The parsed [`ir::Score`](crate::ir::Score): a judge's slot, whose `max_bytes` caps every
-/// submission.
+/// selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Score {
     pub slot: SlotId,
