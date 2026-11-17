@@ -732,6 +732,11 @@ fn returned(score: f64) -> Value {
     })
 }
 
+/// A finished run's `outcome.json` as a build whose verdicts this one doesn't read wrote it.
+fn older_finished() -> Value {
+    json!({ "state": "finished", "verdict": { "kind": "graded" } })
+}
+
 fn submission() -> Value {
     json!({ "payload": payload(), "finalized": true })
 }

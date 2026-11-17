@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report, returned,
-    write_gone, write_on, write_record,
+    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, older_finished, poll, ran,
+    report, returned, write_gone, write_on, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -24,6 +24,9 @@ const BARE: &str = "20261108-120100-0a000002";
 
 /// A run that finished, and left nothing.
 const FINISHED: &str = "20261108-120200-0a000003";
+
+/// A run whose `outcome.json` is not JSON.
+const DAMAGED: &str = "20261108-120210-0a00000e";
 
 /// A live run, whose lock the test holds.
 const LIVE: &str = "20261108-120300-0a000004";
@@ -55,6 +58,8 @@ fn reaps() {
     write_record(&scratch, BARE, true, None);
     let finished = returned(1.0);
     write_record(&scratch, FINISHED, true, Some(finished));
+    write_record(&scratch, DAMAGED, true, None);
+    scratch.write(&format!("runs/{DAMAGED}/outcome.json"), "{");
     write_record(&scratch, LIVE, true, None);
     let live = File::open(scratch.0.join(format!("runs/{LIVE}/driver.pid"))).unwrap();
     live.lock().unwrap();
@@ -99,10 +104,10 @@ fn reaps() {
             socket.exists()
         )
     };
-    steps.extend([LOST, LIVE, BAD_NAME].map(left));
+    steps.extend([LOST, LIVE, BAD_NAME, DAMAGED].map(left));
     let wait = scratch.pumpkin(&["wait", LOST, "--runs", "runs"]);
     steps.push(ran(wait, &scratch.0, false));
-    for unreaped in [UNLOCKED, BAD_NAME] {
+    for unreaped in [UNLOCKED, BAD_NAME, DAMAGED] {
         fs::remove_dir_all(scratch.0.join(format!("runs/{unreaped}"))).unwrap();
     }
     steps.push(reap("runs"));
@@ -123,10 +128,11 @@ fn reaps() {
             pumpkin: run 20261108-120000-0a000001 left its socket directory, now removed: <scratch>/runs/20261108-120000-0a000001/sockets
             pumpkin: run 20261108-120000-0a000001 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120100-0a000002 was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run 20261108-120210-0a00000e can't be reaped: <scratch>/runs/20261108-120210-0a00000e/outcome.json: EOF while parsing an object at line 1 column 1
             pumpkin: <scratch>/runs/20261108-120400-0a000005/driver.pid: No such file or directory (os error 2)
             pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
             pumpkin: run lost name can't be reaped: the record <scratch>/runs/lost name is named by no run tag (the run tag `lost name` holds ` `: use only ASCII letters, digits, `_`, `.` and `-`): expected a record that `pumpkin run` made
-            pumpkin: 2 runs can't be reaped, as said above: fix what each says, and reap again
+            pumpkin: 3 runs can't be reaped, as said above: fix what each says, and reap again
             pumpkin: to reap again: pumpkin reap --runs <scratch>/runs
             printed:
               20261108-115900-0a000000
@@ -138,6 +144,7 @@ fn reaps() {
             }; socket directory: false
             20261108-120300-0a000004: outcome.json: none; socket directory: false
             lost name: outcome.json: none; socket directory: false
+            20261108-120210-0a00000e: outcome.json: {; socket directory: false
             $ pumpkin wait 20261108-120000-0a000001 --runs runs
             exit status: Some(1)
             pumpkin: run 20261108-120000-0a000001 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120000-0a000001
@@ -208,6 +215,10 @@ esac
 /// A lost run whose sandboxes, the agent's and a lease's, ended by themselves.
 const ENDED: &str = "20261108-121200-0a00000d";
 
+/// A run that finished, of a build whose verdicts this one doesn't read, whose agent's sandbox
+/// ended by itself.
+const OLDER_ENDED: &str = "20261108-121300-0a00000f";
+
 // A sandbox that its provider lists no more may have left what only its delete removes.
 #[test]
 fn reaps_ended() {
@@ -228,9 +239,16 @@ esac
         calls.display()
     );
     let path = write_on(&scratch, ENDED, "default", None, &docker);
-    for (dir, id) in [("agent", "a"), ("leases/0", "b")] {
+    let older = Some(older_finished());
+    let _ = write_on(&scratch, OLDER_ENDED, "default", older, &docker);
+    let held = [
+        (ENDED, "agent", "a"),
+        (ENDED, "leases/0", "b"),
+        (OLDER_ENDED, "agent", "d"),
+    ];
+    for (run, dir, id) in held {
         let sandbox = json!({ "provider": "local", "id": id.repeat(64), "report": {} });
-        scratch.write(&format!("runs/{ENDED}/{dir}/sandbox.json"), &sandbox);
+        scratch.write(&format!("runs/{run}/{dir}/sandbox.json"), &sandbox);
     }
     let mut steps = Vec::new();
     for _ in 0..2 {
@@ -252,19 +270,24 @@ esac
             pumpkin: run 20261108-121200-0a00000d's sandbox aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             pumpkin: run 20261108-121200-0a00000d's sandbox bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             pumpkin: run 20261108-121200-0a00000d was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: run 20261108-121300-0a00000f's sandbox dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             printed:
               20261108-121200-0a00000d
+              20261108-121300-0a00000f
             docker was called with:
             context inspect --format {{.Endpoints.docker.Host}} -- default
             info --format {{json .}}
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --filter id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
             exit status: Some(0)
             docker was called with:
             context inspect --format {{.Endpoints.docker.Host}} -- default
             info --format {{json .}}
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d"#]],
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
+            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f"#]],
     );
 }
 

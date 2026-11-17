@@ -1,14 +1,47 @@
-//! A run's [`Ending`], and how a finished run's is read from its `outcome.json`.
+//! How a run ended, as its `outcome.json` says, read in full or as far as its state alone.
 
 use std::path::Path;
 use std::{fs, io};
 
 use schema::ir::Name;
 use schema::sandbox::ExitStatus;
-use serde::Deserialize as _;
+use serde::Deserialize;
 use serde_json::Value;
+use stdx::Context;
 
 use crate::log::{self, outcome};
+
+/// Whether a run finished, failed or was interrupted, as its `outcome.json` says, and nothing of
+/// how.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum State {
+    Finished,
+    Failed,
+    Interrupted,
+}
+
+impl State {
+    /// The state that the `outcome.json` of the record `dir` gives; `None` while it has none.
+    /// Reads nothing of the file but `state`, so a record whose ending this build doesn't read
+    /// still gives its state.
+    pub(super) fn read(dir: &Path) -> Result<Option<Self>, String> {
+        let path = dir.join("outcome.json");
+        let outcome = read_outcome(&path)?;
+        outcome.map(|outcome| Self::of(&outcome, &path)).transpose()
+    }
+
+    /// The state that `outcome`, the `outcome.json` at `path`, gives.
+    pub(super) fn of(outcome: &Value, path: &Path) -> Result<Self, String> {
+        Self::deserialize(&outcome["state"]).map_err(|_| {
+            format!(
+                "{}'s state is not one pumpkin knows: expected `finished`, `failed` or \
+                 `interrupted`",
+                path.display()
+            )
+        })
+    }
+}
 
 /// How a run ended, as its record says. A variant's sentence reads after the run's id, as in
 /// `<id> failed: <reason>`.
@@ -30,6 +63,15 @@ pub enum Ending {
     Interrupted(String),
     /// Its driver ended without an outcome.
     Lost,
+}
+
+/// The `outcome.json` at `path`, parsed; `None` while there is none.
+pub(super) fn read_outcome(path: &Path) -> Result<Option<Value>, String> {
+    let Some(bytes) = super::read_optional(path)? else {
+        return Ok(None);
+    };
+    let outcome = serde_json::from_slice(&bytes).context(path.display())?;
+    Ok(Some(outcome))
 }
 
 pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, String> {
