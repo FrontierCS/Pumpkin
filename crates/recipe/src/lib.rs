@@ -19,9 +19,10 @@
 //! stage named as a named context. It reads a recipe as Docker frames it, with `\` as the escape
 //! character, and refuses what it can't read as Docker would: a heredoc; `ONBUILD`; a keyword
 //! that is no instruction; a `FROM` other than `FROM <image>` or `FROM <image> AS <name>`; and, in
-//! a flag or a name, a character other than printable ASCII, a quote or `\`, or, in a name, `$`,
-//! but for a `FROM`'s build argument. What a `RUN` step's own command fetches, which a fetch stage
-//! may pin instead ([`fetch`]), and a base's `ONBUILD` triggers are outside it.
+//! a flag, a name or an `ADD`'s destination, a character other than printable ASCII, a quote or
+//! `\`, or, in a name, `$`, but for a `FROM`'s build argument. What a `RUN` step's own command
+//! fetches, which a fetch stage may pin instead ([`fetch`]), and a base's `ONBUILD` triggers are
+//! outside it.
 
 // Without `std`, the check can name no file, process or clock: it reads only the text it is given.
 #![no_std]
@@ -595,7 +596,14 @@ fn expanded<'n>(image: &str, named: &'n Named<'_>) -> Result<Option<&'n str>, St
 
 fn add(flags: &[&str], words: &str) -> Result<(), String> {
     let words = split(words);
-    let sources = words.split_last().map_or(&[][..], |(_, sources)| sources);
+    let sources = match words.split_last() {
+        Some((destination, sources)) => {
+            // An `ADD` in JSON form with no blank in it is one word here, and Docker's to split.
+            plain(destination)?;
+            sources
+        }
+        None => &[][..],
+    };
     if let [source] = sources
         && let Some((url, fragment)) = source.split_once('#')
         && url.contains("://")
