@@ -39,7 +39,6 @@ use schema::ir::{self, Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use stdx::{Context, Utc};
 
 use super::log::{self, LogFold, Place, Readout, Used};
@@ -48,9 +47,11 @@ use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 
 mod ending;
+mod payload;
 
 pub use ending::Ending;
 use ending::{State, finished, read_outcome};
+pub(super) use payload::reference;
 
 const LOST: &str = "its driver ended without an outcome";
 
@@ -1182,14 +1183,6 @@ fn replace(host: &impl Host, dir: &Path, name: &str, bytes: &[u8]) -> Result<(),
         };
     }
     sync_dir(host, dir)
-}
-
-pub(super) fn reference(bytes: &[u8]) -> PayloadRef {
-    let sha256: [u8; 32] = Sha256::digest(bytes).into();
-    PayloadRef {
-        size: bytes.len() as u64,
-        digest: Sha256Digest::from(sha256),
-    }
 }
 
 /// The record's `payloads/`, where each accepted payload is kept under the digest of its bytes.

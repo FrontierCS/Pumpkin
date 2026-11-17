@@ -50,6 +50,9 @@ pub(in crate::view) enum Asked {
     Item {
         digest: Sha256Digest,
     },
+    Payload {
+        digest: Sha256Digest,
+    },
     Stats {
         caller: String,
         by: stats::By,
@@ -210,11 +213,18 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
                 ))
             })?,
         }),
+        ["payload", hex] => Ok(Asked::Payload {
+            digest: Sha256Digest::try_from(format!("sha256:{hex}")).map_err(|_| {
+                bad(format!(
+                    "`{hex}` is no payload: expected 64 lowercase hexadecimal digits"
+                ))
+            })?,
+        }),
         _ => Err(Response::refused(
             "404 Not Found",
             &format!(
                 "nothing is at `{}`: expected a run's `trace/<caller>/steps`, `…/entries`, \
-                 `…/entry`, `…/search`, `…/stats` or `…/ops`, `exchange/<n>`, `item/<hex>`, or `diff`",
+                 `…/entry`, `…/search`, `…/stats` or `…/ops`, `exchange/<n>`, `item/<hex>`, `payload/<hex>`, or `diff`",
                 request.path
             ),
         )),
@@ -290,6 +300,13 @@ impl View {
                     bytes,
                 )));
             }
+            Asked::Payload { digest } => {
+                let bytes = held.record.payload(digest).map_err(Failed::NotFound)?;
+                return Ok(Answer::Bytes(Response::bytes(
+                    "application/octet-stream",
+                    bytes,
+                )));
+            }
         };
         if let Some(since) = since {
             line_at(held, since, log_epoch)?;
@@ -354,7 +371,7 @@ impl Trace {
                 said["stats"] = self.step_stats(exchanges, prices, self.at[&request]);
                 Ok(said)
             }
-            Asked::Item { .. } | Asked::Ops { .. } => {
+            Asked::Item { .. } | Asked::Payload { .. } | Asked::Ops { .. } => {
                 unreachable!("answered above, without the pass")
             }
         }
