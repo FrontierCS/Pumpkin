@@ -3,14 +3,14 @@
 
 use std::time::Duration;
 
-use decision::{CallResult, Event, JobId};
+use decision::{CallResult, JobId};
 use schema::sandbox::OpPayloadLimit;
 use schema::sandbox::op::OpReply;
 use schema::workflow::Holder;
 
 use crate::Host;
 use crate::body::{self, Bodies, Ended, Of};
-use crate::child::Child;
+use crate::child::{Child, End};
 use crate::record::Stored;
 
 /// A call of a body, as its thread drives it.
@@ -44,15 +44,12 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         timeout,
     };
     crate::child::run(child, ops, |child, session| {
-        let failed = |reason: String| Event::CallFailed { job, reason };
-        match body::evaluate(bodies, &call, child, session) {
-            Ended::Returned(returned) => match CallResult::returned_by(returned) {
-                Ok(result) => Event::CallReturned { job, result },
-                Err(reason) => failed(reason),
-            },
-            Ended::Failed(reason) => failed(reason),
-            Ended::TimedOut => failed("the call's timeout passed".to_owned()),
-            Ended::Stopped => failed("the call was stopped".to_owned()),
-        }
+        let end = match body::evaluate(bodies, &call, child, session) {
+            Ended::Returned(returned) => CallResult::returned_by(returned),
+            Ended::Failed(reason) => Err(reason),
+            Ended::TimedOut => Err("the call's timeout passed".to_owned()),
+            Ended::Stopped => Err("the call was stopped".to_owned()),
+        };
+        End::Call(job, end)
     });
 }

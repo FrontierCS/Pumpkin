@@ -151,11 +151,20 @@ pub enum Event {
     /// A call reached its timeout, and the runtime stops it.
     CallTimedOut { job: JobId },
     /// A call's body returned, as [`CallResult::returned_by`] takes its return, and the call's
-    /// target has been destroyed.
-    CallReturned { job: JobId, result: CallResult },
+    /// target has been destroyed. `model_requests_over_budget` is how many of the target's model
+    /// requests the route barred for a spent model budget, if any.
+    CallReturned {
+        job: JobId,
+        result: CallResult,
+        model_requests_over_budget: Option<NonZeroU64>,
+    },
     /// A call failed, or was stopped as [`Action::StopCall`] asked, and its target has been
-    /// destroyed.
-    CallFailed { job: JobId, reason: String },
+    /// destroyed; `model_requests_over_budget` as for [`Event::CallReturned`].
+    CallFailed {
+        job: JobId,
+        reason: String,
+        model_requests_over_budget: Option<NonZeroU64>,
+    },
     /// A lease's runner has started, and runs the commands it is given from now.
     LeaseReady { lease: LeaseId },
     /// A command of a lease's, its `command`th, has ended, and what it wrote has been collected:
@@ -447,6 +456,7 @@ impl<'w> Core<'w> {
     /// or a lease's, abandons the run, ends the work phase or closes the lease first, and the
     /// event then finds it so. A report that a job's command has ended, or that the job has,
     /// closes the leases it holds.
+    #[expect(clippy::too_many_lines, reason = "one arm per event")]
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
         let mut actions = Vec::new();
@@ -477,12 +487,26 @@ impl<'w> Core<'w> {
                 let ended = |state: &mut jobs::State| state.ended(at, jobs::End::TimedOut);
                 self.on_job(job, ended, &mut actions);
             }
-            Event::CallFailed { job, reason } => {
+            Event::CallFailed {
+                job,
+                reason,
+                model_requests_over_budget,
+            } => {
                 let outcome = Err(Failure::Error(reason));
-                self.on_job(job, |state| state.report(at, outcome), &mut actions);
+                let report = |state: &mut jobs::State| {
+                    state.report(at, outcome, model_requests_over_budget);
+                };
+                self.on_job(job, report, &mut actions);
             }
-            Event::CallReturned { job, result } => {
-                self.on_job(job, |state| state.report(at, Ok(result)), &mut actions);
+            Event::CallReturned {
+                job,
+                result,
+                model_requests_over_budget,
+            } => {
+                let report = |state: &mut jobs::State| {
+                    state.report(at, Ok(result), model_requests_over_budget);
+                };
+                self.on_job(job, report, &mut actions);
             }
             Event::LeaseReady { lease } => self.on_lease(lease, |lease| lease.state.ready(at)),
             Event::CommandEnded {

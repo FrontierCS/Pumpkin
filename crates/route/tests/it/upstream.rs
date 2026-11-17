@@ -15,6 +15,7 @@ use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
+use serde_json::json;
 use stdx::Deadline;
 use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
@@ -22,7 +23,7 @@ use test_support::http::{read_request, write_chunk};
 use super::kept::{CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM};
 use super::read::CHAT_CUSTOM;
 use super::{
-    Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
+    Request, at, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
 };
 
 const KEY: &str = "sk-test-0123\n";
@@ -146,6 +147,8 @@ const MESSAGES_INPUT_PARTS: Parts = [
 struct Case {
     name: &'static str,
     api: Api,
+    /// The request that the sandbox sends of `api`.
+    request: fn(Api) -> Request,
     url: &'static str,
     /// The text of its key file; `None` for no file.
     key: Option<&'static str>,
@@ -186,6 +189,7 @@ fn case(name: &'static str, answer: Answer) -> Case {
     Case {
         name,
         api: Api::Responses,
+        request,
         url: STAND_IN,
         key: Some(KEY),
         answer: Some(answer),
@@ -255,7 +259,7 @@ fn exchanged(cases: &[Case]) -> String {
             hangs_up = Some(u32::try_from(requests.len()).unwrap());
         }
         let count = 1 + usize::from(case.then.is_some());
-        requests.extend(iter::repeat_n(request(case.api), count));
+        requests.extend(iter::repeat_n((case.request)(case.api), count));
     }
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, Some(&parts), hangs_up));
     let (sender, arrivals) = mpsc::channel();
@@ -280,7 +284,7 @@ fn exchanged(cases: &[Case]) -> String {
                 let (served, key_refused) = outcomes.next().unwrap();
                 let got = match case.answer {
                     Some(_) => {
-                        let sent = request(case.api).3;
+                        let sent = (case.request)(case.api).3;
                         got(received.next().unwrap(), &sent, &mut first)
                     }
                     None => "nothing".to_owned(),
@@ -586,6 +590,14 @@ fn forward() {
                 key: Some("sk-test 0123\n"),
                 ..unanswered("a key with a space")
             },
+            Case {
+                request: |_| post(|body| body["tools"] = json!([{ "type": "web_search" }])),
+                ..unanswered("a body the rules refuse")
+            },
+            Case {
+                request: |_| at("POST", "/models"),
+                ..unanswered("an endpoint no entry serves")
+            },
             chat_case("a stream of Chat Completions", Answer::Streams(CHAT_PARTS)),
             case("a rate limit with a 200", Answer::Streams(LIMITED_PARTS)),
             case("a failure after output", Answer::Streams(FAILED_LATE_PARTS)),
@@ -639,9 +651,9 @@ fn forward() {
         &expect![[r#"
             a stream: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":8},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}}}}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 5, cached_tokens: Some(8), cache_write_tokens: None, reasoning_tokens: Some(3) }), failed: None }); kept: request 552 bytes, response 271 bytes; key refused: false
             the provider's refusal: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; key refused: false
-            the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 35 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 191 bytes; key refused: true
-            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false
-            the entry's budget spent: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models" }); kept: request 552 bytes, response 225 bytes; key refused: false
+            the key refused: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(401), request_id: None, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 35 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the route's key, with a 401, which ends the model route: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Ended, status: 400, message: "the model provider refused the route's key, with a 401, which ends the model route: make no more model requests" }); kept: request 552 bytes, response 191 bytes; key refused: true
+            the work phase ended: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Ended, status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false
+            the entry's budget spent: the stand-in got the same head with the body as sent; the sandbox heard 429 [("content-type", "application/json"), ("retry-after", "2")] {"error":{"message":"slow down","type":"requests"}}; told: Some(Forwarded { model: ModelName("m-large"), status: 429, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 51 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Budget, status: 400, message: "the model budget of the role's entry for `m-large`, `m-small`, $1.50 at the configured prices, is exhausted: make no more requests for its models" }); kept: request 552 bytes, response 225 bytes; key refused: false
             a request forbidden: the stand-in got the same head with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the request, with a 403: send only requests that it allows","param":null,"type":"invalid_request_error"}}; told: Some(Refused { upstream_status: Some(403), request_id: None, status: 400, message: "the model provider refused the request, with a 403: send only requests that it allows" }); kept: request 552 bytes, response 35 bytes; key refused: false
             a redirect: the stand-in got the same head with the body as sent; the sandbox heard 307 [] ; told: Some(Forwarded { model: ModelName("m-large"), status: 307, request_id: None, usage: None, failed: None }); kept: request 552 bytes, response 0 bytes; key refused: false
             a coded body: the stand-in got the same head with the body as sent; the sandbox heard 502 [("content-type", "application/json")] {"error":{"code":null,"message":"the model provider coded its answer, though the request asked for it uncoded: try again","param":null,"type":"server_error"}}; told: Some(Refused { upstream_status: Some(200), request_id: None, status: 502, message: "the model provider coded its answer, though the request asked for it uncoded: try again" }); kept: request 552 bytes, response 20 bytes; key refused: false
@@ -655,6 +667,8 @@ fn forward() {
             no key file: the key file <dir>/key-15 can't be read (No such file or directory (os error 2)): name a file that holds the model provider's key
             an empty key file: the key file <dir>/key-16 holds no API key: write the key alone, on one line
             a key with a space: the key file <dir>/key-17 holds no API key: write the key alone, on one line
+            a body the rules refuse: the stand-in got nothing; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the tool `web_search` runs on the provider's side, which the route refuses: declare client-side tools only (function, custom, namespace, and tool_search with client execution)","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Rules, status: 400, message: "the tool `web_search` runs on the provider's side, which the route refuses: declare client-side tools only (function, custom, namespace, and tool_search with client execution)" }); kept: request 530 bytes, response 255 bytes; key refused: false
+            an endpoint no entry serves: the stand-in got nothing; the sandbox heard 404 [("content-type", "application/json")] {"error":{"code":null,"message":"`/models` is not served: send POST /responses","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Rules, status: 404, message: "`/models` is not served: send POST /responses" }); kept: request 552 bytes, response 125 bytes; key refused: false
             a stream of Chat Completions: the stand-in got POST /v1/chat/completions HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("x-request-id", "req_1")] data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"7"}}],"usage":null}\n\ndata: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":20,"prompt_tokens_details":{"cached_tokens":16},"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":0}}}\n\ndata: [DONE]\n\n; told: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 1, cached_tokens: Some(16), cache_write_tokens: None, reasoning_tokens: Some(0) }), failed: None }); kept: request 355 bytes, response 319 bytes, its output begun by byte 103; key refused: false
             a rate limit with a 200: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.failed\ndata: {"type":"response.failed","sequence_number":0,"response":{"id":"resp_1","object":"response","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit reached"},"output":[],"usage":null}}\n\nevent: error\ndata: {"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null,"sequence_number":1}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("rate_limit_exceeded") }) }); kept: request 552 bytes, response 367 bytes; key refused: false
             a failure after output: the stand-in got the same head with the body as sent; the sandbox heard 200 [("content-type", "text/event-stream"), ("openai-model", "m-large"), ("x-request-id", "req_1"), ("x-codex-primary-used-percent", "5")] event: response.created\ndata: {"type":"response.created"}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hel"}\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed"},"usage":{"input_tokens":12,"output_tokens":1}}}\n\n; told: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 12, output_tokens: 1, cached_tokens: None, cache_write_tokens: None, reasoning_tokens: None }), failed: Some(Failure { code: Some("server_error") }) }); kept: request 552 bytes, response 347 bytes, its output begun by byte 152; key refused: false
@@ -699,7 +713,7 @@ fn shutdown() {
             ..case("a request in flight", Answer::Holds)
         }],
         &expect![[
-            r#"a request in flight: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Abandoned { model: ModelName("m-large") }); kept: request 552 bytes, response 134 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false"#
+            r#"a request in flight: the stand-in got POST /v1/responses HTTP/1.1 [("accept-encoding", "identity"), ("content-length", "552"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "text/event-stream"), ("originator", "codex_exec"), ("user-agent", "codex_exec/0.167.0"), ("session-id", "s-1"), ("thread-id", "t-1"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-codex-window-id", "w-1"), ("x-codex-turn-metadata", "{\"turn_id\":\"u-1\"}"), ("x-openai-internal-codex-responses-lite", "true"), ("authorization", "Bearer sk-test-0123")] with the body as sent; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Abandoned { model: ModelName("m-large") }); kept: request 552 bytes, response 134 bytes; the sandbox heard 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model route has ended: make no more model requests","param":null,"type":"invalid_request_error"}}; told: Some(Barred { bar: Ended, status: 400, message: "the model route has ended: make no more model requests" }); kept: request 552 bytes, response 134 bytes; key refused: false"#
         ]],
     );
 }

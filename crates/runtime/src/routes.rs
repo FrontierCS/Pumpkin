@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use decision::{Caller, Core, Outcome};
 use gateway::IncomingModelRequest;
-use route::Admission;
+use route::{Admission, Answer, Bar};
 use schema::ir::{Api, Name};
 use schema::workflow::RoleId;
 
@@ -116,6 +116,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let role = self.role(*caller);
             if let (Some(budget), Some((_, api))) = (self.budgets.get_mut(&role), &answered.taken) {
                 budget.add(*api, &answered.answer);
+            }
+            if let Caller::Job(job) = caller
+                && let Answer::Barred {
+                    bar: Bar::Budget, ..
+                } = answered.answer
+            {
+                self.call(*job).model_requests_over_budget += 1;
             }
         }
     }

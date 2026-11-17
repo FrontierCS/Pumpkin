@@ -9,6 +9,7 @@
 //! other field of its kind, or holds one in another form, doesn't read: its readers leave it out
 //! and say so ([`Unread`]), and never read it with defaults.
 
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use provider::UnixTime;
@@ -121,10 +122,12 @@ pub(super) enum Event {
     CallReturned {
         job: u64,
         returned: Vec<Shown>,
+        model_requests_over_budget: Option<NonZeroU64>,
     },
     CallFailed {
         job: u64,
         reason: String,
+        model_requests_over_budget: Option<NonZeroU64>,
     },
     LeaseReady {
         lease: u64,

@@ -2,6 +2,7 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use schema::ir::Name;
 use schema::sandbox::op::{JobState, Returned};
@@ -53,9 +54,10 @@ impl CallResult {
         fields.collect()
     }
 
-    pub(super) fn job_state(&self) -> JobState {
+    pub(super) fn job_state(&self, model_requests_over_budget: Option<NonZeroU64>) -> JobState {
         JobState::Completed {
             returned: self.returned(),
+            model_requests_over_budget,
         }
     }
 }

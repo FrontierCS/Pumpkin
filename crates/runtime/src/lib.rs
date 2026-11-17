@@ -10,6 +10,7 @@
 //! The record's layout belongs to `record` and `log`, and the start of every sandbox to `sandbox`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -318,6 +319,8 @@ struct Called {
     // The role that runs the call, whose model route serves once the call's command or body
     // starts.
     role: RoleId,
+    // How many of the call's model requests its route has barred for a spent model budget.
+    model_requests_over_budget: u64,
 }
 
 enum Asked {
@@ -369,7 +372,10 @@ impl Input {
         match self {
             Self::Agent(at, _)
             | Self::Child(
-                Report::Event(at, _) | Report::Op { at, .. } | Report::Model { at, .. },
+                Report::Event(at, _)
+                | Report::CallEnded { at, .. }
+                | Report::Op { at, .. }
+                | Report::Model { at, .. },
             ) => Some(*at),
             Self::Child(Report::Undeleted(_)) | Self::Logged(_) => None,
         }
@@ -573,6 +579,25 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<Option<(Duration, Event)>, String> {
         match report {
             Report::Event(at, event) => Ok(Some((at, event))),
+            Report::CallEnded { at, job, end } => {
+                // Whole for every bar the target heard: the route reports a bar before its client
+                // hears it, so before the call can end on it, into this inbox, which keeps order.
+                let count = self.call(job).model_requests_over_budget;
+                let model_requests_over_budget = NonZeroU64::new(count);
+                let event = match end {
+                    Ok(result) => Event::CallReturned {
+                        job,
+                        result,
+                        model_requests_over_budget,
+                    },
+                    Err(reason) => Event::CallFailed {
+                        job,
+                        reason,
+                        model_requests_over_budget,
+                    },
+                };
+                Ok(Some((at, event)))
+            }
             Report::Op {
                 at,
                 job,
@@ -916,9 +941,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Input::Logged(entry) => self.log.entry(entry),
                 Input::Child(Report::Undeleted(reason)) => Err(reason),
                 Input::Agent(..)
-                | Input::Child(Report::Event(..) | Report::Op { .. } | Report::Model { .. }) => {
-                    Ok(())
-                }
+                | Input::Child(
+                    Report::Event(..)
+                    | Report::CallEnded { .. }
+                    | Report::Op { .. }
+                    | Report::Model { .. },
+                ) => Ok(()),
             };
             failures.extend(logged.err());
         }
