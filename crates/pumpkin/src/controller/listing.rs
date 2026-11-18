@@ -168,20 +168,32 @@ fn answers(
 fn said(name: &Name, health: &Health, jobs: usize) -> String {
     let Health {
         up_seconds,
-        disk_used_percent,
+        disk_size_bytes,
+        disk_free_bytes,
         boot,
     } = health;
+    // The share of the disk that an ordinary user may not write, rounded up: it counts the blocks
+    // reserved for root as used, so it reads a few points above `df`'s.
+    let used = disk_size_bytes
+        .saturating_sub(*disk_free_bytes)
+        .saturating_mul(100);
+    let used_percent = used.div_ceil((*disk_size_bytes).max(1)).min(100);
     let unit = "pumpkin-boot.service";
     let boot = match boot {
-        Boot::Failed { status, at } => format!(
-            "; its boot, {unit}, failed with status {status} at {at}: read why there, in \
-             `journalctl --unit {unit}`"
-        ),
+        Boot::Failed { status, at } => {
+            let at = at
+                .as_ref()
+                .map_or_else(String::new, |at| format!(" at {at}"));
+            format!(
+                "; its boot, {unit}, failed with status {status}{at}: read why there, in \
+                 `journalctl --unit {unit}`"
+            )
+        }
         Boot::Running => format!("; its boot, {unit}, is still running"),
         Boot::Done | Boot::Unknown => String::new(),
     };
     format!(
-        "controller `{name}`: up {}, {}, disk {disk_used_percent}% used{boot}",
+        "controller `{name}`: up {}, {}, disk {used_percent}% used{boot}",
         crate::progress::span(Duration::from_secs(*up_seconds)),
         crate::counted(jobs, "job")
     )

@@ -88,7 +88,10 @@ enum Head {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Health {
     pub(crate) up_seconds: u64,
-    pub(crate) disk_used_percent: u8,
+    /// The size of the disk that holds the runs, as `job::disk` gives it.
+    pub(crate) disk_size_bytes: u64,
+    /// What an ordinary user may still write of that disk, as `job::disk` gives it.
+    pub(crate) disk_free_bytes: u64,
     pub(crate) boot: Boot,
 }
 
@@ -98,10 +101,11 @@ pub(crate) struct Health {
 pub(crate) enum Boot {
     Done,
     Running,
-    /// It failed: its main process exited with `status`, at `at`, as `systemctl` words the time.
+    /// It failed: its main process exited with `status`, at `at`, as `systemctl` words the time,
+    /// if it gives one.
     Failed {
         status: i32,
-        at: String,
+        at: Option<String>,
     },
     /// `systemctl` gave no state.
     Unknown,

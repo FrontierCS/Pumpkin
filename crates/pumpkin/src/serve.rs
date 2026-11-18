@@ -186,16 +186,10 @@ fn health() -> Result<Health, String> {
         size_bytes,
         free_bytes,
     } = crate::job::disk(crate::job::VOLUME)?;
-    // The share of the disk that an ordinary user may not write, rounded up: it counts the blocks
-    // reserved for root as used, so it reads a few points above `df`'s.
-    let used = size_bytes.saturating_sub(free_bytes).saturating_mul(100);
-    let percent = used.div_ceil(size_bytes.max(1)).min(100);
-    let Ok(disk_used_percent) = u8::try_from(percent) else {
-        unreachable!("{percent}, at most 100, fits a `u8`")
-    };
     Ok(Health {
         up_seconds,
-        disk_used_percent,
+        disk_size_bytes: size_bytes,
+        disk_free_bytes: free_bytes,
         boot: boot(),
     })
 }
@@ -222,8 +216,8 @@ fn boot() -> Boot {
             Some(Ok(status)) => Boot::Failed {
                 status,
                 at: property("ExecMainExitTimestamp")
-                    .unwrap_or_default()
-                    .to_owned(),
+                    .filter(|at| !at.is_empty())
+                    .map(str::to_owned),
             },
             Some(Err(_)) | None => Boot::Unknown,
         },
