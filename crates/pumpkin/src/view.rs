@@ -4,8 +4,8 @@
 //! A [`View`] holds each run it has been asked about between requests, as a fold of its log that
 //! is read further on each request, so that a page that polls reads only what the log has grown
 //! by. Its replies are JSON, built here and in [`json`](mod@json), [`talk`] and [`trace`]. The same
-//! replies are written as files by [`export`], and sent over a pipe by [`frame`] to the view that
-//! asks.
+//! replies are written as files by [`export`], and answered to the view that asks over a link
+//! ([`Answering`]).
 //!
 //! A run that has ended is listed from its record, read once, as an ended record doesn't change;
 //! one that is lost, whose driver ended without an outcome, is read again until a reap writes it.
@@ -18,7 +18,6 @@
 
 mod cancel;
 mod export;
-mod frame;
 mod http;
 mod json;
 mod page;
@@ -43,12 +42,14 @@ use serde_json::{Value, json};
 use stdx::Context;
 
 pub(crate) use self::export::{Exported, exported};
-use self::http::{Method, Request, Response};
+use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
+use crate::controller::{Reply, Viewing};
+use crate::link::Answer;
 use crate::progress::{self, Listed};
-use crate::{cli, config, controller, next, say};
+use crate::{cli, config, next, say};
 
 /// The most runs in one reply of the run list; `next` says where the following reply begins.
 const LIST_PAGE_RUNS: usize = 100;
@@ -78,7 +79,7 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?
     {
-        let viewing = controller::Viewing::reach(&client)?;
+        let viewing = Viewing::reach(&client)?;
         let serving = format!("controller `{}`'s runs", viewing.name());
         (Source::Controller(viewing), serving)
     } else {
@@ -109,17 +110,41 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     match serve(&listener, &mut local)? {}
 }
 
-/// Runs `pumpkin controller view`: answers on the standard output the requests that come on the
-/// standard input, about the runs of the default directory ([`frame`]).
-pub(crate) fn over_pipe() -> Result<ExitCode, String> {
-    let view = View::new(PathBuf::from(crate::default_runs()?), None);
-    // The command that runs a run again from here would name the controller's paths.
-    let mut view = View {
-        again: false,
-        ..view
-    };
-    frame::answer(&mut view)?;
-    Ok(ExitCode::SUCCESS)
+/// The view of the runs below a controller's home that `serve` keeps for a link's life, which
+/// holds what it has read of the runs that are live.
+pub(crate) struct Answering(View);
+
+impl Answering {
+    pub(crate) fn new(runs: PathBuf) -> Self {
+        // The command that runs a run again from here would name the controller's paths.
+        Self(View {
+            again: false,
+            ..View::new(runs, None)
+        })
+    }
+
+    /// The answer to a `GET` of `target`, as the page's requests are answered, with its body
+    /// deflated if `deflate` and that is shorter.
+    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Answer {
+        let response = match Request::get(target, deflate) {
+            Ok(request) => api(&request, &mut self.0),
+            Err(refused) => refused,
+        };
+        // A page's file, the one answer a browser may keep, is never asked for here.
+        let Sent {
+            status,
+            content_type,
+            body,
+            deflated,
+            immutable: _,
+        } = response.sent(deflate);
+        Answer::Viewed {
+            status: status.into_owned(),
+            content_type: content_type.into_owned(),
+            deflated,
+            body,
+        }
+    }
 }
 
 struct Local {
@@ -135,8 +160,8 @@ enum Source {
     /// The runs in a directory here, which a cancel names as `runs_given`, as it was given, or
     /// found by default.
     Here { view: View, runs_given: String },
-    /// The controller's runs, which its `pumpkin controller view` answers requests for.
-    Controller(controller::Viewing),
+    /// The controller's runs, which its `serve` answers requests for.
+    Controller(Viewing),
 }
 
 /// The runs of one directory, as the view reads them.
@@ -465,7 +490,16 @@ fn route(request: &Request, local: &mut Local) -> Response {
         (Asked::Cancelling { id }, _) => local.cancels.said(&id),
         (asked, Source::Here { view, .. }) => answered(asked, view),
         (_, Source::Controller(viewing)) => {
-            let asked = viewing.ask(|to, from| frame::ask(request, to, from));
+            let asked = viewing.ask(&request.target, request.deflate);
+            let asked = asked.map(|reply| {
+                let Reply {
+                    status,
+                    content_type,
+                    deflated,
+                    body,
+                } = reply;
+                Response::relayed(status, content_type, body, deflated)
+            });
             asked.unwrap_or_else(|error| Response::refused("502 Bad Gateway", &error))
         }
     }

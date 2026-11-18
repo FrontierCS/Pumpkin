@@ -8,13 +8,15 @@
 //! and none takes a session that another holds. With no connection to share, a command starts
 //! the controller if it is stopped, waits until SSM sees it, and opens one with this machine's
 //! key, which it enrols through EC2 Instance Connect once the controller refuses it. What goes
-//! over the connections is the submodules': `send`, `copy`, `listing`, `viewing` and `commands`.
+//! over the connections is the submodules': `send`, `copy`, `listing`, `viewing` and `commands`;
+//! `listing` and `viewing` go over a link to `serve`, which `linking` opens.
 //!
 //! A command on the controller is cut when its connection ends, and then says nothing of how far
 //! it got, so a command repeats only where its caller knows that running it again is safe.
 
 mod commands;
 mod copy;
+mod linking;
 mod listing;
 mod send;
 mod viewing;
@@ -37,7 +39,7 @@ pub(crate) use listing::{ls, scratch};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
-pub(crate) use viewing::Viewing;
+pub(crate) use viewing::{Reply, Viewing};
 
 use crate::job::JOBS;
 use crate::workspace::Workspace;

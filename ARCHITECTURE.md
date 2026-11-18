@@ -48,10 +48,9 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
 there over `ssh` through SSM, and follows, lists, stops, reaps and views the runs there. On the
 controller, `controller job` runs each run or build in a systemd unit of its own,
-`controller boot` reaps what lost runs left, `controller serve` answers `ls`, and
-`controller view` answers `view`'s requests for the runs' data.
+`controller boot` reaps what lost runs left, and `controller serve` answers `ls` and `view`.
 
-![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](docs/figures/controller-data.svg)
+![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Run under the
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -394,19 +393,18 @@ reads a task's source below its root (`Root`) and serves the standard library's,
 starts the driver process. `run` starts a run and drives it in that process, `ending` follows a
 run and says how it ended, and `reaping` stops runs and removes what they left. `controller`
 reaches the controller over the connections that a workspace's commands share (`Reached`), over
-which its `send` sends a run's or a build's job, its
-`copy` copies an ended run's record back, its `listing` lists the runs there for `ls` over a
-`Link`, its `viewing` carries `view`'s requests to the view there (`Viewing`), and its `commands`
-follow, stop and reap them; `link` is the protocol of a client's `Link` to `serve`, the
-controller's end, which is of the client's own build, installed there by its executable's
-SHA-256; `manifest`
-is what `send` sends a task's tree as, by content, to the controller's store, `job` is the
-controller's side, with the prune and the slots that admit its builds and publishes (`Admission`),
-`publish` copies the runs, as `view` exports them, to the public page's bucket as their jobs run,
-`progress` is what `ls` shows, `next` makes the commands to run next, `style` runs the formatter,
-`view` serves the runs' records to a browser, its `json` the JSON forms of what it answers with,
-its `frame` the frames in which it asks the view on a controller, and `Workspace` is the
-`.pumpkin` directory.
+which its `send` sends a run's or a build's job, its `copy` copies an ended run's record back, its
+`listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there
+(`Viewing`), each over a `Link` that its `linking` opens, and its `commands` follow, stop and reap
+them; `link` is the protocol of a client's `Link` to `serve`, the controller's end, which answers
+`ls` and `view` and is of the client's own build, installed there by its executable's SHA-256;
+`manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
+the controller's side, with the prune and the slots that admit its builds and publishes
+(`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
+their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
+the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
+answers with, its `Answering` the view that `serve` keeps to answer a client's, and `Workspace` is
+the `.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
 readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path
@@ -417,7 +415,7 @@ that a log names is read only below its record; and it says of a run what the CL
 by running `pumpkin cancel`, as `pumpkin view --help` says.
 
 **Architecture Invariant:** `view` reads a controller's records where they are, by the `pumpkin`
-of its own commit there; the page's files, the token, the `Origin` check and the cancel stay on
+of its own build there; the page's files, the token, the `Origin` check and the cancel stay on
 the person's machine.
 
 **Architecture Invariant:** the page is plain modules that the browser runs as they are, with no

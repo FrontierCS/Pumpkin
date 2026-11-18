@@ -426,7 +426,7 @@ fn usage() {
                         Serve nothing: write into <dir> the runs' data as files that a static
                         copy of the page reads, with the page, and a robots.txt that asks
                         search engines to stay out. Each file that holds a reply that the page
-                        reads, as `pumpkin controller view` answers it, is deflated: a host
+                        reads, as `pumpkin view` answers it, is deflated: a host
                         serves it with `Content-Encoding: deflate`. In each reply, a stand-in
                         replaces each sandbox's id, as `<sandbox of job-3>`; the home and user
                         of this machine and of the run's arguments, as `~` and `<user>`; and
@@ -473,11 +473,10 @@ fn usage() {
 
               With [controller] in the configuration, and no --runs, `view` serves the
               controller's runs that have started, and reads them there: it sends each of the
-              page's requests for the runs' data over one `ssh` to `pumpkin controller view`
-              on the controller, of the `pumpkin` of this one's commit, which a `pumpkin run`
-              or `pumpkin build` of a task that pins the commit builds there, and refuses to
-              start without it. It reaches the controller as it starts, starting it if it is
-              stopped; once the connection has ended, the next request opens it again, and
+              page's requests for the runs' data over one `ssh` to `pumpkin controller serve`
+              on the controller, a copy of this `pumpkin` that it installs there if the
+              controller has none. It reaches the controller as it starts, starting it if it
+              is stopped; once the connection has ended, the next request opens it again, and
               while that fails the page says so and asks again after 5 s, then after twice
               the wait before, up to a minute. --runs serves a directory here, such as the
               copies of the controller's runs that `wait` makes.

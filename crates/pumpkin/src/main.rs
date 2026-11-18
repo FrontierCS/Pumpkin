@@ -87,7 +87,6 @@ fn main() -> ExitCode {
         Ok(cli::Command::Follow(id)) => job::follow(&id),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Serve) => serve::serve(),
-        Ok(cli::Command::ViewFor) => view::over_pipe(),
         Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
