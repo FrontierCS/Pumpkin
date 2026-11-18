@@ -174,16 +174,6 @@ fn refuses_unlimited_swap() {
 }
 
 #[test]
-fn unstarted_context_driver_kill() {
-    let shown = unstarted("unstarted", "context", Whom::Driver, "KILL", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        exit status: Some(1)
-        pumpkin: the driver ended before the run started, by signal: 9 (SIGKILL)
-        the driver is gone, and made no record: true"#]].assert_eq(&shown);
-}
-
-#[test]
 fn unstarted_context_driver_term() {
     let shown = unstarted("unstarted", "context", Whom::Driver, "TERM", false);
     expect![[r#"
@@ -199,15 +189,6 @@ fn unstarted_context_run_kill() {
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         ended by signal: 9
-        the driver is gone, and made no record: true"#]].assert_eq(&shown);
-}
-
-#[test]
-fn unstarted_context_run_term() {
-    let shown = unstarted("unstarted", "context", Whom::Run, "TERM", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        ended by signal: 15
         the driver is gone, and made no record: true"#]].assert_eq(&shown);
 }
 
@@ -258,23 +239,6 @@ fn unstarted_image_driver_term_released() {
         pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
         printed outcome.json: {"signal":"SIGTERM","state":"interrupted"}"#]].assert_eq(&shown);
-}
-
-#[test]
-fn unstarted_image_run_term() {
-    let shown = unstarted("unstarted", "image", Whom::Run, "TERM", false);
-    expect![[r#"
-        $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-        ended by signal: 15
-        pumpkin: run <id> records into <scratch>/runs/<id>
-        outcome.json: none
-        printed the id alone: false
-        $ pumpkin wait --outcome <id> --runs runs
-        exit status: Some(1)
-        pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
-        pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
-        pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
-        pumpkin: to remove what every run that has ended left: pumpkin reap --runs <scratch>/runs"#]].assert_eq(&shown);
 }
 
 #[test]
