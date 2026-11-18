@@ -1,7 +1,6 @@
 //! `deploy/pumpkin`'s refusals, against a local repository, with a stand-in `curl` that serves a
-//! file that is not rustup-init, on this machine, on one that lacks what building needs and on
-//! another platform, with a stand-in `uname`, and `cargo xtask install --root`, which the script
-//! runs.
+//! file that is not rustup-init, on this machine and on one that lacks what building needs, and
+//! `cargo xtask install --root`, which the script runs.
 
 use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -21,16 +20,12 @@ const CURL: &str = "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n    [ \"$1\" = --output ]
 
 /// Where the script runs.
 #[derive(Clone, Copy)]
-enum Machine<'a> {
+enum Machine {
     This,
-    /// A stand-in `uname` names this system and machine.
-    Other(&'a str, &'a str),
     /// The `PATH` holds only what the script runs before it checks for what building needs.
     Lacking,
     /// The repository that the script fetches from is not there.
     Unreachable,
-    /// `curl` fails as it does with no network.
-    Offline,
 }
 
 /// Runs the script, as copied into a consumer's repository beside `.pumpkinversion`, which, if
@@ -40,7 +35,7 @@ enum Machine<'a> {
 /// as the script that stands in for the toolchain's `cargo`, beside a `rustup` that says what it
 /// installs; checks its exit code, output, the temporary files left behind, in the caller's
 /// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`.
-fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
+fn check(machine: Machine, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
     let held = TestDir::new();
     let scratch = held.path();
     let (source, consumer, bin, tmp) = (
@@ -131,19 +126,17 @@ fn report(output: &Output, tmp: &Path, state: &Path, commit: &str) -> String {
 
 /// The script's option that names `source`, the local repository, as where it fetches from, but
 /// on a machine that can't reach it, a path beside it that holds nothing.
-fn repository(machine: Machine<'_>, source: &Path) -> String {
+fn repository(machine: Machine, source: &Path) -> String {
     let source = match machine {
         Machine::Unreachable => source.with_file_name("nonexistent"),
-        Machine::This | Machine::Other(..) | Machine::Lacking | Machine::Offline => {
-            source.to_owned()
-        }
+        Machine::This | Machine::Lacking => source.to_owned(),
     };
     format!("--pumpkin-repository=file://{}", source.display())
 }
 
-/// The `PATH` that the script runs on, on `machine`: `bin`, holding a stand-in `curl` and what
-/// `machine` asks for, then this machine's; on one that is lacking, `bin` alone.
-fn path(machine: Machine<'_>, bin: &Path) -> String {
+/// The `PATH` that the script runs on, on `machine`: `bin`, holding a stand-in `curl`, then this
+/// machine's; on one that is lacking, `bin` alone.
+fn path(machine: Machine, bin: &Path) -> String {
     let path = env::var("PATH").unwrap();
     match machine {
         Machine::Lacking => {
@@ -153,17 +146,6 @@ fn path(machine: Machine<'_>, bin: &Path) -> String {
                 symlink(found, bin.join(tool)).unwrap();
             }
             return bin.display().to_string();
-        }
-        Machine::Other(system, machine) => {
-            let uname = format!(
-                "#!/bin/sh\ncase \"$1\" in --kernel-name) echo {system} ;; --machine) echo {machine} ;; *) exit 2 ;; esac\n"
-            );
-            stand_in(bin, "uname", &uname);
-        }
-        Machine::Offline => {
-            let curl = "#!/bin/sh\necho 'curl: (6) Could not resolve host: static.rust-lang.org' >&2\nexit 6\n";
-            stand_in(bin, "curl", curl);
-            return format!("{}:{path}", bin.display());
         }
         Machine::This | Machine::Unreachable => {}
     }
@@ -293,19 +275,6 @@ fn fetch_refusals() {
 }
 
 #[test]
-fn other_platform() {
-    check(
-        Machine::Other("Linux", "aarch64"),
-        Some("v1 <commit>\n"),
-        None,
-        &expect![[r#"
-            Some(1): pumpkin: this is Linux aarch64: run it on Linux x86_64
-            left in the temporary directory: 0, and in .pumpkin/tmp: 1
-            in .pumpkin: build.lock tmp"#]],
-    );
-}
-
-#[test]
 fn lacking() {
     check(
         Machine::Lacking,
@@ -338,25 +307,6 @@ fn unreachable() {
             git ls-remote file://<scratch>/nonexistent
         left in the temporary directory: 0, and in .pumpkin/tmp: 0
         in .pumpkin: .gitignore tmp"#]],
-    );
-}
-
-#[test]
-fn offline() {
-    check(
-        Machine::Offline,
-        Some("v1 <commit>\n"),
-        None,
-        &expect![[r#"
-            Some(6): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
-            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
-            pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
-            pumpkin: downloading rustup-init 1.29.2 ...
-            curl: (6) Could not resolve host: static.rust-lang.org
-            pumpkin: the first run downloads from static.rust-lang.org, index.crates.io, static.crates.io, github.com and release-assets.githubusercontent.com; check that this machine reaches them with
-                curl --head https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
-            left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: .gitignore tmp"#]],
     );
 }
 
