@@ -11,7 +11,7 @@ use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
 use super::{Reached, SHORT_TIMEOUT, Session, Slot};
-use crate::link::{self, Health, Link, Listed, Unanswered, Viewed};
+use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
 /// This build's executable, which the controller runs as `serve`, and its SHA-256.
@@ -76,33 +76,14 @@ impl Linked {
         })
     }
 
-    /// The controller's health, or the message of its refusal: `reached` is the controller that
+    /// The answer to `request`, or the message of its refusal: `reached` is the controller that
     /// the link goes to.
-    pub(super) fn health(&mut self, reached: &Reached) -> Result<Result<Health, String>, Unlinked> {
-        let asked = self.link.health();
-        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
-    }
-
-    /// The runs whose ids start with one of `prefixes`, or the message of the refusal, as
-    /// [`Linked::health`] says.
-    pub(super) fn list(
+    pub(super) fn ask<R: Request>(
         &mut self,
         reached: &Reached,
-        prefixes: &[String],
-    ) -> Result<Result<Listed, String>, Unlinked> {
-        let asked = self.link.list(prefixes);
-        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
-    }
-
-    /// The view's reply to a `GET` of `target`, or the message of the refusal, as
-    /// [`Linked::health`] says.
-    pub(super) fn view(
-        &mut self,
-        reached: &Reached,
-        target: &str,
-        deflate: bool,
-    ) -> Result<Result<Viewed, String>, Unlinked> {
-        let asked = self.link.view(target, deflate);
+        request: R,
+    ) -> Result<Result<R::Answer, String>, Unlinked> {
+        let asked = self.link.ask(request);
         asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 

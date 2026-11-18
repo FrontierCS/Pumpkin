@@ -50,7 +50,7 @@ use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
 use crate::controller::{Unviewed, Viewing};
-use crate::link::{Answer, Viewed};
+use crate::link::Viewed;
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
 
@@ -128,7 +128,7 @@ impl Answering {
 
     /// The answer to a `GET` of `target`, as the page's requests are answered, with its body
     /// deflated if `deflate` and that is shorter.
-    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Answer {
+    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Viewed {
         let response = match Request::get(target, deflate) {
             Ok(request) => api(&request, &mut self.0),
             Err(refused) => refused,
@@ -141,12 +141,12 @@ impl Answering {
             deflated,
             immutable: _,
         } = response.sent(deflate);
-        Answer::Viewed(Viewed {
+        Viewed {
             status: status.into_owned(),
             content_type: content_type.into_owned(),
             deflated,
             body,
-        })
+        }
     }
 }
 

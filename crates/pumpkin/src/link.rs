@@ -2,10 +2,10 @@
 //! of the client's own build, on the standard input and output of one `ssh`, in
 //! [`schema::frame`]'s frames.
 //!
-//! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one request
-//! at a time ([`Ask`]), and each gets one [`Answer`], whose body, if it has one, follows in frames
-//! of its own. A request only reads, so a client whose link ends before an answer is whole may
-//! ask again over another.
+//! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one
+//! [`Request`] at a time, and each gets its own [`Request::Answer`], whose body, if it has one,
+//! follows in frames of its own, or a refusal. A request only reads, so a client whose link ends
+//! before an answer is whole may ask again over another.
 //!
 //! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
 //! by the SHA-256 of the client's own executable, so that both ends are always one build, as
@@ -40,79 +40,75 @@ pub(crate) enum Hello {
     Absent,
 }
 
+/// A request, which `serve` answers with its [`Request::Answer`], or refuses.
+pub(crate) trait Request {
+    type Answer;
+    /// The answer's head: an enum tagged by `type`, as [`Head`] is, by tags of its own, so that no
+    /// other request's answer reads as one.
+    type Head: Serialize + DeserializeOwned;
+
+    /// The request as it crosses.
+    fn ask(self) -> Ask;
+
+    /// The head of `answer`, and its body, of the length that the head gives.
+    fn sent(answer: Self::Answer) -> (Self::Head, Vec<u8>);
+
+    /// The answer that `head` begins, with its body, if it has one, read from `link`.
+    fn received(head: Self::Head, link: &mut Link) -> Result<Self::Answer, Unanswered>;
+}
+
 /// A request, in a frame with no body.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
-    Health,
-    /// The runs, and the jobs yet to start one, whose ids start with one of `prefixes`, or all
-    /// with none, as `ls` lists them, with those that ended before
-    /// [`crate::progress::listed_since`] by `serve`'s clock named only as older.
-    List {
-        prefixes: Vec<String>,
-    },
-    /// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
-    /// ([`crate::view`]), whose body may come deflated if `deflate`. What fails, such as a run
-    /// that isn't there, is answered with the view's status for it, never refused.
-    View {
-        target: String,
-        deflate: bool,
-    },
+    Health(HealthRequest),
+    List(ListRequest),
+    View(ViewRequest),
 }
 
-/// The answer to a request.
-pub(crate) enum Answer {
-    Health(Health),
-    Listed(Listed),
-    Viewed(Viewed),
+/// The head of an answer, or of a refusal.
+#[derive(Serialize, Deserialize)]
+// The whole of serde's message for a head that is neither, which would otherwise name this type.
+#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(expecting = "it is neither an answer to the request nor a refusal")]
+enum Head<H> {
     /// Nothing took effect, for the reason that `message` gives, with what to do.
-    Refused {
-        message: String,
-    },
+    Refused { message: String },
+    /// The answer's head, which carries its tag itself.
+    #[serde(untagged)]
+    Answered(H),
 }
 
-/// The runs that `serve` listed, and how many it couldn't list, as it said on its standard error.
-pub(crate) struct Listed {
-    pub(crate) listing: Listing,
-    pub(crate) unlisted_count: u64,
-}
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HealthRequest {}
 
-/// The view's reply, as its HTTP gives it.
-pub(crate) struct Viewed {
-    /// The status line's code and reason.
-    pub(crate) status: String,
-    pub(crate) content_type: String,
-    /// Whether `body` is deflated.
-    pub(crate) deflated: bool,
-    pub(crate) body: Vec<u8>,
-}
-
-/// An [`Answer`] as it crosses, in a frame with no body: what of it is a body, if anything, follows
-/// in frames of its own.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Head {
+pub(crate) enum HealthHead {
     Health(Health),
-    /// The listing, a [`Listing`]'s JSON, in a body of `body_bytes`.
-    Listed {
-        body_bytes: u64,
-        unlisted_count: u64,
-    },
-    /// The view's reply, whose body is of `body_bytes`.
-    Viewed {
-        status: String,
-        content_type: String,
-        deflated: bool,
-        body_bytes: u64,
-    },
-    Refused {
-        message: String,
-    },
+}
+
+impl Request for HealthRequest {
+    type Answer = Health;
+    type Head = HealthHead;
+
+    fn ask(self) -> Ask {
+        Ask::Health(self)
+    }
+
+    fn sent(health: Health) -> (HealthHead, Vec<u8>) {
+        (HealthHead::Health(health), Vec::new())
+    }
+
+    fn received(head: HealthHead, _: &mut Link) -> Result<Health, Unanswered> {
+        let HealthHead::Health(health) = head;
+        Ok(health)
+    }
 }
 
 /// What the controller's machine reads of itself: how long it has been up, its disk and its boot.
 /// It judges nothing: it reads the same whether or not the controller can run a job.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Health {
     pub(crate) up_seconds: u64,
     /// The size of the disk that holds the runs, as `job::disk` gives it.
@@ -123,7 +119,7 @@ pub(crate) struct Health {
 }
 
 /// The state of the controller's boot, the unit `pumpkin-boot.service`, as `systemctl` gives it.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Boot {
     Done,
@@ -138,55 +134,169 @@ pub(crate) enum Boot {
     Unknown,
 }
 
-/// The message of each frame of an answer's body: the frame's body is the next part of it.
+/// The runs, and the jobs yet to start one, whose ids start with one of `prefixes`, or all with
+/// none, as `ls` lists them, with those that ended before [`crate::progress::listed_since`] by
+/// `serve`'s clock named only as older.
 #[derive(Serialize, Deserialize)]
-struct Part;
+pub(crate) struct ListRequest {
+    pub(crate) prefixes: Vec<String>,
+}
 
-/// Writes `answer`: its head, then its body, if it has one, in frames of at most
-/// [`MAX_BODY_BYTES`].
-pub(crate) fn send(output: &mut impl Write, answer: &Answer) -> io::Result<()> {
-    let listing_json;
-    let (head, body): (Head, &[u8]) = match answer {
-        Answer::Health(health) => (Head::Health(health.clone()), &[]),
-        Answer::Listed(Listed {
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ListedHead {
+    /// The listing, a [`Listing`]'s JSON, in a body of `body_bytes`.
+    Listed {
+        body_bytes: u64,
+        unlisted_count: u64,
+    },
+}
+
+impl Request for ListRequest {
+    type Answer = Listed;
+    type Head = ListedHead;
+
+    fn ask(self) -> Ask {
+        Ask::List(self)
+    }
+
+    fn sent(listed: Listed) -> (ListedHead, Vec<u8>) {
+        let Listed {
             listing,
             unlisted_count,
-        }) => {
-            listing_json = serde_json::to_vec(listing).unwrap_or_else(|error| {
-                unreachable!("a listing, whose maps are keyed by strings, is JSON: {error}")
-            });
-            let head = Head::Listed {
-                body_bytes: listing_json.len() as u64,
-                unlisted_count: *unlisted_count,
-            };
-            (head, &listing_json)
-        }
-        Answer::Viewed(Viewed {
+        } = listed;
+        let body = serde_json::to_vec(&listing).unwrap_or_else(|error| {
+            unreachable!("a listing, whose maps are keyed by strings, is JSON: {error}")
+        });
+        let body_bytes = body.len() as u64;
+        let head = ListedHead::Listed {
+            body_bytes,
+            unlisted_count,
+        };
+        (head, body)
+    }
+
+    fn received(head: ListedHead, link: &mut Link) -> Result<Listed, Unanswered> {
+        let ListedHead::Listed {
+            body_bytes,
+            unlisted_count,
+        } = head;
+        let listing = serde_json::from_slice(&link.body(body_bytes)?)
+            .map_err(|error| Unanswered::Failed(format!("its listing doesn't read: {error}")))?;
+        Ok(Listed {
+            listing,
+            unlisted_count,
+        })
+    }
+}
+
+/// The runs that `serve` listed, and how many it couldn't list, as it said on its standard error.
+pub(crate) struct Listed {
+    pub(crate) listing: Listing,
+    pub(crate) unlisted_count: u64,
+}
+
+/// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
+/// ([`crate::view`]), whose body may come deflated if `deflate`. What fails, such as a run that
+/// isn't there, is answered with the view's status for it, never refused.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ViewRequest {
+    pub(crate) target: String,
+    pub(crate) deflate: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ViewedHead {
+    /// The view's reply, whose body is of `body_bytes`.
+    Viewed {
+        status: String,
+        content_type: String,
+        deflated: bool,
+        body_bytes: u64,
+    },
+}
+
+impl Request for ViewRequest {
+    type Answer = Viewed;
+    type Head = ViewedHead;
+
+    fn ask(self) -> Ask {
+        Ask::View(self)
+    }
+
+    fn sent(viewed: Viewed) -> (ViewedHead, Vec<u8>) {
+        let Viewed {
             status,
             content_type,
             deflated,
             body,
-        }) => {
-            let head = Head::Viewed {
-                status: status.clone(),
-                content_type: content_type.clone(),
-                deflated: *deflated,
-                body_bytes: body.len() as u64,
-            };
-            (head, body)
+        } = viewed;
+        let body_bytes = body.len() as u64;
+        let head = ViewedHead::Viewed {
+            status,
+            content_type,
+            deflated,
+            body_bytes,
+        };
+        (head, body)
+    }
+
+    fn received(head: ViewedHead, link: &mut Link) -> Result<Viewed, Unanswered> {
+        let ViewedHead::Viewed {
+            status,
+            content_type,
+            deflated,
+            body_bytes,
+        } = head;
+        let body = link.body(body_bytes)?;
+        Ok(Viewed {
+            status,
+            content_type,
+            deflated,
+            body,
+        })
+    }
+}
+
+/// The view's reply, as its HTTP gives it.
+pub(crate) struct Viewed {
+    /// The status line's code and reason.
+    pub(crate) status: String,
+    pub(crate) content_type: String,
+    /// Whether `body` is deflated.
+    pub(crate) deflated: bool,
+    pub(crate) body: Vec<u8>,
+}
+
+/// The message of each frame of an answer's body: the frame's body is the next part of it.
+#[derive(Serialize, Deserialize)]
+struct Part;
+
+/// Writes the answer to `request` that `answering` gives, or the refusal of the message it
+/// returns.
+pub(crate) fn answer<R: Request>(
+    output: &mut impl Write,
+    request: R,
+    answering: impl FnOnce(R) -> Result<R::Answer, String>,
+) -> io::Result<()> {
+    let (head, body) = match answering(request) {
+        Ok(answer) => {
+            let (head, body) = R::sent(answer);
+            (Head::Answered(head), body)
         }
-        Answer::Refused { message } => {
-            let head = Head::Refused {
-                message: message.clone(),
-            };
-            (head, &[])
-        }
+        Err(message) => (Head::Refused { message }, Vec::new()),
     };
     frame::write(output, &head, &[])?;
     for part in body.chunks(MAX_BODY_BYTES) {
         frame::write(output, &Part, part)?;
     }
     Ok(())
+}
+
+/// Writes the refusal of `message`, which answers no request.
+pub(crate) fn refuse(output: &mut impl Write, message: String) -> io::Result<()> {
+    frame::write(output, &Head::<()>::Refused { message }, &[])
 }
 
 /// The directory of `serve`'s installs, relative to the controller user's home: each is
@@ -282,51 +392,12 @@ impl Link {
         }
     }
 
-    /// The controller's health, or the message of its refusal.
-    pub(crate) fn health(&mut self) -> Result<Result<Health, String>, Unanswered> {
-        match self.ask(&Ask::Health)? {
-            Answer::Health(health) => Ok(Ok(health)),
-            Answer::Refused { message } => Ok(Err(message)),
-            Answer::Listed(_) | Answer::Viewed(_) => Err(other("health")),
-        }
-    }
-
-    /// The runs whose ids start with one of `prefixes`, as [`Ask::List`] says, or the message of
-    /// the refusal.
-    pub(crate) fn list(
+    /// The answer to `request`, or the message of its refusal.
+    pub(crate) fn ask<R: Request>(
         &mut self,
-        prefixes: &[String],
-    ) -> Result<Result<Listed, String>, Unanswered> {
-        let ask = Ask::List {
-            prefixes: prefixes.to_vec(),
-        };
-        match self.ask(&ask)? {
-            Answer::Listed(listed) => Ok(Ok(listed)),
-            Answer::Refused { message } => Ok(Err(message)),
-            Answer::Health(_) | Answer::Viewed(_) => Err(other("list")),
-        }
-    }
-
-    /// The view's reply to a `GET` of `target`, as [`Ask::View`] says, or the message of the
-    /// refusal.
-    pub(crate) fn view(
-        &mut self,
-        target: &str,
-        deflate: bool,
-    ) -> Result<Result<Viewed, String>, Unanswered> {
-        let ask = Ask::View {
-            target: target.to_owned(),
-            deflate,
-        };
-        match self.ask(&ask)? {
-            Answer::Viewed(viewed) => Ok(Ok(viewed)),
-            Answer::Refused { message } => Ok(Err(message)),
-            Answer::Health(_) | Answer::Listed(_) => Err(other("view")),
-        }
-    }
-
-    fn ask(&mut self, ask: &Ask) -> Result<Answer, Unanswered> {
-        if let Err(error) = frame::write(&mut self.stdin, ask, &[]) {
+        request: R,
+    ) -> Result<Result<R::Answer, String>, Unanswered> {
+        if let Err(error) = frame::write(&mut self.stdin, &request.ask(), &[]) {
             return Err(match error.kind() {
                 io::ErrorKind::BrokenPipe => {
                     Unanswered::Unreached("ended before the request".to_owned())
@@ -334,34 +405,10 @@ impl Link {
                 _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
             });
         }
-        let (body_bytes, unlisted_count) = match self.received("the answer")? {
-            Head::Health(health) => return Ok(Answer::Health(health)),
-            Head::Refused { message } => return Ok(Answer::Refused { message }),
-            Head::Viewed {
-                status,
-                content_type,
-                deflated,
-                body_bytes,
-            } => {
-                return Ok(Answer::Viewed(Viewed {
-                    status,
-                    content_type,
-                    deflated,
-                    body: self.body(body_bytes)?,
-                }));
-            }
-            Head::Listed {
-                body_bytes,
-                unlisted_count,
-            } => (body_bytes, unlisted_count),
-        };
-        let body = self.body(body_bytes)?;
-        let listing = serde_json::from_slice(&body)
-            .map_err(|error| Unanswered::Failed(format!("its listing doesn't read: {error}")))?;
-        Ok(Answer::Listed(Listed {
-            listing,
-            unlisted_count,
-        }))
+        match self.received("the answer")? {
+            Head::Refused { message } => Ok(Err(message)),
+            Head::Answered(head) => R::received(head, self).map(Ok),
+        }
     }
 
     /// The body of an answer whose head gives it as of `body_bytes`.
@@ -417,13 +464,6 @@ impl Link {
             }),
         }
     }
-}
-
-fn other(asked: &str) -> Unanswered {
-    Unanswered::Failed(format!(
-        "it answered `{asked}` with the answer to another request: expected its own, as this \
-         pumpkin's `serve` gives it"
-    ))
 }
 
 impl Drop for Link {

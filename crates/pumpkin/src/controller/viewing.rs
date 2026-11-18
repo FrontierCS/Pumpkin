@@ -17,7 +17,7 @@ use ::aws::Cli;
 use super::aws::{self, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
-use crate::link::Viewed;
+use crate::link::{ViewRequest, Viewed};
 use crate::{config, say};
 
 /// Why the view on the controller gave no reply.
@@ -174,7 +174,8 @@ impl Viewing {
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        match linked.view(&self.reached, target, deflate) {
+        let target = target.to_owned();
+        match linked.ask(&self.reached, ViewRequest { target, deflate }) {
             Ok(Ok(viewed)) => {
                 self.linked = Some(linked);
                 Over::Viewed(viewed)
