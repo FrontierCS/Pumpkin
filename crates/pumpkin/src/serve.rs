@@ -11,7 +11,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::os::fd::AsFd as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -26,7 +26,9 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
 use crate::job::{JOBS, WAITING};
-use crate::link::{self, Answer, Ask, Boot, Health, Hello, Listed};
+use crate::link::{
+    self, Ask, Boot, Health, HealthRequest, Hello, ListRequest, Listed, ViewRequest,
+};
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 use crate::view::Answering;
@@ -70,7 +72,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 if let Ok(install) = &install {
                     mark_install_used(install);
                 }
-                link::send(&mut output, &answered(&home, ask, &mut view)).context(written)?;
+                answer(&mut output, &home, ask, &mut view).context(written)?;
                 continue;
             }
             Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
@@ -80,7 +82,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
         let message = format!(
             "{broken}: expected a request, with no body, as a client of this pumpkin sends"
         );
-        link::send(&mut output, &Answer::Refused { message }).context(written)?;
+        link::refuse(&mut output, message).context(written)?;
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
@@ -172,15 +174,18 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-/// The answer to `ask`, with `view` the view of the runs below `home`: [`Answer::Refused`] if what
-/// it asks for fails.
-fn answered(home: &Path, ask: Ask, view: &mut Answering) -> Answer {
-    let answered = match ask {
-        Ask::Health => health().map(Answer::Health),
-        Ask::List { prefixes } => listed(home, &prefixes),
-        Ask::View { target, deflate } => Ok(view.answer(&target, deflate)),
-    };
-    answered.unwrap_or_else(|message| Answer::Refused { message })
+/// Writes the answer to `ask` on `output`, with `view` the view of the runs below `home`: a
+/// refusal if what it asks for fails.
+fn answer(output: &mut impl Write, home: &Path, ask: Ask, view: &mut Answering) -> io::Result<()> {
+    match ask {
+        Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
+        Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
+            listed(home, &prefixes)
+        }),
+        Ask::View(request) => link::answer(output, request, |ViewRequest { target, deflate }| {
+            Ok(view.answer(&target, deflate))
+        }),
+    }
 }
 
 fn health() -> Result<Health, String> {
@@ -238,16 +243,16 @@ fn boot() -> Boot {
 
 /// The listing of the runs below `home` whose ids start with one of `prefixes`, as
 /// [`crate::listed_in`] makes it, at this machine's time, with the jobs yet to start a run.
-fn listed(home: &Path, prefixes: &[String]) -> Result<Answer, String> {
+fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
     let now = crate::unix_now();
     let since = progress::listed_since(prefixes, now);
     let runs = home.join(crate::job::runs());
     let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
-    Ok(Answer::Listed(Listed {
+    Ok(Listed {
         listing,
         unlisted_count: unlisted as u64,
-    }))
+    })
 }
 
 /// Adds to `listing` each job in `home`'s `JOBS` whose id starts with one of `prefixes`, or each

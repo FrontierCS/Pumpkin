@@ -3494,7 +3494,7 @@ fn view_answers_502_for_a_reply_it_cant_read() {
             "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: it is neither an answer to the request nor a refusal: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
     );
 }
 

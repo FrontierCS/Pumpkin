@@ -8,7 +8,7 @@
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
 use crate::config;
-use crate::link::Viewed;
+use crate::link::{ViewRequest, Viewed};
 
 /// The channel to the view on a controller, opened when a request needs it.
 pub(crate) struct Viewing {
@@ -78,7 +78,8 @@ impl Viewing {
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let viewed = linked.view(&self.reached, target, deflate)?;
+        let target = target.to_owned();
+        let viewed = linked.ask(&self.reached, ViewRequest { target, deflate })?;
         match viewed {
             Ok(viewed) => {
                 self.linked = Some(linked);
