@@ -8,23 +8,13 @@
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
 use crate::config;
-use crate::link::{Answer, Ask};
+use crate::link::Viewed;
 
 /// The channel to the view on a controller, opened when a request needs it.
 pub(crate) struct Viewing {
     reached: Reached,
     build: Build,
     linked: Option<Linked>,
-}
-
-/// The reply to a request, as the view's HTTP gives it.
-pub(crate) struct Reply {
-    /// The status line's code and reason.
-    pub(crate) status: String,
-    pub(crate) content_type: String,
-    /// Whether `body` is deflated.
-    pub(crate) deflated: bool,
-    pub(crate) body: Vec<u8>,
 }
 
 impl Viewing {
@@ -58,19 +48,15 @@ impl Viewing {
     /// Fails if a link can't be opened, or the `serve` gives no reply but by the link's end, or
     /// the link opened anew ends too: with the command that reaches the controller again if it
     /// has stopped, then the error, which says where its master's log is if that has ended.
-    pub(crate) fn ask(&mut self, target: &str, deflate: bool) -> Result<Reply, String> {
-        let ask = Ask::View {
-            target: target.to_owned(),
-            deflate,
-        };
+    pub(crate) fn ask(&mut self, target: &str, deflate: bool) -> Result<Viewed, String> {
         // What it asks for only reads, so it is safe to ask again.
-        let asked = match self.once(&ask) {
-            Err(Unlinked::Cut { .. }) => self.once(&ask),
+        let asked = match self.once(target, deflate) {
+            Err(Unlinked::Cut { .. }) => self.once(target, deflate),
             asked => asked,
         };
         let name = self.name();
         let failed = match asked {
-            Ok(reply) => return Ok(reply),
+            Ok(viewed) => return Ok(viewed),
             Err(Unlinked::Cut { master, said }) => {
                 let failed =
                     format!("asking the view on controller `{name}` failed, as `ssh` {said}");
@@ -85,36 +71,22 @@ impl Viewing {
     }
 
     /// The reply over the link, but never again over another.
-    fn once(&mut self, ask: &Ask) -> Result<Reply, Unlinked> {
+    fn once(&mut self, target: &str, deflate: bool) -> Result<Viewed, Unlinked> {
         let mut linked = match self.linked.take() {
             Some(linked) => linked,
             None => Linked::open(&self.reached, &self.build)?,
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let answer = linked.ask(&self.reached, ask)?;
-        let name = self.name();
-        match answer {
-            Answer::Viewed {
-                status,
-                content_type,
-                deflated,
-                body,
-            } => {
+        let viewed = linked.view(&self.reached, target, deflate)?;
+        match viewed {
+            Ok(viewed) => {
                 self.linked = Some(linked);
-                Ok(Reply {
-                    status,
-                    content_type,
-                    deflated,
-                    body,
-                })
+                Ok(viewed)
             }
-            Answer::Refused { message } => Err(Unlinked::Failed(format!(
-                "controller `{name}` refused: {message}"
-            ))),
-            Answer::Health(_) | Answer::Listed(_) => Err(Unlinked::Failed(format!(
-                "controller `{name}` answered a request for the view with the answer to another: \
-                 expected its own, as this pumpkin's `serve` gives it"
+            Err(message) => Err(Unlinked::Failed(format!(
+                "controller `{}` refused: {message}",
+                self.name()
             ))),
         }
     }

@@ -46,8 +46,8 @@ use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
-use crate::controller::{Reply, Viewing};
-use crate::link::Answer;
+use crate::controller::Viewing;
+use crate::link::{Answer, Viewed};
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
 
@@ -138,12 +138,12 @@ impl Answering {
             deflated,
             immutable: _,
         } = response.sent(deflate);
-        Answer::Viewed {
+        Answer::Viewed(Viewed {
             status: status.into_owned(),
             content_type: content_type.into_owned(),
             deflated,
             body,
-        }
+        })
     }
 }
 
@@ -491,13 +491,13 @@ fn route(request: &Request, local: &mut Local) -> Response {
         (asked, Source::Here { view, .. }) => answered(asked, view),
         (_, Source::Controller(viewing)) => {
             let asked = viewing.ask(&request.target, request.deflate);
-            let asked = asked.map(|reply| {
-                let Reply {
+            let asked = asked.map(|viewed| {
+                let Viewed {
                     status,
                     content_type,
                     deflated,
                     body,
-                } = reply;
+                } = viewed;
                 Response::relayed(status, content_type, body, deflated)
             });
             asked.unwrap_or_else(|error| Response::refused("502 Bad Gateway", &error))

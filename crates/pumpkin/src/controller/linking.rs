@@ -9,7 +9,7 @@ use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
 use super::{Reached, SHORT_TIMEOUT, Session, Slot};
-use crate::link::{self, Answer, Ask, Health, Link, Listed, Unanswered};
+use crate::link::{self, Health, Link, Listed, Unanswered, Viewed};
 use crate::{manifest, say, workspace};
 
 /// This build's executable, which the controller runs as `serve`, and its SHA-256.
@@ -88,9 +88,15 @@ impl Linked {
         asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
     }
 
-    /// The answer to `ask`, as [`Linked::health`] says.
-    pub(super) fn ask(&mut self, reached: &Reached, ask: &Ask) -> Result<Answer, Unlinked> {
-        let asked = self.link.ask(ask);
+    /// The view's reply to a `GET` of `target`, or the message of the refusal, as
+    /// [`Linked::health`] says.
+    pub(super) fn view(
+        &mut self,
+        reached: &Reached,
+        target: &str,
+        deflate: bool,
+    ) -> Result<Result<Viewed, String>, Unlinked> {
+        let asked = self.link.view(target, deflate);
         asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
     }
 

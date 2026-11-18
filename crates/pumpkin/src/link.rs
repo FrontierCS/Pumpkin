@@ -63,14 +63,7 @@ pub(crate) enum Ask {
 pub(crate) enum Answer {
     Health(Health),
     Listed(Listed),
-    /// The view's reply, as its HTTP gives it: `status` is a status line's code and reason, and
-    /// `body` is deflated if `deflated`.
-    Viewed {
-        status: String,
-        content_type: String,
-        deflated: bool,
-        body: Vec<u8>,
-    },
+    Viewed(Viewed),
     /// Nothing took effect, for the reason that `message` gives, with what to do.
     Refused {
         message: String,
@@ -81,6 +74,16 @@ pub(crate) enum Answer {
 pub(crate) struct Listed {
     pub(crate) listing: Listing,
     pub(crate) unlisted_count: u64,
+}
+
+/// The view's reply, as its HTTP gives it.
+pub(crate) struct Viewed {
+    /// The status line's code and reason.
+    pub(crate) status: String,
+    pub(crate) content_type: String,
+    /// Whether `body` is deflated.
+    pub(crate) deflated: bool,
+    pub(crate) body: Vec<u8>,
 }
 
 /// An [`Answer`] as it crosses, in a frame with no body: what of it is a body, if anything, follows
@@ -156,12 +159,12 @@ pub(crate) fn send(output: &mut impl Write, answer: &Answer) -> io::Result<()> {
             };
             (head, &listing_json)
         }
-        Answer::Viewed {
+        Answer::Viewed(Viewed {
             status,
             content_type,
             deflated,
             body,
-        } => {
+        }) => {
             let head = Head::Viewed {
                 status: status.clone(),
                 content_type: content_type.clone(),
@@ -282,7 +285,7 @@ impl Link {
         match self.ask(&Ask::Health)? {
             Answer::Health(health) => Ok(Ok(health)),
             Answer::Refused { message } => Ok(Err(message)),
-            Answer::Listed(_) | Answer::Viewed { .. } => Err(other("health")),
+            Answer::Listed(_) | Answer::Viewed(_) => Err(other("health")),
         }
     }
 
@@ -298,12 +301,29 @@ impl Link {
         match self.ask(&ask)? {
             Answer::Listed(listed) => Ok(Ok(listed)),
             Answer::Refused { message } => Ok(Err(message)),
-            Answer::Health(_) | Answer::Viewed { .. } => Err(other("list")),
+            Answer::Health(_) | Answer::Viewed(_) => Err(other("list")),
         }
     }
 
-    /// The answer to `ask`.
-    pub(crate) fn ask(&mut self, ask: &Ask) -> Result<Answer, Unanswered> {
+    /// The view's reply to a `GET` of `target`, as [`Ask::View`] says, or the message of the
+    /// refusal.
+    pub(crate) fn view(
+        &mut self,
+        target: &str,
+        deflate: bool,
+    ) -> Result<Result<Viewed, String>, Unanswered> {
+        let ask = Ask::View {
+            target: target.to_owned(),
+            deflate,
+        };
+        match self.ask(&ask)? {
+            Answer::Viewed(viewed) => Ok(Ok(viewed)),
+            Answer::Refused { message } => Ok(Err(message)),
+            Answer::Health(_) | Answer::Listed(_) => Err(other("view")),
+        }
+    }
+
+    fn ask(&mut self, ask: &Ask) -> Result<Answer, Unanswered> {
         if let Err(error) = frame::write(&mut self.stdin, ask, &[]) {
             return Err(match error.kind() {
                 io::ErrorKind::BrokenPipe => {
@@ -321,12 +341,12 @@ impl Link {
                 deflated,
                 body_bytes,
             } => {
-                return Ok(Answer::Viewed {
+                return Ok(Answer::Viewed(Viewed {
                     status,
                     content_type,
                     deflated,
                     body: self.body(body_bytes)?,
-                });
+                }));
             }
             Head::Listed {
                 body_bytes,

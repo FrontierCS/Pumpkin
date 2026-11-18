@@ -39,7 +39,7 @@ pub(crate) use listing::{ls, scratch};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
-pub(crate) use viewing::{Reply, Viewing};
+pub(crate) use viewing::Viewing;
 
 use crate::job::JOBS;
 use crate::workspace::Workspace;
