@@ -48,9 +48,10 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
 there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
 there. On the controller, `controller job` runs each run or build in a systemd unit of its own,
-`controller boot` reaps what lost runs left, and `controller serve` answers `ls` and `view`.
+`controller boot` reaps what lost runs left, and `controller serve` answers `ls` and `view`, and
+lists the jobs that `wait` and `cancel` find a run among.
 
-![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
+![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Run under the
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
@@ -397,8 +398,9 @@ connections that a workspace's commands share (`Reached`); over them its `send` 
 build's job, its `copy` copies an ended run's record back, its `listing` lists the runs there for
 `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, and its `commands` follow, stop and reap them; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which answers `ls` and `view` and is of the
-client's own build, installed there by its executable's SHA-256;
+client's `Link` to `serve`, the controller's end, which answers `ls` and `view`, lists the jobs
+that `wait` and `cancel` find a run among, and is of the client's own build, installed there by
+its executable's SHA-256;
 `manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
 the controller's side, with the prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as

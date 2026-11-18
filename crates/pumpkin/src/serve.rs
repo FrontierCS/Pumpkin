@@ -27,7 +27,7 @@ use stdx::{Context as _, Deadline};
 
 use crate::job::{JOBS, WAITING};
 use crate::link::{
-    self, Ask, Boot, Health, HealthRequest, Hello, ListRequest, Listed, ViewRequest,
+    self, Ask, Boot, Health, HealthRequest, Hello, JobsRequest, ListRequest, Listed, ViewRequest,
 };
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
@@ -179,6 +179,9 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
 fn answer(output: &mut impl Write, home: &Path, ask: Ask, view: &mut Answering) -> io::Result<()> {
     match ask {
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
+        Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
+            crate::job::ids(&home.join(JOBS))
+        }),
         Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
             listed(home, &prefixes)
         }),

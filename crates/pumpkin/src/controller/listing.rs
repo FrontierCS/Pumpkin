@@ -10,8 +10,8 @@ use provider::UnixTime;
 use stdx::Context as _;
 use tempfile::TempDir;
 
-use super::linking::{Build, Linked, Unlinked};
-use super::{Name, OPENINGS, Reached};
+use super::linking::Build;
+use super::{Name, Reached};
 use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
 use crate::progress::{Entry, Listing};
 use crate::workspace::Workspace;
@@ -65,34 +65,17 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the controller's `serve` answers, which this installs there first if there is none; asked
-/// again over another link, after each of `AGAIN`'s pauses, while one ends before it has answered,
-/// as asking only reads.
+/// What the controller's `serve` answers, as [`Reached::asked`] asks it.
 fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
     let build = Build::of_this("expected to send it to the controller, to list the runs there")?;
-    let name = &reached.name;
-    let mut attempt = 0;
-    loop {
-        let asked = Linked::open(reached, &build, OPENINGS).and_then(|mut linked| {
-            let health = linked.ask(reached, HealthRequest {})?;
-            let asked = crate::unix_now();
-            let prefixes = prefixes.to_vec();
-            let listed = linked.ask(reached, ListRequest { prefixes })?;
-            Ok((health, listed, asked))
-        });
-        let (master, said) = match asked {
-            Ok((health, listed, asked)) => {
-                return answers(name, health, listed, asked);
-            }
-            Err(Unlinked::Cut { master, said }) => (master, said),
-            Err(Unlinked::Failed(error)) => return Err(error),
-        };
-        let failed = format!("listing the runs on controller `{name}` failed, as `ssh` {said}");
-        if !reached.pause(attempt, master, "listing the runs again") {
-            return Err(reached.lost(master, failed));
-        }
-        attempt += 1;
-    }
+    let (health, listed, asked) = reached.asked(&build, "listing the runs", |linked| {
+        let health = linked.ask(reached, HealthRequest {})?;
+        let asked = crate::unix_now();
+        let prefixes = prefixes.to_vec();
+        let listed = linked.ask(reached, ListRequest { prefixes })?;
+        Ok((health, listed, asked))
+    })?;
+    answers(&reached.name, health, listed, asked)
 }
 
 /// What `serve` answered to `Health` and to `List`.

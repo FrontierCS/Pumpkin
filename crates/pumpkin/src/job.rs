@@ -556,7 +556,7 @@ fn curl(args: &[&str]) -> Result<String, String> {
 
 /// The ids below `dir`, each a job's or a tree's, by name, which sort as their starts do: the names
 /// that begin with a digit, as an id does; none if `dir` isn't there.
-fn ids(dir: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),

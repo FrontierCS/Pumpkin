@@ -62,6 +62,7 @@ pub(crate) trait Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
     Health(HealthRequest),
+    Jobs(JobsRequest),
     List(ListRequest),
     View(ViewRequest),
 }
@@ -194,6 +195,40 @@ impl Request for ListRequest {
 pub(crate) struct Listed {
     pub(crate) listing: Listing,
     pub(crate) unlisted_count: u64,
+}
+
+/// The ids of the runs' jobs there, as `crate::job::ids` lists them.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JobsRequest {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum JobsHead {
+    /// The ids, a JSON array of strings, in a body of `body_bytes`, as they may outgrow a frame's
+    /// message.
+    Jobs { body_bytes: u64 },
+}
+
+impl Request for JobsRequest {
+    type Answer = Vec<String>;
+    type Head = JobsHead;
+
+    fn ask(self) -> Ask {
+        Ask::Jobs(self)
+    }
+
+    fn sent(ids: Vec<String>) -> (JobsHead, Vec<u8>) {
+        let body = serde_json::to_vec(&ids)
+            .unwrap_or_else(|error| unreachable!("a list of strings is JSON: {error}"));
+        let body_bytes = body.len() as u64;
+        (JobsHead::Jobs { body_bytes }, body)
+    }
+
+    fn received(head: JobsHead, link: &mut Link) -> Result<Vec<String>, Unanswered> {
+        let JobsHead::Jobs { body_bytes } = head;
+        serde_json::from_slice(&link.body(body_bytes)?)
+            .map_err(|error| Unanswered::Failed(format!("its jobs' ids don't read: {error}")))
+    }
 }
 
 /// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
