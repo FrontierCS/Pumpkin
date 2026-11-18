@@ -14,9 +14,36 @@ use crate::{Cargo, Result, tidy, tools};
 /// implementations, which stay as their authors wrote them.
 const UNCHECKED: &str = "crates/lang/tests/";
 
+/// Where pumpkin's tests find the formatter, under any command that runs them: the link that
+/// [`link`] makes, which `.cargo/config.toml` names.
+const LINK: &str = env!("PUMPKIN_BUILDIFIER");
+
 /// The pinned buildifier, fetched once into the target directory ([`tools::fetched`]).
 pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
     tools::fetched(cargo, tools::BUILDIFIER)
+}
+
+/// Makes [`LINK`] a symbolic link to the pinned buildifier, fetched if need be, replacing what is
+/// there, and returns the pinned one's path.
+pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
+    let buildifier = buildifier(cargo)?;
+    let link = Path::new(LINK);
+    let Some(dir) = link.parent() else {
+        unreachable!("{LINK} has no parent, though cargo makes a relative `[env]` value absolute")
+    };
+    fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
+    // Made beside it, then renamed over it, so that a test never finds the link missing. The
+    // target is absolute, so that the link in a copy of the tree, as cargo-mutants makes,
+    // finds it too.
+    let made = dir.join(format!(".buildifier.{}", std::process::id()));
+    let linked =
+        std::os::unix::fs::symlink(&buildifier, &made).and_then(|()| fs::rename(&made, link));
+    if let Err(error) = linked {
+        // Made and not renamed, or not made.
+        let _ = fs::remove_file(&made);
+        return Err(format!("linking {} failed: {error}", link.display()).into());
+    }
+    Ok(buildifier)
 }
 
 /// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask install`

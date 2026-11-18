@@ -176,7 +176,7 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     reason = "most of it is the configuration's snapshot"
 )]
 fn job() {
-    let scratch = Scratch::new("controller-job");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
@@ -444,7 +444,7 @@ fn job() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn job_refusals() {
-    let scratch = Scratch::new("controller-job-refusals");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let id = id_ago(0, "0b000004");
@@ -631,7 +631,7 @@ fn job_ended_whole(mut child: Child) -> String {
     reason = "most of it is the jobs' steps and the snapshot"
 )]
 fn job_admission() {
-    let scratch = Scratch::new("controller-job-admission");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     scratch.write_task("built", &workflow(&image('0'), &["true"]));
@@ -773,7 +773,7 @@ fn job_admission() {
     reason = "most of it is the jobs' steps and the snapshot"
 )]
 fn job_publish_wait() {
-    let scratch = Scratch::new("controller-job-publish-wait");
+    let scratch = Scratch::new();
     // The controller's engine is rootful, of which the job says nothing.
     let rootful = INFO.replace(r#","name=rootless""#, "");
     let _stand_in = StandIn::with(&scratch, &rootful, IMAGE);
@@ -912,7 +912,7 @@ fn job_publish_wait() {
     reason = "most of it is the job's command line and the snapshot"
 )]
 fn job_publish_fails() {
-    let scratch = Scratch::new("controller-job-publish-fails");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let publish = "[publish]\nbucket = \"pumpkin-alice-public\"\ndistribution = \"E2STANDIN\"\n\
@@ -1014,7 +1014,7 @@ fn job_publish_fails() {
     reason = "most of it is the records and the snapshot"
 )]
 fn boot() {
-    let scratch = Scratch::new("controller-boot");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let home = scratch.0.join("home");
@@ -1127,7 +1127,7 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 const KEY: &str = "sk-client-stand-in";
 
 // Stands in for `ssh` over shared masters that answer, and runs a command on this machine as the
-// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that opens
+// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that next opens
 // master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
 // command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
 // holds, `cut-out-M` ends any other command's output so, as a cut connection does, whatever the
@@ -1138,7 +1138,7 @@ dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -N) if [ -e "$dir/refused-$master" ]; then
+        -N) if rm "$dir/refused-$master" 2>/dev/null; then
                 echo 'Connection closed by UNKNOWN port 65535' >> "$master.log"; exit 255
             fi
             (umask 077 && : > "$master"); exit 0 ;;
@@ -1185,7 +1185,6 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
         ("ssh", SSH),
         ("systemctl", SYSTEMCTL),
         ("systemd-run", SYSTEMD_RUN),
-        ("session-manager-plugin", ""),
     ] {
         scratch.write_executable(&format!("bin/{name}"), script.as_bytes());
     }
@@ -1267,7 +1266,7 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
 }
 
 // The first `ls` makes the client's key and the shared connections and finds no controller, as the
-// stand-in `aws` describes none; the lock and socket written then are what a controller found
+// stand-in `aws` describes none; the `found` and socket written then are what a controller found
 // over a master that answers leaves.
 fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     let socket = scratch.0.join(SHARED).join("0");
@@ -1276,10 +1275,18 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     }
     let first = on_client(scratch, client, &["ls"]).output().unwrap();
     assert!(!first.status.success(), "{first:?}");
-    fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
-    // As `ssh` makes a master's socket, which only its user may reach.
-    fs::write(&socket, "").unwrap();
-    fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
+    // An address that the kernel refuses a connection to at once, as it is a broadcast's, so that
+    // a probe of it reaches no network.
+    let found = json!({ "instance": INSTANCE, "address": "255.255.255.255" });
+    // As the client keeps `found`, and `ssh` makes a master's socket, which only its user may
+    // reach.
+    for (path, text) in [
+        (scratch.0.join(SHARED).join("found"), found.to_string()),
+        (socket, String::new()),
+    ] {
+        fs::write(&path, text).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
@@ -1305,7 +1312,7 @@ fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) 
 
 #[test]
 fn keys_on_standard_input() {
-    let scratch = Scratch::new("controller-keys");
+    let scratch = Scratch::new();
     let (_, id, ran) = started_job(&scratch);
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     let sent = fs::read_to_string(scratch.0.join(format!("run/pumpkin/{id}/gateway.key")));
@@ -1357,8 +1364,10 @@ fn keys_on_standard_input() {
 // No file of the client's that another user may read, but a public key.
 #[test]
 fn modes_of_what_the_client_keeps() {
-    let scratch = Scratch::new("controller-modes");
+    let scratch = Scratch::new();
     let (_, id, _) = started_job(&scratch);
+    // The test's own, which `connect` wrote.
+    fs::remove_file(scratch.0.join(SHARED).join("found")).unwrap();
     let lines = [
         format!(
             "this machine's key: {}",
@@ -1395,7 +1404,7 @@ fn modes_of_what_the_client_keeps() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn target_refusals() {
-    let scratch = Scratch::new("controller-target-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let mut lines = Vec::new();
     let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
@@ -1460,15 +1469,6 @@ fn target_refusals() {
         &scratch.0,
         false,
     ));
-    fs::remove_file(scratch.0.join("bin/session-manager-plugin")).unwrap();
-    let mut unplugged = on_client(&scratch, &client, &["ls"]);
-    let invoked = invocation(&unplugged);
-    lines.push(report(
-        invoked,
-        &unplugged.output().unwrap(),
-        &scratch.0,
-        false,
-    ));
     let calls = fs::read_to_string(scratch.0.join("bin/calls")).unwrap_or_default();
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap_or_default();
     lines.push(format!(
@@ -1492,9 +1492,6 @@ fn target_refusals() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8/pumpkin.bundle isn't there, which the controller builds Pumpkin 1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 from: build it here with `./pumpkin --version`, after removing <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 if it was built without one
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin ls
-            exit status: Some(1)
-            pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
             calls of aws and ssh: 0"#]],
     );
 }
@@ -1699,7 +1696,7 @@ fn tree_files(scratch: &Scratch, dir: &Path) -> Vec<String> {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn send_by_content() {
-    let scratch = Scratch::new("controller-send");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
@@ -1788,7 +1785,7 @@ fn send_by_content() {
 
 #[test]
 fn send_refused_piece() {
-    let scratch = Scratch::new("controller-send-refused");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     // A piece whole as its size goes, left with other bytes, as by a file changed meanwhile.
@@ -1865,7 +1862,7 @@ fn received(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
 
 #[test]
 fn send_carries_on() {
-    let scratch = Scratch::new("controller-send-carries-on");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
     // The connection that carries the first piece ends part way through it; the other ends whole.
@@ -1910,7 +1907,7 @@ fn send_carries_on() {
 
 #[test]
 fn send_over_streams() {
-    let scratch = Scratch::new("controller-send-streams");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     // With the task's few small files, 33 MiB is three streams' worth.
     let files = [
@@ -1964,13 +1961,13 @@ fn send_over_streams() {
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
-            the connections: 0 600, 0-0 600, 1 600, 1-0 600, 1.log 600, 2 600, 2-0 600, 2.log 600, lock 600, upload 600"#]],
+            the connections: 0 600, 0-0 600, 1 600, 1-0 600, 1.log 600, 2 600, 2-0 600, 2.log 600, found 600, lock 600, upload 600"#]],
     );
 }
 
 #[test]
 fn send_over_one_connection() {
-    let scratch = Scratch::new("controller-send-one-connection");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
     let shared = scratch.0.join(SHARED);
@@ -2032,10 +2029,11 @@ fn send_over_one_connection() {
 
 #[test]
 fn send_over_the_connection_held() {
-    let scratch = Scratch::new("controller-send-connection-held");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
-    // Master 1 can't be opened, so both streams go over master 0.
+    // Master 1's opening is closed once, and the second stream, as the first holds master 0, opens
+    // it once, so both go over master 0.
     scratch.write("bin/refused-1", "");
     let (_, sent) = start(&scratch, &client);
     let mut lines = vec![sent, calls(&scratch)];
@@ -2075,13 +2073,13 @@ fn send_over_the_connection_held() {
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
-            the connections: 0 600, 0-0 600, 0-1 600, 1.log 600, lock 600, upload 600"#]],
+            the connections: 0 600, 0-0 600, 0-1 600, 1.log 600, found 600, lock 600, upload 600"#]],
     );
 }
 
 #[test]
 fn send_refusals() {
-    let scratch = Scratch::new("controller-send-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let mut lines = Vec::new();
     for name in [&b"repo/stand-in/a\nb"[..], b"repo/stand-in/\xff"] {
@@ -2120,7 +2118,7 @@ fn send_refusals() {
 
 #[test]
 fn send_changed_file() {
-    let scratch = Scratch::new("controller-send-changed");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     // Shortened once it is hashed, as the first call to the controller begins.
@@ -2159,7 +2157,7 @@ fn send_changed_file() {
 
 #[test]
 fn send_bundle_and_gone() {
-    let scratch = Scratch::new("controller-send-gone");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     let (_, first) = start(&scratch, &client);
@@ -2206,7 +2204,7 @@ fn send_bundle_and_gone() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn store_collection() {
-    let scratch = Scratch::new("controller-store-collection");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
@@ -2354,7 +2352,7 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn follow_carries_on() {
-    let scratch = Scratch::new("controller-follow-carries-on");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000001");
@@ -2459,7 +2457,7 @@ fn follow_carries_on() {
 
 #[test]
 fn follow_cut_often() {
-    let scratch = Scratch::new("controller-follow-cut-often");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000002");
@@ -2517,7 +2515,7 @@ fn follow_cut_often() {
 
 #[test]
 fn follow_cut_before_a_line() {
-    let scratch = Scratch::new("controller-follow-cut-before-a-line");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000003");
@@ -2559,8 +2557,51 @@ fn follow_cut_before_a_line() {
 }
 
 #[test]
+fn master_opened_again() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000004");
+    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
+    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
+    let calls = calls.lines().count();
+    // As the `wait` finds the run, its master ends, and the follow's opening of it is closed once.
+    let (socket, refused) = (
+        scratch.0.join(SHARED).join("0"),
+        scratch.0.join("bin/refused-0"),
+    );
+    scratch.write(
+        &format!("bin/before-{}", calls + 1),
+        &format!("rm '{}'\ntouch '{}'\n", socket.display(), refused.display()),
+    );
+    let waited = on_client(&scratch, &client, &["wait", &id])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(waited.stderr).unwrap();
+    let mut shown: Vec<&str> = stderr
+        .lines()
+        .take_while(|line| !line.starts_with("pumpkin: following run"))
+        .collect();
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let openings = format!(
+        "openings: {}",
+        argv.lines().filter(|arg| *arg == "-N").count()
+    );
+    shown.push(&openings);
+    check(
+        &scratch,
+        &shown.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            pumpkin: connection 0 to controller `alice` didn't get through, as `ssh` said: Connection closed by UNKNOWN port 65535: opening it again now, attempt 2 of 8
+            line 01 of 01
+            openings: 2"#]],
+    );
+}
+
+#[test]
 fn follow_prints_the_outcome() {
-    let scratch = Scratch::new("controller-follow-prints-the-outcome");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000004");
@@ -2652,7 +2693,7 @@ fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> S
 
 #[test]
 fn ls_answered_there() {
-    let scratch = Scratch::new("controller-ls-there");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
@@ -2721,7 +2762,7 @@ fn ls_answered_there() {
 
 #[test]
 fn ls_lists_other_formats_unread() {
-    let scratch = Scratch::new("controller-ls-unread");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
@@ -2749,7 +2790,7 @@ fn ls_lists_other_formats_unread() {
 
 #[test]
 fn ls_installs_its_serve_there() {
-    let scratch = Scratch::new("controller-ls-installs");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     write_record(
@@ -2810,7 +2851,7 @@ fn ls_installs_its_serve_there() {
 
 #[test]
 fn ls_carries_on_after_a_cut() {
-    let scratch = Scratch::new("controller-ls-cut");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let hex = served(&scratch);
@@ -2842,11 +2883,15 @@ fn ls_carries_on_after_a_cut() {
 
 #[test]
 fn ls_refusals() {
-    let scratch = Scratch::new("controller-ls-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
     let mut steps = Vec::new();
+    // No master answers, and nothing does where the controller was found, so it is found again,
+    // which the stand-in `aws` refuses.
+    scratch.write("bin/unanswered-0", "");
+    steps.push(ls_ran(&scratch, &client, &[]));
     scratch.write("bin/answer", "Welcome to the controller!\n");
     steps.push(ls_ran(&scratch, &client, &[]));
     // A run of this build that doesn't read, beside one that does.
@@ -2870,6 +2915,9 @@ fn ls_refusals() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(1)
+            pumpkin: controller `alice` didn't answer SSH at 255.255.255.255, where it was last found: Network is unreachable (os error 101); finding it again: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
+            $ pumpkin ls
+            exit status: Some(1)
             pumpkin: linking to controller `alice` failed: its hello is no frame that `pumpkin controller serve` sends: a frame's message is 1466264675 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to
             $ pumpkin ls
             exit status: Some(1)
@@ -2887,7 +2935,7 @@ fn ls_refusals() {
 
 #[test]
 fn ls_fails_at_once_when_serve_ends() {
-    let scratch = Scratch::new("controller-ls-serve-ends");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let hex = sha256(&fs::read(PUMPKIN).unwrap());
@@ -2934,7 +2982,7 @@ fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
 
 #[test]
 fn serve_refusals() {
-    let scratch = Scratch::new("controller-serve-refusals");
+    let scratch = Scratch::new();
     let mut steps = vec!["no request:".to_owned(), serve_fed(&scratch, b"")];
     let mut past = (u32::try_from(schema::frame::MAX_MESSAGE_BYTES).unwrap() + 1)
         .to_be_bytes()
@@ -3023,7 +3071,7 @@ fn copied_record(
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy() {
-    let scratch = Scratch::new("controller-record-copy");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let id = id_ago(0, "0d000001");
@@ -3214,7 +3262,7 @@ fn record_copy() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy_refusals() {
-    let scratch = Scratch::new("controller-record-copy-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let id = id_ago(0, "0d000002");
@@ -3296,7 +3344,7 @@ fn record_copy_refusals() {
               pumpkin: controller `alice` listed `f 1 1000000000.0000000000 ../x` as a file or a directory of run <id>'s record, which names none below it, so nothing of it is copied: see what `~/.pumpkin/runs/<id>` holds there
             more files than it takes: exit status: 1
               pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
-              pumpkin: run <id>'s record on controller `alice` holds over 100000 files and directories, more than a copy takes: in a shell on it (`aws ssm start-session`), pack the directories of `~/.pumpkin/runs/<id>` that hold the most into an archive each (`tar --create --remove-files`), then run the command again
+              pumpkin: run <id>'s record on controller `alice` holds over 100000 files and directories, more than a copy takes: in a shell on it (`ssh -i <scratch>/client/.config/pumpkin/ssh/key -o UserKnownHostsFile=<scratch>/client/.config/pumpkin/ssh/known_hosts -o HostKeyAlias=alice.us-west-1 pumpkin@255.255.255.255`), pack the directories of `~/.pumpkin/runs/<id>` that hold the most into an archive each (`tar --create --remove-files`), then run the command again
             a member above it: exit status: 1
               pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
               pumpkin: extracting run <id>'s record, as controller `alice` sent it, failed (exit status: 2), as said above
@@ -3367,7 +3415,7 @@ fn got(served: &Served, path: &str, fields: &[&str]) -> String {
 
 #[test]
 fn views_the_controllers_runs_over_a_reopened_connection() {
-    let scratch = Scratch::new("controller-views-runs");
+    let scratch = Scratch::new();
     let (client, driver, [ended, live]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3411,7 +3459,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
 
 #[test]
 fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
-    let scratch = Scratch::new("controller-views-lost");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3433,7 +3481,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
+            "asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             next: 309222, end: 309222"#]],
@@ -3442,7 +3490,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
 
 #[test]
 fn view_answers_502_for_a_reply_it_cant_read() {
-    let scratch = Scratch::new("controller-views-unread");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let hex = served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3484,19 +3532,53 @@ fn view_answers_502_for_a_reply_it_cant_read() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: a frame's message is 65537 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to"
+            "linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: a frame's message is 65537 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
+            "linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
+            "linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
+    );
+}
+
+#[test]
+fn view_asks_ec2_once_no_link_opens() {
+    let scratch = Scratch::new();
+    let (client, driver, [ended, _]) = viewed(&scratch);
+    let hex = served(&scratch);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
+    // A `serve` that ends before its hello, so that no link opens; then EC2 is asked, which the
+    // stand-in `aws` refuses.
+    let exe = scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin"));
+    let aside = scratch.0.join("aside");
+    fs::rename(&exe, &aside).unwrap();
+    scratch.write_executable(
+        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
+        b"#!/bin/sh\n",
+    );
+    let window = format!("/api/runs/{ended}/log?at=0");
+    let mut steps = vec![got(&served, &window, &["end"])];
+    fs::rename(&aside, &exe).unwrap();
+    steps.push(got(&served, &window, &["end"]));
+    drop(driver);
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(ended, "<ended>")],
+        &expect![[r#"
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 502 Bad Gateway
+            "linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why; asking EC2 whether it runs failed too: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports"
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 200 OK
+            end: 309222"#]],
     );
 }
 
 #[test]
 fn view_installs_its_serve_there() {
-    let scratch = Scratch::new("controller-view-installs");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let window = format!("/api/runs/{ended}/log?at=0");
@@ -3529,10 +3611,45 @@ fn view_installs_its_serve_there() {
     );
 }
 
+// Each is refused before EC2 is asked, which the stand-in `aws` doesn't answer.
+#[test]
+fn view_refuses_a_start_but_from_its_page() {
+    let scratch = Scratch::new();
+    let (client, driver, _) = viewed(&scratch);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
+    let page = format!("http://127.0.0.1:{}", served.port);
+    let start = "/api/controller/start";
+    let mut steps = Vec::new();
+    for (method, headers) in [
+        ("GET", &[][..]),
+        ("POST", &[("Origin", "http://pumpkin.example")]),
+        ("POST", &[("Origin", &page), ("X-Pumpkin-Token", "")]),
+    ] {
+        let (status, body) = served.ask(method, start, headers);
+        steps.push(format!("{method} {start} {headers:?}\n{status}\n{body}"));
+    }
+    drop(driver);
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&page, "<page>")],
+        &expect![[r#"
+            GET /api/controller/start []
+            HTTP/1.1 405 Method Not Allowed
+            {"error":"the controller's start is sent by `POST`, as the page sends it: start it from the page that `pumpkin view` serves, or run a command that reaches it, which starts it: pumpkin ls"}
+            POST /api/controller/start [("Origin", "http://pumpkin.example")]
+            HTTP/1.1 403 Forbidden
+            {"error":"the controller's start comes from `http://pumpkin.example`, a page of another site: start it from the page that `pumpkin view` serves, or run a command that reaches it, which starts it: pumpkin ls"}
+            POST /api/controller/start [("Origin", "<page>"), ("X-Pumpkin-Token", "")]
+            HTTP/1.1 401 Unauthorized
+            {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}"#]],
+    );
+}
+
 // The stand-in controller has no job of the run, which is what the cancel says.
 #[test]
 fn view_cancels_on_the_controller() {
-    let scratch = Scratch::new("controller-view-cancels");
+    let scratch = Scratch::new();
     let (client, driver, [_, live]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));

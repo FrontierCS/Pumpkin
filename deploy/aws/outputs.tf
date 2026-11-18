@@ -36,9 +36,11 @@ output "client_config" {
   value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\n"
 }
 
-# What the person's machine needs to reach the controller: find it by its tag, start it, wait
-# until SSM sees it, push the machine's key for the controller's user, and open SSH sessions
-# through SSM's `AWS-StartSSHSession` alone, which the access check holds it to.
+# What the person's machine needs to reach the controller: find it by its tag, start it, and push
+# the machine's key for the controller's user, then reach its `sshd` from `ssh_from`. The SSM
+# grants are for the clients of the last tag, which open SSH sessions through SSM's
+# `AWS-StartSSHSession` alone, as the access check holds them to, until the controller is made
+# anew.
 resource "aws_iam_policy" "client" {
   name        = "${local.prefix}-client"
   description = "What the machine of a person needs to reach its Pumpkin controller"

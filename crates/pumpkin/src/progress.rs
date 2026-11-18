@@ -401,11 +401,9 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
         Ending::Returned { values, after: _ } if !values.is_empty() => {
             format!("{task}: {}", shown_values(values))
         }
-        Ending::Returned { .. }
-        | Ending::NoResult(_)
-        | Ending::Failed(_)
-        | Ending::Interrupted(_)
-        | Ending::Lost => task.to_owned(),
+        Ending::Returned { .. } | Ending::NoResult(_) | Ending::Stopped(_) | Ending::Lost => {
+            task.to_owned()
+        }
     };
     column(state, ran.as_deref().unwrap_or("-"), "-", &usd, &rest)
 }

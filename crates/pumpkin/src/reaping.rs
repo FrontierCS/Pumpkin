@@ -366,6 +366,7 @@ fn reap_rest(record: &Record, providers: &[(&Name, &dyn Sweep)]) -> Result<bool,
         ended,
         sockets,
         lost,
+        failed: unswept,
     } = reap.map_err(failed)?;
     let mut left = sockets.is_some() || lost || !ended.is_empty();
     for (name, ids) in &sandboxes {
@@ -398,6 +399,9 @@ fn reap_rest(record: &Record, providers: &[(&Name, &dyn Sweep)]) -> Result<bool,
             "run {id} was lost, as its driver ended without an outcome.json: it is now recorded \
              as failed"
         ));
+    }
+    if let Some(error) = unswept {
+        return Err(failed(error));
     }
     Ok(left)
 }

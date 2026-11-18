@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -440,7 +440,7 @@ fn ready(startup_seconds: NonZeroU64) -> Ready {
 }
 
 impl Sweep for Sim {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         let (mut deleted, mut failures) = (Vec::new(), Vec::new());
         let mut state = self.state();
         let named = |id: &str| ids.iter().any(|ours| ours.as_str() == id);
@@ -462,22 +462,29 @@ impl Sweep for Sim {
             state = self.state();
         }
         state.deleting += 1;
-        for id in ids.iter().map(SandboxId::as_str) {
+        for sandbox_id in ids {
+            let id = sandbox_id.as_str();
             let found = state.sandboxes.get_mut(id);
             match found.map(|sandbox| (sandbox.of(run), sandbox.refusals > 0, sandbox)) {
                 None => {}
-                Some((false, _, _)) => failures.push(format!(
-                    "{id} is another run's sandbox, not run {}'s, so the simulated provider left \
-                     it: name only the run's own",
-                    run.as_str()
+                Some((false, _, _)) => failures.push((
+                    sandbox_id.clone(),
+                    format!(
+                        "{id} is another run's sandbox, not run {}'s, so the simulated provider \
+                         left it: name only the run's own",
+                        run.as_str()
+                    ),
                 )),
                 Some((true, true, sandbox)) => {
                     if sandbox.refusals != u32::MAX {
                         sandbox.refusals -= 1;
                     }
-                    failures.push(format!(
-                        "{id} can't be deleted by the simulated provider: create one with another \
-                         `sandboxd`"
+                    failures.push((
+                        sandbox_id.clone(),
+                        format!(
+                            "{id} can't be deleted by the simulated provider: create one with \
+                             another `sandboxd`"
+                        ),
                     ));
                 }
                 Some((true, false, _)) => deleted.extend(state.sandboxes.remove_entry(id)),
@@ -497,11 +504,7 @@ impl Sweep for Sim {
             stop(sandbox);
         }
         self.state().deleting -= 1;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        Undeleted::of(failures)
     }
 
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {

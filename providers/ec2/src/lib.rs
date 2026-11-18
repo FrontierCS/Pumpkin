@@ -27,7 +27,7 @@ use aws::{Bound, Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
 use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
@@ -238,7 +238,7 @@ impl Ec2<'_> {
 }
 
 impl Sweep for Ec2<'_> {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         self.reached.delete(run, ids)
     }
 

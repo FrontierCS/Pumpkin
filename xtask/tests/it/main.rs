@@ -9,6 +9,7 @@
 use std::error::Error;
 
 use expect_test::{Expect, expect};
+use test_support::TestDir;
 use xshell::{Shell, cmd};
 
 #[path = "../../src/diff.rs"]
@@ -39,16 +40,8 @@ enum Standing {
 
 /// Writes `files`, each a path, its text and how it stands, into a new Git repository, and runs
 /// `run` there; the repository's path shows as `<repo>`.
-fn check(
-    name: &str,
-    files: &[(&str, String, Standing)],
-    run: impl FnOnce(&Shell) -> String,
-    expect: &Expect,
-) {
-    let scratch = tempfile::Builder::new()
-        .prefix(&format!("xtask-{name}-"))
-        .tempdir()
-        .unwrap();
+fn check(files: &[(&str, String, Standing)], run: impl FnOnce(&Shell) -> String, expect: &Expect) {
+    let scratch = TestDir::new();
     let dir = scratch.path();
     let sh = Shell::new().unwrap();
     sh.change_dir(dir);
@@ -136,7 +129,6 @@ fn caps() {
         lines("        /// A line.", 10)
     );
     check(
-        "caps",
         &[
             ("at_caps.rs", at_caps, Tracked),
             ("behind_attribute.rs", behind_attribute, Tracked),
@@ -195,7 +187,6 @@ fn forms() {
     );
     let invalid = "fn f() {\n    let c = 'ab';\n}\n".to_owned();
     check(
-        "forms",
         &[
             ("example.rs", example, Tracked),
             ("strings.rs", strings, Tracked),
@@ -233,7 +224,6 @@ fn unreachable() {
                     // debug_assert!(x)\n    let _ = \"debug_assert!(x)\";\n    debug_assert(x);\n}\n"
         .to_owned();
     check(
-        "unreachable",
         &[
             ("bare.rs", bare, Tracked),
             ("messages.rs", messages, Tracked),
@@ -269,7 +259,6 @@ fn test_docs() {
                  // One.\n// Two.\n// Three.\nfn helper_three() {}\n"
         .to_owned();
     check(
-        "test-docs",
         &[("tests.rs", tests, Tracked)],
         tidy,
         &expect![[r#"
@@ -317,7 +306,6 @@ fn comments() {
                     let _ = r#\"\n// let x = 1;\n\"#;\n    let _ = '/';\n    let _ = 1 / 2;\n}\n"
         .to_owned();
     check(
-        "comments",
         &[
             ("markers.rs", markers, Tracked),
             ("code.rs", code, Tracked),
@@ -364,7 +352,6 @@ fn restated() {
                 #[doc = \"A lease.\"]\nstruct LeaseRow;\n"
         .to_owned();
     check(
-        "restated",
         &[("docs.rs", docs, Tracked)],
         tidy,
         &expect![[r#"
@@ -385,7 +372,6 @@ fn architecture() {
                [`main.rs`](src/main.rs) in [`src`](src/).\n"
         .to_owned();
     check(
-        "architecture",
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("AGENTS.md", "# Agents\n".to_owned(), Tracked),
@@ -427,7 +413,6 @@ fn figures() {
         .to_owned();
     let manifest = "[package]\nname = \"a-crate\"\n\n[[bin]]\nname = \"a-bin\"\n".to_owned();
     check(
-        "figures",
         &[
             ("ARCHITECTURE.md", map, Tracked),
             ("docs/dev/guide.md", guide, Tracked),
@@ -491,7 +476,6 @@ fn figure_of_crates() {
     ]})
     .to_string();
     check(
-        "figure-of-crates",
         &[],
         |sh| {
             let stale = figure::check(sh, &metadata).unwrap_err();
@@ -541,7 +525,6 @@ fn test_data() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let file = |path| (path, "data\n".to_owned(), Tracked);
     check(
-        "test-data",
         &[
             file("crates/a/tests/it/main.rs"),
             file("crates/a/tests/it/records/outcome.json"),
@@ -580,7 +563,6 @@ fn long_files() {
                     \"src/split.rs\" = 1001\n\
                     \"src/gone.rs\" = 1001\n";
     check(
-        "long-files",
         &[
             (".config/tidy.toml", ceilings.to_owned(), Tracked),
             ("src/at_cap.rs", rust(1000), Tracked),
@@ -609,7 +591,6 @@ fn diff() {
     use Standing::{Deleted, Ignored, Tracked, Untracked};
     let again = "cargo xtask mutants --in-diff HEAD";
     check(
-        "diff",
         &[
             ("changed.rs", "fn f() {}\n".to_owned(), Tracked),
             ("deleted.rs", "fn d() {}\n".to_owned(), Deleted),

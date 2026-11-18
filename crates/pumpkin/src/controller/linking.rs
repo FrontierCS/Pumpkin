@@ -2,7 +2,9 @@
 //! master: the `serve` is uploaded there first if it has none, and a link that is cut is the
 //! caller's to open again, as only what reads goes over it.
 
+use std::collections::BTreeSet;
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use schema::ir::Sha256Digest;
@@ -52,13 +54,18 @@ pub(super) struct Linked {
 
 impl Linked {
     /// Opens a link to the `serve` of `build` there, uploading `build`'s executable first if the
-    /// controller has none.
-    pub(super) fn open(reached: &Reached, build: &Build) -> Result<Self, Unlinked> {
-        if let Some(linked) = Self::connect(reached, build)? {
+    /// controller has none; an opening of a connection that doesn't get through is made up to
+    /// `openings` times in all.
+    pub(super) fn open(
+        reached: &Reached,
+        build: &Build,
+        openings: NonZeroU32,
+    ) -> Result<Self, Unlinked> {
+        if let Some(linked) = Self::connect(reached, build, openings)? {
             return Ok(linked);
         }
         install(reached, build)?;
-        Self::connect(reached, build)?.ok_or_else(|| {
+        Self::connect(reached, build, openings)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
@@ -100,8 +107,13 @@ impl Linked {
     }
 
     /// `None` if the controller has no `serve` of `build`.
-    fn connect(reached: &Reached, build: &Build) -> Result<Option<Self>, Unlinked> {
-        let Session { command, slot } = reached.ssh(&link::command(&build.digest))?;
+    fn connect(
+        reached: &Reached,
+        build: &Build,
+        openings: NonZeroU32,
+    ) -> Result<Option<Self>, Unlinked> {
+        let slot = reached.slot_opening(&BTreeSet::new(), openings)?;
+        let Session { command, slot } = reached.session(&link::command(&build.digest), slot);
         match Link::open(command) {
             Ok(link) => Ok(link.map(|link| Self { link, slot })),
             Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),

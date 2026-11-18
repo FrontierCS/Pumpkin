@@ -76,7 +76,7 @@ fn write_bench(scratch: &Scratch, recipe: &str, label: &str) {
     reason = "most of it is the cases and their snapshot"
 )]
 fn refusals() {
-    let scratch = Scratch::new("lock-refusals");
+    let scratch = Scratch::new();
     let debs = recipe().replace("AS apt", "AS debs");
     write_bench(
         &scratch,
@@ -204,7 +204,7 @@ fn refusals() {
 #[test]
 #[ignore = "needs Docker and snapshot.ubuntu.com: run cargo xtask live docker"]
 fn locks() {
-    let scratch = Scratch::new("lock-locks");
+    let scratch = Scratch::new();
     let label = format!("pumpkin.test=lock-{}", std::process::id());
     let _images = Labelled(label.clone());
     write_bench(&scratch, &recipe(), &label);

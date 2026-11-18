@@ -39,7 +39,7 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::process::Environment;
-use test_support::hung;
+use test_support::{TestDir, hung};
 
 const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 
@@ -72,19 +72,15 @@ struct Sandbox {
     arrivals: Receiver<Arrival>,
     sandboxd: Child,
     commands: Cell<u32>,
+    dir: TestDir,
 }
 
 impl Sandbox {
     fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
-        let root = tempfile::Builder::new()
-            // Kept if the test fails.
-            .prefix("sandboxd-")
-            .tempdir()
-            .unwrap()
-            .keep();
+        let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
-        let root = fs::canonicalize(root).unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
         let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
         if let Some(script) = nvidia_smi {
             sandboxd.env("PATH", stand_in(&root, script));
@@ -147,6 +143,7 @@ impl Sandbox {
             arrivals,
             sandboxd,
             commands: Cell::new(0),
+            dir,
         }
     }
 
@@ -314,6 +311,7 @@ impl Sandbox {
             arrivals,
             mut sandboxd,
             commands: _,
+            dir,
         } = self;
         drop(session);
         // The meeting ends with the session it opened.
@@ -335,7 +333,7 @@ impl Sandbox {
                 .status()
                 .unwrap();
         }
-        fs::remove_dir_all(root).unwrap();
+        drop(dir);
         lines
     }
 }
@@ -1330,12 +1328,8 @@ fn ended(mut sandboxd: Child) -> String {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn as_root_with_user() {
-    let root = tempfile::Builder::new()
-        // Kept if the test fails.
-        .prefix("sandboxd-")
-        .tempdir()
-        .unwrap()
-        .keep();
+    let scratch = TestDir::new();
+    let root = scratch.path();
     let sockets = Sockets::create(root.join("sockets")).unwrap();
     let name = Name::try_from("as-root".to_owned()).unwrap();
     let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
@@ -1370,7 +1364,6 @@ fn as_root_with_user() {
         after freezing: /sbin/docker-init -- /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s, /.pumpkin/sandboxd --user 1234:1235 /.pumpkin/gateway/s"#]]
     .assert_eq(&lines.join("\n"));
     drop(sockets);
-    fs::remove_dir_all(root).unwrap();
 }
 
 fn start_as_root(dir: &Path, container: &str, user: &str) {

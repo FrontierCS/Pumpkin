@@ -131,7 +131,7 @@ fn how(ending: &Ending) -> String {
     match ending {
         Ending::Returned { values, after } => crate::ending::returned(values, after),
         Ending::NoResult(why) => why.clone(),
-        Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
+        Ending::Stopped(stopped) => stopped.to_string(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),
     }
 }

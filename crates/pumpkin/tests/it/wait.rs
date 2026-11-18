@@ -19,7 +19,7 @@ use super::{
     reason = "most of it is the cases and their snapshot"
 )]
 fn waits() {
-    let scratch = Scratch::new("waits");
+    let scratch = Scratch::new();
     let finished = |result: Value, status: Value| {
         let work_end = json!({ "kind": "agent_exited", "status": status });
         let verdict = json!({ "kind": "returned", "result": result, "submission": submission() });
@@ -218,7 +218,7 @@ fn end_run(scratch: &Scratch, id: &str, outcome: &Value) {
 
 #[test]
 fn follows() {
-    let scratch = Scratch::new("follows");
+    let scratch = Scratch::new();
     let id = "20261107-120000-1b8a6389";
     write_record(&scratch, id, true, None);
     let driver = File::open(scratch.0.join(format!("runs/{id}/driver.pid"))).unwrap();
@@ -258,7 +258,7 @@ fn follows() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn states() {
-    let scratch = Scratch::new("states");
+    let scratch = Scratch::new();
     let unsubmitted =
         r#"{"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}"#;
     let returned = returned(7.0).to_string();
@@ -477,7 +477,7 @@ fn states() {
             pumpkin: runs/<unknown signal, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -486,7 +486,7 @@ fn states() {
             pumpkin: runs/<unknown signal, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -504,7 +504,7 @@ fn states() {
             pumpkin: runs/<unknown state, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -513,7 +513,7 @@ fn states() {
             pumpkin: runs/<unknown state, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -556,7 +556,7 @@ fn states() {
     reason = "most of it is the steps and their snapshot"
 )]
 fn summarizes() {
-    let scratch = Scratch::new("summarizes");
+    let scratch = Scratch::new();
     // A run that went the whole way, priced but for its box's class, whose train call was stopped,
     // with model requests over budget.
     let whole = "20261110-100000-0000000a";
@@ -778,7 +778,7 @@ fn summarizes() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
 fn follows_milestones() {
-    let scratch = Scratch::new("follows-milestones");
+    let scratch = Scratch::new();
     let id = "20261110-100000-0000000a";
     let priced = lease_places(Prices::Both);
     let mut log = over_budget();
@@ -855,7 +855,7 @@ fn follows_milestones() {
 // A follower whose standard error has closed ends at the next line it says, though the run goes on.
 #[test]
 fn follower_without_its_client() {
-    let scratch = Scratch::new("follower-without-its-client");
+    let scratch = Scratch::new();
     let id = "20261110-100000-0000000b";
     let dir = write_run(
         &scratch,
@@ -906,7 +906,7 @@ fn follower_without_its_client() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn final_call_logs() {
-    let scratch = Scratch::new("final-call-logs");
+    let scratch = Scratch::new();
     let no_result = |failure: Value| {
         json!({
             "state": "finished",
@@ -992,7 +992,7 @@ fn final_call_logs() {
 
 #[test]
 fn reads_a_deep_result_and_a_log_cut_short() {
-    let scratch = Scratch::new("reads-a-deep-result");
+    let scratch = Scratch::new();
     let mut steps = Vec::new();
     // A final call's return of the most depth that a body's return may have, its dict included.
     let (id, depth) = ("20261113-123335-0000000a", RESULT_MAX_DEPTH);
@@ -1087,7 +1087,7 @@ fn deep_call(depth: usize) -> [Value; 3] {
 // the delete of each sandbox the core never ended, which the summary says.
 #[test]
 fn summarizes_an_interrupted_run() {
-    let scratch = Scratch::new("summarizes-an-interrupted-run");
+    let scratch = Scratch::new();
     let id = "20261113-123335-5ea1ea5f";
     let deleted = |seconds, sandbox: &str| {
         let event = json!({ "kind": "sandbox_deleted", "sandbox": sandbox });
