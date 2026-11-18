@@ -30,6 +30,8 @@ pub(super) enum Stage {
     Interrupted,
     /// A run that ended with no `outcome.json`.
     Lost,
+    /// A run whose record another build made, which this one can't read.
+    Unread,
     /// A run that publishes its images, before its log has begun, which the totals count as
     /// running.
     Publishing,
@@ -89,6 +91,7 @@ impl Row {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
+            | Stage::Unread
             | Stage::Publishing
             | Stage::Finished { .. } => "",
         }
@@ -102,7 +105,8 @@ impl Row {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
-            | Stage::Unstarted => false,
+            | Stage::Unstarted
+            | Stage::Unread => false,
         }
     }
 
@@ -116,7 +120,8 @@ impl Row {
             | Stage::Publishing
             | Stage::Running { .. }
             | Stage::Lost
-            | Stage::Unstarted => false,
+            | Stage::Unstarted
+            | Stage::Unread => false,
         }
     }
 
@@ -130,7 +135,8 @@ impl Row {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
-            | Stage::Unstarted => false,
+            | Stage::Unstarted
+            | Stage::Unread => false,
         }
     }
 }
@@ -141,6 +147,7 @@ impl Stage {
             Listed::Waiting { .. } => return Self::Waiting,
             Listed::Building { .. } => return Self::Building,
             Listed::Unstarted => return Self::Unstarted,
+            Listed::Unread(_) => return Self::Unread,
             Listed::Run(run) => run,
         };
         match &run.ending {
@@ -172,6 +179,7 @@ impl Stage {
             Self::Failed => State::Failed,
             Self::Interrupted => State::Interrupted,
             Self::Lost => State::Lost,
+            Self::Unread => State::Unread,
         }
     }
 }

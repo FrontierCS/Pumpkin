@@ -15,7 +15,7 @@ use std::{env, fmt, fs};
 use driver::ARGV0;
 use engine::{ContextName, Engine};
 use provider::UnixTime;
-use runtime::Record;
+use runtime::{ReadError, Record};
 use rustix::fs::Mode;
 use rustix::process::umask;
 use stdx::Context;
@@ -220,8 +220,9 @@ fn unix_now() -> UnixTime {
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
 /// how many can't be listed, each said as it is found. A run that ended before `since` is listed
-/// as older. Each row is made at `now`, with its commands naming `named` as the runs directory. A
-/// `runs` that is missing is an empty listing unless `named` names it.
+/// as older, and one that another build made and this can't read is an `unread` row. Each row is
+/// made at `now`, with its commands naming `named` as the runs directory. A `runs` that is missing
+/// is an empty listing unless `named` names it.
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
@@ -234,26 +235,35 @@ fn listed_in(
         return Ok((listing, 0));
     }
     let mut unlisted = 0;
-    for record in Record::all(runs)? {
-        if let Ok(record) = &record
-            && !picked(prefixes, record.id())
-        {
+    for (id, record) in Record::all(runs)? {
+        if !picked(prefixes, &id) {
             continue;
         }
-        let run = record.and_then(|record| {
-            let id = record.id().to_owned();
-            if let Some(since) = since
-                && ended(record.dir())?.is_some_and(|ended| ended < since)
-            {
-                return Ok((id, progress::Entry::Older));
+        let listed = record
+            .and_then(|record| {
+                if let Some(since) = since
+                    && ended(record.dir())?.is_some_and(|ended| ended < since)
+                {
+                    return Ok(None);
+                }
+                progress::Listed::run(&record, record.ending()?).map(Some)
+            })
+            .or_else(|error| {
+                let dir = runs.join(&id);
+                if let Some(since) = since
+                    && ended(&dir)?.is_some_and(|ended| ended < since)
+                {
+                    return Ok(None);
+                }
+                progress::Listed::unread(&dir, error).map(Some)
+            });
+        match listed {
+            Ok(Some(listed)) => {
+                let row = progress::Row::of(&id, &listed, now, named);
+                listing.runs.insert(id, progress::Entry::Row(row));
             }
-            let listed = progress::Listed::run(&record, record.ending()?)?;
-            let row = progress::Row::of(&id, &listed, now, named);
-            Ok((id, progress::Entry::Row(row)))
-        });
-        match run {
-            Ok((id, entry)) => {
-                listing.runs.insert(id, entry);
+            Ok(None) => {
+                listing.runs.insert(id, progress::Entry::Older);
             }
             Err(error) => {
                 say(error);
@@ -264,13 +274,13 @@ fn listed_in(
     Ok((listing, unlisted))
 }
 
-fn ended(dir: &Path) -> Result<Option<UnixTime>, String> {
+fn ended(dir: &Path) -> Result<Option<UnixTime>, ReadError> {
     let outcome = dir.join("outcome.json");
     let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
     match modified {
         Ok(modified) => Ok(Some(UnixTime::of(modified).unwrap_or(EPOCH))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{}: {error}", outcome.display())),
+        Err(error) => Err(ReadError::Failed(format!("{}: {error}", outcome.display()))),
     }
 }
 

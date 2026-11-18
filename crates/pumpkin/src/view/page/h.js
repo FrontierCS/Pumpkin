@@ -434,9 +434,10 @@ export function usd(usd) {
  */
 export const plural = (count, noun, nouns = noun + "s") => count.toLocaleString("en-US") + " " + (count === 1 ? noun : nouns);
 
-// The state a run's mark takes its colour from: a finish without a result is a warning, not an ok.
+// The state a run's mark takes its colour from: a finish without a result is a warning, not an ok,
+// and an unread run's mark is the plain one, as the class `unread` hides an empty element.
 /** @param {{ live: boolean, state: string, has_result: boolean }} run */
-export const tone = (run) => (run.live ? "live" : run.state === "finished" && !run.has_result ? "warn" : run.state);
+export const tone = (run) => (run.live ? "live" : run.state === "finished" && !run.has_result ? "warn" : run.state === "unread" ? "" : run.state);
 
 // `text` with its first letter a capital, for a phrase that starts with a name from the records,
 // such as a run's state.

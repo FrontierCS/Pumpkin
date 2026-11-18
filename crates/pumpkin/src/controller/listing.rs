@@ -78,11 +78,11 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
             // The lock that says a run is live is the controller's, so its copy here is read as
             // live.
             "live" => copied(&reached.name, (&sent, &live), id, from)
-                .and_then(|id| runtime::Record::open(&live.join(id.as_str())))
-                .and_then(|record| crate::progress::Listed::run(&record, None)),
+                .and_then(|id| Ok(runtime::Record::open(&live.join(id.as_str()))?))
+                .and_then(|record| Ok(crate::progress::Listed::run(&record, None)?)),
             "ended" => copied(&reached.name, (&sent, &live), id, from)
                 .and_then(|id| keep(&live, &kept, &id))
-                .and_then(|record| crate::progress::Listed::run(&record, record.ending()?)),
+                .and_then(|record| Ok(crate::progress::Listed::run(&record, record.ending()?)?)),
             _ => Err(format!(
                 "controller `{}` listed `{}`, which is none of the lines that its listing prints",
                 reached.name,
@@ -148,7 +148,7 @@ fn keep(live: &Path, kept: &Path, id: &RunTag) -> Result<runtime::Record, String
     let to = kept.join(id.as_str());
     let moved = fs::create_dir_all(kept).and_then(|()| fs::rename(live.join(id.as_str()), &to));
     moved.map_err(|error| format!("{}: {error}: {}", to.display(), afresh(live, id)))?;
-    runtime::Record::open(&to)
+    Ok(runtime::Record::open(&to)?)
 }
 
 fn afresh(live: &Path, id: &RunTag) -> String {

@@ -7,9 +7,9 @@ use schema::ir::Name;
 use schema::sandbox::ExitStatus;
 use serde::Deserialize;
 use serde_json::Value;
-use stdx::Context;
 
 use crate::log::{self, outcome};
+use crate::read_error::{ReadError, form, read_optional};
 
 /// Whether a run finished, failed or was interrupted, as its `outcome.json` says, and nothing of
 /// how.
@@ -25,20 +25,20 @@ impl State {
     /// The state that the `outcome.json` of the record `dir` gives; `None` while it has none.
     /// Reads nothing of the file but `state`, so a record whose ending this build doesn't read
     /// still gives its state.
-    pub(super) fn read(dir: &Path) -> Result<Option<Self>, String> {
+    pub(super) fn read(dir: &Path) -> Result<Option<Self>, ReadError> {
         let path = dir.join("outcome.json");
         let outcome = read_outcome(&path)?;
         outcome.map(|outcome| Self::of(&outcome, &path)).transpose()
     }
 
     /// The state that `outcome`, the `outcome.json` at `path`, gives.
-    pub(super) fn of(outcome: &Value, path: &Path) -> Result<Self, String> {
+    pub(super) fn of(outcome: &Value, path: &Path) -> Result<Self, ReadError> {
         Self::deserialize(&outcome["state"]).map_err(|_| {
-            format!(
+            ReadError::Form(format!(
                 "{}'s state is not one pumpkin knows: expected `finished`, `failed` or \
                  `interrupted`",
                 path.display()
-            )
+            ))
         })
     }
 }
@@ -66,18 +66,18 @@ pub enum Ending {
 }
 
 /// The `outcome.json` at `path`, parsed; `None` while there is none.
-pub(super) fn read_outcome(path: &Path) -> Result<Option<Value>, String> {
-    let Some(bytes) = super::read_optional(path)? else {
+pub(super) fn read_outcome(path: &Path) -> Result<Option<Value>, ReadError> {
+    let Some(bytes) = read_optional(path)? else {
         return Ok(None);
     };
-    let outcome = serde_json::from_slice(&bytes).context(path.display())?;
+    let outcome = serde_json::from_slice(&bytes).map_err(form(path.display()))?;
     Ok(Some(outcome))
 }
 
-pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, String> {
+pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, ReadError> {
     let read = outcome::Finished::deserialize(outcome).map_err(|error| {
         let path = dir.join("outcome.json");
-        format!("{} doesn't read: {error}", path.display())
+        ReadError::Form(format!("{} doesn't read: {error}", path.display()))
     })?;
     let outcome::Finished { work_end, verdict } = read;
     let ended = match work_end {

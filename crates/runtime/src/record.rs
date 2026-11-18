@@ -46,15 +46,19 @@ use stdx::Context;
 
 use super::log::{self, LogFold, Place, Readout, Used};
 use super::model::{KeptPart, KeptRequest};
+use super::read_error::{ReadError, failed, form, open_required, read_optional};
 use super::sandbox::sweep;
 use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 
 mod ending;
 mod payload;
+mod writer;
 
 pub use ending::Ending;
 use ending::{State, finished, read_outcome};
 pub(super) use payload::reference;
+pub use writer::{Writer, writer};
+use writer::{read_record_json, writer_of};
 
 const LOST: &str = "its driver ended without an outcome";
 
@@ -130,17 +134,6 @@ fn write_build(
         Some((hash, date)) => write!(f, "{version} ({hash:.9} {date})"),
         None => f.write_str(version),
     }
-}
-
-fn shown(build: &Value) -> Option<String> {
-    let version = build["version"].as_str()?;
-    let commit = match &build["commit"] {
-        Value::Null => None,
-        commit => Some((commit["hash"].as_str()?, commit["date"].as_str()?)),
-    };
-    let mut shown = String::new();
-    write_build(&mut shown, version, commit).ok()?;
-    Some(shown)
 }
 
 /// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
@@ -327,64 +320,41 @@ pub struct Reaped {
 
 impl Record {
     /// Opens the record in `dir`, whose name is the run's id. Fails if `dir` holds no
-    /// `record.json`, or one that isn't this build's `record_version`.
-    pub fn open(dir: &Path) -> Result<Self, String> {
+    /// `record.json`, or one that isn't this build's `record_version`, which is a
+    /// [`ReadError::Form`].
+    pub fn open(dir: &Path) -> Result<Self, ReadError> {
         let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
-            return Err(format!(
+            return Err(ReadError::Failed(format!(
                 "`{}` names no directory: expected the directory of a run's record",
                 dir.display()
-            ));
+            )));
         };
         let path = dir.join("record.json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound && !dir.is_dir() => {
-                return Err(format!(
-                    "{} is not a directory: expected the directory of a run's record",
-                    dir.display()
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "{} has no record.json, so it is no run's record: expected the directory \
-                     of one that `pumpkin run` made",
-                    dir.display()
-                ));
-            }
-            Err(error) => return Err(error).context(path.display()),
-        };
-        let record: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
+        let record = read_record_json(dir, &path)?;
         if record["record_version"] != RECORD_VERSION {
-            return Err(format!(
+            return Err(ReadError::Form(format!(
                 "{} holds record_version {}: expected \"{RECORD_VERSION}\", which this \
                  `pumpkin` reads",
                 path.display(),
                 record["record_version"]
-            ));
+            )));
         }
         let args = serde_json::from_value(record["args"].clone()).map_err(|_| {
-            format!(
+            ReadError::Form(format!(
                 "{} holds args {}: expected an array of strings, the words that started the run",
                 path.display(),
                 record["args"]
-            )
+            ))
         })?;
-        let other_build = match &record["pumpkin"] {
-            Value::Null => None,
-            build if *build == BUILD.json() => None,
-            build => Some(shown(build).ok_or_else(|| {
-                format!(
-                    "{} holds pumpkin {build}: expected the build that made it, \
-                     {{\"version\": v, \"commit\": c}}",
-                    path.display()
-                )
-            })?),
+        let other_build = match writer_of(&path, &record)? {
+            Writer::Other(build) => Some(build),
+            Writer::This | Writer::Older => None,
         };
         let absolute = std::path::absolute(dir).map_err(|error| {
-            format!(
+            ReadError::Failed(format!(
                 "the record {} can't be made absolute ({error}): name it by its absolute path",
                 dir.display()
-            )
+            ))
         })?;
         Ok(Self {
             id: id.to_owned(),
@@ -398,21 +368,22 @@ impl Record {
     pub fn find(runs: &Path, run: &str) -> Result<Self, String> {
         let names = names(runs)?;
         let id = named(&names, run, &format!("in {}", runs.display()))?;
-        Self::open(&runs.join(id))
+        Ok(Self::open(&runs.join(id))?)
     }
 
-    /// Opens each record in `runs`, in the order of their ids; a directory that holds no
-    /// `record.json` is skipped, and one that doesn't open is an error in its place.
-    pub fn all(runs: &Path) -> Result<Vec<Result<Self, String>>, String> {
-        let mut records = Vec::new();
+    /// Opens each record in `runs`, by its id; a directory that holds no `record.json` is
+    /// skipped, and one that doesn't open is an error in its place.
+    pub fn all(runs: &Path) -> Result<BTreeMap<String, Result<Self, ReadError>>, String> {
+        let mut records = BTreeMap::new();
         for name in names(runs)? {
             let dir = runs.join(&name);
             let has = dir.join("record.json").try_exists();
-            match has.context(dir.display()) {
-                Ok(false) => {}
-                Ok(true) => records.push(Self::open(&dir)),
-                Err(error) => records.push(Err(error)),
-            }
+            let record = match has.map_err(failed(dir.display())) {
+                Ok(false) => continue,
+                Ok(true) => Self::open(&dir),
+                Err(error) => Err(error),
+            };
+            records.insert(name, record);
         }
         Ok(records)
     }
@@ -441,33 +412,33 @@ impl Record {
     }
 
     /// The name of the workflow, or `None` if `ir.json` isn't written.
-    pub fn task(&self) -> Result<Option<String>, String> {
+    pub fn task(&self) -> Result<Option<String>, ReadError> {
         let path = self.dir.join("ir.json");
         let Some(bytes) = read_optional(&path)? else {
             return Ok(None);
         };
-        let ir: Value = serde_json::from_slice(&bytes).context(path.display())?;
+        let ir: Value = serde_json::from_slice(&bytes).map_err(form(path.display()))?;
         match ir["name"].as_str() {
             Some(name) => Ok(Some(name.to_owned())),
-            None => Err(format!(
+            None => Err(ReadError::Form(format!(
                 "{} holds no name: expected a workflow's IR",
                 path.display()
-            )),
+            ))),
         }
     }
 
     /// The workflow's IR, or `None` if `ir.json` isn't written.
-    pub fn ir(&self) -> Result<Option<ir::Workflow>, String> {
+    pub fn ir(&self) -> Result<Option<ir::Workflow>, ReadError> {
         log::ir_in(&self.dir)
     }
 
     /// Where each role is placed, by the role's name, or `None` if `provider.json` isn't written.
-    pub fn places(&self) -> Result<Option<BTreeMap<String, Place>>, String> {
+    pub fn places(&self) -> Result<Option<BTreeMap<String, Place>>, ReadError> {
         let path = self.dir.join("provider.json");
         let Some(bytes) = read_optional(&path)? else {
             return Ok(None);
         };
-        let provided: Value = serde_json::from_slice(&bytes).context(path.display())?;
+        let provided: Value = serde_json::from_slice(&bytes).map_err(form(path.display()))?;
         Ok(Some(log::places(&provided)))
     }
 
@@ -480,7 +451,7 @@ impl Record {
     }
 
     /// What the whole run log says now.
-    pub fn progress(&self) -> Result<Readout, String> {
+    pub fn progress(&self) -> Result<Readout, ReadError> {
         log::progress(&self.dir)
     }
 
@@ -554,7 +525,7 @@ impl Record {
 
     /// How the run ended, or was lost, as [`wait`](Self::wait) finds it; `None` while the run is
     /// live. Does not wait.
-    pub fn ending(&self) -> Result<Option<Ending>, String> {
+    pub fn ending(&self) -> Result<Option<Ending>, ReadError> {
         let (pid, pid_path) = self.pid_file()?;
         // An `outcome.json` is the record's last write, so it decides before the lock does.
         if let Some(ending) = self.ended()? {
@@ -563,7 +534,7 @@ impl Record {
         match pid.try_lock_shared() {
             Ok(()) => Ok(Some(self.ended()?.unwrap_or(Ending::Lost))),
             Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(error)) => Err(error).context(pid_path.display()),
+            Err(TryLockError::Error(error)) => Err(failed(pid_path.display())(error)),
         }
     }
 
@@ -777,7 +748,7 @@ impl Record {
     /// Each role's model route as `provider.json` records it, by the role's name, each entry in the
     /// route's order; a role that the table leaves out has no route. `None` if the record's build
     /// kept no routes, which says nothing of which roles have one.
-    pub fn routes(&self) -> Result<Option<BTreeMap<String, Vec<RouteEntry>>>, String> {
+    pub fn routes(&self) -> Result<Option<BTreeMap<String, Vec<RouteEntry>>>, ReadError> {
         #[derive(serde::Deserialize)]
         struct Provided {
             routes: Option<BTreeMap<String, Vec<Entry>>>,
@@ -793,8 +764,8 @@ impl Record {
             upstream_name: String,
         }
         let path = self.dir.join("provider.json");
-        let bytes = fs::read(&path).context(path.display())?;
-        let Provided { routes } = serde_json::from_slice(&bytes).context(path.display())?;
+        let bytes = fs::read(&path).map_err(failed(path.display()))?;
+        let Provided { routes } = serde_json::from_slice(&bytes).map_err(form(path.display()))?;
         let entry = |entry: Entry| {
             let Entry {
                 api,
@@ -820,24 +791,24 @@ impl Record {
 
     /// What the run used, as its `outcome.json` records it; `None` while it has none, or if it has
     /// one without what the run used, as a reap writes of a lost run.
-    pub fn used(&self) -> Result<Option<Used>, String> {
+    pub fn used(&self) -> Result<Option<Used>, ReadError> {
         let path = self.dir.join("outcome.json");
         let Some(outcome) = read_outcome(&path)? else {
             return Ok(None);
         };
         match outcome.get("usage") {
             None => Ok(None),
-            Some(usage) => log::used(usage).map(Some).context(path.display()),
+            Some(usage) => log::used(usage).map(Some).map_err(form(path.display())),
         }
     }
 
-    fn pid_file(&self) -> Result<(File, PathBuf), String> {
+    fn pid_file(&self) -> Result<(File, PathBuf), ReadError> {
         let path = self.dir.join("driver.pid");
-        let pid = File::open(&path).context(path.display())?;
+        let pid = open_required(&path)?;
         Ok((pid, path))
     }
 
-    fn ended(&self) -> Result<Option<Ending>, String> {
+    fn ended(&self) -> Result<Option<Ending>, ReadError> {
         let path = self.dir.join("outcome.json");
         let Some(outcome) = read_outcome(&path)? else {
             return Ok(None);
@@ -851,11 +822,11 @@ impl Record {
             State::Interrupted => {
                 let signal = outcome["signal"].as_str().and_then(Signal::named);
                 let signal = signal.ok_or_else(|| {
-                    format!(
+                    ReadError::Form(format!(
                         "{}'s signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or \
                          `SIGHUP`",
                         path.display()
-                    )
+                    ))
                 })?;
                 let stopped = Stopped::Interrupted(signal);
                 Ok(Some(Ending::Interrupted(stopped.to_string())))
@@ -874,15 +845,6 @@ pub struct RouteEntry {
     /// The name that the upstream takes for each model the entry allows, by the name the route
     /// allows.
     pub models: BTreeMap<String, String>,
-}
-
-/// The bytes of `path`, or `None` if there is no such file.
-pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context(path.display()),
-    }
 }
 
 fn names(runs: &Path) -> Result<Vec<String>, String> {

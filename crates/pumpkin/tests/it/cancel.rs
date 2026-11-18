@@ -131,7 +131,7 @@ fn cancels() {
             pumpkin: no run in runs matches `nothing`: name an id, a unique prefix of an id or of its random digits, or a record's path
             $ pumpkin cancel 20261108-120200-0b000003 --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/20261108-120200-0b000003/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/20261108-120200-0b000003/driver.pid isn't there: expected the record of a run to have it
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin cancel 20261108-120300-0c000004 --runs runs
             exit status: Some(3)
             pumpkin: run 20261108-120300-0c000004's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120300-0c000004, to stop reaping it

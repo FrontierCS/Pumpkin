@@ -6,11 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
+    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
+    Sandbox, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -79,8 +81,18 @@ pub(crate) enum Listed {
     /// A job on the controller that has ended, whose run has no record in the controller's runs
     /// directory.
     Unstarted,
+    /// A run whose record this `pumpkin` can't read, made by another build.
+    Unread(Unread),
     /// A run whose record is begun.
     Run(Box<Run>),
+}
+
+/// The build that made a record that this `pumpkin` can't read.
+pub(crate) enum Unread {
+    /// A build shown as a [`runtime::Build`] is.
+    Build(String),
+    /// A build from before records named theirs.
+    Older,
 }
 
 pub(crate) struct Run {
@@ -93,12 +105,27 @@ pub(crate) struct Run {
 impl Listed {
     /// The run of `record`, which says on the standard error what of its log this `pumpkin`
     /// can't read.
-    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, String> {
+    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, ReadError> {
         let Readout { progress, unread } = record.progress()?;
         if let Some(unread) = self::unread(&unread) {
             crate::say(format_args!("run {}: {unread}", record.id()));
         }
         Ok(Self::of(record, record.task()?, ending, progress))
+    }
+
+    /// The run in `dir`, whose record failed to read with `error`, if the record is in a form
+    /// that this build doesn't read and another build made it; else `error`.
+    pub(crate) fn unread(dir: &Path, error: ReadError) -> Result<Self, String> {
+        match error {
+            // A record that couldn't be read says nothing of its form, whoever made it.
+            ReadError::Failed(error) => Err(error),
+            ReadError::Form(error) => match runtime::writer(dir) {
+                Ok(Writer::Other(build)) => Ok(Self::Unread(Unread::Build(build))),
+                Ok(Writer::Older) => Ok(Self::Unread(Unread::Older)),
+                // Only a bug or a damaged file makes this build fail to read its own record.
+                Ok(Writer::This) | Err(_) => Err(error),
+            },
+        }
     }
 
     pub(crate) fn of(
@@ -127,6 +154,7 @@ pub(crate) enum State {
     Interrupted,
     Lost,
     Unstarted,
+    Unread,
 }
 
 impl State {
@@ -140,6 +168,7 @@ impl State {
             Self::Interrupted => "interrupted",
             Self::Lost => "lost",
             Self::Unstarted => "unstarted",
+            Self::Unread => "unread",
         }
     }
 }
@@ -207,7 +236,7 @@ fn prefixes(ids: &[&str]) -> Vec<String> {
     vec![common.to_owned()]
 }
 
-pub(crate) fn unread(unread: &[Unread]) -> Option<String> {
+pub(crate) fn unread(unread: &[runtime::Unread]) -> Option<String> {
     let first = unread.first()?;
     Some(format!(
         "{} of its log can't be read by this pumpkin, the first at {}",
@@ -247,6 +276,7 @@ impl Totals {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
+            | Stage::Unread
             | Stage::Publishing => {}
         }
         match spent {
@@ -333,6 +363,13 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
                 next::of_run("wait", runs, id)
             );
             return column(state, "-", "", "-", &why);
+        }
+        Listed::Unread(unread) => {
+            let made = match unread {
+                Unread::Build(build) => format!("made by pumpkin {build}"),
+                Unread::Older => "made by an older pumpkin".to_owned(),
+            };
+            return column(state, "-", "", "-", &made);
         }
         Listed::Run(run) => run,
     };
@@ -757,7 +794,7 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
             }
         }
         Err(error) => {
-            let error = crate::escaped(&error);
+            let error = crate::escaped(&error.to_string());
             let _ = writeln!(summary, "  its budgets can't be read: {error}");
         }
     }

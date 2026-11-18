@@ -17,14 +17,14 @@ use schema::ir::{Api, Gpu};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 use serde_json::Value;
-use stdx::Context;
 
 use super::Direction;
 use super::call::{CallEnd, CallOf, CallSpan};
 use super::logged::{self, CommandOf, Line};
 use super::roles::{Grant, Roles};
+use crate::TokenPrices;
+use crate::read_error::{ReadError, form, read_optional};
 use crate::sandbox::SandboxName;
-use crate::{TokenPrices, record};
 
 /// Where a sandbox runs: a class of a provider, each by the name that `provider.json` gives it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -341,7 +341,7 @@ pub(super) fn readout(
     roles: Option<&Roles>,
     reading: Reading,
     unread: Vec<Unread>,
-) -> Result<Readout, String> {
+) -> Result<Readout, ReadError> {
     let (Some(roles), Some((started, hard_end))) = (roles, reading.started) else {
         return Ok(Readout {
             progress: None,
@@ -395,9 +395,9 @@ pub(super) fn readout(
 }
 
 /// The JSON in `path`, or `null` if there is no such file.
-pub(super) fn json_file(path: &Path) -> Result<Value, String> {
-    match record::read_optional(path)? {
-        Some(bytes) => serde_json::from_slice(&bytes).context(path.display()),
+pub(super) fn json_file(path: &Path) -> Result<Value, ReadError> {
+    match read_optional(path)? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(form(path.display())),
         None => Ok(Value::Null),
     }
 }
@@ -416,7 +416,7 @@ pub(crate) fn places(provided: &Value) -> BTreeMap<String, Place> {
     places.collect()
 }
 
-fn deleted(dir: &Path) -> Result<Option<bool>, String> {
+fn deleted(dir: &Path) -> Result<Option<bool>, ReadError> {
     let sandbox = json_file(&dir.join("sandbox.json"))?;
     Ok((!sandbox.is_null()).then(|| sandbox["delete"]["state"] == "deleted"))
 }

@@ -1,6 +1,7 @@
 //! `ls`, which lists the runs in their states.
 
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
+use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use expect_test::expect;
@@ -61,7 +62,7 @@ fn lists() {
         &expect![[r#"
             $ pumpkin ls --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/20261107-120600-7130006/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/20261107-120600-7130006/driver.pid isn't there: expected the record of a run to have it
             pumpkin: 1 run can't be listed, as said above
             printed:
               20261107-120000-1b8a6389 finished          -  -               -  examples/hello: score=7 metrics={"solved":3}
@@ -76,6 +77,81 @@ fn lists() {
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
             $ pumpkin ls
             exit status: Some(0)"#]],
+    );
+}
+
+#[test]
+fn lists_other_builds_unread() {
+    let scratch = Scratch::new("lists-other-builds-unread");
+    let made = |id: &str, build: Value| {
+        let record = json!({ "record_version": "pumpkin.record/v0", "pumpkin": build, "args": [] });
+        scratch.write(&format!("runs/{id}/record.json"), &record);
+        scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
+    };
+    let other =
+        json!({ "version": "9.9.9", "commit": { "hash": "0f3a2b1c9d8e", "date": "2026-11-08" } });
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a6389",
+        true,
+        Some(returned(7.0)),
+    );
+    // An outcome that this build doesn't know, from a build that does.
+    made("20261107-120100-2c9b0001", other.clone());
+    scratch.write(
+        "runs/20261107-120100-2c9b0001/outcome.json",
+        &json!({ "state": "judged" }),
+    );
+    // A record version that is not this build's.
+    scratch.write(
+        "runs/20261107-120200-3d0c0002/record.json",
+        &json!({ "record_version": "pumpkin.record/v9", "pumpkin": other, "args": [] }),
+    );
+    // An older record that doesn't read: it names no build.
+    made("20261107-120300-4e1d0003", Value::Null);
+    scratch.write(
+        "runs/20261107-120300-4e1d0003/outcome.json",
+        &json!({ "state": "judged" }),
+    );
+    let ls = || {
+        Step::Ran(ran(
+            scratch.pumpkin(&["ls", "--runs", "runs"]),
+            &scratch.0,
+            false,
+        ))
+    };
+    let unread = ls();
+    // Another build's record that the kernel won't let this build read says nothing of its form:
+    // it is an error, not an unread row.
+    let denied = "20261107-120400-5f2e0004";
+    made(denied, other);
+    let outcome = format!("runs/{denied}/outcome.json");
+    scratch.write(&outcome, &json!({ "state": "failed", "reason": "r" }));
+    fs::set_permissions(scratch.0.join(outcome), Permissions::from_mode(0o000)).unwrap();
+    check(
+        &scratch,
+        [unread, ls()],
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              20261107-120000-1b8a6389 finished          -  -               -  -: score=7 metrics={"solved":3}
+              20261107-120100-2c9b0001 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+              20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+              20261107-120300-4e1d0003 unread            -                  -  made by an older pumpkin
+              4 runs: 1 finished, 3 unread
+            $ pumpkin ls --runs runs
+            exit status: Some(1)
+            pumpkin: <scratch>/runs/20261107-120400-5f2e0004/outcome.json: Permission denied (os error 13)
+            pumpkin: 1 run can't be listed, as said above
+            printed:
+              20261107-120000-1b8a6389 finished          -  -               -  -: score=7 metrics={"solved":3}
+              20261107-120100-2c9b0001 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+              20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+              20261107-120300-4e1d0003 unread            -                  -  made by an older pumpkin
+              4 runs: 1 finished, 3 unread"#]],
     );
 }
 
@@ -97,6 +173,21 @@ fn lists_the_last_day() {
     ended("20261106-120000-1b8a0001", 2);
     ended("20261107-110000-1b8a0002", 3);
     ended("20261107-120000-1b8a0003", 0);
+    // Another build's run that this build can't read, which ended over a day ago too.
+    let unread = "20261106-130000-2c9b0004";
+    let other = json!({ "version": "9.9.9", "commit": null });
+    let record = json!({ "record_version": "pumpkin.record/v0", "pumpkin": other, "args": [] });
+    scratch.write(&format!("runs/{unread}/record.json"), &record);
+    scratch.write(&format!("runs/{unread}/driver.pid"), "4242\n");
+    scratch.write(
+        &format!("runs/{unread}/outcome.json"),
+        &json!({ "state": "judged" }),
+    );
+    let outcome = scratch.0.join(format!("runs/{unread}/outcome.json"));
+    let outcome = File::options().write(true).open(outcome).unwrap();
+    outcome
+        .set_modified(SystemTime::now() - Duration::from_hours(48))
+        .unwrap();
     let ls = |args: &[&str]| {
         let mut ls = scratch.pumpkin(&["ls", "--runs", "runs"]);
         ls.args(args);
@@ -112,20 +203,21 @@ fn lists_the_last_day() {
         false,
         &[],
         &expect![[r#"
-        $ pumpkin ls --runs runs
-        exit status: Some(0)
-        printed:
-          20261107-120000-1b8a0003 failed            -  -               -  -
-          1 run: 1 failed; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110
-        $ pumpkin ls --runs runs 20261106
-        exit status: Some(0)
-        printed:
-          20261106-120000-1b8a0001 failed            -  -               -  -
-          1 run: 1 failed
-        $ pumpkin ls --runs runs
-        exit status: Some(0)
-        printed:
-          no run is live, or ended within a day; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110"#]],
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              20261107-120000-1b8a0003 failed            -  -               -  -
+              1 run: 1 failed; 3 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110
+            $ pumpkin ls --runs runs 20261106
+            exit status: Some(0)
+            printed:
+              20261106-120000-1b8a0001 failed            -  -               -  -
+              20261106-130000-2c9b0004 unread            -                  -  made by pumpkin 9.9.9
+              2 runs: 1 failed, 1 unread
+            $ pumpkin ls --runs runs
+            exit status: Some(0)
+            printed:
+              no run is live, or ended within a day; 3 runs that ended over a day ago aren't listed: to list them: pumpkin ls --runs <scratch>/runs 2026110"#]],
     );
 }
 

@@ -1014,7 +1014,7 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     ];
     scratch.write(
         &format!("runs/{id}/record.json"),
-        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+        &json!({ "record_version": "pumpkin.record/v0", "pumpkin": this_build(), "args": args }),
     );
     if pid {
         scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
@@ -1022,6 +1022,19 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     if let Some(outcome) = outcome {
         scratch.write(&format!("runs/{id}/outcome.json"), &outcome);
     }
+}
+
+/// What a record made by this build names as its `pumpkin`.
+fn this_build() -> Value {
+    let build = runtime::BUILD;
+    let commit = build.commit_hash().map(|hash| {
+        let shown = build.to_string();
+        let date = shown.trim_end_matches(')').rsplit(' ').next().unwrap();
+        json!({ "hash": hash, "date": date })
+    });
+    let version = build.to_string();
+    let version = version.split(' ').next().unwrap();
+    json!({ "version": version, "commit": commit })
 }
 
 /// `write_on` with a `docker` that says it has no context `gone`, as Docker's command line does.
