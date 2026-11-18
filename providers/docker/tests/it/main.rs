@@ -229,7 +229,10 @@ impl Drop for Fixture {
                     eprintln!("the logs of run {} can't be shown: {error}", run.as_str());
                 }
                 let listed = provider.list(run);
-                let deleted = listed.and_then(|listed| provider.delete(run, &ids(listed)));
+                let deleted = listed.and_then(|listed| {
+                    let deleted = provider.delete(run, &ids(listed));
+                    deleted.map_err(|error| error.to_string())
+                });
                 if let Err(error) = deleted {
                     eprintln!("run {} can't be cleaned up: {error}", run.as_str());
                 }

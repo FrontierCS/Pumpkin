@@ -21,7 +21,7 @@ use expect_test::{Expect, expect};
 use gateway::{Dialer, GatewayAddress, GrantListener};
 use provider::{
     Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
-    RunTag, SandboxId, SandboxdRef, Sweep,
+    RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use route::Serving;
 use runtime::{Host, ModelRoutes, Record, Recorded, Run, System, TokenPrices, new_id};
@@ -95,7 +95,7 @@ fn interrupt() {
 }
 
 impl Sweep for Interrupting<'_> {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         self.at(At::Delete);
         if self.at == Some(At::SwapPayloads) {
             let payloads = fs::read_dir(self.record.join("payloads")).unwrap();
@@ -279,12 +279,18 @@ enum Also {
     Exchanges,
     ChangedItem,
     Polls,
+    Reaped,
 }
 
 fn interruption(also: &[Also]) -> Option<At> {
     also.iter().find_map(|also| match also {
         Also::Interrupted(at) => Some(*at),
-        Also::Listing | Also::Usage | Also::Exchanges | Also::ChangedItem | Also::Polls => None,
+        Also::Listing
+        | Also::Usage
+        | Also::Exchanges
+        | Also::ChangedItem
+        | Also::Polls
+        | Also::Reaped => None,
     })
 }
 
@@ -366,6 +372,9 @@ fn executed_ir<H: Shown>(
     }
     lines.extend((also.contains(&Also::ChangedItem)).then(|| changed_item(&record)));
     assert!(!sockets.exists(), "{name}: its socket directories are left");
+    if also.contains(&Also::Reaped) {
+        lines.extend(reaped(&record, providers));
+    }
     lines.extend(left(name, providers, &tag.unwrap()));
     for hung_up in hung_ups {
         // A run whose stream stalled has started. The stand-in reads the clock after the hang-up,
@@ -746,6 +755,29 @@ fn declared(name: &str, record: &Path, providers: &[(&str, &Sim)]) -> Vec<String
             "provider.json places the roles: {}",
             recorded["roles"]
         ));
+    }
+    lines
+}
+
+// What a reap of the ended run on `providers` returns, and each line of its `reaps.jsonl`.
+fn reaped(record: &Path, providers: &[(&str, &Sim)]) -> Vec<String> {
+    let names = providers.iter().map(|(name, _)| (*name).to_owned());
+    let names: Vec<ir::Name> = names
+        .map(|name| ir::Name::try_from(name).unwrap())
+        .collect();
+    let sweeps = (names.iter().zip(providers)).map(|(name, (_, sim))| (name, *sim as &dyn Sweep));
+    let reaped = Record::open(record)
+        .unwrap()
+        .reap(&sweeps.collect::<Vec<_>>());
+    let mut lines = vec![match reaped {
+        Ok(_) => "reaped".to_owned(),
+        Err(error) => format!("reaped: {error}"),
+    }];
+    let reaps = fs::read_to_string(record.join("reaps.jsonl")).unwrap_or_default();
+    for line in reaps.lines() {
+        let mut line: Value = serde_json::from_str(line).unwrap();
+        line["at_ns"] = json!("<ns>");
+        lines.push(format!("reaps.jsonl: {line}"));
     }
     lines
 }
@@ -1463,6 +1495,72 @@ fn interrupted_call_start() {
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
             its last record came before the agent's teardown was to end"#]],
     );
+}
+
+#[test]
+fn interrupted_with_one_undeletable() {
+    // The run's sweep deletes both sandboxes at once, and fails only the agent's.
+    let mut judged = ops_workflow(&["ops", "call train 6", "await 0 completed"], WAITED);
+    judged["roles"][0]["image"] = json!(sim::image(UNDELETABLE).as_str());
+    judged["roles"][1]["image"] = json!(sim::image(HUNG).as_str());
+    interrupted(
+        "one-undeletable",
+        WAITED,
+        &judged,
+        SANDBOXD,
+        At::Created("job-0"),
+        &expect![[r#"
+            failed: SIGTERM interrupted the run; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`
+            it started: true
+            it returned within 60 s: true
+            it published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000", "image sha256:2f73696d2f68756e670000000000000000000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
+            payloads hold: ["xxxxxx"]
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+            {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":3}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":4}
+            {"at_ns":"<ns>","note":"the run failed: SIGTERM interrupted the run; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":5}
+            its last record came before the agent's teardown was to end
+            listed once it ended: ["sim-1"]"#]],
+    );
+}
+
+#[test]
+fn reaped_past_one_undeletable() {
+    // The run's sweep fails both sandboxes, and the reap's deletes the agent's alone.
+    let mut judged = ops_workflow(&["ops", "call train 6", "await 0 completed"], WAITED);
+    judged["roles"][0]["image"] = json!(sim::image(REFUSED_ONCE).as_str());
+    judged["roles"][1]["image"] = json!(sim::image(UNDELETABLE).as_str());
+    let provider = Sim::with_startup(WAITED);
+    let shown = executed(
+        &System,
+        "reaped-past-one-undeletable",
+        &[(PROVIDER, &provider)],
+        &judged,
+        SANDBOXD,
+        &[Also::Interrupted(At::Created("job-0")), Also::Reaped],
+    );
+    expect![[r#"
+        failed: SIGTERM interrupted the run; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
+        it started: true
+        it returned within 60 s: true
+        it published: ["sandboxd /sim/sandboxd", "image sha256:2f73696d2f726566757365642d6f6e6365000000000000000000000000000000", "image sha256:2f73696d2f756e64656c657461626c6500000000000000000000000000000000", "image sha256:2222222222222222222222222222222222222222222222222222222222222222"]
+        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"failed"},"id":"sim-1","provider":"simulated"}
+        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-2","provider":"simulated"}
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agent"}],"at_ns":"<ns>","event":{"hard_end_ns":"420000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":2}
+        {"at_ns":"<ns>","note":"the run was interrupted by SIGTERM","seq":3}
+        {"at_ns":"<ns>","note":"the run failed: SIGTERM interrupted the run; deleting the sandboxes the run left on provider `simulated` failed: sim-1 can't be deleted by the simulated provider: create one with another `sandboxd`; sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":4}
+        its last record came before the agent's teardown was to end
+        reaped: deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
+        reaps.jsonl: {"at_ns":"<ns>","id":"sim-1","provider":"simulated","reaped":"removed"}
+        listed once it ended: ["sim-2"]"#]].assert_eq(&shown);
 }
 
 #[test]
