@@ -1,11 +1,9 @@
 //! `@pumpkin//harness/zcode/zcode.star`'s `zcode()`: the agent role it gives for each set of
 //! arguments, and the arguments it refuses.
 
-use std::fmt::Write as _;
-
 use expect_test::expect;
 
-use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
+use super::{FCS_PROMPT, check_refusals, check_roles};
 
 /// The arguments `zcode()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 2] = [
@@ -48,29 +46,20 @@ fn roles() {
             "32000",
         ],
     ];
-    let mut shown = String::new();
-    for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(&entry("zcode", &OWN), &args(&OWN, case)).unwrap();
-        let [model, effort, workspace, _, _, _, context, output] = case;
-        let (agent, runtime) = agent(&workflow, case);
-        assert_eq!(runtime.stdin, None);
-        let _ = writeln!(shown, "{model} {effort} {workspace} {context} {output}:");
-        // Each file's whole text, but in the last case, whose files differ from the first's
-        // only in the values the case names.
-        shown.push_str(&show(runtime, |file| {
+    // Each file's whole text, but in the last case, whose files differ from the first's
+    // only in the values the case names.
+    check_roles(
+        "zcode",
+        &OWN,
+        &cases,
+        false,
+        |index, file| {
             if index == 2 {
                 String::new()
             } else {
                 format!("{}\n", file.content)
             }
-        }));
-        shown.push_str(&route(agent));
-        if index == 0 {
-            shown.push_str(&layer(agent, &images));
-        }
-    }
-    check(
-        &shown,
+        },
         &expect![[r#"
             glm-5.3 max /workspace 1048576 262144:
             argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd /workspace --disallowed-tools WebSearch,WebFetch "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
@@ -120,7 +109,6 @@ fn roles() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn refusals() {
     let given = [
         "model-small",
@@ -132,35 +120,19 @@ fn refusals() {
         "200000",
         "32000",
     ];
-    let mut refused = Vec::new();
-    for (effort, workspace, prompt, context, output) in [
-        ("medium", "/workspace", "Go.", "200000", "32000"),
-        ("High", "/workspace", "Go.", "200000", "32000"),
-        ("high", "/pumpkin/home", "Go.", "200000", "32000"),
-        ("high", "/workspace", "", "200000", "32000"),
-        ("high", "/workspace", "Go.", "0", "32000"),
-        ("high", "/workspace", "Go.", "200000", "0"),
-    ] {
-        let case = [
-            given[0], effort, workspace, prompt, given[4], given[5], context, output,
-        ];
-        refused.push(evaluated(&entry("zcode", &OWN), &args(&OWN, &case)).unwrap_err());
-    }
-    // Each argument that ZCode checks given `None`, as a task's `arg(…, default = None)` gives
-    // it when no one passes one.
-    for (argument, value) in [
-        ("prompt = PROMPT,", "prompt = None,"),
-        ("context_tokens = CONTEXT_TOKENS,", "context_tokens = None,"),
-        (
-            "max_output_tokens = MAX_OUTPUT_TOKENS,",
-            "max_output_tokens = None,",
-        ),
-    ] {
-        let entry = entry("zcode", &OWN).replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
-    }
-    check(
-        &refused.join("\n"),
+    check_refusals(
+        "zcode",
+        &OWN,
+        &given,
+        &[
+            ("effort", "medium"),
+            ("effort", "High"),
+            ("workspace", "/pumpkin/home"),
+            ("prompt", ""),
+            ("context_tokens", "0"),
+            ("max_output_tokens", "0"),
+        ],
+        &["prompt"],
         &expect![[r#"
             @pumpkin//harness/zcode/zcode.star:59:9: fail: `medium` is not a reasoning level of ZCode's: use one of low, high, max
                 59 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -189,18 +161,6 @@ fn refusals() {
             @pumpkin//harness/zcode/zcode.star:61:9: fail: ZCode runs only on a prompt: give a string that is not empty
                 61 |         fail("ZCode runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:62:23: `<` can't take `None` and an int: give it two numbers or two strings
-                62 |     if context_tokens < 1:
-                   |                       ^
-                the left operand, `None`, is made at task.star:24:22
-                the right operand, `1`, is made at @pumpkin//harness/zcode/zcode.star:62:25
-                in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:64:26: `<` can't take `None` and an int: give it two numbers or two strings
-                64 |     if max_output_tokens < 1:
-                   |                          ^
-                the left operand, `None`, is made at task.star:25:25
-                the right operand, `1`, is made at @pumpkin//harness/zcode/zcode.star:64:28
                 in `zcode()`, called at task.star:16:9"#]],
     );
 }

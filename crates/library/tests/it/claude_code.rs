@@ -1,11 +1,9 @@
 //! `@pumpkin//harness/claude_code/claude_code.star`'s `claude_code()`: the agent role it gives
 //! for each set of arguments, and the arguments it refuses.
 
-use std::fmt::Write as _;
-
 use expect_test::expect;
 
-use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
+use super::{FCS_PROMPT, check_refusals, check_roles};
 
 /// The arguments `claude_code()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 1] = [("max_output_tokens", r#"arg("max_output_tokens", int)"#)];
@@ -54,25 +52,12 @@ fn roles() {
             "32000",
         ]);
     }
-    let mut shown = String::new();
-    for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(&entry("claude_code", &OWN), &args(&OWN, case)).unwrap();
-        let [model, effort, workspace, prompt, _, _, max] = case;
-        let (agent, runtime) = agent(&workflow, case);
-        assert_eq!(runtime.stdin.as_deref(), Some(*prompt));
-        assert!(
-            runtime.files.is_empty(),
-            "Claude Code reads no file of ours"
-        );
-        let _ = writeln!(shown, "{model} {effort} {workspace} {max}:");
-        shown.push_str(&show(runtime, |_| String::new()));
-        shown.push_str(&route(agent));
-        if index == 0 {
-            shown.push_str(&layer(agent, &images));
-        }
-    }
-    check(
-        &shown,
+    check_roles(
+        "claude_code",
+        &OWN,
+        &cases,
+        true,
+        |_, _| String::new(),
         &expect![[r#"
             claude-opus-5-5 max /workspace 64000:
             argv: /harness/claude-code-2.1.296/claude --print --model claude-opus-5-5 --effort max --output-format text --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --strict-mcp-config --mcp-config {"mcpServers":{}} --setting-sources ""
@@ -140,7 +125,6 @@ fn roles() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn refusals() {
     let given = [
         "model-small",
@@ -151,54 +135,19 @@ fn refusals() {
         "0",
         "32000",
     ];
-    let mut refused = Vec::new();
-    for (effort, workspace, prompt, max) in [
-        ("extreme", "/workspace", "Go.", "32000"),
-        ("High", "/workspace", "Go.", "32000"),
-        ("high", "/pumpkin/home", "Go.", "32000"),
-        ("high", "work", "Go.", "32000"),
-        ("high", "/workspace", "", "32000"),
-        ("high", "/workspace", "Go.", "0"),
-    ] {
-        let case = [given[0], effort, workspace, prompt, given[4], given[5], max];
-        refused.push(evaluated(&entry("claude_code", &OWN), &args(&OWN, &case)).unwrap_err());
-    }
-    // Each argument given `None`, as a task's `arg(…, default = None)` gives it when no one
-    // passes one, and given a value of another type.
-    for (argument, value) in [
-        ("BASE,", "None,"),
-        ("model = MODEL,", "model = None,"),
-        ("effort = EFFORT,", "effort = None,"),
-        ("workspace = WORKSPACE,", "workspace = None,"),
-        ("prompt = PROMPT,", "prompt = None,"),
-        (
-            "deadline_seconds = DEADLINE_SECONDS,",
-            "deadline_seconds = None,",
-        ),
-        (
-            "finalize_grace_seconds = FINALIZE_GRACE_SECONDS,",
-            "finalize_grace_seconds = None,",
-        ),
-        (
-            "max_output_tokens = MAX_OUTPUT_TOKENS,",
-            "max_output_tokens = None,",
-        ),
-        ("model = MODEL,", "model = 5,"),
-        ("prompt = PROMPT,", "prompt = [PROMPT],"),
-        (
-            "deadline_seconds = DEADLINE_SECONDS,",
-            "deadline_seconds = \"60\",",
-        ),
-        (
-            "max_output_tokens = MAX_OUTPUT_TOKENS,",
-            "max_output_tokens = \"128000\",",
-        ),
-    ] {
-        let entry = entry("claude_code", &OWN).replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
-    }
-    check(
-        &refused.join("\n"),
+    check_refusals(
+        "claude_code",
+        &OWN,
+        &given,
+        &[
+            ("effort", "extreme"),
+            ("effort", "High"),
+            ("workspace", "/pumpkin/home"),
+            ("workspace", "work"),
+            ("prompt", ""),
+            ("max_output_tokens", "0"),
+        ],
+        &["prompt"],
         &expect![[r#"
             @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
                 77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -224,64 +173,9 @@ fn refusals() {
                 81 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9
-            task.star:16:5: a value of `image`'s `contexts` can't be `None`: give an image, as `image()` makes
-                16 |     None,
-                   |     ^^^^
-                in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and `None`: give it two numbers, two strings, two lists or two tuples
-                97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
-                   |                     ^
-                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `None`, is made at task.star:17:13
-                in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:77:69: `format` of `None` is not in Pumpkin's Starlark: give it a number or a string
-                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
-                   |                                                                     ^^^^^^
-                the argument, `None`, is made at task.star:18:14
-                in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:85:52: `+` can't take `None` and a string: give it two numbers, two strings, two lists or two tuples
-                85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
-                   |                                                    ^
-                the left operand, `None`, is made at task.star:19:17
-                the right operand, `"/.claude-code"`, is made at @pumpkin//harness/claude_code/claude_code.star:85:54
-                in `claude_code()`, called at task.star:15:9
             @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
                 79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `claude_code()`, called at task.star:15:9
-            task.star:21:24: `deadline_seconds` can't be `None`: expected an int
-                21 |     deadline_seconds = None,
-                   |                        ^^^^
-                the IR's /roles/0/runtime/agent/deadline_seconds
-            task.star:22:30: `finalize_grace_seconds` can't be `None`: expected an int
-                22 |     finalize_grace_seconds = None,
-                   |                              ^^^^
-                the IR's /roles/0/runtime/agent/finalize_grace_seconds
-            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take `None` and an int: give it two numbers or two strings
-                80 |     if max_output_tokens < 1:
-                   |                          ^
-                the left operand, `None`, is made at task.star:23:25
-                the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
-                in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:97:21: `+` can't take a string and an int: give it two numbers, two strings, two lists or two tuples
-                97 |     ] + [name + "=" + model for name in _MODEL_VARIABLES] + [
-                   |                     ^
-                the left operand, `"ANTHROPIC_MODEL="`, is made at @pumpkin//harness/claude_code/claude_code.star:97:10
-                the right operand, `5`, is made at task.star:17:13
-                in `claude_code()`, called at task.star:15:9
-            task.star:20:14: `stdin` can't be a list: expected a string
-                20 |     prompt = [PROMPT],
-                   |              ^^^^^^^^
-                the IR's /roles/0/runtime/agent/stdin
-            task.star:21:24: `deadline_seconds` can't be a string: expected an int
-                21 |     deadline_seconds = "60",
-                   |                        ^^^^
-                the IR's /roles/0/runtime/agent/deadline_seconds
-            @pumpkin//harness/claude_code/claude_code.star:80:26: `<` can't take a string and an int: give it two numbers or two strings
-                80 |     if max_output_tokens < 1:
-                   |                          ^
-                the left operand, `"128000"`, is made at task.star:23:25
-                the right operand, `1`, is made at @pumpkin//harness/claude_code/claude_code.star:80:28
                 in `claude_code()`, called at task.star:15:9"#]],
     );
 }
