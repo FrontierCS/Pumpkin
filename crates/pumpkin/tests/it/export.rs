@@ -105,6 +105,11 @@ pub(super) fn write_exported(
         places["providers"][provider]["report"] = report.clone();
     }
     write_run(scratch, EXPORTED, started, &log, outcome, &places);
+    // No host path: the export scrubs `/home/<user>`, which the scratch directory may be under.
+    let record = scratch.0.join("runs").join(EXPORTED).join("record.json");
+    let mut made: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    made["args"] = json!(["--runs", "runs", "task.star"]);
+    fs::write(&record, made.to_string()).unwrap();
     let runs = scratch.0.join(".pumpkin/runs");
     fs::rename(scratch.0.join("runs"), &runs).unwrap();
     let driver = File::open(runs.join(EXPORTED).join("driver.pid")).unwrap();
