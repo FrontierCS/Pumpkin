@@ -48,8 +48,8 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
 there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
 there. On the controller, `controller job` runs each run or build in a systemd unit of its own,
-`controller boot` reaps what lost runs left, and `controller serve` answers `ls` and `view`, and
-lists the jobs that `wait` and `cancel` find a run among.
+`controller boot` reaps what lost runs left, and `controller serve` starts jobs, answers `ls` and
+`view`, and lists the jobs that `wait` and `cancel` find a run among.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -398,11 +398,12 @@ connections that a workspace's commands share (`Reached`); over them its `send` 
 build's job, its `copy` copies an ended run's record back, its `listing` lists the runs there for
 `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, and its `commands` follow, stop and reap them; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which answers `ls` and `view`, lists the jobs
-that `wait` and `cancel` find a run among, and is of the client's own build, installed there
+client's `Link` to `serve`, the controller's end, which starts jobs, answers `ls` and `view`, lists
+the jobs that `wait` and `cancel` find a run among, and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
-the controller's side, with the prune and the slots that admit its builds and publishes
+the controller's side, whose `start` starts each id once under the jobs' lock and keeps the
+install its unit runs, with the prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
 their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
 the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
@@ -474,8 +475,7 @@ needs beside it; `tools` pins the contributor tools.
 The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. It fetches
 the commit that the repository's `.pumpkinversion` names, and a pinned toolchain, as its header
 says, then runs `cargo xtask install --root` into the repository's `.pumpkin`, and the `pumpkin`
-it installed. It keeps a git bundle of that commit in the install, which the controller target
-sends, so a controller builds the same commit with no credentials of its own.
+it installed. A controller job runs the same install, uploaded by the client.
 
 **Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
 consumer builds what a checkout builds.

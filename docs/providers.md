@@ -66,9 +66,9 @@ with the same arguments, and `wait` copies an ended run's record back to the mac
 
 The controller starts when a command needs it and stops itself once it has been idle a while,
 with no job and no ssh session; at boot it reaps what lost runs left. A machine's keys go to it
-only with a job, into the job's directory in memory, which the job's unit removes as it ends. It
-builds the Pumpkin that the task's `.pumpkinversion` pins, from a bundle that the machine sends,
-so a job runs the same commit as the machine.
+only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
+runs the same Pumpkin and helper programs as the machine, which uploads its install when
+the controller lacks it.
 
 A controller can also publish its runs, live and ended, to a read-only page served from a private
 bucket behind CloudFront, for a team that knows its address. `deploy/aws`'s README says how to
