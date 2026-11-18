@@ -18,9 +18,9 @@ $ echo "<tag> <commit>" > .pumpkinversion
 $ ./pumpkin --version
 ```
 
-The first run fetches the tag and checks that it names that commit, downloads a pinned Rust
-toolchain's installer and checks its SHA-256, builds Pumpkin and runs it; later runs start the
-built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, a C linker and TLS
+The first run fetches the tag and checks that it names that commit, downloads Rust's installer and the Zig
+C compiler, checks their SHA-256 pins, builds a static Pumpkin and runs it. Later runs start the
+built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, tar, xz, a C linker and TLS
 certificates, and names the packages to install if one is missing. `./pumpkin
 --pumpkin-repository=<url> …`, as its first argument, fetches from another repository, such as a
 local clone.
