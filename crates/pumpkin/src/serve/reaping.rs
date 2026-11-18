@@ -43,7 +43,7 @@ pub(super) fn cancel(
     match runtime::writer(&record) {
         Ok(Writer::This) => {}
         writer => {
-            // Stopping the unit needs no knowledge of its record, even if its writer cannot be read.
+            // The unit can be stopped even when its record's writer cannot be read.
             stop(id, &held, request.force)?;
             let writer = match writer {
                 Ok(Writer::Other(build)) => Some(build),
