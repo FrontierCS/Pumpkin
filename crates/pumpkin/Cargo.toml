@@ -27,6 +27,7 @@ schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 tls = { path = "../tls" }
 clap.workspace = true
+jiff.workspace = true
 libc.workspace = true
 miniz_oxide.workspace = true
 rustix = { workspace = true, features = ["event", "fs", "process", "stdio", "thread"] }

@@ -24,11 +24,12 @@ use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime};
 
 use aws::{Bound, Cli, Region};
+use jiff::Timestamp;
 use provider::RunTag;
 use runtime::Record;
 use serde::Deserialize;
 use stdx::Context as _;
-use toml::value::{Datetime, Offset};
+use toml::value::Datetime;
 
 use crate::view::{self, Exported, Scrub};
 use crate::{cli, say};
@@ -114,24 +115,22 @@ impl TryFrom<Datetime> for Since {
                  `2026-11-15T00:00:00Z`"
             ));
         };
-        let before = || format!("`{datetime}` is before 1970: give an instant after it");
-        if date.year < 1970 {
-            return Err(before());
-        }
-        let local = stdx::Utc {
-            year: u64::from(date.year),
-            month: u64::from(date.month),
-            day: u64::from(date.day),
-            hour: u64::from(time.hour),
-            minute: u64::from(time.minute),
-            second: u64::from(time.second.unwrap_or(0)),
-        };
-        let offset_seconds = match offset {
-            Offset::Z => 0,
-            Offset::Custom { minutes } => i64::from(minutes) * 60,
-        };
-        let seconds = local.to_unix().checked_add_signed(-offset_seconds);
-        let seconds = seconds.ok_or_else(before)?;
+        // RFC 3339 as jiff reads it: the offset is `Z` or `+hh:mm`, and a time without seconds
+        // is at their start.
+        let text = format!(
+            "{date}T{:02}:{:02}:{:02}{offset}",
+            time.hour,
+            time.minute,
+            time.second.unwrap_or(0)
+        );
+        let at: Timestamp = text.parse().map_err(|_| {
+            format!(
+                "`{datetime}` is no instant: give a date and a time that exist, as \
+                 `2026-11-15T00:00:00Z`"
+            )
+        })?;
+        let seconds = u64::try_from(at.as_second())
+            .map_err(|_| format!("`{datetime}` is before 1970: give an instant after it"))?;
         Ok(Self {
             since_epoch: Duration::from_secs(seconds),
         })

@@ -306,6 +306,47 @@ fn prepare() {
     );
 }
 
+// Only what `new_id` writes is minted, not a sign, fewer digits, a leap second or a date that
+// doesn't exist, as the prune deletes a directory by its id's time.
+#[test]
+fn reads_only_ids_it_wrote() {
+    let ids = [
+        "20240229-000000-hhhhhhhh",
+        "20251231-235959",
+        "20241301-000000-hhhhhhhh",
+        "20230229-000000-hhhhhhhh",
+        "20240229-240000-hhhhhhhh",
+        "20240229-235960-hhhhhhhh",
+        "+0240229-000000-hhhhhhhh",
+        "2024022-9000000-hhhhhhhh",
+        " 0240229-000000-hhhhhhhh",
+        "20240229-00000-hhhhhhhhh",
+        "20240229_000000-hhhhhhhh",
+        "20240229-0000é0-hhhhhhhh",
+        "19691231-235959-hhhhhhhh",
+        "20240229-00000",
+        "",
+    ];
+    let shown = ids.map(|id| format!("{id:?}: {:?}", runtime::minted(id)));
+    expect![[r#"
+        "20240229-000000-hhhhhhhh": Some(1709164800s)
+        "20251231-235959": Some(1767225599s)
+        "20241301-000000-hhhhhhhh": None
+        "20230229-000000-hhhhhhhh": None
+        "20240229-240000-hhhhhhhh": None
+        "20240229-235960-hhhhhhhh": None
+        "+0240229-000000-hhhhhhhh": None
+        "2024022-9000000-hhhhhhhh": None
+        " 0240229-000000-hhhhhhhh": None
+        "20240229-00000-hhhhhhhhh": None
+        "20240229_000000-hhhhhhhh": None
+        "20240229-0000é0-hhhhhhhh": None
+        "19691231-235959-hhhhhhhh": None
+        "20240229-00000": None
+        "": None"#]]
+    .assert_eq(&shown.join("\n"));
+}
+
 /// `id` with each hexadecimal digit of its random suffix shown as `h`.
 fn id_form(id: &str) -> String {
     let (time, suffix) = id.rsplit_once('-').unwrap();

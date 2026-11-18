@@ -206,6 +206,12 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The time `since_epoch` after the Unix epoch, or the latest time jiff holds if that is past it.
+fn utc(since_epoch: std::time::Duration) -> jiff::Timestamp {
+    let at = jiff::Timestamp::UNIX_EPOCH.saturating_add(since_epoch);
+    at.unwrap_or(jiff::Timestamp::MAX)
+}
+
 fn unix_now() -> UnixTime {
     UnixTime::of(SystemTime::now()).unwrap_or(UnixTime::after_epoch(std::time::Duration::ZERO))
 }

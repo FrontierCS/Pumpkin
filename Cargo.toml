@@ -11,6 +11,7 @@ publish = false
 base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 expect-test = "1"
+jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 libc = "0.2.191"
 mimalloc = "0.1.52"
 miniz_oxide = "0.9.1"

@@ -133,14 +133,9 @@ fn said_when(began: Duration) {
     if took < STALE {
         return;
     }
-    let stdx::Utc {
-        hour,
-        minute,
-        second,
-        ..
-    } = stdx::Utc::from_unix(began.as_secs());
+    let began_at = crate::utc(began).strftime("%H:%M:%S");
     say(format_args!(
-        "the runs are listed as they were at {hour:02}:{minute:02}:{second:02} UTC, {} ago, as \
+        "the runs are listed as they were at {began_at} UTC, {} ago, as \
          the listing took that long to arrive",
         crate::progress::span(took)
     ));

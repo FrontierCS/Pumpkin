@@ -14,7 +14,6 @@ use runtime::{
 };
 use schema::ir::Name;
 use serde_json::Value;
-use stdx::Utc;
 
 use crate::next;
 
@@ -285,8 +284,8 @@ impl Totals {
             ));
         }
         if let Some(ends) = self.ends {
-            let Utc { hour, minute, .. } = Utc::from_unix(ends.since_epoch().as_secs());
-            let _ = write!(line, "; every live run ends by {hour:02}:{minute:02} UTC");
+            let ends = crate::utc(ends.since_epoch()).strftime("%H:%M");
+            let _ = write!(line, "; every live run ends by {ends} UTC");
         }
         line
     }
