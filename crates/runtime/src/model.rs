@@ -125,8 +125,8 @@ impl Served {
 
     /// Serves one model request, number `number`, with its `exchange` keeping it, as `admission` of
     /// the index of the entry that takes it admits it: `forwarding` is called once if the request
-    /// goes upstream, and `answered` once, with the name and API of the entry that took it, if one
-    /// did, and the answer.
+    /// goes upstream, and `answered` once, with the answer and the index, name and API of the entry
+    /// that took it, if one did.
     pub(super) fn serve<'b>(
         &self,
         (number, exchange): (u64, &Exchange<impl Clock>),
@@ -134,13 +134,14 @@ impl Served {
         admission: impl FnOnce(usize) -> Admission<'b>,
         by: Deadline,
         forwarding: impl FnOnce(),
-        answered: impl FnOnce(Option<&(Name, Api)>, Answer),
+        answered: impl FnOnce(Option<(usize, Name, Api)>, Answer),
     ) {
         let answered = |entry: Option<usize>, answer| {
-            let taken = entry.map(|entry| &self.names[entry]);
-            if let Some((name, _)) = taken {
+            let taken = entry.map(|index| {
+                let (name, api) = &self.names[index];
                 self.bear(number, name, &answer);
-            }
+                (index, name.clone(), *api)
+            });
             answered(taken, answer);
         };
         let entries = &self.entries;

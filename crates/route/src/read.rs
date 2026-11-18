@@ -69,8 +69,8 @@ pub struct Reply {
     pub stop: Option<String>,
     /// The byte at which each event of a stream begins, in order: its `data:` line's first.
     pub events: Vec<usize>,
-    /// Where the stream's output begins, if it has: the byte after the end of the line of its
-    /// first event that its API counts as output, which is where the route's write path tells
+    /// Where the stream's output begins, if it has: the number of bytes needed to recognize its
+    /// first output event, which is where the route's write path tells
     /// [`Keep::first_output`](crate::Keep::first_output).
     pub first_output: Option<usize>,
     /// Whether the answer ended as its API ends one: a body that is one JSON value, or a stream
@@ -169,21 +169,39 @@ pub fn answer(api: Api, response: &[u8]) -> Reply {
     let mut events = Vec::new();
     let mut offsets = Vec::new();
     let mut first_output = None;
-    let mut at = 0;
-    for line in response.split_inclusive(|&byte| byte == b'\n') {
-        let start = at;
-        at += line.len();
-        let Some(line) = line.strip_suffix(b"\n") else {
-            break;
-        };
-        let Some(event) = usage::event(line) else {
-            continue;
-        };
+    let mut take = |start, end, event| {
         if first_output.is_none() && (dialect.output)(&event) {
-            first_output = Some(at);
+            first_output = Some(end);
         }
         offsets.push(start);
         events.push(event);
+    };
+    let mut ended = api != Api::Chat;
+    if api == Api::Chat {
+        let mut frames = crate::sse::Frames::default();
+        let mut bytes = response;
+        while !bytes.is_empty() {
+            if let Ok(Some(frame)) = frames.next(&mut bytes) {
+                if frame.data.trim_ascii() == b"[DONE]" {
+                    ended = true;
+                } else if let Ok(event) = serde_json::from_slice(&frame.data) {
+                    take(frame.start, frame.end, event);
+                }
+            }
+        }
+    } else {
+        let mut at = 0;
+        for line in response.split_inclusive(|&byte| byte == b'\n') {
+            let start = at;
+            at += line.len();
+            let Some(line) = line.strip_suffix(b"\n") else {
+                break;
+            };
+            let Some(event) = usage::event(line) else {
+                continue;
+            };
+            take(start, at, event);
+        }
     }
     let (items, stop, whole) = (dialect.stream)(&events);
     Reply {
@@ -191,7 +209,7 @@ pub fn answer(api: Api, response: &[u8]) -> Reply {
         stop,
         events: offsets,
         first_output,
-        whole,
+        whole: whole && ended,
     }
 }
 

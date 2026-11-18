@@ -38,7 +38,7 @@ fn output(event: &Value) -> bool {
             let called = called(call);
             called["name"].is_string() || said(passed(called))
         };
-        ["content", REASONING[0], REASONING[1]]
+        ["content", "refusal", REASONING[0], REASONING[1]]
             .into_iter()
             .any(|field| said(delta[field].as_str()))
             || calls.into_iter().any(call)
@@ -91,7 +91,12 @@ fn item(message: &Value) -> Vec<Item> {
                 }
             });
             let reasoning = reasoning(message).unwrap_or_default().to_owned();
-            assistant(reasoning, content, calls.collect())
+            assistant(
+                reasoning,
+                content,
+                string(message, "refusal").unwrap_or_default(),
+                calls.collect(),
+            )
         }
         _ => vec![Item::Other {
             json: message.clone(),
@@ -101,13 +106,16 @@ fn item(message: &Value) -> Vec<Item> {
 
 /// The entries of an assistant's message: its reasoning, if not empty; its text, if not empty or
 /// if it holds nothing else; and its calls.
-fn assistant(reasoning: String, content: String, calls: Vec<Item>) -> Vec<Item> {
+fn assistant(reasoning: String, content: String, refusal: String, calls: Vec<Item>) -> Vec<Item> {
     let mut items = Vec::new();
     if !reasoning.is_empty() {
         items.push(Item::Reasoning { text: reasoning });
     }
-    if !content.is_empty() || (items.is_empty() && calls.is_empty()) {
+    if !content.is_empty() || (items.is_empty() && refusal.is_empty() && calls.is_empty()) {
         items.push(Item::Assistant { text: content });
+    }
+    if !refusal.is_empty() {
+        items.push(Item::Assistant { text: refusal });
     }
     items.extend(calls);
     items
@@ -136,6 +144,7 @@ fn body(body: &Value) -> (Vec<Item>, Option<String>) {
 struct Joined {
     content: String,
     reasoning: String,
+    refusal: String,
     /// Each tool call's id, name and what it passes, by its index.
     calls: BTreeMap<u64, [String; 3]>,
     finish: Option<String>,
@@ -151,6 +160,7 @@ fn stream(events: &[Value]) -> Streamed {
         let index = choice["index"].as_u64().unwrap_or_default();
         let joined = joined.entry(index).or_default();
         let delta = &choice["delta"];
+        joined.refusal += delta["refusal"].as_str().unwrap_or_default();
         joined.content += delta["content"].as_str().unwrap_or_default();
         joined.reasoning += reasoning(delta).unwrap_or_default();
         for call in delta["tool_calls"].as_array().into_iter().flatten() {
@@ -176,7 +186,12 @@ fn stream(events: &[Value]) -> Streamed {
                 name,
                 arguments,
             });
-        assistant(joined.reasoning, joined.content, calls.collect())
+        assistant(
+            joined.reasoning,
+            joined.content,
+            joined.refusal,
+            calls.collect(),
+        )
     });
     (items.collect(), stop, whole)
 }

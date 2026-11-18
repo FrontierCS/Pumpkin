@@ -116,6 +116,7 @@ fn check_archive(
         let raw = match answer {
             Answer::Json(body) => body.to_owned(),
             Answer::Streams(parts) => parts.concat(),
+            Answer::ContextExceeded => r#"{"error":{"code":"context_length_exceeded","message":"private provider diagnostics","type":"invalid_request_error","param":null}}"#.to_owned(),
             Answer::Refuses => r#"{"error":{"message":"slow down","type":"requests"}}"#.to_owned(),
             _ => panic!("unexpected fixture"),
         };
@@ -128,6 +129,55 @@ fn check_archive(
 const CALL: &str = r#"{"object":"chat.completion","id":"completion1","model":"vendor/small","created":1730000000,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"Counting.","tool_calls":[{"type":"function","id":"call_a","function":{"name":"count","arguments":"{}"}},{"type":"function","id":"call_b","function":{"name":"count","arguments":"{\"word\":\"pear\"}"}}]}}],"usage":{"prompt_tokens":11,"completion_tokens":6,"total_tokens":17,"completion_tokens_details":{"reasoning_tokens":0}}}"#;
 const TEXT: &str = r#"{"object":"chat.completion","id":"completion2","model":"vendor/small","created":1730000001,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Three."}}]}"#;
 const LIMITED: &str = r#"{"object":"chat.completion","id":"completion3","model":"vendor/small","created":1730000003,"choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"Thr"}}]}"#;
+
+fn stream_replayed() -> String {
+    let first = concat!(
+        "data: ",
+        r#"{"object":"chat.completion.chunk","id":"c","created":123,"model":"vendor/small","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"first","type":"function","function":{"name":"count","arguments":"{}"}}]}}]}"#,
+        "\n\n",
+    );
+    let rest = concat!(
+        "data: ",
+        r#"{"object":"chat.completion.chunk","id":"c","created":123,"model":"vendor/small","choices":[{"index":0,"delta":{"content":"One more."}}]}"#,
+        "\n\n",
+        "data: ",
+        r#"{"object":"chat.completion.chunk","id":"c","created":123,"model":"vendor/small","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"second","type":"function","function":{"name":"count","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        "\n\ndata: [DONE]\n\n",
+    );
+    let mut request = json!({"model":"m-small","store":false,"stream":true,"input":"How many?"});
+    let heard = bridge_exchange(request.clone(), Some(Answer::Streams([first, rest]))).0;
+    let done: Value = serde_json::from_str(
+        heard
+            .trim_end()
+            .lines()
+            .last()
+            .unwrap()
+            .strip_prefix("data: ")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(done["type"], "response.completed");
+    let mut items = vec![json!({"role":"user","content":"How many?"})];
+    items.extend(
+        done["response"]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    items.extend(
+        ["second", "first"]
+            .map(|id| json!({"type":"function_call_output","call_id":id,"output":"3"})),
+    );
+    request["input"] = json!(items);
+    request["stream"] = json!(false);
+    let reply = bridge_exchange(request, Some(Answer::Json(TEXT)));
+    let chat: Value = serde_json::from_slice(&reply.2).unwrap();
+    format!(
+        "replayed {} as {}",
+        done["response"]["output"], chat["messages"]
+    )
+}
 
 fn check(expect: &Expect) {
     let mut request = json!({
@@ -166,6 +216,7 @@ fn check(expect: &Expect) {
     turn(&request, LIMITED);
     let error = bridge_exchange(request.clone(), Some(Answer::Refuses)).0;
     shown.push(error);
+    shown.push(bridge_exchange(request.clone(), Some(Answer::ContextExceeded)).0);
     for edit in [
         json!({"previous_response_id":"stored"}),
         json!({"tools":[{"type":"custom","name":"count"}]}),
@@ -188,6 +239,7 @@ fn check(expect: &Expect) {
         Some(Answer::Json(NATIVE)),
     );
     assert!(heard.ends_with(&native));
+    shown.push(stream_replayed());
     expect.assert_eq(&shown.join("\n"));
 }
 
@@ -197,7 +249,7 @@ const NATIVE: &str = r#"{"id":"resp_native","model":"m-large","object":"response
 fn function_round_trip() {
     check(&expect![[r#"
         {"max_completion_tokens":100,"messages":[{"content":"Count words.","role":"developer"},{"content":"Words?","role":"user"}],"model":"vendor/small","prompt_cache_key":"session1","reasoning_effort":"medium","store":false,"tool_choice":{"function":{"name":"count"},"type":"function"},"tools":[{"function":{"name":"count","parameters":{"type":"object"},"strict":false},"type":"function"}]}
-        "completed" null [{"content":[{"annotations":[],"text":"Counting.","type":"output_text"}],"id":"msg_completion1","role":"assistant","status":"completed","type":"message"},{"arguments":"{}","call_id":"call_a","id":"fc_call_a","name":"count","status":"completed","type":"function_call"},{"arguments":"{\"word\":\"pear\"}","call_id":"call_b","id":"fc_call_b","name":"count","status":"completed","type":"function_call"}] {"input_tokens":11,"output_tokens":6,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":17}
+        "completed" null [{"content":[{"annotations":[],"text":"Counting.","type":"output_text"}],"id":"msg_completion1","role":"assistant","status":"completed","type":"message"},{"arguments":"{}","call_id":"call_a","id":"fc_1_completion1","name":"count","status":"completed","type":"function_call"},{"arguments":"{\"word\":\"pear\"}","call_id":"call_b","id":"fc_2_completion1","name":"count","status":"completed","type":"function_call"}] {"input_tokens":11,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":6,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":17}
         Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 11, output_tokens: 6, cached_tokens: None, cache_write_tokens: None, reasoning_tokens: Some(0) }), failed: None })
         {"max_completion_tokens":100,"messages":[{"content":"Count words.","role":"developer"},{"content":"Words?","role":"user"},{"content":[{"text":"Counting.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"call_a","type":"function"},{"function":{"arguments":"{\"word\":\"pear\"}","name":"count"},"id":"call_b","type":"function"}]},{"content":"3","role":"tool","tool_call_id":"call_b"},{"content":"3","role":"tool","tool_call_id":"call_a"}],"model":"vendor/small","prompt_cache_key":"session1","reasoning_effort":"medium","store":false,"tool_choice":{"function":{"name":"count"},"type":"function"},"tools":[{"function":{"name":"count","parameters":{"type":"object"},"strict":false},"type":"function"}]}
         "completed" null [{"content":[{"annotations":[],"text":"Three.","type":"output_text"}],"id":"msg_completion2","role":"assistant","status":"completed","type":"message"}] null
@@ -205,12 +257,14 @@ fn function_round_trip() {
         {"max_completion_tokens":100,"messages":[{"content":"Count words.","role":"developer"},{"content":"Words?","role":"user"},{"content":[{"text":"Counting.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"call_a","type":"function"},{"function":{"arguments":"{\"word\":\"pear\"}","name":"count"},"id":"call_b","type":"function"}]},{"content":"3","role":"tool","tool_call_id":"call_b"},{"content":"3","role":"tool","tool_call_id":"call_a"}],"model":"vendor/small","prompt_cache_key":"session1","reasoning_effort":"medium","store":false,"tool_choice":{"function":{"name":"count"},"type":"function"},"tools":[{"function":{"name":"count","parameters":{"type":"object"},"strict":false},"type":"function"}]}
         "incomplete" {"reason":"max_output_tokens"} [{"content":[{"annotations":[],"text":"Thr","type":"output_text"}],"id":"msg_completion3","role":"assistant","status":"incomplete","type":"message"}] null
         Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: None, failed: Some(Failure { code: Some("max_output_tokens") }) })
-        429 [("retry-after", "2"), ("content-type", "application/json")] {"error":{"code":null,"message":"the model provider refused the Chat request","param":null,"type":"upstream_error"}}
+        429 [("retry-after", "2"), ("content-type", "application/json")] {"error":{"code":"server_error","message":"the model provider refused the Chat request","param":null,"type":"upstream_error"}}
+        400 [("content-type", "application/json")] {"error":{"code":"context_length_exceeded","message":"the model request exceeds the context window","param":null,"type":"upstream_error"}}
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"`previous_response_id` refers to state kept on the provider's side, which the route refuses: send the whole context instead","param":null,"type":"invalid_request_error"}}
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation takes function tools only","param":null,"type":"invalid_request_error"}}
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `input_image`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `include`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}
-        400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `unexpected`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}"#]]);
+        400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `unexpected`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}
+        replayed [{"arguments":"{}","call_id":"first","id":"fc_0_c","name":"count","status":"completed","type":"function_call"},{"content":[{"annotations":[],"logprobs":[],"text":"One more.","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"},{"arguments":"{}","call_id":"second","id":"fc_2_c","name":"count","status":"completed","type":"function_call"}] as [{"content":"How many?","role":"user"},{"content":[{"text":"One more.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"first","type":"function"},{"function":{"arguments":"{}","name":"count"},"id":"second","type":"function"}]},{"content":"3","role":"tool","tool_call_id":"second"},{"content":"3","role":"tool","tool_call_id":"first"}]"#]]);
 }
 
 #[test]
@@ -234,9 +288,16 @@ fn model_scoped_history_repair() {
     expect![[r#"[{"content":"Count.","role":"user"},{"content":[{"text":"First.","type":"text"},{"text":"Two.","type":"text"},{"text":"Three.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"a","type":"function"},{"function":{"arguments":"{}","name":"count"},"id":"b","type":"function"}]},{"content":"2","role":"tool","tool_call_id":"b"},{"content":"1","role":"tool","tool_call_id":"a"},{"content":"Count.","role":"user"}]"#]].assert_eq(&sent["messages"].to_string());
 
     let unchanged = json!([user, before, a, b, rb, ra, user]);
-    let ask =
-        |model| bridge_exchange(request(model, unchanged.clone()), Some(Answer::Json(TEXT))).2;
-    assert_eq!(ask("m-repaired"), ask("m-small"));
+    let ask = |model, items| bridge_exchange(request(model, items), Some(Answer::Json(TEXT))).2;
+    assert_eq!(
+        ask("m-repaired", unchanged.clone()),
+        ask("m-small", unchanged)
+    );
+    let mut replay = json!([user, a, b, after, rb, ra, user]);
+    replay[1]["id"] = json!("fc_0_count");
+    replay[2]["id"] = json!("fc_1_count");
+    replay[3]["id"] = json!("msg_count");
+    assert_eq!(ask("m-repaired", replay.clone()), ask("m-small", replay));
     let original = request("m-large", input.clone());
     let native = bridge_exchange(original.clone(), Some(Answer::Json(NATIVE))).2;
     assert_eq!(

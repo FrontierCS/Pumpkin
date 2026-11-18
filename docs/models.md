@@ -71,11 +71,23 @@ Text parts and string function arguments pass through.
 All pending calls need results before the next turn. Declare ordinary function tools with an
 explicit boolean `strict`: Responses and Chat default an omitted value differently. Text,
 function calls, refusals and length-limited answers can be returned whole or as a stream. A
-stream requests token usage from Chat; a provider that omits it leaves spend unknown.
+stream requests token usage from Chat. Accounting uses the provider's reported input, output,
+cache reads and cache writes. A provider that omits usage leaves spend unknown. A client can
+replay the output items, with their IDs, in their original order even when text followed a call.
+An interrupted Chat stream delivers a failed Responses event and leaves a cut exchange in the
+run record. If the stream fails before the provider supplies a completion ID, the failed
+response gets a local ID starting with `resp_pumpkin_` and a local creation time.
+
+The bridge preserves `context_length_exceeded` in `response.failed` for Codex's context-window
+recovery. The default OpenAI Python 3.46.0 stream reader accepts that event. Explicit strict
+validation against that SDK's generated `ResponseFailedEvent` rejects the code because its
+nested error enum omits it.
 
 A model that needs assistant text on the same Chat message as its calls can set
 `request_repair = "join_assistant_tool_text"` alongside `responses_via_chat = true`.
-The repair accepts one assistant text message between a group of calls and their results.
+Replaying the bridge's own output with its item IDs uses ordinary conversion and records no repair.
+For other histories, the repair accepts one assistant text message between a group of calls and
+their results.
 It appends the text to the calling assistant message, preserving each text part in order.
 All results must immediately follow, one per call ID. A result can answer any call in the group.
 A second message in the gap, or assistant text after the first result, is refused.

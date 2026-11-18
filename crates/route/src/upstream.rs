@@ -21,7 +21,7 @@ use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
 use super::Keep;
 use super::closure::{Closed, Headers, Refusal, Route, Status, parsed, refusal};
-use super::usage::{Failure, Scan, Usage};
+use super::usage::{Failure, Usage};
 
 /// How long the upstream may take to resolve the provider's host name.
 // Resolving the name and connecting to it (`CONNECT_TIMEOUT`) are the waits that `IDLE_TIMEOUT`
@@ -389,7 +389,12 @@ impl Upstream {
         };
         let mut scan = closed.scan();
         let mut body = response.into_body().into_reader();
-        let relayed = relay(&mut body, &mut scan, keep, |bytes| client.send(bytes));
+        let relayed = relay(&mut body, keep, |bytes| {
+            if scan.feed(bytes) {
+                keep.first_output();
+            }
+            client.send(bytes)
+        });
         let (usage, failed, _) = scan.finish();
         let cut = !matches!(relayed, Relayed::Whole);
         answered(Answer::upstream(
@@ -686,12 +691,9 @@ enum Relayed {
     Unsent(io::Error),
 }
 
-/// Streams `body` to `client` as it arrives, showing it to `scan` and giving it to `keep`, and
-/// telling `keep` where its output begins, until it ends, without writing its end, and returns
-/// how it went.
+/// Gives each part of the body to the record, then the client, until it ends.
 fn relay(
     body: &mut impl Read,
-    scan: &mut Scan,
     keep: &dyn Keep,
     mut send: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> Relayed {
@@ -701,12 +703,7 @@ fn relay(
         match body.read(&mut buffer) {
             Ok(0) => return Relayed::Whole,
             Ok(read) => {
-                let began = scan.feed(&buffer[..read]);
                 keep.response(&buffer[..read]);
-                // After the bytes, so that the first output is timed no earlier than they are.
-                if began {
-                    keep.first_output();
-                }
                 if let Err(error) = send(&buffer[..read]) {
                     return Relayed::Unsent(error);
                 }

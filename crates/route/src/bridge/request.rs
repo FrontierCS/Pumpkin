@@ -249,7 +249,7 @@ fn history(
     messages: &mut Vec<Value>,
     repair: Option<RequestRepair>,
 ) -> Result<Option<RequestRepair>, String> {
-    let items = match input {
+    let mut items = match input {
         Value::String(text) => {
             messages.push(json!({"role":"user","content":text}));
             return Ok(None);
@@ -257,6 +257,7 @@ fn history(
         Value::Array(items) => items,
         _ => return Err("send input as text or a list of items".into()),
     };
+    group_output(&mut items);
     let mut pending = BTreeSet::new();
     let mut applied = None;
     let mut items = items.into_iter().peekable();
@@ -339,6 +340,43 @@ fn join_text(before: &mut Value, after: Value) -> Result<(), String> {
         *before = Value::Array(joined);
     }
     Ok(())
+}
+
+/// A single Chat turn can stream calls before its text. Reunite the items bearing its response
+/// ID and output positions when a Responses client replays that turn.
+fn group_output(mut items: &mut [Value]) {
+    while let Some(first) = items.first() {
+        let Some(response_id) = call_response(first, 0) else {
+            items = &mut items[1..];
+            continue;
+        };
+        let calls = items
+            .iter()
+            .enumerate()
+            .take_while(|(index, item)| call_response(item, *index) == Some(response_id))
+            .count();
+        if let Some(message) = items.get(calls)
+            && message["type"] == "message"
+            && message["role"] == "assistant"
+            && message["id"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("msg_"))
+                == Some(response_id)
+        {
+            items[..=calls].rotate_right(1);
+            items = &mut items[calls + 1..];
+        } else {
+            items = &mut items[calls..];
+        }
+    }
+}
+
+fn call_response(item: &Value, index: usize) -> Option<&str> {
+    if item["type"] != "function_call" {
+        return None;
+    }
+    let (position, id) = item["id"].as_str()?.strip_prefix("fc_")?.split_once('_')?;
+    (position.parse() == Ok(index) && !id.is_empty()).then_some(id)
 }
 
 fn add_call(

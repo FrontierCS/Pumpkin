@@ -19,6 +19,7 @@
 mod bridge;
 mod closure;
 pub mod read;
+mod sse;
 mod upstream;
 mod usage;
 
@@ -47,7 +48,7 @@ pub trait Keep {
     /// route answers its client with a refusal in its place, or, if none came, the refusal.
     fn response(&self, bytes: &[u8]);
     /// The upstream's stream has just begun the model's output: of the bytes given
-    /// [`Keep::response`] so far, the last hold the end of the line of the stream's first event
+    /// [`Keep::response`] so far, the last hold the end of the stream's first event
     /// that its API counts as output, such as a delta of its text. Called once at most, and
     /// never for a body that is no stream.
     fn first_output(&self);
