@@ -2885,6 +2885,32 @@ fn ls_refusals() {
     );
 }
 
+#[test]
+fn ls_fails_at_once_when_serve_ends() {
+    let scratch = Scratch::new("controller-ls-serve-ends");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = sha256(&fs::read(PUMPKIN).unwrap());
+    // The connection stays up, so asking again would end the same way.
+    let script = "#!/bin/sh\necho 'serve: cannot start' >&2\nexit 1\n";
+    scratch.write_executable(
+        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
+        script.as_bytes(),
+    );
+    let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&hex, "<this build>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            serve: cannot start
+            pumpkin: linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin"#]],
+    );
+}
+
 /// What `controller serve` does with `input` on its standard input.
 fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
     let mut serve = scratch.program(PUMPKIN, &["controller", "serve"]);
@@ -3407,7 +3433,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed, as `ssh` ended within the answer's body; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             next: 309222, end: 309222"#]],

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
-use super::{Name, Reached, SHORT_TIMEOUT, Session, Slot};
+use super::{Reached, SHORT_TIMEOUT, Session, Slot};
 use crate::link::{self, Answer, Ask, Health, Link, Listed, Unanswered};
 use crate::{manifest, say, workspace};
 
@@ -29,8 +29,9 @@ impl Build {
 
 /// Why no answer came over a link.
 pub(super) enum Unlinked {
-    /// The link, over connection `master`, ended before what was asked for was whole, as `ssh`
-    /// says, as when the connection is cut: asking again, over another, may answer.
+    /// The link, over connection `master`, ended before what was asked for was whole, and the
+    /// connection no longer answers, as when it is cut: asking again, over another, may answer.
+    /// `said` is how the frames ended, in Pumpkin's words.
     Cut { master: usize, said: String },
     /// Asking again would fail again: why, with what was being done.
     Failed(String),
@@ -48,7 +49,6 @@ pub(super) struct Linked {
     link: Link,
     master: usize,
     _slot: Slot,
-    name: Name,
 }
 
 impl Linked {
@@ -70,22 +70,28 @@ impl Linked {
         })
     }
 
-    /// The controller's health, or the message of its refusal.
-    pub(super) fn health(&mut self) -> Result<Result<Health, String>, Unlinked> {
+    /// The controller's health, or the message of its refusal: `reached` is the controller that
+    /// the link goes to.
+    pub(super) fn health(&mut self, reached: &Reached) -> Result<Result<Health, String>, Unlinked> {
         let asked = self.link.health();
-        asked.map_err(|unanswered| unlinked(&self.name, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
     }
 
-    /// The runs whose ids start with one of `prefixes`, or the message of the refusal.
-    pub(super) fn list(&mut self, prefixes: &[String]) -> Result<Result<Listed, String>, Unlinked> {
+    /// The runs whose ids start with one of `prefixes`, or the message of the refusal, as
+    /// [`Linked::health`] says.
+    pub(super) fn list(
+        &mut self,
+        reached: &Reached,
+        prefixes: &[String],
+    ) -> Result<Result<Listed, String>, Unlinked> {
         let asked = self.link.list(prefixes);
-        asked.map_err(|unanswered| unlinked(&self.name, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
     }
 
-    /// The answer to `ask`.
-    pub(super) fn ask(&mut self, ask: &Ask) -> Result<Answer, Unlinked> {
+    /// The answer to `ask`, as [`Linked::health`] says.
+    pub(super) fn ask(&mut self, reached: &Reached, ask: &Ask) -> Result<Answer, Unlinked> {
         let asked = self.link.ask(ask);
-        asked.map_err(|unanswered| unlinked(&self.name, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
     }
 
     /// `None` if the controller has no `serve` of `build`.
@@ -97,16 +103,23 @@ impl Linked {
                 link,
                 master,
                 _slot: slot,
-                name: reached.name.clone(),
             })),
-            Err(unanswered) => Err(unlinked(&reached.name, master, unanswered)),
+            Err(unanswered) => Err(unlinked(reached, master, unanswered)),
         }
     }
 }
 
-fn unlinked(name: &Name, master: usize, unanswered: Unanswered) -> Unlinked {
+fn unlinked(reached: &Reached, master: usize, unanswered: Unanswered) -> Unlinked {
+    let name = &reached.name;
     match unanswered {
-        Unanswered::Unreached(said) => Unlinked::Cut { master, said },
+        // A `serve` that ended on its own, with the connection up, would end the same way again.
+        Unanswered::Unreached(said) if !reached.shared.answers(master, &reached.host()) => {
+            Unlinked::Cut { master, said }
+        }
+        Unanswered::Unreached(said) => Unlinked::Failed(format!(
+            "linking to controller `{name}` failed: its `serve` ended before it answered in \
+             full (the link {said}): what it printed above says why"
+        )),
         Unanswered::Failed(error) => {
             Unlinked::Failed(format!("linking to controller `{name}` failed: {error}"))
         }

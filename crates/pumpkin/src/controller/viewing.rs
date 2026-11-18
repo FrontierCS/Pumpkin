@@ -92,7 +92,7 @@ impl Viewing {
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let answer = linked.ask(ask)?;
+        let answer = linked.ask(&self.reached, ask)?;
         let name = self.name();
         match answer {
             Answer::Viewed {

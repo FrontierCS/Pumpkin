@@ -74,9 +74,9 @@ fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
     let mut attempt = 0;
     loop {
         let asked = Linked::open(reached, &build).and_then(|mut linked| {
-            let health = linked.health()?;
+            let health = linked.health(reached)?;
             let asked = crate::unix_now();
-            Ok((health, linked.list(prefixes)?, asked))
+            Ok((health, linked.list(reached, prefixes)?, asked))
         });
         let (master, said) = match asked {
             Ok((health, listed, asked)) => {
