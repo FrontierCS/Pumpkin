@@ -522,7 +522,11 @@ pub fn serve<'b>(
         let allows = |route: &Route| named.is_some_and(|named| route.allows(named).is_some());
         let Some((index, _)) = taking().find(|(_, (route, _))| allows(route)) else {
             let allowed = taking().flat_map(|(_, (route, _))| route.models());
-            let refusal = Refusal::unallowed(named, allowed);
+            // A body that is no JSON object names no model: say what is wrong with it instead.
+            let refusal = match body {
+                Err(refusal) => refusal,
+                Ok(_) => Refusal::unallowed(named, allowed),
+            };
             let api = entries[first].0.api();
             let _ = barred((Bar::Rules, refusal), api, client, |answer| {
                 answered(None, answer);
