@@ -33,7 +33,8 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The target that the static `sandboxd` and `ec2-boot` are built for.
+/// The target that the static `sandboxd` and `ec2-boot` are built for, and that `install --target`
+/// builds a static `pumpkin` for.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
 /// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
@@ -102,10 +103,15 @@ mod flags {
             /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
             /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
             /// which `pumpkin fmt` and `pumpkin check` run; prints each path. It runs on Linux
-            /// on x86-64 alone, the one platform buildifier is pinned for.
+            /// on x86-64 alone, the one platform buildifier is pinned for. `pumpkin` is built for
+            /// the host, unless `--target` names another, as a release's static build does.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
+                /// The target that `pumpkin` is built for, as cargo's `--target`: the host by
+                /// default. `x86_64-unknown-linux-musl` builds it static, which needs a musl C
+                /// compiler for `ring` and `mimalloc`: `CC_x86_64_unknown_linux_musl=musl-gcc`.
+                optional --target triple: String
             }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
@@ -171,7 +177,6 @@ mod flags {
         pub target: String,
 
         pub gpu_model: Option<String>,
-
         pub lost: bool,
     }
 
@@ -181,6 +186,7 @@ mod flags {
     #[derive(Debug)]
     pub struct Install {
         pub root: Option<PathBuf>,
+        pub target: Option<String>,
     }
 
     #[derive(Debug)]
@@ -272,7 +278,9 @@ fn try_main() -> Result<()> {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
-        flags::XtaskCmd::Install(flags::Install { root }) => install(&cargo, root),
+        flags::XtaskCmd::Install(flags::Install { root, target }) => {
+            install(&cargo, root, target.as_deref())
+        }
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
         }
@@ -523,12 +531,12 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin`, the static `sandboxd` and `ec2-boot`, and installs them, with the Modal
-/// provider's helper and its lock, and the pinned buildifier ([`star::buildifier`]), in
-/// `<root>/bin`, made if need be, replacing what is there: `root` made absolute, or this
-/// checkout's `.pumpkin`. Prints each one's path, and, without a `root`, says if `<root>/bin` is
-/// not on `PATH`.
-fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
+/// Builds `pumpkin`, for `target` if given, else the host, and the static `sandboxd` and
+/// `ec2-boot`, and installs them, with the Modal provider's helper and its lock, and the pinned
+/// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
+/// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
+/// `root`, says if `<root>/bin` is not on `PATH`.
+fn install(cargo: &Cargo, root: Option<PathBuf>, target: Option<&str>) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -537,8 +545,12 @@ fn install(cargo: &Cargo, root: Option<PathBuf>) -> Result<()> {
     // The Modal provider's helper and its lock, which `pumpkin` finds beside it, under the
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
+    let target_args: &[&str] = match target {
+        Some(target) => &["--target", target],
+        None => &[],
+    };
     let mut built = vec![
-        ("pumpkin", release(cargo, "pumpkin", &[])?, 0o755),
+        ("pumpkin", release(cargo, "pumpkin", target_args)?, 0o755),
         ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
     let sandboxd = sandboxd(cargo)?;

@@ -47,6 +47,11 @@ use run::{driver_run, run, start};
 
 const MODAL_HELPER: &str = "pumpkin-modal.py";
 
+// musl's allocator is much slower than glibc's at reading a run's records.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     stdx::abort_on_panic();
     // A run reads back what its record holds, such as a payload or a call's result, and the
