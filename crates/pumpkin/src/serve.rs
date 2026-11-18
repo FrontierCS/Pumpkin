@@ -167,14 +167,7 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
 fn answered(home: &Path, ask: Ask) -> Answer {
     let answered = match ask {
         Ask::Health => health().map(Answer::Health),
-        Ask::List {
-            prefixes,
-            since_unix_secs,
-        } => {
-            let since =
-                since_unix_secs.map(|secs| UnixTime::after_epoch(Duration::from_secs(secs)));
-            listed(home, &prefixes, since)
-        }
+        Ask::List { prefixes } => listed(home, &prefixes),
     };
     answered.unwrap_or_else(|message| Answer::Refused { message })
 }
@@ -240,8 +233,9 @@ fn boot() -> Boot {
 
 /// The listing of the runs below `home` whose ids start with one of `prefixes`, as
 /// [`crate::listed_in`] makes it, at this machine's time, with the jobs yet to start a run.
-fn listed(home: &Path, prefixes: &[String], since: Option<UnixTime>) -> Result<Answer, String> {
+fn listed(home: &Path, prefixes: &[String]) -> Result<Answer, String> {
     let now = crate::unix_now();
+    let since = progress::listed_since(prefixes, now);
     let runs = home.join(crate::job::runs());
     let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
@@ -320,6 +314,5 @@ fn logged_since(log: &Path, since: Option<UnixTime>) -> Result<bool, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(error).context(log.display()),
     };
-    let modified = modified.duration_since(SystemTime::UNIX_EPOCH);
-    Ok(modified.unwrap_or_default().as_secs() >= since.since_epoch().as_secs())
+    Ok(UnixTime::of(modified).unwrap_or(crate::EPOCH) >= since)
 }

@@ -17,7 +17,6 @@
 use std::io::{self, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use provider::UnixTime;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
@@ -47,11 +46,10 @@ pub(crate) enum Hello {
 pub(crate) enum Ask {
     Health,
     /// The runs, and the jobs yet to start one, whose ids start with one of `prefixes`, or all
-    /// with none, as `ls` lists them: an ended run that ended before `since_unix_secs` is named
-    /// only as older ([`crate::progress::listed_since`]).
+    /// with none, as `ls` lists them, with those that ended before
+    /// [`crate::progress::listed_since`] by `serve`'s clock named only as older.
     List {
         prefixes: Vec<String>,
-        since_unix_secs: Option<u64>,
     },
 }
 
@@ -254,11 +252,9 @@ impl Link {
     pub(crate) fn list(
         &mut self,
         prefixes: &[String],
-        since: Option<UnixTime>,
     ) -> Result<Result<Listed, String>, Unanswered> {
         let ask = Ask::List {
             prefixes: prefixes.to_vec(),
-            since_unix_secs: since.map(|since| since.since_epoch().as_secs()),
         };
         match self.ask(&ask)? {
             Answer::Listed(listed) => Ok(Ok(listed)),

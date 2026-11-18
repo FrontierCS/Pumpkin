@@ -41,7 +41,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         mut listing,
         unlisted,
         asked,
-    } = answered(&reached, prefixes, since)?;
+    } = answered(&reached, prefixes)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -69,11 +69,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 /// What the controller's `serve` answers, which this installs there first if there is none; asked
 /// again over another link, after each of `AGAIN`'s pauses, while one ends before it has answered,
 /// as asking only reads.
-fn answered(
-    reached: &Reached,
-    prefixes: &[String],
-    since: Option<UnixTime>,
-) -> Result<Answers, String> {
+fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
     let exe = workspace::exe("expected to send it to the controller, to list the runs there")?;
     let (digest, _) = manifest::file_sha256(&exe)?;
     let name = &reached.name;
@@ -85,7 +81,7 @@ fn answered(
             Some(mut link) => {
                 let health = link.health()?;
                 let asked = crate::unix_now();
-                Ok(Some((health, link.list(prefixes, since)?, asked)))
+                Ok(Some((health, link.list(prefixes)?, asked)))
             }
             None => Ok(None),
         });
