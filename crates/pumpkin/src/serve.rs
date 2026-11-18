@@ -11,6 +11,7 @@
 
 mod copy;
 mod follow;
+mod reaping;
 
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
@@ -205,6 +206,9 @@ fn answer(
         Ask::Copy(request) => copy::answer(output, home, request, body),
         Ask::Start(request) => link::answer(output, *request, |start| {
             crate::job::start(home, start, body)
+        }),
+        Ask::Cancel(request) => link::answer(output, request, |request| {
+            reaping::cancel(home, request, body)
         }),
         Ask::Follow { id, log_from_bytes } => follow::answer(output, home, id, log_from_bytes),
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),

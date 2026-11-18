@@ -398,7 +398,7 @@ connections that a workspace's commands share (`Reached`); over them its `send` 
 build's job, its `copy` receives an ended record file by file, with `record.json` last, its
 `listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which starts jobs, answers `ls` and `view`, lists the jobs
+client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`, lists the jobs
 that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
 and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;

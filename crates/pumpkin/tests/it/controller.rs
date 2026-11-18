@@ -2423,6 +2423,82 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
 }
 
+#[test]
+fn cancel_stops_the_unit_once() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0c000006");
+    scratch.write(&format!("home/jobs/{id}/log"), "a job still building\n");
+    scratch.write(&format!("run/pumpkin/{id}/held"), "");
+    let ctl = r#"#!/bin/sh
+echo "$*" >> "${0%/*}/units"
+if [ "$2" = stop ]; then rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"; fi
+"#;
+    scratch.write_executable("bin/systemctl", ctl.as_bytes());
+    let mut lines = Vec::new();
+    for _ in 0..2 {
+        let cancel = on_client(&scratch, &client, &["cancel", "--force", &id])
+            .output()
+            .unwrap();
+        lines.push(format!(
+            "{}: {}",
+            cancel.status,
+            String::from_utf8_lossy(&cancel.stderr).trim()
+        ));
+    }
+    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
+    assert!(scratch.0.join(format!("home/jobs/{id}")).is_dir());
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+        --user kill --signal=KILL pumpkin-job-<id>
+        --user stop pumpkin-job-<id>"#]],
+    );
+}
+
+#[test]
+fn cancel_another_builds_job() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0c000007");
+    ended_job(&scratch, &id, "running a different build\n");
+    let dir = format!("home/.pumpkin/runs/{id}");
+    let foreign = json!({ "record_version": "another format", "pumpkin": { "version": "1.2.3" } });
+    scratch.write(&format!("{dir}/record.json"), &foreign);
+    scratch.write(&format!("{dir}/outcome.json"), "the other build's outcome");
+    scratch.write(&format!("run/pumpkin/{id}/held"), "");
+    let ctl = r#"#!/bin/sh
+echo "$*" >> "${0%/*}/units"
+rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"
+"#;
+    scratch.write_executable("bin/systemctl", ctl.as_bytes());
+    let cancel = on_client(&scratch, &client, &["cancel", &id])
+        .output()
+        .unwrap();
+    let copied = scratch
+        .0
+        .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
+    assert_eq!(
+        fs::read_to_string(copied).unwrap(),
+        "the other build's outcome"
+    );
+    let said = String::from_utf8_lossy(&cancel.stderr);
+    assert!(said.contains("1.2.3"), "{said}");
+    assert!(cancel.status.success(), "{said}");
+    assert_eq!(
+        fs::read_to_string(scratch.0.join("bin/units")).unwrap(),
+        format!("--user stop pumpkin-job-{id}\n")
+    );
+}
+
 fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
     let mut frame = Vec::new();
     schema::frame::write(&mut frame, message, body).unwrap();
@@ -3268,7 +3344,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `reap`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start` at line 1 column 14: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `reap`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel` at line 1 column 14: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
@@ -3344,11 +3420,6 @@ fn record_copy() {
     let hex = served(&scratch);
     let id = id_ago(0, "0d000001");
     ended_job(&scratch, &id, "built\n");
-    symlink(
-        scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin")),
-        scratch.0.join(format!("home/jobs/{id}/pumpkin")),
-    )
-    .unwrap();
     let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
     let at = |path: &str| format!("home/.pumpkin/runs/{id}/{path}");
@@ -3477,22 +3548,25 @@ fn record_copy() {
               jobs: 0, 2
             unchanged:
             cancel: exit status: 0
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, serve=.pumpkin/serve/<this build>/pumpkin
+              pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: 
             changed:
             cancel: exit status: 0
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, serve=.pumpkin/serve/<this build>/pumpkin
+              pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: log.jsonl, model/added
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1
               pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, now, attempt 2 of 7
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: model/big-1
             cut:
             cancel: exit status: 0
               pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, now, attempt 2 of 7
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: model/big-2, model/big-3
             the copy (but `jobs/0/out`) is the record's:
               driver.pid 644
