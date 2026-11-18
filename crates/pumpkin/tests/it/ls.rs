@@ -44,8 +44,7 @@ fn lists() {
     write_record(&scratch, "20261107-120600-7130006", false, None);
     let ls = |runs: &str| Step::from(scratch.pumpkin(&["ls", "--runs", runs]));
     // Nothing is listed for a default runs directory that isn't there yet.
-    let mut fresh = scratch.pumpkin(&["ls"]);
-    fresh.env("HOME", scratch.0.join("home"));
+    let fresh = scratch.pumpkin(&["ls"]);
     let listed = masked(
         &ran(
             scratch.pumpkin(&["ls", "--runs", "runs"]),
@@ -75,7 +74,7 @@ fn lists() {
             $ pumpkin ls --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it
-            $ HOME=<scratch>/home pumpkin ls
+            $ pumpkin ls
             exit status: Some(0)"#]],
     );
 }
