@@ -6,11 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
+    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox,
+    Unread, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -79,6 +81,9 @@ pub(crate) enum Listed {
     /// A job on the controller that has ended, whose run has no record in the controller's runs
     /// directory.
     Unstarted,
+    /// A run whose record this `pumpkin` can't read, made by another build: what is known of its
+    /// writer.
+    Unread(String),
     /// A run whose record is begun.
     Run(Box<Run>),
 }
@@ -99,6 +104,17 @@ impl Listed {
             crate::say(format_args!("run {}: {unread}", record.id()));
         }
         Ok(Self::of(record, record.task()?, ending, progress))
+    }
+
+    /// The run in `dir`, whose record failed to read with `error`, if another build made it, and
+    /// is the one to read it; else `error`.
+    pub(crate) fn unread(dir: &Path, error: String) -> Result<Self, String> {
+        match runtime::writer(dir) {
+            Ok(Writer::Other(build)) => Ok(Self::Unread(format!("made by pumpkin {build}"))),
+            Ok(Writer::Older) => Ok(Self::Unread("made by an older pumpkin".to_owned())),
+            // Only a bug or a failure of the disk makes this build fail to read its own record.
+            Ok(Writer::This) | Err(_) => Err(error),
+        }
     }
 
     pub(crate) fn of(
@@ -127,6 +143,7 @@ pub(crate) enum State {
     Interrupted,
     Lost,
     Unstarted,
+    Unread,
 }
 
 impl State {
@@ -140,6 +157,7 @@ impl State {
             Self::Interrupted => "interrupted",
             Self::Lost => "lost",
             Self::Unstarted => "unstarted",
+            Self::Unread => "unread",
         }
     }
 }
@@ -247,6 +265,7 @@ impl Totals {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
+            | Stage::Unread
             | Stage::Publishing => {}
         }
         match spent {
@@ -334,6 +353,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
             );
             return column(state, "-", "", "-", &why);
         }
+        Listed::Unread(writer) => return column(state, "-", "", "-", writer),
         Listed::Run(run) => run,
     };
     let task = run.task.as_deref().unwrap_or("-");

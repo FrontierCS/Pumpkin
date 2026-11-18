@@ -51,10 +51,13 @@ use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
 
 mod ending;
 mod payload;
+mod writer;
 
 pub use ending::Ending;
 use ending::{State, finished, read_outcome};
 pub(super) use payload::reference;
+pub use writer::{Writer, writer};
+use writer::{read_record_json, writer_of};
 
 const LOST: &str = "its driver ended without an outcome";
 
@@ -132,16 +135,8 @@ fn write_build(
     }
 }
 
-fn shown(build: &Value) -> Option<String> {
-    let version = build["version"].as_str()?;
-    let commit = match &build["commit"] {
-        Value::Null => None,
-        commit => Some((commit["hash"].as_str()?, commit["date"].as_str()?)),
-    };
-    let mut shown = String::new();
-    write_build(&mut shown, version, commit).ok()?;
-    Some(shown)
-}
+/// A record of the runs directory by its run's id, or why it didn't open.
+pub type Opened = (String, Result<Record, String>);
 
 /// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
 /// process that drives the run.
@@ -336,24 +331,7 @@ impl Record {
             ));
         };
         let path = dir.join("record.json");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound && !dir.is_dir() => {
-                return Err(format!(
-                    "{} is not a directory: expected the directory of a run's record",
-                    dir.display()
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "{} has no record.json, so it is no run's record: expected the directory \
-                     of one that `pumpkin run` made",
-                    dir.display()
-                ));
-            }
-            Err(error) => return Err(error).context(path.display()),
-        };
-        let record: serde_json::Value = serde_json::from_slice(&bytes).context(path.display())?;
+        let record = read_record_json(dir, &path)?;
         if record["record_version"] != RECORD_VERSION {
             return Err(format!(
                 "{} holds record_version {}: expected \"{RECORD_VERSION}\", which this \
@@ -369,16 +347,9 @@ impl Record {
                 record["args"]
             )
         })?;
-        let other_build = match &record["pumpkin"] {
-            Value::Null => None,
-            build if *build == BUILD.json() => None,
-            build => Some(shown(build).ok_or_else(|| {
-                format!(
-                    "{} holds pumpkin {build}: expected the build that made it, \
-                     {{\"version\": v, \"commit\": c}}",
-                    path.display()
-                )
-            })?),
+        let other_build = match writer_of(&path, &record)? {
+            Writer::Other(build) => Some(build),
+            Writer::This | Writer::Older => None,
         };
         let absolute = std::path::absolute(dir).map_err(|error| {
             format!(
@@ -401,17 +372,17 @@ impl Record {
         Self::open(&runs.join(id))
     }
 
-    /// Opens each record in `runs`, in the order of their ids; a directory that holds no
-    /// `record.json` is skipped, and one that doesn't open is an error in its place.
-    pub fn all(runs: &Path) -> Result<Vec<Result<Self, String>>, String> {
+    /// Opens each record in `runs`, in the order of their ids, each with its id; a directory that
+    /// holds no `record.json` is skipped, and one that doesn't open is an error in its place.
+    pub fn all(runs: &Path) -> Result<Vec<Opened>, String> {
         let mut records = Vec::new();
         for name in names(runs)? {
             let dir = runs.join(&name);
             let has = dir.join("record.json").try_exists();
             match has.context(dir.display()) {
                 Ok(false) => {}
-                Ok(true) => records.push(Self::open(&dir)),
-                Err(error) => records.push(Err(error)),
+                Ok(true) => records.push((name, Self::open(&dir))),
+                Err(error) => records.push((name, Err(error))),
             }
         }
         Ok(records)

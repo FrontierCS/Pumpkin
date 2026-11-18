@@ -9,7 +9,7 @@ import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, 
  * @typedef {object} ListedRun a run as `ls` lists it
  * @property {string} id
  * @property {boolean} live
- * @property {string} state
+ * @property {string} state "unread" for a run that another build made, whose page this build can't draw
  * @property {boolean} has_result
  * @property {string} time
  * @property {string} bound
@@ -44,6 +44,9 @@ export async function runsView() {
   /** @type {Map<string, HTMLTableRowElement>} */
   const rows = new Map();
   const open = (/** @type {string} */ id) => (location.hash = "#/run/" + encodeURIComponent(id));
+  // Whether a run's page can be opened: not for one whose record can't be read, or is another
+  // build's.
+  const opens = (/** @type {ListedRun | Unlisted} */ run) => run.error === undefined && run.state !== "unread";
 
   // A row's cells: each its class, title and text, and the state's its mark.
   /** @typedef {{ cls: string, title: string | null, text: string, mark?: string, span?: number }} Cell */
@@ -82,11 +85,11 @@ export async function runsView() {
     const want = cells(run);
     let tr = rows.get(run.id);
     if (!tr || tr.children.length !== want.length) {
-      tr = /** @type {HTMLTableRowElement} */ (h("tr", { onclick: () => run.error === undefined && open(run.id) }));
+      tr = /** @type {HTMLTableRowElement} */ (h("tr", { onclick: () => opens(run) && open(run.id) }));
       for (const cell of want) tr.append(h("td", {}, cell.mark !== undefined ? h("span") : null, ""));
       rows.set(run.id, tr);
     }
-    const listed = run.error === undefined ? /** @type {ListedRun} */ (run) : null;
+    const listed = opens(run) ? /** @type {ListedRun} */ (run) : null;
     attr(tr, "class", (listed ? "link" : "unread") + (index === state.cursor ? " on" : ""));
     attr(tr, "title", listed ? (listed.live ? "Live: open it to follow it" : "Open this run") : null);
     want.forEach((cell, at) => {
@@ -141,7 +144,7 @@ export async function runsView() {
       event.preventDefault();
       state.cursor = Math.max(0, Math.min(runs.length - 1, state.cursor + step));
       draw();
-    } else if (event.key === "Enter" && runs[state.cursor]) {
+    } else if (event.key === "Enter" && runs[state.cursor] && opens(runs[state.cursor])) {
       open(runs[state.cursor].id);
     } else if (event.key === "Escape") {
       state.cursor = -1;

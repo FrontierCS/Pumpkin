@@ -66,7 +66,8 @@ pub use model::{KeptPart, KeptRequest};
 use op::{Unanswered, accepts, request};
 pub use price::TokenPrices;
 pub use record::{
-    BUILD, Build, Ending, Reaped, Record, RouteEntry, ir_json, minted, named, new_id,
+    BUILD, Build, Ending, Opened, Reaped, Record, RouteEntry, Writer, ir_json, minted, named,
+    new_id, writer,
 };
 use record::{Lock, Payloads};
 use sandbox::{Published, Sandboxes};

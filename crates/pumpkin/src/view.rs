@@ -637,6 +637,7 @@ impl View {
             last = Some(name.clone());
             let row = self
                 .row(name)
+                .or_else(|error| self.unread_row(name, error).map(Some))
                 .unwrap_or_else(|error| Some(json!({ "id": name, "error": error })));
             rows.extend(row);
             if rows.len() == LIST_PAGE_RUNS {
@@ -645,6 +646,19 @@ impl View {
         }
         let next = if page.next().is_some() { last } else { None };
         Ok(json!({ "runs": rows, "next": next }))
+    }
+
+    /// The row of run `id`, whose record failed to read with `error`, as `ls` lists it when
+    /// another build made the record; else `error`.
+    fn unread_row(&self, id: &str, error: String) -> Result<Value, String> {
+        let listed = Listed::unread(&self.runs.join(id), error)?;
+        let mut row = listed_json(
+            id,
+            &progress::Row::of(id, &listed, crate::unix_now(), self.named.as_deref()),
+        );
+        row["requests"] = Value::Null;
+        row["tokens"] = Value::Null;
+        Ok(row)
     }
 
     fn row(&mut self, id: &str) -> Result<Option<Value>, String> {

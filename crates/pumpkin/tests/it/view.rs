@@ -268,6 +268,15 @@ fn serves_runs() {
             &places,
         );
     }
+    // A run of a later build, whose record this one can't read.
+    scratch.write(
+        "runs/20261110-125000-00000010/record.json",
+        &json!({
+            "record_version": "pumpkin.record/v9",
+            "pumpkin": { "version": "9.9.9", "commit": null },
+            "args": [],
+        }),
+    );
     let served = Served::start(&scratch);
     let mut steps = vec![format!(
         "pumpkin view --runs runs\n{}",
@@ -354,6 +363,7 @@ fn serves_runs() {
             GET /api/runs
             next: null
             runs:
+              {"bound":"","has_result":false,"id":"20261110-125000-00000010","live":false,"requests":null,"rest":"made by pumpkin 9.9.9","state":"unread","time":"-","tokens":null,"usd":"-"}
               {"bound":"-","has_result":false,"id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","state":"lost","time":"-","tokens":null,"usd":"-"}
               {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
