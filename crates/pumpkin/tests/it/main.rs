@@ -81,7 +81,8 @@ def final_call(target: Target, payload: Payload):
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
 /// Field `0` is its canonical path. A test that panics leaves the directory and prints where it
-/// is.
+/// is; one that ends and can't remove it fails, as a leftover would otherwise stay unseen:
+/// `TempDir` ignores what its removal fails with.
 struct Scratch(PathBuf, TempDir);
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
@@ -214,6 +215,12 @@ impl Drop for Scratch {
         if thread::panicking() {
             self.1.disable_cleanup(true);
             eprintln!("the test's scratch directory is {}", self.0.display());
+        } else if let Err(error) = fs::remove_dir_all(&self.0) {
+            self.1.disable_cleanup(true);
+            panic!(
+                "the scratch directory {} can't be removed: {error}",
+                self.0.display()
+            );
         }
     }
 }
