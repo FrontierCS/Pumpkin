@@ -312,10 +312,12 @@ pub struct Reaped {
     /// name, which that provider no longer listed, as they had ended, now deleted with what each
     /// left there.
     pub ended: Vec<(Name, SandboxId)>,
-    /// The directory of sockets removed, if there was one.
+    /// The directory of sockets removed, if there was one and every provider was swept.
     pub sockets: Option<PathBuf>,
     /// Whether the run had no outcome: the reap recorded it as failed.
     pub lost: bool,
+    /// Why the sweep of each provider that failed did, if one did.
+    pub failed: Option<String>,
 }
 
 impl Record {
@@ -560,8 +562,9 @@ impl Record {
 
     /// Waits for the run's driver, if one runs, to end, then deletes each sandbox of the run that
     /// `providers`, by name, list or the record holds undeleted, removes its `sockets/` and records
-    /// a lost run as failed; each deletion is appended to `reaps.jsonl`. Two reaps of a record take
-    /// turns. A provider left out deletes nothing, so a sandbox on it stays.
+    /// a lost run as failed; each deletion is appended to `reaps.jsonl`. Every provider is swept
+    /// even if one fails, which [`Reaped::failed`] says, and `sockets/` then stays. Two reaps of a
+    /// record take turns. A provider left out deletes nothing, so a sandbox on it stays.
     pub fn reap(&self, providers: &[(&Name, &dyn Sweep)]) -> Result<Reaped, String> {
         let (pid, pid_path) = self.pid_file()?;
         let run = RunTag::try_from(self.id.clone()).map_err(|error| {
@@ -589,18 +592,10 @@ impl Record {
             )?;
         }
         let undeleted = self.undeleted()?;
-        let swept = (providers.iter()).map(|&(name, provider)| {
-            // A sandbox that its provider lists no more may have ended and left what only its
-            // delete removes.
-            let held: Vec<SandboxId> = (undeleted.iter())
-                .filter(|(on, _)| on == name)
-                .map(|(_, id)| id.clone())
-                .collect();
-            // The sandboxes' records keep what the run's deletes said; `reaps.jsonl`, the reap's.
-            let after = |ids: &[SandboxId], deleted: &_| self.note_reaped(name, ids, deleted);
-            sweep(name, provider, &run, &held, after).map(|ids| (name.clone(), ids))
-        });
-        let sandboxes: Vec<(Name, Vec<SandboxId>)> = swept.collect::<Result<_, _>>()?;
+        // The sandboxes' records keep what the run's deletes said; `reaps.jsonl`, the reap's.
+        let after =
+            |name: &Name, ids: &[SandboxId], deleted: &_| self.note_reaped(name, ids, deleted);
+        let (sandboxes, failed) = sweep(providers.iter().copied(), &run, &undeleted, after);
         let ended: Vec<(Name, SandboxId)> = (undeleted.into_iter())
             .filter(|(name, id)| {
                 let swept = sandboxes.iter().find(|(swept, _)| swept == name);
@@ -608,16 +603,19 @@ impl Record {
             })
             .collect();
         let sockets = sockets(&self.dir);
-        let sockets = match fs::remove_dir_all(&sockets) {
-            Ok(()) => Some(sockets),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error).context(sockets.display()),
+        // Kept while a sandbox may still run, as one that a failed sweep left.
+        let sockets = match failed.is_none().then(|| fs::remove_dir_all(&sockets)) {
+            Some(Ok(())) => Some(sockets),
+            None => None,
+            Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Some(Err(error)) => return Err(error).context(sockets.display()),
         };
         Ok(Reaped {
             sandboxes,
             ended,
             sockets,
             lost,
+            failed,
         })
     }
 
