@@ -51,7 +51,10 @@ its run's hard end.
 ## The controller
 
 The controller is the same `pumpkin`, on an EC2 instance of the operator's own, under
-`pumpkin controller`. A machine whose configuration names `[controller]` sends it each run, over
+`pumpkin controller`. Only the instance that `deploy/aws` makes can be one: its jobs read their
+settings, such as the EC2 provider's launch templates, from the module's SSM parameter, and the
+machine finds, starts and enrols with it through EC2. A machine whose configuration names
+`[controller]` sends it each run, over
 ssh through SSM: `pumpkin run` sends the files of the task's repository that git lists and the
 task reaches, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
