@@ -1004,16 +1004,14 @@ pub(super) fn provided(
     // Names alone: the upstream's URL and key are the deployment's, and stay out of the record.
     let entry = |serving: &Serving| {
         let Serving {
-            name,
-            api,
-            url: _,
-            key: _,
-            models,
-            headers: _,
+            name, api, models, ..
         } = serving;
         let models = (models.iter())
-            .map(|(model, upstream_name)| {
-                let mut served = json!({ "upstream_name": upstream_name });
+            .map(|(model, upstream)| {
+                let mut served = json!({ "upstream_name": upstream.name });
+                if *api == schema::ir::Api::Responses && upstream.responses_via_chat {
+                    served["upstream_api"] = json!(schema::ir::Api::Chat);
+                }
                 if let Some(price) = prices.get(model) {
                     served["usd_per_mtok"] = json!(price);
                 }

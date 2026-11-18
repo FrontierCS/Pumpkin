@@ -2,6 +2,9 @@
 //! request as its case says. The test is the session's owner: it serves the harness's request
 //! from the fake sandbox, and shows what the stand-in received and what the sandbox heard.
 
+mod bridge;
+mod bridge_stream;
+
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
@@ -11,6 +14,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, slice, thread};
 
+use bridge::bridge_exchange;
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
@@ -157,6 +161,7 @@ enum Answer {
     Labelled(&'static str, Parts),
     Json(&'static str),
     Refuses,
+    ContextExceeded,
     RefusesKey(u16),
     Redirects,
     Codes,
@@ -348,6 +353,7 @@ fn serve_one(
 
 #[derive(Default)]
 struct Kept {
+    translated_to: Cell<Option<Api>>,
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
     first_output: Cell<Option<usize>>,
@@ -365,7 +371,9 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn dropped_headers(&self, _: &[String]) {}
+    fn upstream(&self, api: Option<Api>, _: &[String]) {
+        self.translated_to.set(api);
+    }
 
     fn request(&self, body: &[u8], _: Option<Apart>) {
         self.request.borrow_mut().extend_from_slice(body);
@@ -462,6 +470,10 @@ fn serve(
                     body.len()
                 );
                 connection.write_all((head + body).as_bytes()).unwrap();
+            }
+            Answer::ContextExceeded => {
+                let body = r#"{"error":{"code":"context_length_exceeded","message":"private provider diagnostics","type":"invalid_request_error","param":null}}"#;
+                write!(connection,"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
             Answer::Refuses => {
                 let body = r#"{"error":{"message":"slow down","type":"requests"}}"#;
@@ -711,7 +723,7 @@ fn first_output_as_read() {
         let at = route::read::answer(api, stream.as_bytes())
             .first_output
             .unwrap();
-        // Split where the reader says the first output's line ends, and a byte before: the route
+        // Split where the reader says the first output event ends, and a byte before: the route
         // says its output began by the first part's end only if it reads the same event first.
         for split in [at, at - 1] {
             let (first, rest) = stream.split_at(split);
@@ -741,10 +753,10 @@ fn first_output_as_read() {
         a stream, split at 1274 of 6988: begun by 6988
         a stream broken off, split at 1262 of 1685: begun by 1262
         a stream broken off, split at 1261 of 1685: begun by 1685
-        a stream of Chat Completions, split at 203 of 1206: begun by 203
-        a stream of Chat Completions, split at 202 of 1206: begun by 1206
-        a custom call of Chat Completions, split at 226 of 412: begun by 226
-        a custom call of Chat Completions, split at 225 of 412: begun by 412
+        a stream of Chat Completions, split at 204 of 1206: begun by 204
+        a stream of Chat Completions, split at 203 of 1206: begun by 1206
+        a custom call of Chat Completions, split at 227 of 412: begun by 227
+        a custom call of Chat Completions, split at 226 of 412: begun by 412
         a stream of Messages, split at 604 of 2207: begun by 604
         a stream of Messages, split at 603 of 2207: begun by 2207
         a stream of Messages broken off, split at 385 of 525: begun by 385

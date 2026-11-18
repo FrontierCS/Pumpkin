@@ -1578,7 +1578,10 @@ fn traces_a_caller() {
             "stop",
         )),
     );
-    log.push(answered(15, "job-0", 8, 200, kept, None));
+    let mut translated = answered(15, "job-0", 8, 200, kept, None);
+    translated["event"]["api"] = json!("responses");
+    translated["event"]["kept"]["upstream_api"] = json!("chat");
+    log.push(translated);
     // And the same again, abandoned as the call's route ended.
     log.push(started(16, "job-0", 9));
     let ended = "{\"error\":{\"message\":\"the model route has ended\"}}";
@@ -1739,7 +1742,7 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="cut" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
             caller: "agent"
-            end: 6248
+            end: 6288
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -1798,11 +1801,11 @@ fn traces_a_caller() {
             the call's steps:
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.08333333333333333 cached=50 calls=["grep"] end_ns="13000000000" input=600 items=2 kept_bytes=243 output=10 request=6 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=2 answer="forwarded" answers=3 back_bytes=226 cache_hit=0.07142857142857142 cached=50 calls=["grep"] end_ns="14000000000" input=700 items=2 kept_bytes=243 output=10 repeat_of=6 request=7 sent_bytes=100 status=200 stop="tool_calls" thread=6 tools=0 turn=6 whole=true
-            added=2 added_entries=1 answer="forwarded" answers=1 back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
+            added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=95 cache_hit=0.0625 cached=50 calls=[] differs=[] end_ns="15000000000" input=800 items=4 kept_bytes=391 output=10 parent=6 request=8 sent_bytes=100 status=200 stop="stop" thread=6 tools=0 turn=6 whole=true
             added=2 added_entries=1 answer="abandoned" answers=0 back_bytes=49 calls=[] differs=[] end_ns="17000000000" items=4 kept_bytes=391 model_ns=1000000001 parent=6 repeat_of=8 request=9 sent_bytes=100 start_ns="15999999999" thread=6 tools=0 turn=6 whole=true
             added_entries=1 answer="barred" answers=0 api="chat" back_bytes=53 calls=[] end_ns="18000000000" kept_bytes=71 notes=["the record kept its body whole, so its conversation is compared with no other"] request=10 sent_bytes=71 thread=10 turn=10 upstream="zai" whole=true
             caller: "job-0"
-            end: 6248
+            end: 6288
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[1000000001,null],"thread":[6,10]}

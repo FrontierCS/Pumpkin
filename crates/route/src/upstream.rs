@@ -1,5 +1,7 @@
 //! Sending a closed model request to the model provider, and streaming its response back.
 
+mod translated;
+
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::net::IpAddr;
@@ -8,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::{fmt, fs};
 
-use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
+use gateway::{IncomingModelRequest, ModelRequest};
 use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
 use serde_json::{Map, Value};
@@ -18,7 +20,7 @@ use ureq::http::{HeaderMap, HeaderName, HeaderValue, Uri};
 
 use super::Keep;
 use super::closure::{Closed, Headers, Refusal, Route, Status, parsed, refusal};
-use super::usage::{Failure, Scan, Usage};
+use super::usage::{Failure, Usage};
 
 /// How long the upstream may take to resolve the provider's host name.
 // Resolving the name and connecting to it (`CONNECT_TIMEOUT`) are the waits that `IDLE_TIMEOUT`
@@ -68,6 +70,14 @@ pub struct Upstream {
     refused: OnceLock<()>,
 }
 
+/// The model name and whether a Responses caller reaches Chat Completions below the upstream's
+/// base URL.
+#[derive(Clone, Debug)]
+pub struct UpstreamModel {
+    pub name: ModelName,
+    pub responses_via_chat: bool,
+}
+
 /// How the route answered a model request: never with what the request or the response held.
 ///
 /// An upstream's response comes with the provider's id for the request, if it gave one, which an
@@ -113,6 +123,36 @@ pub enum Answer {
     Abandoned { model: ModelName },
 }
 
+impl Answer {
+    fn upstream(
+        model: &ModelName,
+        status: u16,
+        request_id: Option<String>,
+        cut: bool,
+        usage: Option<Usage>,
+        failed: Option<Failure>,
+    ) -> Self {
+        let model = model.clone();
+        if cut {
+            Self::Cut {
+                model,
+                status,
+                request_id,
+                usage,
+                failed,
+            }
+        } else {
+            Self::Forwarded {
+                model,
+                status,
+                request_id,
+                usage,
+                failed,
+            }
+        }
+    }
+}
+
 /// Why the route barred a request before it reached the upstream.
 #[derive(Debug)]
 pub enum Bar {
@@ -135,7 +175,7 @@ pub struct Serving {
     pub key: Key,
     /// The name that the upstream takes for each model it serves, by the name that a route
     /// allows.
-    pub models: BTreeMap<ModelName, ModelName>,
+    pub models: BTreeMap<ModelName, UpstreamModel>,
     /// The headers that the entry passes besides its API's own.
     pub headers: Headers,
 }
@@ -290,7 +330,9 @@ impl Upstream {
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
-        client.keep.dropped_headers(closed.dropped_headers());
+        client
+            .keep
+            .upstream(closed.translated_to(), closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url(closed)).config();
         let call = call.timeout_global(bound(client.by)).build();
@@ -314,6 +356,9 @@ impl Upstream {
             return replaced(refusal, upstream, closed, &mut body, client, answered);
         }
         let headers = returned(response.headers(), closed);
+        if let Some(conversion) = &closed.conversion {
+            return translated::answer(closed, conversion, response, headers, client, answered);
+        }
         let Client { request, by, keep } = client;
         let mut client = match request.respond(status, headers, by) {
             Ok(client) => client,
@@ -330,25 +375,22 @@ impl Upstream {
         };
         let mut scan = closed.scan();
         let mut body = response.into_body().into_reader();
-        let relayed = relay(&mut body, &mut client, &mut scan, keep);
-        let (usage, failed) = scan.finish();
-        let model = closed.model().clone();
-        answered(match relayed {
-            Relayed::Whole => Answer::Forwarded {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
-            Relayed::BrokeOff | Relayed::Unsent(_) => Answer::Cut {
-                model,
-                status,
-                request_id,
-                usage,
-                failed,
-            },
+        let relayed = relay(&mut body, keep, |bytes| {
+            if scan.feed(bytes) {
+                keep.first_output();
+            }
+            client.send(bytes)
         });
+        let (usage, failed, _) = scan.finish();
+        let cut = !matches!(relayed, Relayed::Whole);
+        answered(Answer::upstream(
+            closed.model(),
+            status,
+            request_id,
+            cut,
+            usage,
+            failed,
+        ));
         match relayed {
             Relayed::Whole => client.end(),
             Relayed::BrokeOff => client.cut(),
@@ -448,6 +490,25 @@ impl Upstream {
 
     /// The endpoint's URL for `closed`, with the query that its target carried.
     fn url(&self, closed: &Closed<'_>) -> Uri {
+        if closed.translated_to().is_some() {
+            // Both API endpoints belong to this upstream: the model can change only the path,
+            // never the authority that receives the key.
+            let base = self
+                .url
+                .path()
+                .rsplit_once('/')
+                .map_or("", |(base, _)| base);
+            let mut parts = self.url.clone().into_parts();
+            parts.path_and_query = Some(format!("{base}/chat/completions").parse().unwrap_or_else(
+                |_| {
+                    unreachable!(
+                        "a prefix of the endpoint's path followed by /chat/completions is a path"
+                    )
+                },
+            ));
+            return Uri::from_parts(parts)
+                .unwrap_or_else(|_| unreachable!("only the URI's path changed"));
+        }
         let Some(query) = closed.query() else {
             return self.url.clone();
         };
@@ -616,14 +677,11 @@ enum Relayed {
     Unsent(io::Error),
 }
 
-/// Streams `body` to `client` as it arrives, showing it to `scan` and giving it to `keep`, and
-/// telling `keep` where its output begins, until it ends, without writing its end, and returns
-/// how it went.
+/// Gives each part of the body to the record, then the client, until it ends.
 fn relay(
     body: &mut impl Read,
-    client: &mut ModelResponse,
-    scan: &mut Scan,
     keep: &dyn Keep,
+    mut send: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> Relayed {
     // A read fills at most one frame of the session.
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
@@ -631,13 +689,8 @@ fn relay(
         match body.read(&mut buffer) {
             Ok(0) => return Relayed::Whole,
             Ok(read) => {
-                let began = scan.feed(&buffer[..read]);
                 keep.response(&buffer[..read]);
-                // After the bytes, so that the first output is timed no earlier than they are.
-                if began {
-                    keep.first_output();
-                }
-                if let Err(error) = client.send(&buffer[..read]) {
+                if let Err(error) = send(&buffer[..read]) {
                     return Relayed::Unsent(error);
                 }
             }

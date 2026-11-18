@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use stdx::Deadline;
 use ureq::http::{HeaderName, HeaderValue};
 
-use super::upstream::{Answer, Bar};
+use super::upstream::{Answer, Bar, UpstreamModel};
 use super::{read, usage};
 use crate::Apart;
 
@@ -60,10 +60,10 @@ const STATE_FIELDS: [&str; 4] = [
 /// The fields that hold a URL, which the provider fetches unless it is a `data:` URL.
 const URL_FIELDS: [&str; 4] = ["url", "image_url", "file_url", "audio_url"];
 
-/// The most names of left-behind request headers that [`Keep::dropped_headers`] is given for a
+/// The most names of left-behind request headers that [`Keep::upstream`] is given for a
 /// request.
 ///
-/// [`Keep::dropped_headers`]: crate::Keep::dropped_headers
+/// [`Keep::upstream`]: crate::Keep::upstream
 // A client sends a few dozen headers at most; the names are for a person to read.
 pub const MAX_DROPPED_HEADERS: usize = 32;
 
@@ -159,7 +159,7 @@ const MESSAGES: Rules = Rules {
 pub struct Route {
     rules: &'static Rules,
     /// Each model that requests may name, with the name that its upstream takes for it.
-    models: BTreeMap<ModelName, ModelName>,
+    models: BTreeMap<ModelName, UpstreamModel>,
     request_headers: Vec<HeaderName>,
     response_headers: Vec<String>,
 }
@@ -182,7 +182,8 @@ pub(crate) struct Closed<'r> {
     body: Vec<u8>,
     /// The model that the request named, and the name that its upstream takes for it, which
     /// `body` names.
-    model: (ModelName, ModelName),
+    model: (&'r ModelName, &'r UpstreamModel),
+    pub(crate) conversion: Option<crate::bridge::Request>,
     route: &'r Route,
 }
 
@@ -209,7 +210,7 @@ pub(super) enum Status {
 impl Route {
     /// The entry for `api` that allows each model that `models` keys, which goes upstream under
     /// the name that it maps the model to, and passes the headers of `api`'s own and `headers`.
-    pub fn new(api: Api, models: BTreeMap<ModelName, ModelName>, headers: &Headers) -> Self {
+    pub fn new(api: Api, models: BTreeMap<ModelName, UpstreamModel>, headers: &Headers) -> Self {
         let rules = match api {
             Api::Responses => &RESPONSES,
             Api::Chat => &CHAT,
@@ -279,21 +280,40 @@ impl Route {
         let dropped_headers = self.dropped(headers);
         let headers = passed(&self.request_headers, headers)?;
         let mut body = body?;
-        (rules.stored)(&body)?;
         let named = body.get("model").and_then(Value::as_str);
-        let allowed = named.and_then(|named| self.allows(named));
-        let (model, upstream_name) =
-            allowed.ok_or_else(|| Refusal::unallowed(named, self.models.keys()))?;
+        let allowed = named
+            .and_then(|name| self.allows(name))
+            .ok_or_else(|| Refusal::unallowed(named, self.models.keys()));
+        let translated = rules.api == Api::Responses
+            && allowed
+                .as_ref()
+                .is_ok_and(|(_, model)| model.responses_via_chat);
+        if translated {
+            crate::bridge::explicit_messages(&mut body);
+        }
+        (rules.stored)(&body)?;
+        let (model, upstream) = allowed?;
         (rules.feature)(&body)?;
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
-        let named = Value::String(upstream_name.as_str().to_owned());
+        let conversion = if translated {
+            let (chat, request) = crate::bridge::request(body).map_err(bad)?;
+            (CHAT.stored)(&chat)?;
+            (CHAT.feature)(&chat)?;
+            (CHAT.choice)(&chat)?;
+            closed_fields(&CHAT, &chat)?;
+            body = chat;
+            Some(request)
+        } else {
+            None
+        };
+        let named = Value::String(upstream.name.as_str().to_owned());
         body.insert("model".to_owned(), named);
         // What goes upstream is the body as parsed here, not as sent, so that no other parser can
         // read it otherwise: one that keeps the first of a field sent twice, say, where this
         // keeps the last.
         let body = Value::Object(body).to_string().into_bytes();
-        let model = (model.clone(), upstream_name.clone());
+        let model = (model, upstream);
         Ok(Closed {
             query,
             headers,
@@ -301,6 +321,7 @@ impl Route {
             body,
             model,
             route: self,
+            conversion,
         })
     }
 
@@ -325,7 +346,7 @@ impl Route {
 
     /// The model that requests may name as `named`, with the name that its upstream takes for it,
     /// if they may.
-    pub(crate) fn allows(&self, named: &str) -> Option<(&ModelName, &ModelName)> {
+    pub(crate) fn allows(&self, named: &str) -> Option<(&ModelName, &UpstreamModel)> {
         (self.models.iter()).find(|(model, _)| model.as_str() == named)
     }
 
@@ -367,7 +388,11 @@ impl Closed<'_> {
     }
 
     pub(crate) fn model(&self) -> &ModelName {
-        &self.model.0
+        self.model.0
+    }
+
+    pub(crate) fn upstream_name(&self) -> &str {
+        self.model.1.name.as_str()
     }
 
     /// The request's body, as [`Route::close`] parsed it.
@@ -376,26 +401,36 @@ impl Closed<'_> {
     }
 
     pub(crate) fn apart(&self) -> Apart {
-        self.route.rules.apart
+        self.upstream_rules().apart
+    }
+
+    pub(crate) fn translated_to(&self) -> Option<Api> {
+        self.conversion.as_ref().map(|_| Api::Chat)
+    }
+
+    fn upstream_rules(&self) -> &'static Rules {
+        if self.conversion.is_some() {
+            &CHAT
+        } else {
+            self.route.rules
+        }
     }
 
     pub(crate) fn scan(&self) -> usage::Scan {
-        let rules = self.route.rules;
+        let rules = self.upstream_rules();
         let output = read::dialect(rules.api).output;
-        usage::Scan::new(rules.usage, rules.failure_code, output)
+        usage::Scan::new(
+            rules.usage,
+            rules.failure_code,
+            output,
+            rules.api == Api::Chat,
+        )
     }
 
     /// `answered`, the model that a response says answered the request, as the request named it,
     /// if it is the name that the upstream takes for it, and else as it is.
     pub(super) fn named<'a>(&'a self, answered: &'a str) -> &'a str {
-        let (model, upstream_name) = &self.model;
-        // A harness compares the model that answered with the one it asked for, ASCII case
-        // aside, and would take the upstream's name for it as another model.
-        if answered.eq_ignore_ascii_case(upstream_name.as_str()) {
-            model.as_str()
-        } else {
-            answered
-        }
+        crate::bridge::response::model_name(self.model().as_str(), self.upstream_name(), answered)
     }
 }
 

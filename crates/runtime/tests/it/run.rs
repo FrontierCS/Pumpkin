@@ -172,9 +172,15 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
     let url = UpstreamUrl::try_from(url.to_owned()).unwrap();
     let key = Key::read(&dir.join("key")).unwrap();
     let model = |name: String| ModelName::try_from(name).unwrap();
-    let models = models
-        .iter()
-        .map(|name| (model((*name).to_owned()), model(format!("vendor/{name}"))));
+    let models = models.iter().map(|name| {
+        (
+            model((*name).to_owned()),
+            route::UpstreamModel {
+                name: model(format!("vendor/{name}")),
+                responses_via_chat: false,
+            },
+        )
+    });
     Serving {
         name: Name::try_from("stand-in".to_owned()).unwrap(),
         api: Api::Responses,

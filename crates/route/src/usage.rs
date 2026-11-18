@@ -5,7 +5,7 @@ use serde_json::Value;
 
 /// The most that a response is held for its usage: one server-sent event's line, or a response's
 /// whole body when it is not a stream. What is longer reports no usage.
-const MAX_HELD_BYTES: usize = 16 << 20;
+pub(crate) const MAX_HELD_BYTES: usize = 16 << 20;
 
 /// The most bytes of a failure's code that [`Failure::code`] gives.
 // Twice the longest that the Responses API lists for a failed response, 30 bytes, which leaves
@@ -18,12 +18,13 @@ pub(crate) type Reported = fn(Option<Usage>, &Value) -> Option<Usage>;
 
 /// Where an API of OpenAI's gives its input and output tokens in a usage, and the pointers to
 /// its cached and reasoning tokens.
-type Fields = [&'static str; 4];
+type Fields = [&'static str; 5];
 
 const RESPONSES_FIELDS: Fields = [
     "input_tokens",
     "output_tokens",
     "/input_tokens_details/cached_tokens",
+    "/input_tokens_details/cache_write_tokens",
     "/output_tokens_details/reasoning_tokens",
 ];
 
@@ -31,6 +32,7 @@ const CHAT_FIELDS: Fields = [
     "prompt_tokens",
     "completion_tokens",
     "/prompt_tokens_details/cached_tokens",
+    "/prompt_tokens_details/cache_write_tokens",
     "/completion_tokens_details/reasoning_tokens",
 ];
 
@@ -125,8 +127,7 @@ pub struct Usage {
     pub output_tokens: u64,
     /// The input tokens that the provider served from its cache, if it says.
     pub cached_tokens: Option<u64>,
-    /// The input tokens that the provider wrote to its cache, if it says, as only the Messages
-    /// API does.
+    /// The input tokens that the provider wrote to its cache, if it says.
     pub cache_write_tokens: Option<u64>,
     /// The output tokens that went to the model's reasoning, if the provider says.
     pub reasoning_tokens: Option<u64>,
@@ -140,12 +141,12 @@ impl Usage {
             .get("usage")
             .or_else(|| value.get("response")?.get("usage"))?;
         let count = |value: Option<&Value>| value?.as_u64();
-        let [input, output, cached, reasoning] = fields;
+        let [input, output, cached, written, reasoning] = fields;
         Some(Self {
             input_tokens: count(usage.get(input))?,
             output_tokens: count(usage.get(output))?,
             cached_tokens: count(usage.pointer(cached)),
-            cache_write_tokens: None,
+            cache_write_tokens: count(usage.pointer(written)),
             reasoning_tokens: count(usage.pointer(reasoning)),
         })
     }
@@ -163,6 +164,12 @@ pub struct Failure {
 }
 
 impl Failure {
+    pub(crate) fn new(code: &'static str) -> Self {
+        Self {
+            code: Some(code.to_owned()),
+        }
+    }
+
     /// The code that the response gave for its failure: the first of its failures' codes that is
     /// an identifier, of at most `MAX_CODE_BYTES` ASCII letters, digits, `_`, `-` and `.`, if one
     /// is.
@@ -171,7 +178,7 @@ impl Failure {
     }
 
     /// The failure that `event` states, whose error gives its code in `code`.
-    fn of(event: &Value, code: &str) -> Option<Self> {
+    pub(crate) fn of(event: &Value, code: &str) -> Option<Self> {
         let error = match (event.get("error"), event["type"].as_str()) {
             (Some(error), _) if !error.is_null() => Some(error),
             (_, Some("response.failed")) => event.pointer("/response/error"),
@@ -199,6 +206,7 @@ pub(crate) struct Scan {
     output: Output,
     /// `None` while the body has held only whitespace, which is read as a stream's.
     framing: Option<Framing>,
+    chat_frames: Option<crate::sse::Frames>,
     /// Whether an event of the stream was output.
     began: bool,
     // A stream's current line, or a plain body; `None` once it passed its bound: a stream's line
@@ -209,12 +217,13 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn new(usage_of: Reported, code: &'static str, output: Output) -> Self {
+    pub(crate) fn new(usage_of: Reported, code: &'static str, output: Output, chat: bool) -> Self {
         Self {
             usage_of,
             code,
             output,
             framing: None,
+            chat_frames: chat.then(crate::sse::Frames::default),
             began: false,
             held: Some(Vec::new()),
             usage: None,
@@ -223,7 +232,7 @@ impl Scan {
     }
 
     /// Reads `bytes`, the body's next, and returns whether the stream's output began in them:
-    /// whether a line they end holds its first event of output.
+    /// whether they complete its first event of output.
     pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> bool {
         if self.framing.is_none() {
             self.framing = Framing::of(bytes);
@@ -233,6 +242,16 @@ impl Scan {
             return false;
         }
         let began = self.began;
+        while let Some(frames) = &mut self.chat_frames {
+            if bytes.is_empty() {
+                return !began && self.began;
+            }
+            if let Ok(Some(frame)) = frames.next(&mut bytes)
+                && let Ok(event) = serde_json::from_slice(&frame.data)
+            {
+                self.take(&event);
+            }
+        }
         while let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
             self.hold(&bytes[..end]);
             self.line();
@@ -242,18 +261,19 @@ impl Scan {
         !began && self.began
     }
 
-    pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>) {
-        match self.framing {
-            Some(Framing::Stream) | None => self.line(),
-            Some(Framing::Whole) => {
-                if let Some(held) = &self.held {
-                    self.usage = serde_json::from_slice(held)
-                        .ok()
-                        .and_then(|body| (self.usage_of)(None, &body));
-                }
-            }
+    /// Also returns the parsed body for a response that was one bounded JSON value.
+    pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>, Option<Value>) {
+        let body = if self.framing == Some(Framing::Whole) {
+            self.held
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        } else {
+            self.line();
+            None
+        };
+        if let Some(value) = &body {
+            self.usage = (self.usage_of)(None, value);
         }
-        (self.usage, self.failed)
+        (self.usage, self.failed, body)
     }
 
     fn hold(&mut self, bytes: &[u8]) {
@@ -274,9 +294,13 @@ impl Scan {
         let Some(event) = event(&held) else {
             return;
         };
-        self.usage = (self.usage_of)(self.usage, &event);
-        self.began |= (self.output)(&event);
-        if let Some(failure) = Failure::of(&event, self.code) {
+        self.take(&event);
+    }
+
+    fn take(&mut self, event: &Value) {
+        self.usage = (self.usage_of)(self.usage, event);
+        self.began |= (self.output)(event);
+        if let Some(failure) = Failure::of(event, self.code) {
             let code = self.failed.take().and_then(|failed| failed.code);
             self.failed = Some(Failure {
                 code: code.or(failure.code),

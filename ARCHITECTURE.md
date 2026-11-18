@@ -229,7 +229,10 @@ control socket, and each provider mounts `sandboxctl` only for a role that makes
 
 The model route. `serve` answers each model request through the entry for its API that allows its
 model, whose `Route` admits it in a closed form (`closure`), sends it upstream (`Upstream`), streams
-the response back, and says how it answered (`Answer`). `Serving` is the upstream that serves an
+the response back, and says how it answered (`Answer`). For a configured model, `bridge` converts a
+closed Responses request to Chat Completions and the upstream answer back to Responses. The record
+reads the API of the upstream bodies and accounting uses the caller's route.
+`Serving` is the upstream that serves an
 entry, and `Keep` is where an exchange is kept as it passes. `read` reads a kept exchange of any API
 as the same kinds of items (`Item`), and takes a stream's first output where `serve` does, by the
 same rule.
