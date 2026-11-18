@@ -30,10 +30,12 @@ pub(super) enum Stage {
     Interrupted,
     /// A run that ended with no `outcome.json`.
     Lost,
+    /// A run that publishes its images, before its log has begun, which the totals count as
+    /// running.
+    Publishing,
     Running {
-        /// When the run ends at the latest, by its hard end, in seconds since the Unix epoch:
-        /// nothing while it publishes, before its log has begun.
-        ends_unix_secs: Option<u64>,
+        /// When the run ends at the latest, by its hard end, in seconds since the Unix epoch.
+        ends_unix_secs: u64,
         /// The lines that `ls` prints under the run's line, each ending in a newline: one for
         /// each call and lease that hasn't ended.
         under: String,
@@ -87,6 +89,7 @@ impl Row {
             | Stage::Failed
             | Stage::Interrupted
             | Stage::Lost
+            | Stage::Publishing
             | Stage::Finished { .. } => "",
         }
     }
@@ -94,7 +97,7 @@ impl Row {
     /// Whether the run is live, or its job builds it.
     pub(crate) fn live(&self) -> bool {
         match self.stage {
-            Stage::Waiting | Stage::Building | Stage::Running { .. } => true,
+            Stage::Waiting | Stage::Building | Stage::Publishing | Stage::Running { .. } => true,
             Stage::Finished { .. }
             | Stage::Failed
             | Stage::Interrupted
@@ -110,6 +113,7 @@ impl Row {
             Stage::Finished { .. } | Stage::Failed | Stage::Interrupted => true,
             Stage::Waiting
             | Stage::Building
+            | Stage::Publishing
             | Stage::Running { .. }
             | Stage::Lost
             | Stage::Unstarted => false,
@@ -121,6 +125,7 @@ impl Row {
             Stage::Finished { result } => result,
             Stage::Waiting
             | Stage::Building
+            | Stage::Publishing
             | Stage::Running { .. }
             | Stage::Failed
             | Stage::Interrupted
@@ -141,14 +146,11 @@ impl Stage {
         match &run.ending {
             None => {
                 let Some(progress) = &run.progress else {
-                    return Self::Running {
-                        ends_unix_secs: None,
-                        under: String::new(),
-                    };
+                    return Self::Publishing;
                 };
                 let ends = progress.started.saturating_add(progress.hard_end);
                 Self::Running {
-                    ends_unix_secs: Some(ends.since_epoch().as_secs()),
+                    ends_unix_secs: ends.since_epoch().as_secs(),
                     under: under(id, progress, now, runs),
                 }
             }
@@ -165,7 +167,7 @@ impl Stage {
             Self::Waiting => State::Waiting,
             Self::Building => State::Building,
             Self::Unstarted => State::Unstarted,
-            Self::Running { .. } => State::Running,
+            Self::Publishing | Self::Running { .. } => State::Running,
             Self::Finished { .. } => State::Finished,
             Self::Failed => State::Failed,
             Self::Interrupted => State::Interrupted,

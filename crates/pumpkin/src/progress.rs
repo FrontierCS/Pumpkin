@@ -216,7 +216,7 @@ impl Totals {
             Stage::Running {
                 ends_unix_secs,
                 under: _,
-            } => self.ends_unix_secs = self.ends_unix_secs.max(*ends_unix_secs),
+            } => self.ends_unix_secs = self.ends_unix_secs.max(Some(*ends_unix_secs)),
             Stage::Finished { result: false } => self.without_result += 1,
             Stage::Finished { result: true }
             | Stage::Waiting
@@ -224,7 +224,8 @@ impl Totals {
             | Stage::Unstarted
             | Stage::Failed
             | Stage::Interrupted
-            | Stage::Lost => {}
+            | Stage::Lost
+            | Stage::Publishing => {}
         }
         match spent {
             Spent::Unread => {}
