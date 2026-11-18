@@ -2885,6 +2885,32 @@ fn ls_refusals() {
     );
 }
 
+#[test]
+fn ls_fails_at_once_when_serve_ends() {
+    let scratch = Scratch::new("controller-ls-serve-ends");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = sha256(&fs::read(PUMPKIN).unwrap());
+    // The connection stays up, so asking again would end the same way.
+    let script = "#!/bin/sh\necho 'serve: cannot start' >&2\nexit 1\n";
+    scratch.write_executable(
+        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
+        script.as_bytes(),
+    );
+    let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&hex, "<this build>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            serve: cannot start
+            pumpkin: linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin"#]],
+    );
+}
+
 /// What `controller serve` does with `input` on its standard input.
 fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
     let mut serve = scratch.program(PUMPKIN, &["controller", "serve"]);
@@ -2925,17 +2951,17 @@ fn serve_refusals() {
         &steps.join("\n"),
         &[],
         &expect![[r#"
-        no request:
-        exit status: 0
-          {"type":"serving"}, and a body of 0 bytes
-        a frame past the cap:
-        exit status: 1
-          {"type":"serving"}, and a body of 0 bytes
-          {"message":"a frame's message is 65537 bytes: it holds at most 65536: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes
-        a message that is no request:
-        exit status: 1
-          {"type":"serving"}, and a body of 0 bytes
-          {"message":"unknown variant `reap`, expected `health` or `list` at line 1 column 14: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes"#]],
+            no request:
+            exit status: 0
+              {"type":"serving"}, and a body of 0 bytes
+            a frame past the cap:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"a frame's message is 65537 bytes: it holds at most 65536: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes
+            a message that is no request:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"unknown variant `reap`, expected one of `health`, `list`, `view` at line 1 column 14: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 
@@ -3288,8 +3314,6 @@ fn record_copy_refusals() {
 fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2]) {
     let client = set_up_client(scratch);
     connect(scratch, &client);
-    let commit = runtime::BUILD.commit_hash().unwrap();
-    install(scratch, &format!("home/.pumpkin/{commit}/bin"));
     let (ended, live) = ("20261110-090000-0000000a", "20261110-110000-0000000c");
     let places = lease_places(Prices::Both);
     let outcome = returned(49.36);
@@ -3324,6 +3348,7 @@ fn viewed(scratch: &Scratch) -> ([(String, String); 2], File, [&'static str; 2])
     );
     let driver = File::open(dir.join("driver.pid")).unwrap();
     driver.lock().unwrap();
+    fs::create_dir_all(scratch.0.join("home/.pumpkin")).unwrap();
     fs::rename(scratch.0.join("runs"), scratch.0.join("home/.pumpkin/runs")).unwrap();
     (client, driver, [ended, live])
 }
@@ -3344,6 +3369,7 @@ fn got(served: &Served, path: &str, fields: &[&str]) -> String {
 fn views_the_controllers_runs_over_a_reopened_connection() {
     let scratch = Scratch::new("controller-views-runs");
     let (client, driver, [ended, live]) = viewed(&scratch);
+    served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let mut steps = vec![served.said.trim_end().to_owned()];
     // Before the first request, which opens the connection that the stand-in cuts.
@@ -3387,8 +3413,9 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
 fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
     let scratch = Scratch::new("controller-views-lost");
     let (client, driver, [ended, _]) = viewed(&scratch);
+    served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
-    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
+    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap_or_default();
     let cut_out = scratch.0.join("bin/cut-out-0");
     scratch.write("bin/cut-out-0", "1000");
     // So that the connection opened anew is cut too.
@@ -3406,7 +3433,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: it ended before it replied in full; `ssh` ended with exit status: 255; the connection it went over has ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log"
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             next: 309222, end: 309222"#]],
@@ -3417,21 +3444,36 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
 fn view_answers_502_for_a_reply_it_cant_read() {
     let scratch = Scratch::new("controller-views-unread");
     let (client, driver, [ended, _]) = viewed(&scratch);
+    let hex = served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
-    let commit = runtime::BUILD.commit_hash().unwrap();
-    let exe = format!("home/.pumpkin/{commit}/bin/pumpkin");
     let window = format!("/api/runs/{ended}/log?at=0");
+    let mut hello = Vec::new();
+    schema::frame::write(&mut hello, &json!({ "type": "serving" }), &[]).unwrap();
+    fs::write(scratch.0.join("hello"), hello).unwrap();
+    // Unlinked first, as it is a link to this build. It says its hello, takes the request's
+    // length, which is all that the link needs of it, and sends the reply.
+    let exe = format!("home/.pumpkin/serve/{hex}/pumpkin");
+    fs::remove_file(scratch.0.join(&exe)).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncat {0}/hello\nhead --bytes=4 > /dev/null\ncat {0}/reply\n",
+        scratch.0.display()
+    );
+    scratch.write_executable(&exe, script.as_bytes());
+    let mut past = (u32::try_from(schema::frame::MAX_MESSAGE_BYTES).unwrap() + 1)
+        .to_be_bytes()
+        .to_vec();
+    past.extend(b"{}");
+    let mut body_past = Vec::new();
+    let answer = json!({
+        "type": "viewed", "status": "200 OK", "content_type": "text/plain", "deflated": false,
+        "body_bytes": 256 * 1024 * 1024 + 1,
+    });
+    schema::frame::write(&mut body_past, &answer, &[]).unwrap();
+    let mut other = Vec::new();
+    schema::frame::write(&mut other, &json!({ "type": "reap" }), &[]).unwrap();
     let mut steps = Vec::new();
-    for reply in [
-        "head --bytes=70000 /dev/zero | tr '\\0' x",
-        r#"echo '{"status":"200 OK","content_type":"text/plain","deflated":false,"body_bytes":268435457}'"#,
-        "echo 'no head'",
-    ] {
-        // Unlinked first, as it is a link to this build. Each channel there runs it anew, and it
-        // waits after its reply, so that the channel's end kills it.
-        fs::remove_file(scratch.0.join(&exe)).unwrap();
-        let script = format!("#!/bin/sh\nread -r _\n{reply}\nexec sleep 60\n");
-        scratch.write_executable(&exe, script.as_bytes());
+    for reply in [past, body_past, other] {
+        fs::write(scratch.0.join("reply"), reply).unwrap();
         steps.push(got(&served, &window, &[]));
     }
     drop(driver);
@@ -3442,33 +3484,48 @@ fn view_answers_502_for_a_reply_it_cant_read() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: its reply's head is longer than 64 KiB: expected a line of JSON; `ssh` ended with signal: 9 (SIGKILL)"
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: a frame's message is 65537 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: its reply's body is of 268435457 bytes: expected 256 MiB at most; `ssh` ended with signal: 9 (SIGKILL)"
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed: its reply's head is no JSON head of a reply: expected ident at line 1 column 2; `ssh` ended with signal: 9 (SIGKILL)""#]],
+            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
     );
 }
 
 #[test]
-fn view_refuses_a_controller_without_this_build() {
-    let scratch = Scratch::new("controller-view-refusals");
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    let view = on_client(&scratch, &client, &["view"]);
-    let invoked = invocation(&view);
-    let refused = report(invoked, &{ view }.output().unwrap(), &scratch.0, false);
-    let commit = runtime::BUILD.commit_hash().unwrap();
+fn view_installs_its_serve_there() {
+    let scratch = Scratch::new("controller-view-installs");
+    let (client, driver, [ended, _]) = viewed(&scratch);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
+    let window = format!("/api/runs/{ended}/log?at=0");
+    let mut steps = Vec::new();
+    // The first request installs it and then asks, and the second asks over the same link.
+    for _ in 0..2 {
+        steps.push(got(&served, &window, &["end"]));
+        steps.push(calls(&scratch));
+    }
+    let hex = sha256(&fs::read(PUMPKIN).unwrap());
+    steps.push(format!(
+        "the install: {}",
+        modes(&scratch.0.join(format!("home/.pumpkin/serve/{hex}")))
+    ));
+    drop(driver);
     check(
         &scratch,
-        &refused,
-        &[(commit, "<commit>")],
+        &steps.join("\n"),
+        &[(ended, "<ended>"), (&hex, "<this build>")],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin view
-        exit status: Some(1)
-        pumpkin: controller `alice` has no build of this pumpkin's commit, <commit>, to read its runs: build it there from a task whose .pumpkinversion pins that commit, with pumpkin build <the task's file>; or view the copies of its runs here: pumpkin view --runs <scratch>/repo/.pumpkin/runs"#]],
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 200 OK
+            end: 309222
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 200 OK
+            end: 309222
+            the calls: none
+            the install: pumpkin 555"#]],
     );
 }
 
@@ -3477,6 +3534,7 @@ fn view_refuses_a_controller_without_this_build() {
 fn view_cancels_on_the_controller() {
     let scratch = Scratch::new("controller-view-cancels");
     let (client, driver, [_, live]) = viewed(&scratch);
+    served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let origin = format!("http://127.0.0.1:{}", served.port);
     let cancel = format!("/api/runs/{live}/cancel");

@@ -29,6 +29,7 @@ use crate::job::{JOBS, WAITING};
 use crate::link::{self, Answer, Ask, Boot, Health, Hello, Listed};
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
+use crate::view::Answering;
 
 /// How long to wait for a request before ending: a page that is open polls every few seconds, so
 /// a minute with none is a closed page or a lost connection, and ending lets the `ssh` session,
@@ -59,6 +60,8 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
+    // Kept for the link's life: it holds what it read of the live runs.
+    let mut view = Answering::new(home.join(crate::job::runs()));
     let written = "writing to the standard output failed";
     frame::write(&mut output, &Hello::Serving, &[]).context(written)?;
     while arrives(&input)? {
@@ -67,7 +70,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 if let Ok(install) = &install {
                     mark_install_used(install);
                 }
-                link::send(&mut output, &answered(&home, ask)).context(written)?;
+                link::send(&mut output, &answered(&home, ask, &mut view)).context(written)?;
                 continue;
             }
             Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
@@ -169,11 +172,13 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-/// The answer to `ask`: [`Answer::Refused`] if what it asks for fails.
-fn answered(home: &Path, ask: Ask) -> Answer {
+/// The answer to `ask`, with `view` the view of the runs below `home`: [`Answer::Refused`] if what
+/// it asks for fails.
+fn answered(home: &Path, ask: Ask, view: &mut Answering) -> Answer {
     let answered = match ask {
         Ask::Health => health().map(Answer::Health),
         Ask::List { prefixes } => listed(home, &prefixes),
+        Ask::View { target, deflate } => Ok(view.answer(&target, deflate)),
     };
     answered.unwrap_or_else(|message| Answer::Refused { message })
 }

@@ -111,6 +111,7 @@ impl Served {
         };
         let status = head.lines().next().unwrap();
         let answered = json!({
+            "type": "viewed",
             "status": status.strip_prefix("HTTP/1.1 ").unwrap(),
             "content_type": header("Content-Type: ").unwrap(),
             "deflated": header("Content-Encoding: ").as_deref() == Some("deflate"),
@@ -437,8 +438,8 @@ fn serves_runs() {
     );
 }
 
-/// A `pumpkin controller view` process, which answers a request on each line of its standard
-/// input.
+/// A `pumpkin controller serve` process, which answers a request for the view in each frame of
+/// its standard input.
 pub(super) struct Piped {
     child: Child,
     stdin: ChildStdin,
@@ -446,27 +447,37 @@ pub(super) struct Piped {
 }
 
 impl Piped {
+    /// Starts it as the user whose home is the scratch directory, and reads its hello.
     pub(super) fn start(scratch: &Scratch) -> Self {
-        let mut command = scratch.pumpkin(&["controller", "view"]);
+        let mut command = scratch.pumpkin(&["controller", "serve"]);
+        command.env("HOME", &scratch.0);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command.spawn().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let (hello, _) = schema::frame::read::<Value>(&mut stdout).unwrap().unwrap();
+        assert_eq!(hello, json!({ "type": "serving" }));
         Self {
             stdin: child.stdin.take().unwrap(),
-            stdout: BufReader::new(child.stdout.take().unwrap()),
+            stdout,
             child,
         }
     }
 
-    /// Returns the head and the body of the answer to a request for `target`.
+    /// Returns the answer to a request for `target`, and its body.
     pub(super) fn ask(&mut self, target: &str, deflate: bool) -> (Value, Vec<u8>) {
-        let asking = json!({ "target": target, "deflate": deflate });
-        writeln!(self.stdin, "{asking}").unwrap();
-        let mut head = String::new();
-        self.stdout.read_line(&mut head).unwrap();
-        let head: Value = serde_json::from_str(&head).unwrap();
-        let mut body = vec![0; usize::try_from(head["body_bytes"].as_u64().unwrap()).unwrap()];
-        self.stdout.read_exact(&mut body).unwrap();
-        (head, body)
+        let asking = json!({ "type": "view", "target": target, "deflate": deflate });
+        schema::frame::write(&mut self.stdin, &asking, &[]).unwrap();
+        let (answer, _) = schema::frame::read::<Value>(&mut self.stdout)
+            .unwrap()
+            .unwrap();
+        let mut body = Vec::new();
+        while body.len() < usize::try_from(answer["body_bytes"].as_u64().unwrap()).unwrap() {
+            let (_, part) = schema::frame::read::<Value>(&mut self.stdout)
+                .unwrap()
+                .unwrap();
+            body.extend(part);
+        }
+        (answer, body)
     }
 }
 

@@ -135,7 +135,7 @@ run` and `pumpkin build` start there in a unit of its own; `boot` reaps what los
 runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
 and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
 ending from its copy of the record; `serve` answers, on its standard input and
-output, `pumpkin ls` on a client, which lists the controller's runs, and `view`
+output, `pumpkin ls` on a client, which lists the controller's runs, and
 `pumpkin view`, which shows them; and `publish` uploads the runs to the bucket
 of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
@@ -191,8 +191,6 @@ writes.")]
     },
     #[command(about = "Answer a client's link, on the standard input and output")]
     Serve,
-    #[command(about = "Answer a client's view of the runs, on the standard input and output")]
-    View,
     #[command(about = "Upload the runs to the bucket of the public page")]
     #[command(long_about = PUBLISH_ABOUT, after_help = PUBLISH_NOTES)]
     Publish(Publish),
@@ -259,7 +257,6 @@ pub(crate) enum Command {
     Follow(RunTag),
     CancelFor(Cancel),
     Serve,
-    ViewFor,
     Publish(Publish),
     Print(String),
 }
@@ -492,7 +489,7 @@ Default: one that is free, which `view` says"
 Serve nothing: write into <dir> the runs' data as files that a static
 copy of the page reads, with the page, and a robots.txt that asks
 search engines to stay out. Each file that holds a reply that the page
-reads, as `pumpkin controller view` answers it, is deflated: a host
+reads, as `pumpkin view` answers it, is deflated: a host
 serves it with `Content-Encoding: deflate`. In each reply, a stand-in
 replaces each sandbox's id, as `<sandbox of job-3>`; the home and user
 of this machine and of the run's arguments, as `~` and `<user>`; and
@@ -757,9 +754,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Serve,
         } => Command::Serve,
         Parsed::Controller {
-            action: Action::View,
-        } => Command::ViewFor,
-        Parsed::Controller {
             action: Action::Publish(publish),
         } => Command::Publish(publish),
         Parsed::Controller {
@@ -800,7 +794,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Follow(_)
         | Command::CancelFor(_)
         | Command::Serve
-        | Command::ViewFor
         | Command::Publish(_)
         | Command::Print(_) => {
             let problem = "the job's command is neither `run` nor `build`: give one";

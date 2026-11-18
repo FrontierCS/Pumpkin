@@ -26,7 +26,8 @@ use stdx::Context as _;
 use crate::progress::Listing;
 use crate::workspace;
 
-// Well past the largest answer: a listing of a few thousand runs is a few MiB.
+// Well past the largest answer: a listing of a few thousand runs is a few MiB, and a body that a
+// record keeps is at most the 64 MiB that the gateway takes of a request.
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
 /// What `serve` says first, in a frame with no body.
@@ -50,12 +51,19 @@ pub(crate) enum Ask {
     List {
         prefixes: Vec<String>,
     },
+    /// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
+    /// ([`crate::view`]), whose body may come deflated if `deflate`.
+    View {
+        target: String,
+        deflate: bool,
+    },
 }
 
 /// The answer to a request.
 pub(crate) enum Answer {
     Health(Health),
     Listed(Listed),
+    Viewed(Viewed),
     /// Nothing took effect, for the reason that `message` gives, with what to do.
     Refused {
         message: String,
@@ -68,6 +76,16 @@ pub(crate) struct Listed {
     pub(crate) unlisted_count: u64,
 }
 
+/// The view's reply, as its HTTP gives it.
+pub(crate) struct Viewed {
+    /// The status line's code and reason.
+    pub(crate) status: String,
+    pub(crate) content_type: String,
+    /// Whether `body` is deflated.
+    pub(crate) deflated: bool,
+    pub(crate) body: Vec<u8>,
+}
+
 /// An [`Answer`] as it crosses, in a frame with no body: what of it is a body, if anything, follows
 /// in frames of its own.
 #[derive(Serialize, Deserialize)]
@@ -78,6 +96,13 @@ enum Head {
     Listed {
         body_bytes: u64,
         unlisted_count: u64,
+    },
+    /// The view's reply, whose body is of `body_bytes`.
+    Viewed {
+        status: String,
+        content_type: String,
+        deflated: bool,
+        body_bytes: u64,
     },
     Refused {
         message: String,
@@ -118,27 +143,42 @@ struct Part;
 /// Writes `answer`: its head, then its body, if it has one, in frames of at most
 /// [`MAX_BODY_BYTES`].
 pub(crate) fn send(output: &mut impl Write, answer: &Answer) -> io::Result<()> {
-    let (head, body) = match answer {
-        Answer::Health(health) => (Head::Health(health.clone()), Vec::new()),
+    let listing_json;
+    let (head, body): (Head, &[u8]) = match answer {
+        Answer::Health(health) => (Head::Health(health.clone()), &[]),
         Answer::Listed(Listed {
             listing,
             unlisted_count,
         }) => {
-            let body = serde_json::to_vec(listing).unwrap_or_else(|error| {
+            listing_json = serde_json::to_vec(listing).unwrap_or_else(|error| {
                 unreachable!("a listing, whose maps are keyed by strings, is JSON: {error}")
             });
             let head = Head::Listed {
-                body_bytes: body.len() as u64,
+                body_bytes: listing_json.len() as u64,
                 unlisted_count: *unlisted_count,
+            };
+            (head, &listing_json)
+        }
+        Answer::Viewed(Viewed {
+            status,
+            content_type,
+            deflated,
+            body,
+        }) => {
+            let head = Head::Viewed {
+                status: status.clone(),
+                content_type: content_type.clone(),
+                deflated: *deflated,
+                body_bytes: body.len() as u64,
             };
             (head, body)
         }
-        Answer::Refused { message } => (
-            Head::Refused {
+        Answer::Refused { message } => {
+            let head = Head::Refused {
                 message: message.clone(),
-            },
-            Vec::new(),
-        ),
+            };
+            (head, &[])
+        }
     };
     frame::write(output, &head, &[])?;
     for part in body.chunks(MAX_BODY_BYTES) {
@@ -245,7 +285,7 @@ impl Link {
         match self.ask(&Ask::Health)? {
             Answer::Health(health) => Ok(Ok(health)),
             Answer::Refused { message } => Ok(Err(message)),
-            Answer::Listed(_) => Err(other("health")),
+            Answer::Listed(_) | Answer::Viewed(_) => Err(other("health")),
         }
     }
 
@@ -261,7 +301,25 @@ impl Link {
         match self.ask(&ask)? {
             Answer::Listed(listed) => Ok(Ok(listed)),
             Answer::Refused { message } => Ok(Err(message)),
-            Answer::Health(_) => Err(other("list")),
+            Answer::Health(_) | Answer::Viewed(_) => Err(other("list")),
+        }
+    }
+
+    /// The view's reply to a `GET` of `target`, as [`Ask::View`] says, or the message of the
+    /// refusal.
+    pub(crate) fn view(
+        &mut self,
+        target: &str,
+        deflate: bool,
+    ) -> Result<Result<Viewed, String>, Unanswered> {
+        let ask = Ask::View {
+            target: target.to_owned(),
+            deflate,
+        };
+        match self.ask(&ask)? {
+            Answer::Viewed(viewed) => Ok(Ok(viewed)),
+            Answer::Refused { message } => Ok(Err(message)),
+            Answer::Health(_) | Answer::Listed(_) => Err(other("view")),
         }
     }
 
@@ -277,6 +335,19 @@ impl Link {
         let (body_bytes, unlisted_count) = match self.received("the answer")? {
             Head::Health(health) => return Ok(Answer::Health(health)),
             Head::Refused { message } => return Ok(Answer::Refused { message }),
+            Head::Viewed {
+                status,
+                content_type,
+                deflated,
+                body_bytes,
+            } => {
+                return Ok(Answer::Viewed(Viewed {
+                    status,
+                    content_type,
+                    deflated,
+                    body: self.body(body_bytes)?,
+                }));
+            }
             Head::Listed {
                 body_bytes,
                 unlisted_count,

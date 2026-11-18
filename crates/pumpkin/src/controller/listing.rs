@@ -2,21 +2,20 @@
 //! answers with its health and the rows of its runs and of its jobs yet to start one, made where
 //! the records are, and `ls` adds the rows of the copies of its runs here that it lacks.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use provider::UnixTime;
-use schema::ir::Sha256Digest;
 use stdx::Context as _;
 use tempfile::TempDir;
 
-use super::{Name, Reached, SHORT_TIMEOUT, Session};
-use crate::link::{self, Boot, Health, Link, Listed, Unanswered};
+use super::linking::{Build, Linked, Unlinked};
+use super::{Name, Reached};
+use crate::link::{Boot, Health, Listed};
 use crate::progress::{Entry, Listing};
-use crate::workspace::{self, Workspace};
-use crate::{config, manifest, say};
+use crate::workspace::Workspace;
+use crate::{config, say};
 
 // How long a listing may take before `ls` says when it was made: a person reads the rows of a
 // listing as they are now.
@@ -70,45 +69,21 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 /// again over another link, after each of `AGAIN`'s pauses, while one ends before it has answered,
 /// as asking only reads.
 fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
-    let exe = workspace::exe("expected to send it to the controller, to list the runs there")?;
-    let (digest, _) = manifest::file_sha256(&exe)?;
+    let build = Build::of_this("expected to send it to the controller, to list the runs there")?;
     let name = &reached.name;
-    let (mut attempt, mut installed) = (0, false);
+    let mut attempt = 0;
     loop {
-        let Session { command, slot } = reached.ssh(&link::command(&digest))?;
-        let master = slot.master;
-        // The link, and so its `ssh`, is dropped as the closure ends, before the slot of the
-        // session that the `ssh` goes over.
-        let asked = Link::open(command).and_then(|link| match link {
-            Some(mut link) => {
-                let health = link.health()?;
-                let asked = crate::unix_now();
-                Ok(Some((health, link.list(prefixes)?, asked)))
-            }
-            None => Ok(None),
+        let asked = Linked::open(reached, &build).and_then(|mut linked| {
+            let health = linked.health(reached)?;
+            let asked = crate::unix_now();
+            Ok((health, linked.list(reached, prefixes)?, asked))
         });
-        let said = match asked {
-            Ok(Some((health, listed, asked))) => {
+        let (master, said) = match asked {
+            Ok((health, listed, asked)) => {
                 return answers(name, health, listed, asked);
             }
-            Ok(None) if !installed => {
-                install(reached, &exe, &digest)?;
-                installed = true;
-                continue;
-            }
-            Ok(None) => {
-                return Err(format!(
-                    "controller `{name}` has no serve of this pumpkin though it was just \
-                     installed there, in `~/{}/{}`: see that its user may run it, and run the \
-                     command again",
-                    link::installs(),
-                    digest.hex()
-                ));
-            }
-            Err(Unanswered::Unreached(said)) => said,
-            Err(Unanswered::Failed(error)) => {
-                return Err(format!("linking to controller `{name}` failed: {error}"));
-            }
+            Err(Unlinked::Cut { master, said }) => (master, said),
+            Err(Unlinked::Failed(error)) => return Err(error),
         };
         let failed = format!("listing the runs on controller `{name}` failed, as `ssh` {said}");
         if !reached.pause(attempt, master, "listing the runs again") {
@@ -116,20 +91,6 @@ fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
         }
         attempt += 1;
     }
-}
-
-/// Uploads this executable, `exe`, whose SHA-256 is `digest`, to the controller, as the `serve`
-/// that a link runs there.
-fn install(reached: &Reached, exe: &Path, digest: &Sha256Digest) -> Result<(), String> {
-    let name = &reached.name;
-    say(format_args!(
-        "controller `{name}` has no serve of this pumpkin: installing it there"
-    ));
-    let bytes = fs::read(exe).context(exe.display())?;
-    let mut session = reached.ssh(&link::installing(digest))?;
-    let installed = reached.call(&mut session, Some(&bytes), "ssh", SHORT_TIMEOUT);
-    let installed = installed.map_err(|error| format!("installing it failed: {error}"));
-    installed.map(drop)
 }
 
 /// What `serve` answered to `Health` and to `List`.
