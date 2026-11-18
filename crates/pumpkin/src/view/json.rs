@@ -176,7 +176,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     };
     let state = match (&held.ending, &progress) {
         (None, None) => "publishing",
-        (Some(_), _) | (None, Some(_)) => row.state.name(),
+        (Some(_), _) | (None, Some(_)) => row.state().name(),
     };
     let times = progress.as_ref().map(|progress| {
         let live_at = (held.ending.is_none()).then(|| now.since(progress.started));

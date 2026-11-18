@@ -29,6 +29,7 @@ pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::{answered, failed_upstream, model};
 pub(crate) use row::Row;
+use row::{Spent, Stage};
 
 /// How long a phase may go on past its bound before `ls` says that it is a bug: the core acts at
 /// the bound, and its act is logged at once, but the run's log is read over a connection and
@@ -100,25 +101,10 @@ impl Listed {
             asked: runtime::minted(record.id()),
         }))
     }
-
-    fn state(&self) -> State {
-        match self {
-            Self::Waiting { .. } => State::Waiting,
-            Self::Building { .. } => State::Building,
-            Self::Unstarted => State::Unstarted,
-            Self::Run(run) => match &run.ending {
-                None => State::Running,
-                Some(Ending::Returned { .. } | Ending::NoResult(_)) => State::Finished,
-                Some(Ending::Failed(_)) => State::Failed,
-                Some(Ending::Interrupted(_)) => State::Interrupted,
-                Some(Ending::Lost) => State::Lost,
-            },
-        }
-    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// What a run is doing or how it ended, by name, and in the order that the totals list them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum State {
     Waiting,
     Building,
@@ -157,7 +143,7 @@ pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
         totals.add(row);
         lines.push_str(&line(id, &row.cells));
         lines.push('\n');
-        lines.push_str(&row.under);
+        lines.push_str(row.under());
     }
     let mut parts = Vec::new();
     if !listing.runs.is_empty() {
@@ -220,14 +206,39 @@ struct Totals {
 
 impl Totals {
     fn add(&mut self, row: &Row) {
-        *self.states.entry(row.state).or_default() += 1;
-        self.without_result += usize::from(row.without_result);
-        self.ends_unix_secs = self.ends_unix_secs.max(row.ends_unix_secs);
-        if let Some(usd) = row.cost_usd {
-            *self.usd.get_or_insert(0.0) += usd;
+        let Row {
+            cells: _,
+            stage,
+            spent,
+        } = row;
+        *self.states.entry(stage.state()).or_default() += 1;
+        match stage {
+            Stage::Running {
+                ends_unix_secs,
+                under: _,
+            } => self.ends_unix_secs = self.ends_unix_secs.max(*ends_unix_secs),
+            Stage::Finished { result: false } => self.without_result += 1,
+            Stage::Finished { result: true }
+            | Stage::Waiting
+            | Stage::Building
+            | Stage::Unstarted
+            | Stage::Failed
+            | Stage::Interrupted
+            | Stage::Lost => {}
         }
-        self.unpriced |= row.unpriced;
-        self.unreported += row.unreported_responses;
+        match spent {
+            Spent::Unread => {}
+            Spent::Unpriced => self.unpriced = true,
+            Spent::Priced {
+                usd,
+                partly_unpriced,
+                unreported_responses,
+            } => {
+                *self.usd.get_or_insert(0.0) += usd;
+                self.unpriced |= partly_unpriced;
+                self.unreported += unreported_responses;
+            }
+        }
     }
 
     fn line(&self) -> String {
@@ -277,7 +288,7 @@ pub(crate) struct Columns {
     pub(crate) rest: String,
 }
 
-fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Columns {
+fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<&str>) -> Columns {
     let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
         state: state.to_owned(),
         time: time.to_owned(),
@@ -285,7 +296,7 @@ fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Colu
         usd: usd.to_owned(),
         rest: rest.to_owned(),
     };
-    let state = listed.state().name();
+    let state = state.name();
     let since = |asked: &Option<Duration>| {
         asked.map(|asked| column_span(now.since_epoch().saturating_sub(asked)))
     };
@@ -337,14 +348,10 @@ fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Colu
     column(state, ran.as_deref().unwrap_or("-"), "-", &usd, &rest)
 }
 
-pub(super) fn under(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
+/// The lines under a live run that has begun its log, each ending in a newline: one for each of
+/// its calls and leases that hasn't ended.
+fn under(id: &str, progress: &Progress, now: UnixTime, runs: Option<&str>) -> String {
     let mut lines = String::new();
-    let Listed::Run(run) = listed else {
-        return lines;
-    };
-    let (None, Some(progress)) = (&run.ending, &run.progress) else {
-        return lines;
-    };
     let at = now.since(progress.started);
     let cancel = next::of_run("cancel", runs, id);
     for child in children(progress, at) {
