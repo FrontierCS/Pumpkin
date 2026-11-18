@@ -686,7 +686,10 @@ impl View {
         let lost = ending == Ending::Lost;
         let json = if let Some(used) = record.used()? {
             let listed = Listed::of(&record, record.task()?, Some(ending), None);
-            let mut row = listed_json(record.id(), &listed, now, named);
+            let mut row = listed_json(
+                record.id(),
+                &progress::Row::of(record.id(), &listed, now, named),
+            );
             row["time"] = json!(progress::column_span(used.ran));
             row["usd"] = json!(
                 used.usd
@@ -700,7 +703,10 @@ impl View {
             let progress = record.progress()?.progress;
             let model = progress.as_ref().map(|progress| progress.model.clone());
             let listed = Listed::of(&record, record.task()?, Some(ending), progress);
-            let mut row = listed_json(record.id(), &listed, now, named);
+            let mut row = listed_json(
+                record.id(),
+                &progress::Row::of(record.id(), &listed, now, named),
+            );
             row["requests"] = json!(model.as_ref().map(|model| model.requests));
             row["tokens"] = json!(
                 model

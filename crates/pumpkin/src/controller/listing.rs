@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use provider::RunTag;
+use provider::{RunTag, UnixTime};
 use stdx::{Context as _, Deadline};
 use tempfile::TempDir;
 
@@ -44,7 +44,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let kept = reached.shared.ended();
     let live = reached.shared.live();
     let _listing = reached.shared.listing(&reached.name)?;
-    let (mut listing, mut unlisted) = listed_here(&kept, prefixes, since)?;
+    let (mut listing, mut unlisted) = listed_here(&kept, prefixes, since, now)?;
     let held = holding(&listing, &live)?;
     let since = since.map_or(0, |since| since.as_secs());
     let printed = listed_there(&reached, prefixes, since, &held)?;
@@ -90,7 +90,8 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         };
         match run {
             Ok(run) => {
-                listing.runs.insert(id.to_owned(), run);
+                let row = crate::progress::Row::of(id, &run, now, None);
+                listing.runs.insert(id.to_owned(), row);
             }
             Err(error) => {
                 say(error);
@@ -101,7 +102,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let jobs = listing.runs.values().filter(|run| run.live()).count();
     say(health.line(&reached.name, jobs));
     // As of when the controller began the listing, which is when it read what each run does.
-    let lines = crate::progress::lines(&listing, now, None);
+    let lines = crate::progress::lines(&listing, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
     said_when(now.since_epoch());
     if unlisted > 0 {
@@ -115,10 +116,11 @@ fn listed_here(
     kept: &Path,
     prefixes: &[String],
     since: Option<Duration>,
+    now: UnixTime,
 ) -> Result<(crate::progress::Listing, usize), String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    let (mut listing, unlisted) = crate::listed_in(&runs, true, prefixes, since)?;
-    let (ended, ended_unlisted) = crate::listed_in(kept, true, prefixes, since)?;
+    let (mut listing, unlisted) = crate::listed_in(&runs, true, prefixes, since, now, None)?;
+    let (ended, ended_unlisted) = crate::listed_in(kept, true, prefixes, since, now, None)?;
     for (id, run) in ended.runs {
         listing.runs.entry(id).or_insert(run);
     }
