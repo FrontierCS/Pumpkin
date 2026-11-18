@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use schema::sandbox::frame::{MAX_BODY_BYTES, MAX_MESSAGE_BYTES};
+use schema::frame::{MAX_BODY_BYTES, MAX_MESSAGE_BYTES};
 use schema::sandbox::{
     FromSandbox, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MODEL_PORT,
 };

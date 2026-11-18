@@ -6,9 +6,10 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+use schema::frame;
 use schema::ir::{AbsolutePath, Mode};
 use schema::sandbox::tree::{self, Limits, Modes};
-use schema::sandbox::{Entry, RelativePath, Root, ToSandbox, frame};
+use schema::sandbox::{Entry, RelativePath, Root, ToSandbox};
 use stdx::Deadline;
 
 use crate::{Part, Put, Reply, Route, Shared, broke, context, out_of_turn};

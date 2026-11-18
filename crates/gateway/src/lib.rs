@@ -40,8 +40,8 @@ use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Entry, ExitStatus, FromSandbox, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
-    MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, frame,
-    pumpkin_dir, pumpkin_subdirs,
+    MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, pumpkin_dir,
+    pumpkin_subdirs,
 };
 use stdx::Deadline;
 
@@ -644,7 +644,7 @@ impl IncomingModelRequest {
 impl ModelResponse {
     pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         let request = self.responder.request;
-        for chunk in bytes.chunks(frame::MAX_BODY_BYTES) {
+        for chunk in bytes.chunks(schema::frame::MAX_BODY_BYTES) {
             self.responder
                 .send(&ToSandbox::ModelData { request }, chunk, self.by)?;
         }
@@ -736,7 +736,7 @@ impl Shared {
         due: Due,
     ) -> io::Result<()> {
         let connection = &self.connection;
-        match frame::write(&mut Until { connection, by }, message, body) {
+        match schema::frame::write(&mut Until { connection, by }, message, body) {
             // A frame too long, which `frame::write` refuses before writing anything, leaves the
             // session open, so that a reply too long can still be answered with a refusal; any
             // other failure ends it.
@@ -889,7 +889,7 @@ fn route(mut ops: Assembler) {
     let routes = &shared.routes;
     let mut reader = BufReader::new(&shared.connection);
     let reason = loop {
-        let (message, body) = match frame::read::<FromSandbox>(&mut reader) {
+        let (message, body) = match schema::frame::read::<FromSandbox>(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => break SANDBOX_ENDED.to_owned(),
             Err(error) if closed_by_sandbox(&error) => break SANDBOX_ENDED.to_owned(),

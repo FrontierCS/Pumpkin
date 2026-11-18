@@ -9,6 +9,7 @@
 //! here.
 
 pub mod ec2_boot;
+pub mod frame;
 pub mod ir;
 pub mod sandbox;
 pub mod workflow;

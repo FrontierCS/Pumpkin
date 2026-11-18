@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fmt, thread};
 
+use schema::frame;
 use schema::ir::GpuModel;
 use schema::sandbox::{
     FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant,
-    SANDBOXD_GRANT, ToSandbox, frame,
+    SANDBOXD_GRANT, ToSandbox, read_hello_reply,
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline, unpoisoned};
@@ -292,7 +293,7 @@ fn open(
         .context("sending the hello failed")?;
     // Unbuffered, as a frame is read to its end and no further, so that the session's reads,
     // through a buffer of their own, start at the gateway's first request.
-    let answer = frame::read_hello_reply(peer)
+    let answer = read_hello_reply(peer)
         .map_err(late)
         .context("reading its answer failed")?;
     match (answer, expected) {

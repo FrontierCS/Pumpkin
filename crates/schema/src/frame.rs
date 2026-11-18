@@ -1,16 +1,14 @@
-//! Frames, the unit a session carries.
+//! Frames, the unit that a protocol of Pumpkin's programs carries.
 //!
 //! A frame is a message's length and its JSON, then a body's length and its bytes. Both
 //! lengths are big-endian `u32`s, and both are capped, so that a reader never allocates more
-//! than [`MAX_MESSAGE_BYTES`] plus [`MAX_BODY_BYTES`] for a frame. Every version of the protocol
-//! keeps this encoding ([`super`]).
+//! than [`MAX_MESSAGE_BYTES`] plus [`MAX_BODY_BYTES`] for a frame. The encoding never changes,
+//! as every version of the sandbox protocol keeps it ([`crate::sandbox`]).
 
 use std::io::{self, Read, Write};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-
-use super::{Hello, HelloReply, MAX_HELLO_BYTES};
 
 /// The largest message in a frame.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -53,31 +51,9 @@ pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T
     Ok(Some((message, body)))
 }
 
-/// Reads a [`Hello`], the frame that opens a session, or `None` if the connection ended cleanly
-/// before it.
-///
-/// It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone, one with a body, and
-/// a message that isn't JSON or is no hello.
-pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
-    read_bodiless(reader, MAX_HELLO_BYTES, ["the hello", "a hello"])
-}
-
-/// Reads a [`HelloReply`], the answer to a hello, or `None` if the connection ended cleanly before
-/// it.
-///
-/// It reads a message of at most [`MAX_MESSAGE_BYTES`] and no body, and refuses a longer frame
-/// from its lengths alone.
-pub fn read_hello_reply(reader: &mut impl Read) -> io::Result<Option<HelloReply>> {
-    read_bodiless(
-        reader,
-        MAX_MESSAGE_BYTES,
-        ["the answer to the hello", "an answer"],
-    )
-}
-
 /// Reads a frame of a message of at most `max` bytes and no body, named as `the` one and as `a`
 /// one in what it says of a frame that it refuses.
-fn read_bodiless<T: DeserializeOwned>(
+pub(crate) fn read_bodiless<T: DeserializeOwned>(
     reader: &mut impl Read,
     max: usize,
     [the, a]: [&str; 2],

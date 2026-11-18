@@ -9,8 +9,8 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use gateway::{IncomingModelRequest, ModelRequest, ModelResponse};
+use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
-use schema::sandbox::frame;
 use serde_json::{Map, Value};
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};

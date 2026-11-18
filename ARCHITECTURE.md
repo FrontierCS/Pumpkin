@@ -90,10 +90,11 @@ panic that aborts the whole process (`abort_on_panic`).
 ### `crates/schema`
 
 The formats that Pumpkin's programs share: the workflow IR (`ir`); a workflow parsed and placed
-(`workflow`, with `Workflow`, `Placed` and `Class`); the sandbox protocol (`sandbox`), with its
-frames, trees and ops, how a sandbox meets the gateway, and the in-sandbox contract, the paths
-under `/pumpkin` and the limits that a role's commands and the session's owner share; and what the
-EC2 provider hands `ec2-boot` (`ec2_boot::Start`). The IR, the in-sandbox contract and
+(`workflow`, with `Workflow`, `Placed` and `Class`); the frames that its protocols carry
+(`frame`); the sandbox protocol (`sandbox`), with its trees and ops, how a sandbox meets the
+gateway, and the in-sandbox contract, the paths under `/pumpkin` and the limits that a role's
+commands and the session's owner share; and what the EC2 provider hands `ec2-boot`
+(`ec2_boot::Start`). The IR, the in-sandbox contract and
 `sandboxctl`'s JSON are interfaces that task authors rely on.
 
 **Architecture Invariant:** it depends on `serde` and `serde_json` alone, since `sandboxd` and

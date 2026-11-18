@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use schema::sandbox::frame::{self, MAX_BODY_BYTES};
+use schema::frame::{self, MAX_BODY_BYTES};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::{CONTROL_SOCKET, FromSandbox, MAX_OP_PAYLOAD_BYTES};
 use stdx::{Context, unpoisoned};

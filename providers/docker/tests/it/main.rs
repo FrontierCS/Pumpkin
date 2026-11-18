@@ -28,8 +28,8 @@ use provider::{
     UnixTime,
 };
 use recipe::Given;
+use schema::frame::MAX_MESSAGE_BYTES;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
-use schema::sandbox::frame::MAX_MESSAGE_BYTES;
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
