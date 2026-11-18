@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{BufRead as _, BufReader, Read as _, Write as IoWrite};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -240,6 +241,8 @@ fn write_served(scratch: &Scratch) -> File {
     write_record(scratch, "20261110-083000-0000000c", true, Some(outcome));
     // A directory with no record.
     fs::create_dir_all(scratch.0.join("runs/20261110-130000-0000000e")).unwrap();
+    // A file among the runs.
+    fs::write(scratch.0.join("runs/20261110-131000-00000013"), "").unwrap();
     driver
 }
 
@@ -278,6 +281,11 @@ fn serves_runs() {
             "args": [],
         }),
     );
+    // A run whose record the kernel won't let the view read.
+    let denied = "20261110-124000-00000011";
+    write_record(&scratch, denied, false, None);
+    let record = scratch.0.join(format!("runs/{denied}/record.json"));
+    fs::set_permissions(record, Permissions::from_mode(0o000)).unwrap();
     let served = Served::start(&scratch);
     let mut steps = vec![format!(
         "pumpkin view --runs runs\n{}",
@@ -338,12 +346,16 @@ fn serves_runs() {
         )
     };
     steps.push(window(&format!("at={}", records[50]["byte"])));
-    let refusals: [(&str, &[(&str, &str)]); 6] = [
+    let refusals: [(&str, &[(&str, &str)]); 10] = [
         ("/api/runs", &[("X-Pumpkin-Token", "")]),
         ("/api/runs", &[("X-Pumpkin-Token", "0123")]),
         ("/api/runs", &[("Host", "pumpkin.example:80")]),
         ("/api/runs/run-1", &[]),
         ("/api/runs/20261110-140000-0000000f", &[]),
+        ("/api/runs/20261110-130000-0000000e", &[]),
+        ("/api/runs/20261110-131000-00000013", &[]),
+        ("/api/runs/20261110-125000-00000010", &[]),
+        ("/api/runs/20261110-124000-00000011", &[]),
         ("/api/runs/20261110-090000-0000000a/since?log=7", &[]),
     ];
     for (path, headers) in refusals {
@@ -365,6 +377,7 @@ fn serves_runs() {
             next: null
             runs:
               {"bound":"","has_result":false,"id":"20261110-125000-00000010","live":false,"requests":null,"rest":"made by pumpkin 9.9.9","state":"unread","time":"-","tokens":null,"usd":"-"}
+              {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)","id":"20261110-124000-00000011"}
               {"bound":"-","has_result":false,"id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","state":"lost","time":"-","tokens":null,"usd":"-"}
               {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
@@ -432,6 +445,18 @@ fn serves_runs() {
             GET /api/runs/20261110-140000-0000000f []
             HTTP/1.1 404 Not Found
             {"error":"no run that this view serves matches `20261110-140000-0000000f`: name the id of one that its list shows"}
+            GET /api/runs/20261110-130000-0000000e []
+            HTTP/1.1 404 Not Found
+            {"error":"no run that this view serves matches `20261110-130000-0000000e`: name the id of one that its list shows"}
+            GET /api/runs/20261110-131000-00000013 []
+            HTTP/1.1 404 Not Found
+            {"error":"no run that this view serves matches `20261110-131000-00000013`: name the id of one that its list shows"}
+            GET /api/runs/20261110-125000-00000010 []
+            HTTP/1.1 404 Not Found
+            {"error":"runs/20261110-125000-00000010/record.json holds record_version \"pumpkin.record/v9\": expected \"pumpkin.record/v0\", which this `pumpkin` reads"}
+            GET /api/runs/20261110-124000-00000011 []
+            HTTP/1.1 500 Internal Server Error
+            {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
             {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9222: expected 0, or a byte that an answer gave"}"#]],
