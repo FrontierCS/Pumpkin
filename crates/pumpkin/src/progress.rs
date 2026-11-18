@@ -251,7 +251,7 @@ pub(crate) fn unread(unread: &[runtime::Unread]) -> Option<String> {
 struct Totals {
     states: BTreeMap<State, usize>,
     without_result: usize,
-    ends_unix_secs: Option<u64>,
+    ends_unix_seconds: Option<u64>,
     usd: Option<f64>,
     unpriced: bool,
     unreported: u64,
@@ -267,9 +267,9 @@ impl Totals {
         *self.states.entry(stage.state()).or_default() += 1;
         match stage {
             Stage::Running {
-                ends_unix_secs,
+                ends_unix_seconds,
                 under: _,
-            } => self.ends_unix_secs = self.ends_unix_secs.max(Some(*ends_unix_secs)),
+            } => self.ends_unix_seconds = self.ends_unix_seconds.max(Some(*ends_unix_seconds)),
             Stage::Finished { result: false } => self.without_result += 1,
             Stage::Finished { result: true }
             | Stage::Waiting
@@ -314,7 +314,7 @@ impl Totals {
                 self.unreported,
             ));
         }
-        if let Some(ends) = self.ends_unix_secs {
+        if let Some(ends) = self.ends_unix_seconds {
             let ends = crate::utc(Duration::from_secs(ends)).strftime("%H:%M");
             let _ = write!(line, "; every live run ends by {ends} UTC");
         }

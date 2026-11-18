@@ -37,7 +37,7 @@ pub(super) enum Stage {
     Publishing,
     Running {
         /// When the run ends at the latest, by its hard end, in seconds since the Unix epoch.
-        ends_unix_secs: u64,
+        ends_unix_seconds: u64,
         /// The lines that `ls` prints under the run's line, each ending in a newline: one for
         /// each call and lease that hasn't ended.
         under: String,
@@ -142,7 +142,7 @@ impl Stage {
                 };
                 let ends = progress.started.saturating_add(progress.hard_end);
                 Self::Running {
-                    ends_unix_secs: ends.since_epoch().as_secs(),
+                    ends_unix_seconds: ends.since_epoch().as_secs(),
                     under: under(id, progress, now, runs),
                 }
             }
