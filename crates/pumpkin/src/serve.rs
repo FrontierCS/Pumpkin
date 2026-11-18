@@ -26,8 +26,8 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
 use crate::job::{JOBS, WAITING};
-use crate::link::{self, Answer, Ask, Boot, Health, Hello};
-use crate::progress::{Entry, Listed, Listing, Row};
+use crate::link::{self, Answer, Ask, Boot, Health, Hello, Listed};
+use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 
 /// How long to wait for a request before ending: a page that is open polls every few seconds, so
@@ -59,8 +59,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
         let broken = match frame::read::<Ask>(&mut input) {
             Ok(Some((ask, body))) if body.is_empty() => {
                 mark_install_used();
-                let (answer, body) = answered(&home, ask);
-                link::send(&mut output, &answer, &body).context(written)?;
+                link::send(&mut output, &answered(&home, ask)).context(written)?;
                 continue;
             }
             Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
@@ -70,7 +69,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
         let message = format!(
             "{broken}: expected a request, with no body, as a client of this pumpkin sends"
         );
-        frame::write(&mut output, &Answer::Refused { message }, &[]).context(written)?;
+        link::send(&mut output, &Answer::Refused { message }).context(written)?;
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
@@ -164,10 +163,10 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-/// The answer to `ask`, and its body: [`Answer::Refused`] if what it asks for fails.
-fn answered(home: &Path, ask: Ask) -> (Answer, Vec<u8>) {
+/// The answer to `ask`: [`Answer::Refused`] if what it asks for fails.
+fn answered(home: &Path, ask: Ask) -> Answer {
     let answered = match ask {
-        Ask::Health => health().map(|health| (Answer::Health(health), Vec::new())),
+        Ask::Health => health().map(Answer::Health),
         Ask::List {
             prefixes,
             since_unix_secs,
@@ -177,7 +176,7 @@ fn answered(home: &Path, ask: Ask) -> (Answer, Vec<u8>) {
             listed(home, &prefixes, since)
         }
     };
-    answered.unwrap_or_else(|message| (Answer::Refused { message }, Vec::new()))
+    answered.unwrap_or_else(|message| Answer::Refused { message })
 }
 
 fn health() -> Result<Health, String> {
@@ -241,21 +240,15 @@ fn boot() -> Boot {
 
 /// The listing of the runs below `home` whose ids start with one of `prefixes`, as
 /// [`crate::listed_in`] makes it, at this machine's time, with the jobs yet to start a run.
-fn listed(
-    home: &Path,
-    prefixes: &[String],
-    since: Option<UnixTime>,
-) -> Result<(Answer, Vec<u8>), String> {
+fn listed(home: &Path, prefixes: &[String], since: Option<UnixTime>) -> Result<Answer, String> {
     let now = crate::unix_now();
     let runs = home.join(crate::job::runs());
     let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
-    let body = serde_json::to_vec(&listing).map_err(|error| format!("the listing: {error}"))?;
-    let answer = Answer::Listed {
-        body_bytes: body.len() as u64,
+    Ok(Answer::Listed(Listed {
+        listing,
         unlisted_count: unlisted as u64,
-    };
-    Ok((answer, body))
+    }))
 }
 
 /// Adds to `listing` each job in `home`'s `JOBS` whose id starts with one of `prefixes`, or each
@@ -290,11 +283,11 @@ fn unstarted(
         let asked = runtime::minted(id);
         let tmpfs = held.join(id);
         let listed = if exists(&tmpfs.join(WAITING))? {
-            Listed::Waiting { asked }
+            progress::Listed::Waiting { asked }
         } else if is_dir(&tmpfs)? {
-            Listed::Building { asked }
+            progress::Listed::Building { asked }
         } else if logged_since(&jobs.join(id).join("log"), since)? {
-            Listed::Unstarted
+            progress::Listed::Unstarted
         } else {
             listing.runs.insert(id.to_owned(), Entry::Older);
             continue;

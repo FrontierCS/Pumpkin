@@ -17,6 +17,7 @@
 use std::io::{self, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use provider::UnixTime;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
 use crate::controller::Slot;
+use crate::progress::Listing;
 use crate::workspace;
 
 // Well past the largest answer: a listing of a few thousand runs is a few MiB.
@@ -54,33 +56,39 @@ pub(crate) enum Ask {
 }
 
 /// The answer to a request.
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Answer {
     Health(Health),
-    /// The listing, a [`crate::progress::Listing`]'s JSON, in a body of `body_bytes`;
-    /// `unlisted_count` runs couldn't be listed, as `serve` said on its standard error.
-    Listed {
-        body_bytes: u64,
-        unlisted_count: u64,
-    },
+    Listed(Listed),
     /// Nothing took effect, for the reason that `message` gives, with what to do.
     Refused {
         message: String,
     },
 }
 
-impl Answer {
-    fn body_bytes(&self) -> u64 {
-        match self {
-            Self::Listed { body_bytes, .. } => *body_bytes,
-            Self::Health(_) | Self::Refused { .. } => 0,
-        }
-    }
+/// The runs that `serve` listed, and how many it couldn't list, as it said on its standard error.
+pub(crate) struct Listed {
+    pub(crate) listing: Listing,
+    pub(crate) unlisted_count: u64,
+}
+
+/// An [`Answer`] as it crosses, in a frame with no body: what of it is a body, if anything, follows
+/// in frames of its own.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Head {
+    Health(Health),
+    /// The listing, a [`Listing`]'s JSON, in a body of `body_bytes`.
+    Listed {
+        body_bytes: u64,
+        unlisted_count: u64,
+    },
+    Refused {
+        message: String,
+    },
 }
 
 /// The controller's own health.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Health {
     pub(crate) up_seconds: u64,
     pub(crate) disk_used_percent: u8,
@@ -88,7 +96,7 @@ pub(crate) struct Health {
 }
 
 /// The state of the controller's boot, the unit `pumpkin-boot.service`, as `systemctl` gives it.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Boot {
     Done,
@@ -106,14 +114,32 @@ pub(crate) enum Boot {
 #[derive(Serialize, Deserialize)]
 struct Part;
 
-/// Writes `answer`, then `body`, whose length it gives, in frames of at most [`MAX_BODY_BYTES`].
-pub(crate) fn send(output: &mut impl Write, answer: &Answer, body: &[u8]) -> io::Result<()> {
-    assert_eq!(
-        answer.body_bytes(),
-        body.len() as u64,
-        "an answer gives its body's length"
-    );
-    frame::write(output, answer, &[])?;
+/// Writes `answer`: its head, then its body, if it has one, in frames of at most
+/// [`MAX_BODY_BYTES`].
+pub(crate) fn send(output: &mut impl Write, answer: &Answer) -> io::Result<()> {
+    let (head, body) = match answer {
+        Answer::Health(health) => (Head::Health(health.clone()), Vec::new()),
+        Answer::Listed(Listed {
+            listing,
+            unlisted_count,
+        }) => {
+            let body = serde_json::to_vec(listing).unwrap_or_else(|error| {
+                unreachable!("a listing, whose maps are keyed by strings, is JSON: {error}")
+            });
+            let head = Head::Listed {
+                body_bytes: body.len() as u64,
+                unlisted_count: *unlisted_count,
+            };
+            (head, body)
+        }
+        Answer::Refused { message } => (
+            Head::Refused {
+                message: message.clone(),
+            },
+            Vec::new(),
+        ),
+    };
+    frame::write(output, &head, &[])?;
     for part in body.chunks(MAX_BODY_BYTES) {
         frame::write(output, &Part, part)?;
     }
@@ -214,8 +240,34 @@ impl Link {
         }
     }
 
-    /// The answer to `ask`, and its body.
-    pub(crate) fn ask(&mut self, ask: &Ask) -> Result<(Answer, Vec<u8>), Unanswered> {
+    /// The controller's health, or the message of its refusal.
+    pub(crate) fn health(&mut self) -> Result<Result<Health, String>, Unanswered> {
+        match self.ask(&Ask::Health)? {
+            Answer::Health(health) => Ok(Ok(health)),
+            Answer::Refused { message } => Ok(Err(message)),
+            Answer::Listed(_) => Err(other("health")),
+        }
+    }
+
+    /// The runs whose ids start with one of `prefixes`, as [`Ask::List`] says, or the message of
+    /// the refusal.
+    pub(crate) fn list(
+        &mut self,
+        prefixes: &[String],
+        since: Option<UnixTime>,
+    ) -> Result<Result<Listed, String>, Unanswered> {
+        let ask = Ask::List {
+            prefixes: prefixes.to_vec(),
+            since_unix_secs: since.map(|since| since.since_epoch().as_secs()),
+        };
+        match self.ask(&ask)? {
+            Answer::Listed(listed) => Ok(Ok(listed)),
+            Answer::Refused { message } => Ok(Err(message)),
+            Answer::Health(_) => Err(other("list")),
+        }
+    }
+
+    fn ask(&mut self, ask: &Ask) -> Result<Answer, Unanswered> {
         if let Err(error) = frame::write(&mut self.stdin, ask, &[]) {
             return Err(match error.kind() {
                 io::ErrorKind::BrokenPipe => {
@@ -224,8 +276,25 @@ impl Link {
                 _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
             });
         }
-        let answer: Answer = self.received("the answer")?;
-        let body_bytes = answer.body_bytes();
+        let (body_bytes, unlisted_count) = match self.received("the answer")? {
+            Head::Health(health) => return Ok(Answer::Health(health)),
+            Head::Refused { message } => return Ok(Answer::Refused { message }),
+            Head::Listed {
+                body_bytes,
+                unlisted_count,
+            } => (body_bytes, unlisted_count),
+        };
+        let body = self.body(body_bytes)?;
+        let listing = serde_json::from_slice(&body)
+            .map_err(|error| Unanswered::Failed(format!("its listing doesn't read: {error}")))?;
+        Ok(Answer::Listed(Listed {
+            listing,
+            unlisted_count,
+        }))
+    }
+
+    /// The body of an answer whose head gives it as of `body_bytes`.
+    fn body(&mut self, body_bytes: u64) -> Result<Vec<u8>, Unanswered> {
         if body_bytes > MAX_ANSWER_BODY_BYTES {
             return Err(Unanswered::Failed(format!(
                 "its answer's body is of {body_bytes} bytes: expected {} MiB at most",
@@ -245,7 +314,7 @@ impl Link {
             }
             body.extend_from_slice(&part);
         }
-        Ok((answer, body))
+        Ok(body)
     }
 
     /// The message of the next frame, which has no body; `what` names it.
@@ -277,6 +346,13 @@ impl Link {
             }),
         }
     }
+}
+
+fn other(asked: &str) -> Unanswered {
+    Unanswered::Failed(format!(
+        "it answered `{asked}` with the answer to another request: expected its own, as this \
+         pumpkin's `serve` gives it"
+    ))
 }
 
 impl Drop for Link {

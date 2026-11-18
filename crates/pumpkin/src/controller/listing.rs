@@ -13,7 +13,7 @@ use stdx::Context as _;
 use tempfile::TempDir;
 
 use super::{Name, Reached, SHORT_TIMEOUT, Session};
-use crate::link::{self, Answer, Ask, Boot, Health, Link, Unanswered};
+use crate::link::{self, Boot, Health, Link, Listed, Unanswered};
 use crate::progress::{Entry, Listing};
 use crate::workspace::{self, Workspace};
 use crate::{config, manifest, say};
@@ -36,11 +36,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
     let since = crate::progress::listed_since(prefixes, now);
-    let list = Ask::List {
-        prefixes: prefixes.to_vec(),
-        since_unix_secs: since.map(|since| since.since_epoch().as_secs()),
-    };
-    let ((health, mut listing, unlisted), asked) = answered(&reached, &list)?;
+    let ((health, mut listing, unlisted), asked) = answered(&reached, prefixes, since)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -68,7 +64,11 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 /// What the controller's `serve` answers, which this installs there first if there is none, and
 /// when the listing was asked for, as `serve` makes its rows then; asked again over another link,
 /// after each of `AGAIN`'s pauses, while one ends before it has answered, as asking only reads.
-fn answered(reached: &Reached, list: &Ask) -> Result<(Answers, UnixTime), String> {
+fn answered(
+    reached: &Reached,
+    prefixes: &[String],
+    since: Option<UnixTime>,
+) -> Result<(Answers, UnixTime), String> {
     let exe = workspace::exe("expected to send it to the controller, to list the runs there")?;
     let (digest, _) = manifest::file_sha256(&exe)?;
     let name = &reached.name;
@@ -78,9 +78,9 @@ fn answered(reached: &Reached, list: &Ask) -> Result<(Answers, UnixTime), String
         let master = slot.master;
         let asked = Link::open(command, slot).and_then(|link| match link {
             Some(mut link) => {
-                let health = link.ask(&Ask::Health)?;
+                let health = link.health()?;
                 let asked = crate::unix_now();
-                Ok(Some((health, link.ask(list)?, asked)))
+                Ok(Some((health, link.list(prefixes, since)?, asked)))
             }
             None => Ok(None),
         });
@@ -135,37 +135,15 @@ type Answers = (Result<Health, String>, Listing, usize);
 /// What `serve` answered to `Health` and to `List`.
 fn answers(
     name: &Name,
-    health: (Answer, Vec<u8>),
-    listed: (Answer, Vec<u8>),
+    health: Result<Health, String>,
+    listed: Result<Listed, String>,
 ) -> Result<Answers, String> {
-    let other = |asked: &str| {
-        format!(
-            "controller `{name}` answered `{asked}` with the answer to another request: expected \
-             its own, as this pumpkin's `serve` gives it"
-        )
-    };
-    let refused = |message: String| format!("controller `{name}` refused: {message}");
-    let health = match health.0 {
-        Answer::Health(health) => Ok(health),
-        Answer::Refused { message } => Err(format!(
-            "controller `{name}` says nothing of its health: {message}"
-        )),
-        Answer::Listed { .. } => return Err(other("health")),
-    };
-    let (listing, unlisted_count) = match listed {
-        (
-            Answer::Listed {
-                body_bytes: _,
-                unlisted_count,
-            },
-            body,
-        ) => (serde_json::from_slice(&body), unlisted_count),
-        (Answer::Refused { message }, _) => return Err(refused(message)),
-        (Answer::Health(_), _) => return Err(other("list")),
-    };
-    let listing = listing.map_err(|error| {
-        format!("controller `{name}` sent a listing that doesn't read: {error}")
-    })?;
+    let Listed {
+        listing,
+        unlisted_count,
+    } = listed.map_err(|message| format!("controller `{name}` refused: {message}"))?;
+    let health = health
+        .map_err(|message| format!("controller `{name}` says nothing of its health: {message}"));
     let unlisted = usize::try_from(unlisted_count).unwrap_or(usize::MAX);
     Ok((health, listing, unlisted))
 }
