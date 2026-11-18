@@ -134,7 +134,7 @@ impl<'h, H: Host> Log<'h, H> {
     }
 
     /// Writes the `model_answered` event of a request: its `caller`, `request` number, the
-    /// `upstream` and `api` of the entry that took it, if one did, `upstream_status`, null if no
+    /// `entry` index, `upstream` and `api` if an entry took it, `upstream_status`, null if no
     /// response came, and `model`, `request_id`, `usage` and `failed` (with the `code` of its
     /// failure, if it gave one), each if there is one. `answer` is named by its `kind`: `forwarded`
     /// or `cut` short, for an upstream's response; `barred` before an upstream, by its `bar`
@@ -225,7 +225,8 @@ impl<'h, H: Host> Log<'h, H> {
             "upstream_status": upstream_status,
             "answer": answer,
         });
-        if let Some((upstream, api)) = taken {
+        if let Some((entry, upstream, api)) = taken {
+            event["entry"] = json!(entry);
             event["upstream"] = json!(upstream);
             event["api"] = json!(api);
         }
@@ -405,9 +406,9 @@ pub(super) enum Targeted {
 }
 
 pub(super) struct ModelAnswer {
-    /// The name and API of the upstream entry that took the request, if one did, even if the route
+    /// The index, upstream name and API of the entry that took the request, even if the route
     /// barred the request itself and never sent it upstream.
-    pub(super) taken: Option<(Name, Api)>,
+    pub(super) taken: Option<(usize, Name, Api)>,
     pub(super) answer: Answer,
     pub(super) kept: Value,
     /// When the response's first bytes came and, if its stream's output began, when that did;

@@ -91,6 +91,20 @@ $ ./pumpkin wait --outcome 234cd166 2> /dev/null
 `usage` holds the run's duration, the sandboxes counted by provider and class with their lifetimes,
 both in nanoseconds written as strings, and the model requests and tokens.
 
+When any model request selected a route entry and was answered, `usage.routes` gives one row
+per such entry in workflow order. Each row names the `role`, the zero-based `entry` in that
+role's model route in `ir.json`, and its `api`. Its `model_requests` counts all answers through
+that entry, including refusals, across every sandbox of the role. An answer that matched no
+entry counts only towards the run and its caller. A request still in flight has no answer to count.
+
+Each row's `tokens` sums the usage that responses reported. Its `usd` gives the cost of the
+reported tokens that the run's prices cover, or zero when every request was unbilled.
+A row whose billable usage is entirely unknown or unpriced has no `usd`.
+Where a price is missing, `unpriced_models` names the models it leaves out.
+`unreported_responses`, when present on a row, counts responses with missing or partial usage,
+including those of unpriced models. A cut 2xx response can contribute both reported tokens and
+one missing response. The run's cost counts missing responses of priced models separately.
+
 [Workflows](workflows.md) says what the log keeps of each call.
 
 ## Model exchanges
