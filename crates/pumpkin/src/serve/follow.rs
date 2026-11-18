@@ -61,25 +61,33 @@ fn follow(
         }
         std::thread::sleep(FOLLOW_POLL);
     }
-    let written = "writing the job's ending failed";
     if !is_run {
-        let size = size(&out)?;
-        if size == 0 {
-            return frame::write(output, &Followed::Unbuilt, &[]).context(written);
-        }
-        let file = File::open(&out).context(out.display())?;
-        frame::write(output, &Followed::Built { body_bytes: size }, &[]).context(written)?;
-        parts(output, file, &Part, &out)?;
-        return Ok(());
+        return built(output, &out);
     }
-    let dir = home.join(job::runs()).join(id);
-    if !exists(&dir)? {
+    ran(output, &home.join(job::runs()).join(id), id, &active)
+}
+
+fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
+    let written = "writing the build's IR failed";
+    let size = size(out)?;
+    if size == 0 {
+        return frame::write(output, &Followed::Unbuilt, &[]).context(written);
+    }
+    let file = File::open(out).context(out.display())?;
+    frame::write(output, &Followed::Built { body_bytes: size }, &[]).context(written)?;
+    parts(output, file, &Part, out)?;
+    Ok(())
+}
+
+fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(), String> {
+    let written = "writing the run's ending failed";
+    if !exists(dir)? {
         return frame::write(output, &Followed::Unstarted, &[]).context(written);
     }
-    let writer = runtime::writer(&dir);
+    let writer = runtime::writer(dir);
     let record = match &writer {
-        Ok(Writer::This) => Some(Record::open(&dir)?),
-        Ok(Writer::Older) => match Record::open(&dir) {
+        Ok(Writer::This) => Some(Record::open(dir)?),
+        Ok(Writer::Older) => match Record::open(dir) {
             Ok(record) => Some(record),
             Err(ReadError::Form(_)) => None,
             Err(error) => return Err(error.into()),
@@ -93,7 +101,7 @@ fn follow(
             milestones(&record, |message| say(output, &message.to_string()))?;
         }
     } else {
-        while exists(&active)? {
+        while exists(active)? {
             std::thread::sleep(FOLLOW_POLL);
         }
     }
