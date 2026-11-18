@@ -21,7 +21,8 @@
 //!
 //! A reader takes a line only once it ends in a newline, skips an event or action `kind` it doesn't
 //! know, lists a part it can't read as unread rather than failing, and takes as optional what an
-//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`.
+//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`; an older
+//! log's note of the agent's collect stands for its `agent_collected`.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -259,6 +260,7 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
+            Entry::AgentCollected => self.told(json!({ "kind": "agent_collected" })),
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
@@ -366,6 +368,9 @@ impl<'h, H: Host> Log<'h, H> {
 
 pub(super) enum Entry {
     Note(String),
+    /// The agent's sandbox frozen and what it left collected, as `agent_collected`: the run is
+    /// done with it.
+    AgentCollected,
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),

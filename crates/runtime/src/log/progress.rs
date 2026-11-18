@@ -468,6 +468,8 @@ impl Reading {
             | None => None,
         };
         let mut work = request.and_then(Work::asked);
+        // A log without `agent_collected` marks the agent's collect by this note alone; in one
+        // with it, it follows the note and sets the time again.
         if let Some(note) = &line.note
             && note.starts_with("collected from the agent's sandbox")
         {
@@ -504,6 +506,7 @@ impl Reading {
                 self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
                 self.agent.sandbox.gone.get_or_insert(at);
             }
+            logged::Event::AgentCollected => self.agent.sandbox.gone = Some(at),
             logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
