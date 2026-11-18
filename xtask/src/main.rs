@@ -19,7 +19,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-use xshell::{Cmd, Shell};
+use xshell::{Cmd, Shell, cmd};
 
 mod diff;
 mod figure;
@@ -115,7 +115,9 @@ mod flags {
             }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
-            /// listed in `mutants.out`, is a finding to read, not a failure.
+            /// listed in `mutants.out`, is a finding to read, not a failure. Given paths whose
+            /// source the changes leave as it is, it mutates that source whole, and names the
+            /// mutants missed that the tests of the merge base catch.
             cmd mutants {
                 /// The paths whose changes alone are taken, if any are given.
                 repeated paths: PathBuf
@@ -421,7 +423,9 @@ fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
 }
 
 /// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
-/// `paths` alone if there are any. Missed mutants and timeouts are findings, not failures.
+/// `paths` alone if there are any. If the changes leave the source below `paths` as it is, it
+/// mutates that source whole, then runs the mutants missed again on the merge base, to name those
+/// that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
 fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::MUTANTS)?;
     tools::require(cargo, tools::NEXTEST)?;
@@ -432,29 +436,88 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     if let Some(rev) = rev {
         again = format!("{again} --in-diff {rev}");
     }
-    let diff = diff::since(&cargo.sh, rev.unwrap_or("origin/main"), paths, &again)?;
-    let scratch = cargo.sh.create_temp_dir()?;
+    let sh = &cargo.sh;
+    let rev = rev.unwrap_or("origin/main");
+    let base = cmd!(sh, "git merge-base {rev} HEAD").read()?;
+    let diff = diff::since(sh, &base, paths, &again)?;
+    let scratch = sh.create_temp_dir()?;
     let diff_path = scratch.path().join("changes.diff");
-    cargo.sh.write_file(&diff_path, diff)?;
-    let run = tested(cargo, cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path))?;
+    sh.write_file(&diff_path, diff)?;
+    // A glob with a slash matches the whole path in cargo-mutants, so a directory needs its `**`.
+    let files = paths
+        .iter()
+        .flat_map(|path| [path.clone(), path.join("**")]);
+    let files: Vec<_> = files
+        .flat_map(|glob| ["--file".into(), glob.into_os_string()])
+        .collect();
+    let whole = !paths.is_empty() && unchanged(cargo, &base, &files)?;
+    let run = if whole {
+        cargo.cmd(&["mutants"]).args(&files)
+    } else {
+        cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path)
+    };
+    let report = root().join("mutants.out");
+    if !missed(cargo, run, &again)? {
+        return Ok(());
+    }
+    if !whole {
+        println!(
+            "xtask: the mutants cargo-mutants missed or timed out on are findings, listed in \
+             `{}` with their diffs",
+            report.display()
+        );
+        return Ok(());
+    }
+    // The source is as it is on `base`, so each mutant there has the name it has here, and
+    // `--iterate` tests there only those that weren't caught or unviable here.
+    let archive = scratch.path().join("base.tar");
+    cmd!(sh, "git archive --output {archive} {base}").run()?;
+    let tree = sh.create_dir(scratch.path().join("base"))?;
+    cmd!(sh, "tar --extract --file {archive} --directory {tree}").run()?;
+    let run = cargo.cmd(&["mutants", "--iterate", "--dir"]).arg(&tree);
+    missed(cargo, run.arg("--output").arg(root()).args(&files), &again)?;
+    let brought = sh.read_file(report.join("caught.txt"))?;
+    let brought = if brought.is_empty() {
+        "none\n"
+    } else {
+        &brought
+    };
+    println!(
+        "xtask: the mutants cargo-mutants missed or timed out on are listed in `{}` with their \
+         diffs; the changes left these uncaught, which the tests on {base} catch:\n{brought}",
+        root().join("mutants.out.old").display()
+    );
+    Ok(())
+}
+
+/// Whether the source files that `files`, cargo-mutants' `--file` arguments, select are the same
+/// in the working tree as on `base`, and there are any.
+fn unchanged(cargo: &Cargo, base: &str, files: &[OsString]) -> Result<bool> {
+    let listed = cargo.cmd(&["mutants", "--list-files"]).args(files).read()?;
+    let sources: Vec<&str> = listed.lines().collect();
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let sh = &cargo.sh;
+    let diff = cmd!(sh, "git diff --quiet {base} -- {sources...}")
+        .quiet()
+        .ignore_status();
+    Ok(diff.output()?.status.success())
+}
+
+/// Runs `run`, a cargo-mutants command, in the environment of the tests ([`tested`]), and returns
+/// whether it missed a mutant or one timed out.
+fn missed(cargo: &Cargo, run: Cmd<'_>, again: &str) -> Result<bool> {
     // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
     // cargo would take a mutant's artifacts as fresh for the unmutated tree.
-    let run = run.env("CARGO_TARGET_DIR", "target");
+    let run = tested(cargo, run)?.env("CARGO_TARGET_DIR", "target");
     let line = run.to_string();
     let status = Command::from(run).status();
     let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
     match status.code() {
-        Some(0) => Ok(()),
+        Some(0) => Ok(false),
         // cargo-mutants exits with 2 when it missed a mutant and with 3 when one timed out.
-        Some(2 | 3) => {
-            let report = root().join("mutants.out");
-            println!(
-                "xtask: the mutants cargo-mutants missed or timed out on are findings, listed in \
-                 `{}` with their diffs",
-                report.display()
-            );
-            Ok(())
-        }
+        Some(2 | 3) => Ok(true),
         _ => Err(format!(
             "`{line}` ended with {status}: fix what it printed above, and run `{again}` again"
         )
