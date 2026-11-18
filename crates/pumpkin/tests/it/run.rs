@@ -717,7 +717,9 @@ fn usage() {
                               that its prices lack. No model is listed twice, under one
                               upstream or two. With `responses_via_chat = true`, a Responses
                               caller of this model reaches /chat/completions using text and
-                              function tools. Otherwise each caller reaches its own API.
+                              function tools. Its optional `request_repair` takes the value
+                              `join_assistant_tool_text` for histories with assistant text
+                              between function calls and their results.
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
@@ -1485,6 +1487,7 @@ fn configurations() {
         "missing", "undocked", "nameless", "broken", "inline", "priced", "keyless", "invalid",
     ];
     let refused = (refused.into_iter()).chain([
+        "untranslated",
         "negative",
         "outputless",
         "reasoned",
@@ -1563,7 +1566,7 @@ fn configurations() {
               |
             7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
               |                                                                         ^^^^^
-            unknown field `price`, expected one of `name`, `upstream_name`, `responses_via_chat`, `usd_per_mtok`
+            unknown field `price`, expected one of `name`, `upstream_name`, `responses_via_chat`, `request_repair`, `usd_per_mtok`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/priced.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config keyless.toml
             exit status: Some(1)
@@ -1581,6 +1584,10 @@ fn configurations() {
               |            ^^^^^^^
             `Gateway` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/invalid.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config untranslated.toml
+            exit status: Some(1)
+            pumpkin: untranslated.toml: `gpt-6-astra` has a request_repair without responses_via_chat: enable Chat translation for this model
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/untranslated.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config negative.toml
             exit status: Some(1)
             pumpkin: negative.toml: TOML parse error at line 7, column 88
@@ -1779,7 +1786,7 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
                 "{gateway}\n{}",
                 direct.replace(
                     " }",
-                    ", responses_via_chat = true, usd_per_mtok = { input = 0.3, output = 2.5 } }"
+                    ", responses_via_chat = true, request_repair = \"join_assistant_tool_text\", usd_per_mtok = { input = 0.3, output = 2.5 } }"
                 )
             ),
         ),
@@ -1794,6 +1801,7 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
             gateway.replace("key_file = \"key\"", "key = \"sk-1\""),
         ),
         ("priced", gateway.replace(" }", ", price = 1 }")),
+        ("untranslated", gateway.replace(" }", r#", request_repair = "join_assistant_tool_text" }"#)),
         ("negative", priced("input = -1, output = 10")),
         ("outputless", priced("input = 1.25")),
         (

@@ -297,7 +297,8 @@ impl Route {
         (rules.choice)(&body)?;
         closed_fields(rules, &body)?;
         let conversion = if translated {
-            let (chat, request) = crate::bridge::request(body).map_err(bad)?;
+            let (chat, request) =
+                crate::bridge::request(body, upstream.request_repair).map_err(bad)?;
             (CHAT.stored)(&chat)?;
             (CHAT.feature)(&chat)?;
             (CHAT.choice)(&chat)?;

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
-use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
+use route::{Admission, Answer, Apart, Headers, Keep, RequestRepair, Route, Serving, Upstream};
 use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
 use schema::workflow::{ByRole, Sandbox, Workflow};
 use serde_json::{Map, Value, json};
@@ -274,6 +274,7 @@ pub(super) struct Exchange<C> {
     response: Part,
     body: RefCell<Option<Body>>,
     translated_to: Cell<Option<Api>>,
+    repair: Cell<Option<RequestRepair>>,
     dropped_headers: RefCell<Vec<String>>,
     items: RefCell<Vec<File>>,
     failed: RefCell<Option<String>>,
@@ -323,6 +324,7 @@ impl<C: Clock> Exchange<C> {
             response: part("response"),
             body: RefCell::new(None),
             translated_to: Cell::new(None),
+            repair: Cell::new(None),
             dropped_headers: RefCell::new(Vec::new()),
             items: RefCell::new(Vec::new()),
             failed: RefCell::new(None),
@@ -338,6 +340,9 @@ impl<C: Clock> Exchange<C> {
         let mut kept = json!({});
         if let Some(api) = self.translated_to.get() {
             kept["upstream_api"] = json!(api);
+        }
+        if let Some(repair) = self.repair.get() {
+            kept["request_repair"] = json!(repair);
         }
         for part in [&self.request, &self.response] {
             if part.file.borrow().is_some() {
@@ -633,7 +638,13 @@ pub(super) fn kept_item(record: &Path, digest: &Sha256Digest) -> Result<Vec<u8>,
 }
 
 impl<C: Clock> Keep for Exchange<C> {
-    fn upstream(&self, translated_to: Option<Api>, names: &[String]) {
+    fn upstream(
+        &self,
+        translated_to: Option<Api>,
+        repair: Option<RequestRepair>,
+        names: &[String],
+    ) {
+        self.repair.set(repair);
         self.translated_to.set(translated_to);
         *self.dropped_headers.borrow_mut() = names.to_vec();
     }

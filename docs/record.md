@@ -104,6 +104,8 @@ the headers it left behind, never their values.
 A translated exchange names its upstream API in `kept.upstream_api` on its `model_answered`
 line. Read the archived bodies as that API. The line's `api` and `model` identify the caller's
 route for accounting. With no translation, the caller and upstream speak the same API.
+A translation that applied a configured request repair names it in `kept.request_repair`.
+The field is absent when the request was unchanged or refused before forwarding.
 
 ## The page
 

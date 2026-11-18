@@ -73,6 +73,15 @@ explicit boolean `strict`: Responses and Chat default an omitted value different
 function calls, refusals and length-limited answers can be returned whole or as a stream. A
 stream requests token usage from Chat; a provider that omits it leaves spend unknown.
 
+A model that needs assistant text on the same Chat message as its calls can set
+`request_repair = "join_assistant_tool_text"` alongside `responses_via_chat = true`.
+The repair accepts one assistant text message between a group of calls and their results.
+It appends the text to the calling assistant message, preserving each text part in order.
+All results must immediately follow, one per call ID. A result can answer any call in the group.
+A second message in the gap, or assistant text after the first result, is refused.
+OpenAI's [Chat assistant message](https://github.com/openai/openai-python/blob/ea5d1606f441d80dca1e9e7f99b74581f41408f8/src/openai/types/chat/chat_completion_assistant_message_param.py#L58-L81)
+defines both the content parts and the list of calls.
+
 The bridge accepts `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`,
 `max_output_tokens`, `prompt_cache_key`, `metadata`, `reasoning.effort`, `text.verbosity` and
 plain text output format. The `reasoning.encrypted_content` include selects a field on reasoning

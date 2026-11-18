@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use docker::CpuList;
 use engine::ContextName;
 use gateway::GatewayAddress;
-use route::{Headers, Key, Serving, UpstreamModel, UpstreamUrl};
+use route::{Headers, Key, RequestRepair, Serving, UpstreamModel, UpstreamUrl};
 use runtime::TokenPrices;
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -142,6 +142,8 @@ struct Model {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     responses_via_chat: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    request_repair: Option<RequestRepair>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usd_per_mtok: Option<TokenPrices>,
 }
 
@@ -267,6 +269,7 @@ impl Upstreams {
                 UpstreamModel {
                     name: model.upstream_name.clone(),
                     responses_via_chat: model.responses_via_chat && *api == Api::Responses,
+                    request_repair: model.request_repair,
                 },
             )
         });
@@ -388,7 +391,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
     } = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
         .context(path.display())?;
-    unique(&upstreams).context(path.display())?;
+    validate_models(&upstreams).context(path.display())?;
     // Below the file's directory, rather than the working directory or `HOME`, so that a
     // configuration and its keys move together, and no variable of the environment changes which
     // file a key is in. A file that was read has a parent: `""` for a bare file name.
@@ -502,10 +505,19 @@ fn key_file(name: &Name) -> String {
     format!("{name}.key")
 }
 
-fn unique(upstreams: &Upstreams) -> Result<(), String> {
+fn validate_models(upstreams: &Upstreams) -> Result<(), String> {
     let mut models = BTreeSet::new();
     for upstream in upstreams.0.values() {
         let listed = &upstream.models;
+        if let Some(model) = listed
+            .iter()
+            .find(|m| m.request_repair.is_some() && !m.responses_via_chat)
+        {
+            return Err(format!(
+                "`{}` has a request_repair without responses_via_chat: enable Chat translation for this model",
+                model.name.as_str().escape_debug()
+            ));
+        }
         if let Some(model) = listed.iter().find(|model| !models.insert(&model.name)) {
             return Err(format!(
                 "`{}` is listed more than once: list each model once, under the upstream that \

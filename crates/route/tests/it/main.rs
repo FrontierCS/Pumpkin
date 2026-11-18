@@ -46,6 +46,7 @@ fn models(names: &[&str]) -> BTreeMap<ModelName, route::UpstreamModel> {
                 route::UpstreamModel {
                     name: model(name),
                     responses_via_chat: false,
+                    request_repair: None,
                 },
             )
         })
@@ -216,7 +217,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
 struct Dropped(RefCell<Vec<String>>);
 
 impl Keep for Dropped {
-    fn upstream(&self, _: Option<Api>, names: &[String]) {
+    fn upstream(&self, _: Option<Api>, _: Option<route::RequestRepair>, names: &[String]) {
         *self.0.borrow_mut() = names.to_vec();
     }
 

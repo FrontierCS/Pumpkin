@@ -885,6 +885,9 @@ impl StandIn {
         serving.api = entry.api;
         for (name, model) in &mut serving.models {
             model.responses_via_chat = name.as_str() == "m-translated";
+            model.request_repair = model
+                .responses_via_chat
+                .then_some(route::RequestRepair::JoinAssistantToolText);
         }
         serving
     }
@@ -2622,6 +2625,7 @@ fn translated_model_exchange() {
     let argv = [
         "ops",
         "model m-translated count",
+        r#"model m-translated count {"input":[{"type":"function_call","call_id":"count_a","name":"count","arguments":"{}"},{"role":"assistant","content":"Counting."},{"type":"function_call_output","call_id":"count_a","output":"3"}]}"#,
         "call submit 6 finalize=true",
     ];
     let mut ir = routed(ops_workflow(&argv, 30));
@@ -2638,15 +2642,18 @@ fn translated_model_exchange() {
         line.starts_with("provider.json routes:")
             || line.starts_with("outcome.json's usage:")
             || line.contains(r#""kind":"model_answered""#)
-            || line.starts_with("model request 0:")
-            || line.starts_with("model exchange 0 kept:")
+            || line.starts_with("model request ")
+            || line.starts_with("model exchange ")
     });
     expect![[r#"
         provider.json routes: {"agent":[{"api":"responses","models":{"m-translated":{"upstream_api":"chat","upstream_name":"vendor/m-translated"}},"upstream":"stand-in"}]}
-        outcome.json's usage: {"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":10,"output":1,"responses":1}}
+        outcome.json's usage: {"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":20,"output":2,"responses":2}}
         {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":147,"body_sha256":"fed2710eed841b4afdd6270de0fb0f6278f780cba05bf347520d81e9c2be87de","bytes":206,"dropped_headers":["user-agent"],"items":{"count":2,"field":"messages"}},"response":{"bytes":246},"upstream_api":"chat"},"kind":"model_answered","model":"m-translated","request":0,"upstream":"stand-in","upstream_status":200,"usage":{"input_tokens":10,"output_tokens":1}},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":251,"body_sha256":"8e6442a7795154e498457d04d65d584fd44093658d03805f48cfb2d120ceef4a","bytes":206,"dropped_headers":["user-agent"],"items":{"count":2,"field":"messages"}},"request_repair":"join_assistant_tool_text","response":{"bytes":246},"upstream_api":"chat"},"kind":"model_answered","model":"m-translated","request":1,"upstream":"stand-in","upstream_status":200,"usage":{"input_tokens":10,"output_tokens":1}},"observed_ns":"<ns>","seq":5}
         model request 0: 200 [("content-type", "application/json")] {"created_at":123,"error":null,"id":"c","incomplete_details":null,"model":"m-translated","object":"response","output":[{"content":[{"annotations":[],"text":"three","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"status":"completed","store":false,"tool_choice":"auto","tools":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}
-        model exchange 0 kept: request {"messages":["sha256:1c095c4d80e8e5c574bef753e03c99cc07a0488cc6018d44118a7580b4dd52cd","sha256:268fb0caed75fc0dcdf556c49e034940780f13fd8a9b661b3c1e3b4cce11ece6"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#]].assert_eq(&exchange.collect::<Vec<_>>().join("\n"));
+        model request 1: 200 [("content-type", "application/json")] {"created_at":123,"error":null,"id":"c","incomplete_details":null,"model":"m-translated","object":"response","output":[{"content":[{"annotations":[],"text":"three","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"status":"completed","store":false,"tool_choice":"auto","tools":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}
+        model exchange 0 kept: request {"messages":["sha256:1c095c4d80e8e5c574bef753e03c99cc07a0488cc6018d44118a7580b4dd52cd","sha256:268fb0caed75fc0dcdf556c49e034940780f13fd8a9b661b3c1e3b4cce11ece6"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}
+        model exchange 1 kept: request {"messages":["sha256:65f7672f44b17eaa37d46e80d117f1ff91ca388fbd04226edeb3964245502557","sha256:2559fd30483e7c4101d22c1d643e6eb13f3a4bf3fcaf2815cadd17784101f956"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#]].assert_eq(&exchange.collect::<Vec<_>>().join("\n"));
 }
 
 // The route stays open through the grace after the finalize, until the agent's exit ends the

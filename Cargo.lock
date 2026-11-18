@@ -540,6 +540,7 @@ dependencies = [
  "expect-test",
  "gateway",
  "schema",
+ "serde",
  "serde_json",
  "stdx",
  "test-support",

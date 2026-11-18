@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value, json};
 
 use super::Request;
+use crate::RequestRepair;
 
 type Object = Map<String, Value>;
 
@@ -27,7 +28,10 @@ pub(crate) fn explicit_messages(body: &mut Object) {
     }
 }
 
-pub(crate) fn request(mut body: Object) -> Result<(Object, Request), String> {
+pub(crate) fn request(
+    mut body: Object,
+    repair: Option<RequestRepair>,
+) -> Result<(Object, Request), String> {
     let mut messages = Vec::new();
     let mut echo =
         json!({"tools": [], "tool_choice": "auto", "parallel_tool_calls": true, "store": false});
@@ -39,7 +43,7 @@ pub(crate) fn request(mut body: Object) -> Result<(Object, Request), String> {
     let input = body
         .remove("input")
         .ok_or("send input as text or a list of items")?;
-    history(input, &mut messages)?;
+    let repair = history(input, &mut messages, repair)?;
     let mut chat = Map::from_iter([("messages".to_owned(), Value::Array(messages))]);
     let stream = match body.remove("stream") {
         None => false,
@@ -70,7 +74,14 @@ pub(crate) fn request(mut body: Object) -> Result<(Object, Request), String> {
             }
         }
     }
-    Ok((chat, Request { stream, echo }))
+    Ok((
+        chat,
+        Request {
+            repair,
+            stream,
+            echo,
+        },
+    ))
 }
 
 fn parameter(field: &str, value: &Value, chat: &mut Object) -> Result<(), String> {
@@ -233,20 +244,40 @@ fn function(tool: &Value) -> Result<Value, String> {
     Ok(json!({"type":"function","function":function}))
 }
 
-fn history(input: Value, messages: &mut Vec<Value>) -> Result<(), String> {
+fn history(
+    input: Value,
+    messages: &mut Vec<Value>,
+    repair: Option<RequestRepair>,
+) -> Result<Option<RequestRepair>, String> {
     let items = match input {
         Value::String(text) => {
             messages.push(json!({"role":"user","content":text}));
-            return Ok(());
+            return Ok(None);
         }
         Value::Array(items) => items,
         _ => return Err("send input as text or a list of items".into()),
     };
     let mut pending = BTreeSet::new();
-    for item in items {
+    let mut applied = None;
+    let mut items = items.into_iter().peekable();
+    while let Some(item) = items.next() {
         match item["type"].as_str() {
             Some("message") => {
-                answered(&pending)?;
+                let turn = if repair == Some(RequestRepair::JoinAssistantToolText)
+                    && item["role"] == "assistant"
+                    && items
+                        .peek()
+                        .is_some_and(|next| next["type"] == "function_call_output")
+                {
+                    messages
+                        .last_mut()
+                        .filter(|last| last["tool_calls"].is_array())
+                } else {
+                    None
+                };
+                if turn.is_none() {
+                    answered(&pending)?;
+                }
                 fields(&item, &["type", "id", "status", "role", "content"])?;
                 let role = string(&item, "role")?;
                 if !matches!(role, "developer" | "system" | "user" | "assistant") {
@@ -254,7 +285,12 @@ fn history(input: Value, messages: &mut Vec<Value>) -> Result<(), String> {
                 }
                 completed(&item)?;
                 let content = content(&item["content"], role == "assistant")?;
-                messages.push(json!({"role":role,"content":content}));
+                if let Some(turn) = turn {
+                    join_text(&mut turn["content"], content)?;
+                    applied = repair;
+                } else {
+                    messages.push(json!({"role":role,"content":content}));
+                }
             }
             Some("function_call") => {
                 add_call(&item, messages, &mut pending)?;
@@ -275,7 +311,34 @@ fn history(input: Value, messages: &mut Vec<Value>) -> Result<(), String> {
             None => return Err("send each input item with its type".into()),
         }
     }
-    answered(&pending)
+    answered(&pending)?;
+    Ok(applied)
+}
+
+// LiteLLM keeps trailing assistant text with the calls whose results follow it.
+// https://github.com/BerriAI/litellm/blob/df78b16941697991a736fc224182fa17270420ed/litellm/responses/litellm_completion_transformation/transformation.py#L1854-L1895
+fn join_text(before: &mut Value, after: Value) -> Result<(), String> {
+    let text_only = |value: &Value| {
+        value.is_string()
+            || value.as_array().is_some_and(|parts| {
+                !parts.is_empty() && parts.iter().all(|part| part["type"] == "text")
+            })
+    };
+    if !text_only(&after) || (!before.is_null() && !text_only(before)) {
+        return Err("join_assistant_tool_text requires text on the assistant turn".into());
+    }
+    if before.is_null() {
+        *before = after;
+    } else {
+        let parts = |content| match content {
+            Value::Array(parts) => parts,
+            text => vec![json!({"type":"text","text":text})],
+        };
+        let mut joined = parts(before.take());
+        joined.extend(parts(after));
+        *before = Value::Array(joined);
+    }
+    Ok(())
 }
 
 fn add_call(
