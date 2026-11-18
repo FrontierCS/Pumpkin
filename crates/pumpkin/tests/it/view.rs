@@ -775,6 +775,7 @@ fn cancels_a_run() {
     );
     ask("GET", &cancel, &[]);
     ask("POST", "/api/runs", &[("Origin", &page)]);
+    ask("POST", "/api/controller/start", &[("Origin", &page)]);
     ask("GET", &cancelling, &[]);
     let unknown = "/api/runs/20261110-170000-00000012/cancel";
     ask("POST", unknown, &[("Origin", &page)]);
@@ -829,10 +830,13 @@ fn cancels_a_run() {
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
             GET /api/runs/<id>/cancel []
             HTTP/1.1 405 Method Not Allowed
-            {"error":"run <id> is cancelled by `POST`, which the page's cancel sends: cancel it there, or run: pumpkin cancel --runs <scratch>/runs <id>"}
+            {"error":"the cancel of run <id> is sent by `POST`, as the page sends it: cancel it from the page that `pumpkin view` serves, or run: pumpkin cancel --runs <scratch>/runs <id>"}
             POST /api/runs [("Origin", "<page>")]
             HTTP/1.1 405 Method Not Allowed
-            {"error":"`/api/runs` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, takes `POST`"}
+            {"error":"`/api/runs` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, and the controller's start, `/api/controller/start`, take `POST`"}
+            POST /api/controller/start [("Origin", "<page>")]
+            HTTP/1.1 404 Not Found
+            {"error":"this view serves the runs of a directory, `runs`, not a controller's: start a controller by a command that reaches it, which starts it: pumpkin ls"}
             GET /api/runs/<id>/cancelling []
             HTTP/1.1 404 Not Found
             {"error":"the page started no cancel of run <id>: cancel it from the page, by POST /api/runs/<id>/cancel"}
