@@ -36,7 +36,7 @@ use decision::PayloadRef;
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::Offset;
-use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
+use provider::{Provider, Ready, RunTag, SandboxId, Sweep, Undeleted, UnixTime};
 use route::Serving;
 use schema::ir::{self, Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{log_dir, out_dir};
@@ -48,14 +48,14 @@ use super::log::{self, LogFold, Place, Readout, Used};
 use super::model::{KeptPart, KeptRequest};
 use super::read_error::{ReadError, failed, form, open_required, read_optional};
 use super::sandbox::sweep;
-use super::{Durable, Host, Signal, Stopped, System, TokenPrices};
+use super::{Durable, Host, System, TokenPrices};
 
 mod ending;
 mod payload;
 mod writer;
 
 pub use ending::Ending;
-use ending::{State, finished, read_outcome};
+use ending::{State, read_outcome};
 pub(super) use payload::reference;
 pub use writer::{Writer, writer};
 use writer::{read_record_json, writer_of};
@@ -312,10 +312,12 @@ pub struct Reaped {
     /// name, which that provider no longer listed, as they had ended, now deleted with what each
     /// left there.
     pub ended: Vec<(Name, SandboxId)>,
-    /// The directory of sockets removed, if there was one.
+    /// The directory of sockets removed, if there was one and every provider was swept.
     pub sockets: Option<PathBuf>,
     /// Whether the run had no outcome: the reap recorded it as failed.
     pub lost: bool,
+    /// Why the sweep of each provider that failed did, if one did.
+    pub failed: Option<String>,
 }
 
 impl Record {
@@ -520,7 +522,7 @@ impl Record {
         let (pid, pid_path) = self.pid_file()?;
         pid.lock_shared().context(pid_path.display())?;
         // The lock is free: the driver wrote its `outcome.json`, if it did, before it let go.
-        Ok(self.ended()?.unwrap_or(Ending::Lost))
+        Ok(ending::read(&self.dir)?.unwrap_or(Ending::Lost))
     }
 
     /// How the run ended, or was lost, as [`wait`](Self::wait) finds it; `None` while the run is
@@ -528,11 +530,11 @@ impl Record {
     pub fn ending(&self) -> Result<Option<Ending>, ReadError> {
         let (pid, pid_path) = self.pid_file()?;
         // An `outcome.json` is the record's last write, so it decides before the lock does.
-        if let Some(ending) = self.ended()? {
+        if let Some(ending) = ending::read(&self.dir)? {
             return Ok(Some(ending));
         }
         match pid.try_lock_shared() {
-            Ok(()) => Ok(Some(self.ended()?.unwrap_or(Ending::Lost))),
+            Ok(()) => Ok(Some(ending::read(&self.dir)?.unwrap_or(Ending::Lost))),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(failed(pid_path.display())(error)),
         }
@@ -560,8 +562,9 @@ impl Record {
 
     /// Waits for the run's driver, if one runs, to end, then deletes each sandbox of the run that
     /// `providers`, by name, list or the record holds undeleted, removes its `sockets/` and records
-    /// a lost run as failed; each deletion is appended to `reaps.jsonl`. Two reaps of a record take
-    /// turns. A provider left out deletes nothing, so a sandbox on it stays.
+    /// a lost run as failed; each deletion is appended to `reaps.jsonl`. Every provider is swept
+    /// even if one fails, which [`Reaped::failed`] says, and `sockets/` then stays. Two reaps of a
+    /// record take turns. A provider left out deletes nothing, so a sandbox on it stays.
     pub fn reap(&self, providers: &[(&Name, &dyn Sweep)]) -> Result<Reaped, String> {
         let (pid, pid_path) = self.pid_file()?;
         let run = RunTag::try_from(self.id.clone()).map_err(|error| {
@@ -589,36 +592,30 @@ impl Record {
             )?;
         }
         let undeleted = self.undeleted()?;
-        let swept = (providers.iter()).map(|&(name, provider)| {
-            // A sandbox that its provider lists no more may have ended and left what only its
-            // delete removes.
-            let held: Vec<SandboxId> = (undeleted.iter())
-                .filter(|(on, _)| on == name)
-                .map(|(_, id)| id.clone())
-                .collect();
-            // A lost run's sandboxes' records keep what its own deletes said.
-            let after = |_: &[SandboxId], _: &Result<(), String>| Ok(());
-            sweep(name, provider, &run, &held, after).map(|ids| (name.clone(), ids))
-        });
-        let sandboxes: Vec<(Name, Vec<SandboxId>)> = swept.collect::<Result<_, _>>()?;
+        // The sandboxes' records keep what the run's deletes said; `reaps.jsonl`, the reap's.
+        let after =
+            |name: &Name, ids: &[SandboxId], deleted: &_| self.note_reaped(name, ids, deleted);
+        let (sandboxes, failed) = sweep(providers.iter().copied(), &run, &undeleted, after);
         let ended: Vec<(Name, SandboxId)> = (undeleted.into_iter())
             .filter(|(name, id)| {
                 let swept = sandboxes.iter().find(|(swept, _)| swept == name);
                 swept.is_some_and(|(_, ids)| !ids.contains(id))
             })
             .collect();
-        self.note_reaped(&sandboxes, &ended)?;
         let sockets = sockets(&self.dir);
-        let sockets = match fs::remove_dir_all(&sockets) {
-            Ok(()) => Some(sockets),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error).context(sockets.display()),
+        // Kept while a sandbox may still run, as one that a failed sweep left.
+        let sockets = match failed.is_none().then(|| fs::remove_dir_all(&sockets)) {
+            Some(Ok(())) => Some(sockets),
+            None => None,
+            Some(Err(error)) if error.kind() == io::ErrorKind::NotFound => None,
+            Some(Err(error)) => return Err(error).context(sockets.display()),
         };
         Ok(Reaped {
             sandboxes,
             ended,
             sockets,
             lost,
+            failed,
         })
     }
 
@@ -696,15 +693,16 @@ impl Record {
 
     fn note_reaped(
         &self,
-        listed: &[(Name, Vec<SandboxId>)],
-        ended: &[(Name, SandboxId)],
+        provider: &Name,
+        ids: &[SandboxId],
+        deleted: &Result<(), Undeleted>,
     ) -> Result<(), String> {
         let at = log::nanos(UnixTime::of(SystemTime::now())?.since_epoch());
-        let listed = (listed.iter()).flat_map(|(name, ids)| ids.iter().map(move |id| (name, id)));
-        let lines = (listed.chain(ended.iter().map(|(name, id)| (name, id)))).map(|(name, id)| {
+        let lines = ids.iter().filter_map(|id| {
+            let failed = deleted.as_ref().is_err_and(|undeleted| undeleted.why(id).is_some());
             let line =
-                json!({ "at_ns": at, "provider": name, "id": id.as_str(), "reaped": "removed" });
-            format!("{line}\n")
+                json!({ "at_ns": at, "provider": provider, "id": id.as_str(), "reaped": "removed" });
+            (!failed).then(|| format!("{line}\n"))
         });
         let lines: String = lines.collect();
         if lines.is_empty() {
@@ -806,32 +804,6 @@ impl Record {
         let path = self.dir.join("driver.pid");
         let pid = open_required(&path)?;
         Ok((pid, path))
-    }
-
-    fn ended(&self) -> Result<Option<Ending>, ReadError> {
-        let path = self.dir.join("outcome.json");
-        let Some(outcome) = read_outcome(&path)? else {
-            return Ok(None);
-        };
-        let reason = outcome["reason"]
-            .as_str()
-            .unwrap_or("no reason is recorded");
-        match State::of(&outcome, &path)? {
-            State::Finished => Ok(Some(finished(&outcome, &self.dir)?)),
-            State::Failed => Ok(Some(Ending::Failed(format!("failed: {reason}")))),
-            State::Interrupted => {
-                let signal = outcome["signal"].as_str().and_then(Signal::named);
-                let signal = signal.ok_or_else(|| {
-                    ReadError::Form(format!(
-                        "{}'s signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or \
-                         `SIGHUP`",
-                        path.display()
-                    ))
-                })?;
-                let stopped = Stopped::Interrupted(signal);
-                Ok(Some(Ending::Interrupted(stopped.to_string())))
-            }
-        }
     }
 }
 
@@ -1093,7 +1065,7 @@ pub(super) fn write_sandbox(
     provider: &Name,
     id: &SandboxId,
     gpus: Option<&[GpuModel]>,
-    deleted: Option<&Result<(), String>>,
+    deleted: Option<Result<(), &str>>,
 ) -> Result<(), String> {
     let mut sandbox = json!({ "provider": provider, "id": id.as_str() });
     if let Some(gpus) = gpus {

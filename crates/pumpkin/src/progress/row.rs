@@ -2,7 +2,7 @@
 //! the typed fields that the totals and a reader of a listing need.
 
 use provider::UnixTime;
-use runtime::Ending;
+use runtime::{Ending, Stopped};
 use serde::{Deserialize, Serialize};
 
 use super::{Columns, Listed, State, columns, under};
@@ -148,8 +148,8 @@ impl Stage {
             }
             Some(Ending::Returned { .. }) => Self::Finished { result: true },
             Some(Ending::NoResult(_)) => Self::Finished { result: false },
-            Some(Ending::Failed(_)) => Self::Failed,
-            Some(Ending::Interrupted(_)) => Self::Interrupted,
+            Some(Ending::Stopped(Stopped::Failed(_))) => Self::Failed,
+            Some(Ending::Stopped(Stopped::Interrupted(_))) => Self::Interrupted,
             Some(Ending::Lost) => Self::Lost,
         }
     }

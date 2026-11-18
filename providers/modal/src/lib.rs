@@ -30,7 +30,7 @@ use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
@@ -278,7 +278,7 @@ impl<'e> Modal<'e> {
 }
 
 impl Sweep for Modal<'_> {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         self.reached.delete(run, ids)
     }
 

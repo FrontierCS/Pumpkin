@@ -25,7 +25,6 @@ use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
-use serde_json::json;
 use stdx::{Context, Deadline};
 
 mod agent;
@@ -188,17 +187,7 @@ impl<'r, H: Host> Run<'r, H> {
             Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
             Err(error) => (failed_also(outcome, Err(error.into())), None),
         };
-        let mut recorded = match &outcome {
-            Ok(outcome) => {
-                let mut recorded = log::outcome_json(outcome);
-                recorded["state"] = "finished".into();
-                recorded
-            }
-            Err(Stopped::Failed(reason)) => json!({ "state": "failed", "reason": reason }),
-            Err(Stopped::Interrupted(signal)) => {
-                json!({ "state": "interrupted", "signal": signal.name() })
-            }
-        };
+        let mut recorded = log::outcome_json(&outcome);
         if let Some(usage) = usage {
             recorded["usage"] = usage;
         }

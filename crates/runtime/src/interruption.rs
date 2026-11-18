@@ -2,23 +2,21 @@
 
 use std::fmt;
 
-/// A signal that interrupts a run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+/// A signal that interrupts a run, by its name, as a run's `outcome.json` records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
+    #[serde(rename = "SIGINT")]
     Int,
+    #[serde(rename = "SIGTERM")]
     Term,
+    #[serde(rename = "SIGHUP")]
     Hup,
 }
 
 impl Signal {
-    const ALL: [Self; 3] = [Self::Int, Self::Term, Self::Hup];
-
-    /// The signal that `name` names, as [`Signal::name`] gives it, if one does.
-    pub(crate) fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|signal| signal.name() == name)
-    }
-
-    /// Its name, as `SIGINT`, as a run's `outcome.json` records it.
+    /// Its name, as `SIGINT`.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Int => "SIGINT",
@@ -47,7 +45,7 @@ pub(super) fn check() -> Result<(), Stopped> {
 }
 
 /// Why a run stopped without an outcome, as its `outcome.json` records it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stopped {
     Failed(String),
     Interrupted(Signal),

@@ -19,7 +19,7 @@ use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
 use provider::{
     Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
-    SandboxdRef, Sweep, UnixTime,
+    SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
@@ -532,7 +532,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     fn write_sandbox(
         &self,
         made: &Made<'_>,
-        deleted: Option<&Result<(), String>>,
+        deleted: Option<Result<(), &str>>,
     ) -> Result<(), String> {
         let Made {
             on,
@@ -544,34 +544,37 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         record::write_sandbox(self.host, &dir, on, id, gpus.as_deref(), deleted)
     }
 
-    // Writes `deleted` into the record of each of `ids` that this run created. Returns the log
-    // entries of the delete, none if it failed, one per id, named by its sandbox if this run
+    // Writes how `deleted` went for each of `ids` into its record, if this run created it. Returns
+    // the log entries of the delete, one per id it deleted, named by its sandbox if this run
     // created it, and the failure of the writes, if any.
     fn record_deletes(
         &self,
         on: &Name,
         ids: &[SandboxId],
-        deleted: &Result<(), String>,
+        deleted: &Result<(), Undeleted>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
         let created = stdx::unpoisoned(self.created.lock());
         let made = (created.iter()).filter(|made| made.on == on && ids.contains(&made.id));
         // Written once the lock is let go, so that no other thread waits on the record's syncs.
         let made: Vec<Made<'_>> = made.map(Made::clone).collect();
         drop(created);
+        let undeleted = deleted.as_ref().err();
+        let failed = |id: &SandboxId| undeleted.and_then(|undeleted| undeleted.why(id));
         let mut logged = Vec::new();
-        if deleted.is_ok() {
-            for id in ids {
-                let made = made.iter().find(|made| made.id == *id);
-                let deleted = Deleted {
-                    sandbox: made.map(|made| made.which.name()),
-                    provider: on.clone(),
-                    id: id.clone(),
-                };
-                logged.push(log::Entry::Deleted(deleted));
-            }
+        for id in ids.iter().filter(|id| failed(id).is_none()) {
+            let made = made.iter().find(|made| made.id == *id);
+            let deleted = Deleted {
+                sandbox: made.map(|made| made.which.name()),
+                provider: on.clone(),
+                id: id.clone(),
+            };
+            logged.push(log::Entry::Deleted(deleted));
         }
         let failures: Vec<String> = (made.iter())
-            .filter_map(|made| self.write_sandbox(made, Some(deleted)).err())
+            .filter_map(|made| {
+                let deleted = failed(&made.id).map_or(Ok(()), Err);
+                self.write_sandbox(made, Some(deleted)).err()
+            })
             .collect();
         let recorded = if failures.is_empty() {
             Ok(())
@@ -591,20 +594,17 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     /// Deletes what each provider still lists of the run, so that a run ends with none of its
     /// sandboxes left, and records each delete.
     pub(super) fn sweep(&self) -> Result<(), String> {
-        let swept = (self.providers.iter()).map(|(name, hosting)| {
-            let record = |ids: &[SandboxId], deleted: &Result<(), String>| {
-                let (logged, recorded) = self.record_deletes(name, ids, deleted);
-                self.send(logged);
-                recorded
-            };
-            sweep(name, hosting.provider, &self.run, &[], record).err()
+        let providers = (self.providers.iter()).map(|(name, hosting)| {
+            let provider: &dyn Sweep = hosting.provider;
+            (name, provider)
         });
-        let failures: Vec<String> = swept.flatten().collect();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        let record = |name: &Name, ids: &[SandboxId], deleted: &Result<(), Undeleted>| {
+            let (logged, recorded) = self.record_deletes(name, ids, deleted);
+            self.send(logged);
+            recorded
+        };
+        let (_, failed) = sweep(providers, &self.run, &[], record);
+        failed.map_or(Ok(()), Err)
     }
 }
 
@@ -614,16 +614,41 @@ pub(super) struct Deleted {
     pub(super) id: SandboxId,
 }
 
-/// Deletes the sandboxes of `run` that `provider` lists, and those of `also` that it doesn't,
-/// then calls `after` with the ids deleted and the result of the delete, to record it, whichever
-/// it was. Returns the listed ids, or why the list, the delete or `after` failed. Nothing is
-/// deleted, nor `after` called, if there are none.
-pub(super) fn sweep(
+/// Deletes the sandboxes of `run` that each of `providers` lists, and those of `also` on it that
+/// it doesn't, then calls `after` with the provider's name, the ids deleted and the result of the
+/// delete, to record it, whichever it was. Nothing is deleted on a provider, nor `after` called,
+/// if there are none.
+///
+/// Returns the ids that each provider whose sweep succeeded listed, by its name, once every
+/// provider is swept, and why each list, delete or `after` that failed did, if one did.
+pub(super) fn sweep<'p>(
+    providers: impl IntoIterator<Item = (&'p Name, &'p dyn Sweep)>,
+    run: &RunTag,
+    also: &[(Name, SandboxId)],
+    after: impl Fn(&Name, &[SandboxId], &Result<(), Undeleted>) -> Result<(), String>,
+) -> (Vec<(Name, Vec<SandboxId>)>, Option<String>) {
+    let (mut swept, mut failures) = (Vec::new(), Vec::new());
+    for (name, provider) in providers {
+        // A sandbox that its provider lists no more may have ended and left what only its delete
+        // removes.
+        let held = also.iter().filter(|(on, _)| on == name);
+        let held: Vec<SandboxId> = held.map(|(_, id)| id.clone()).collect();
+        let recorded = |ids: &[SandboxId], deleted: &_| after(name, ids, deleted);
+        match sweep_one(name, provider, run, &held, recorded) {
+            Ok(ids) => swept.push((name.clone(), ids)),
+            Err(error) => failures.push(error),
+        }
+    }
+    let failed = (!failures.is_empty()).then(|| failures.join("; "));
+    (swept, failed)
+}
+
+fn sweep_one(
     name: &Name,
     provider: &dyn Sweep,
     run: &RunTag,
     also: &[SandboxId],
-    after: impl FnOnce(&[SandboxId], &Result<(), String>) -> Result<(), String>,
+    after: impl FnOnce(&[SandboxId], &Result<(), Undeleted>) -> Result<(), String>,
 ) -> Result<Vec<SandboxId>, String> {
     let listed = provider.list(run).context(format_args!(
         "listing the run's sandboxes on provider `{name}` failed"

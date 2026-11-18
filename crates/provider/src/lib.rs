@@ -9,7 +9,7 @@ use schema::ir::Image;
 use schema::sandbox::{Endpoint, Listening, SocketDial, TcpDial};
 pub use values::{
     Console, Create, Created, ImageRef, Listed, Ready, Role, RunTag, SandboxId, SandboxdRef,
-    UnixTime,
+    Undeleted, UnixTime,
 };
 
 mod values;
@@ -25,8 +25,9 @@ pub trait Sweep {
     ///
     /// An id of another run's sandbox, or of one whose run the provider can't tell, is refused and
     /// left untouched; a sandbox whose delete fails may still run. Each id is tried on its own:
-    /// the error names each that failed, and every other is deleted all the same.
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String>;
+    /// [`Undeleted`] holds each of `ids` that failed, with why, and no other id; every other is
+    /// deleted all the same.
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted>;
 
     /// Lists the sandboxes tagged with `run`, whatever created them, each with whether it has ended
     /// ([`Listed::ended`]): every one, from when its create returns, or, for one that a create made

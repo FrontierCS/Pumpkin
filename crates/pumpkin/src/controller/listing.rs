@@ -11,7 +11,7 @@ use stdx::Context as _;
 use tempfile::TempDir;
 
 use super::linking::{Build, Linked, Unlinked};
-use super::{Name, Reached};
+use super::{Name, OPENINGS, Reached};
 use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
 use crate::progress::{Entry, Listing};
 use crate::workspace::Workspace;
@@ -73,7 +73,7 @@ fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
     let name = &reached.name;
     let mut attempt = 0;
     loop {
-        let asked = Linked::open(reached, &build).and_then(|mut linked| {
+        let asked = Linked::open(reached, &build, OPENINGS).and_then(|mut linked| {
             let health = linked.ask(reached, HealthRequest {})?;
             let asked = crate::unix_now();
             let prefixes = prefixes.to_vec();
