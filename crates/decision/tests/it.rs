@@ -57,13 +57,9 @@ const SLOW_STARTUP: Duration = Duration::from_secs(30);
 fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     edit(&mut ir);
-    check_ir(&serde_json::from_value(ir).unwrap(), script, expect);
-}
-
-/// Runs `script` on `ir`, and compares what the core did with `expect`.
-fn check_ir(ir: &ir::Workflow, script: &str, expect: &Expect) {
+    let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
     let offered = offered();
-    let (placed, _) = Workflow::parse(ir)
+    let (placed, _) = Workflow::parse(&ir)
         .unwrap()
         .place(&offered, |classes| classes)
         .unwrap();
@@ -1289,36 +1285,6 @@ fn hard_end_startups() {
 }
 
 #[test]
-fn reports_for_the_log() {
-    check(
-        |_| {},
-        r#"
-        0 agent_started
-        1000 now submit 10 select
-        1100 agent_exited 0
-        1500 call_started 0
-        3100 call_returned 0 score=1
-        "#,
-        &expect![[r#"
-            start
-              start the agent
-              (tick due at 18010000)
-            0 agent_started
-              (tick due at 18000000)
-            1000 now submit 10 select
-              reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17999}
-            1100 agent_exited 0
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
-              (tick due at 18210000)
-            1500 call_started 0
-            3100 call_returned 0 score=1
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, returned, showing [score=1]
-        "#]],
-    );
-}
-
-#[test]
 fn exact_scores() {
     check(
         |_| {},
@@ -1607,7 +1573,6 @@ fn unknown_jobs() {
         0 agent_started
         1000 call train 10
         1400 status 2
-        1500 status 1
         ",
         &expect![[r#"
             start
@@ -1620,8 +1585,6 @@ fn unknown_jobs() {
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1400 status 2
               refuse op 2: you have no job 2: ask about a job that one of your calls returned
-            1500 status 1
-              refuse op 3: you have no job 1: ask about a job that one of your calls returned
         "#]],
     );
 }

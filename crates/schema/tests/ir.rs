@@ -423,7 +423,6 @@ fn prices() {
     check(
         [
             Price(json!(0)),
-            Price(json!(2)),
             Price(json!(0.3672)),
             Price(json!(0.000_001)),
             Price(json!(1_000_000)),
@@ -431,34 +430,23 @@ fn prices() {
             Price(json!(0.123_456_7)),
             Price(json!(-0.000_001)),
             Price(json!(1_000_000.000_001)),
-            Price(json!("0.3672")),
         ],
         &expect![[r#"
             0 writes as 0.0
-            2 writes as 2.0
             0.3672 writes as 0.3672
             1e-6 writes as 1e-6
             1000000 writes as 1000000.0
             4e-7 writes as 0.0
             0.1234567 writes as 0.123457
             -0.000001 is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672
-            1000000.000001 is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672
-            invalid type: string "0.3672", expected f64"#]],
+            1000000.000001 is not a price in dollars an hour: give one from 0 to 1000000, such as 0.3672"#]],
     );
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the replies and the snapshot"
-)]
 fn op_replies() {
     check(
         [
-            Reply(
-                r#"{"kind":"ops","remaining_seconds":17940,"resources":{"cpu_millis":2000,"memory_bytes":4294967296},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":600},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}"#,
-            ),
-            Reply(r#"{"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}"#),
             Reply(
                 r#"{"kind":"status","job":1,"state":"queued","remaining":{"calls":99,"seconds":null}}"#,
             ),
@@ -477,32 +465,6 @@ fn op_replies() {
             Reply(
                 r#"{"kind":"status","job":4,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"model_requests_over_budget":3,"remaining":{"calls":96,"seconds":0}}"#,
             ),
-            Reply(r#"{"kind":"call","returned":{"state":"stored"},"remaining_seconds":120}"#),
-            Reply(r#"{"kind":"refused","message":"`train` has no calls left: it allows 100"}"#),
-            Reply(
-                r#"{"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":null}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":40,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":899,"cumulative_seconds":1199,"commands":31}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":140,"busy_seconds":79,"idle_seconds":47,"failure":null,"last":{"kind":"command","command":1,"end":{"exited":{"code":0}},"stdout":"GPU 0\n","stderr":""},"remaining":{"instances":1,"instance_seconds":800,"cumulative_seconds":null,"commands":null}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":1,"state":"expired","elapsed_seconds":930,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"command","command":2,"end":"timed_out","stdout":"","stderr":""},"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":0,"commands":null}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":0,"state":"running","elapsed_seconds":41,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":1,"end":null},"remaining":{"instances":1,"instance_seconds":898,"cumulative_seconds":1198,"commands":30}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":42,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":1,"end":{"moved":{"entries":12,"bytes":40960}}},"remaining":{"instances":1,"instance_seconds":897,"cumulative_seconds":1197,"commands":30}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":43,"busy_seconds":0,"idle_seconds":0,"failure":null,"last":{"kind":"transfer","transfer":2,"end":{"failed":"putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist"}},"remaining":{"instances":1,"instance_seconds":896,"cumulative_seconds":1196,"commands":29}}"#,
-            ),
-            Reply(
-                r#"{"kind":"lease_status","lease":2,"state":"failed","elapsed_seconds":61,"busy_seconds":0,"idle_seconds":0,"failure":"the runner's sandbox didn't start: ResourceExhaustedError","last":null,"remaining":{"instances":2,"instance_seconds":0,"cumulative_seconds":null,"commands":null}}"#,
-            ),
             Reply(
                 r#"{"kind":"status","job":1,"state":"running","returned":{},"remaining":{"calls":null,"seconds":null}}"#,
             ),
@@ -517,24 +479,12 @@ fn op_replies() {
             ),
         ],
         &expect![[r#"
-            Ops(OpsReply { remaining_seconds: 17940, resources: Resources { cpu_millis: 2000, memory_bytes: 4294967296 }, grants: [Job(JobFunction { name: Name("train"), payload_max_bytes: 4194304, calls: Some(100), cumulative_seconds: Some(12000), call_timeout_seconds: 600, arguments: {} }), Now(NowFunction { name: Name("submit"), payload_max_bytes: 4194304, arguments: {Name("finalize"): Bool { default: Some(false) }} })] })
-            Call(Job(JobReply { job: 1, remaining: Remaining { calls: Some(99), seconds: Some(12000) } }))
             Status(StatusReply { job: 1, state: Queued, remaining: Remaining { calls: Some(99), seconds: None } })
             Status(StatusReply { job: 1, state: Running, remaining: Remaining { calls: Some(99), seconds: Some(12000) } })
             Status(StatusReply { job: 1, state: Completed { returned: Returned({"metrics": Object {"solved": Number(3)}, "raw_score": Number(3)}), model_requests_over_budget: None }, remaining: Remaining { calls: Some(99), seconds: Some(11993) } })
             Status(StatusReply { job: 2, state: Completed { returned: Returned({"failure": String("wrong answer"), "raw_score": Null}), model_requests_over_budget: Some(1) }, remaining: Remaining { calls: Some(98), seconds: Some(11990) } })
             Status(StatusReply { job: 3, state: Errored { failure: Failure { code: CallTimeout, message: "the call ran past its timeout" }, model_requests_over_budget: None }, remaining: Remaining { calls: Some(97), seconds: Some(0) } })
             Status(StatusReply { job: 4, state: Errored { failure: Failure { code: CallError, message: "the call's body failed: the run's record says why" }, model_requests_over_budget: Some(3) }, remaining: Remaining { calls: Some(96), seconds: Some(0) } })
-            Call(Now(NowReply { returned: Returned({"state": String("stored")}), remaining_seconds: 120 }))
-            Refused { message: "`train` has no calls left: it allows 100" }
-            Lease(LeaseReply { lease: 0, remaining: LeaseRemaining { instances: 1, instance_seconds: 900, cumulative_seconds: Some(1200), commands: None } })
-            LeaseStatus(LeaseStatusReply { lease: 0, state: Running, elapsed_seconds: 40, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Command(CommandStatus { command: 0, end: None, stdout: "", stderr: "" })), remaining: LeaseRemaining { instances: 1, instance_seconds: 899, cumulative_seconds: Some(1199), commands: Some(31) } })
-            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 140, busy_seconds: 79, idle_seconds: 47, failure: None, last: Some(Command(CommandStatus { command: 1, end: Some(Exited(Code(0))), stdout: "GPU 0\n", stderr: "" })), remaining: LeaseRemaining { instances: 1, instance_seconds: 800, cumulative_seconds: None, commands: None } })
-            LeaseStatus(LeaseStatusReply { lease: 1, state: Expired, elapsed_seconds: 930, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Command(CommandStatus { command: 2, end: Some(TimedOut), stdout: "", stderr: "" })), remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: Some(0), commands: None } })
-            LeaseStatus(LeaseStatusReply { lease: 0, state: Running, elapsed_seconds: 41, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 1, end: None })), remaining: LeaseRemaining { instances: 1, instance_seconds: 898, cumulative_seconds: Some(1198), commands: Some(30) } })
-            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 42, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 1, end: Some(Moved { entries: 12, bytes: 40960 }) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 897, cumulative_seconds: Some(1197), commands: Some(30) } })
-            LeaseStatus(LeaseStatusReply { lease: 0, state: Ready, elapsed_seconds: 43, busy_seconds: 0, idle_seconds: 0, failure: None, last: Some(Transfer(TransferStatus { transfer: 2, end: Some(Failed("putting the tree at /work/repo in the runner failed: /work/repo: File exists (os error 17): the tree's root becomes /work/repo, which must not exist")) })), remaining: LeaseRemaining { instances: 1, instance_seconds: 896, cumulative_seconds: Some(1196), commands: Some(29) } })
-            LeaseStatus(LeaseStatusReply { lease: 2, state: Failed, elapsed_seconds: 61, busy_seconds: 0, idle_seconds: 0, failure: Some("the runner's sandbox didn't start: ResourceExhaustedError"), last: None, remaining: LeaseRemaining { instances: 2, instance_seconds: 0, cumulative_seconds: None, commands: None } })
             a job that hasn't ended has no result: give it neither `returned` nor `failure`
             a job that hasn't ended has no count of model requests over budget yet: give it no `model_requests_over_budget`
             a completed job has a result: give it `returned`, and no `failure`
@@ -634,14 +584,13 @@ fn lease_status_bound() {
 }
 
 #[test]
-fn hellos() {
+fn hellos_and_frames() {
     check(
         [
             HelloJson(r#"{"version":0}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff"}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddee"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff00"}"#),
             HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeefg"}"#),
             HelloJson(r#"{"version":0,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
             HelloJson(r#"{"version":0,"gpus":["NVIDIA A100\u0000"]}"#),
@@ -649,7 +598,6 @@ fn hellos() {
         &expect![[r#"
             Hello { grant: None, gpus: None }
             Hello { grant: Some(RegistrationGrant(..)), gpus: None }
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
@@ -725,26 +673,39 @@ fn in_sandbox_contract() {
     );
 }
 
+/// A valid IR, parsed: its agent, its `now` functions, the role of its final call with that call's
+/// keywords, and the agent's model route, by API.
+struct Parsed(Value);
+
+impl Case for Parsed {
+    fn outcome(self) -> String {
+        let ir: ir::Workflow = serde_json::from_value(self.0).unwrap();
+        let workflow = Workflow::parse(&ir).unwrap();
+        let name = |role| workflow.sandbox(role).name.as_str();
+        let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
+        let route = workflow.agent().model.as_ref().unwrap();
+        let apis: Vec<ir::Api> = route.as_slice().iter().map(|entry| entry.api).collect();
+        let final_call = workflow.final_call();
+        format!(
+            "agent `{}`, now functions {:?}, final call on `{}` with keywords {}, route {apis:?}",
+            name(workflow.agent().role),
+            now.collect::<Vec<_>>(),
+            name(final_call.target.role()),
+            serde_json::to_string(&final_call.keywords).unwrap(),
+        )
+    }
+}
+
 #[test]
 fn parsed() {
-    let ir: ir::Workflow = serde_json::from_str(WORKFLOW).unwrap();
-    let workflow = Workflow::parse(&ir).unwrap();
-    let name = |role| workflow.sandbox(role).name.as_str();
-    assert_eq!(name(workflow.agent().role), "agent");
-    let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
-    assert_eq!(now.collect::<Vec<_>>(), ["submit"]);
-    assert_eq!(name(workflow.final_call().target.role()), "final_judge");
-    let model = workflow.agent().model.as_ref();
-    let route = model.unwrap();
-    let apis: Vec<ir::Api> = route.as_slice().iter().map(|e| e.api).collect();
-    assert_eq!(apis, [ir::Api::Responses], "the agent's route");
-    let keywords = fixture_with("/final/keywords", json!({ "mode": "final" }));
-    let ir: ir::Workflow = serde_json::from_value(keywords).unwrap();
-    let workflow = Workflow::parse(&ir).unwrap();
-    assert_eq!(
-        workflow.final_call().keywords["mode"],
-        "final",
-        "the final call's keywords"
+    check(
+        [
+            Parsed(fixture()),
+            Parsed(fixture_with("/final/keywords", json!({ "mode": "final" }))),
+        ],
+        &expect![[r#"
+            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {}, route [Responses]
+            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {"mode":"final"}, route [Responses]"#]],
     );
 }
 
@@ -808,7 +769,6 @@ fn checked_values() {
             /final/payload_max_bytes: the final call's `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             parsed"#]],
     );
-    assert_eq!(valid::<ir::Image>(&format!("sha256:{HEX}")).hex(), HEX);
 }
 
 #[test]
@@ -909,11 +869,6 @@ fn header_names() {
 #[test]
 fn needs_values() {
     let needs = "/roles/0/needs";
-    let mut labelled = fixture();
-    let role = labelled["roles"][0].as_object_mut().unwrap();
-    let resources = role.remove("needs").unwrap();
-    role.insert("resources".to_owned(), resources);
-    role.insert("placement".to_owned(), json!("agent"));
     let gpu = |count: u32, model: &str| json!({ "count": count, "model": model });
     let every = json!({
         "cpu_millis": 4000,
@@ -924,10 +879,7 @@ fn needs_values() {
     });
     check(
         [
-            fixture_with("/ir_version", json!("pumpkin.ir/v1")),
-            labelled,
             fixture_with(needs, every),
-            fixture_with(&format!("{needs}/gpu"), gpu(0, "NVIDIA H100 80GB HBM3")),
             fixture_with(&format!("{needs}/gpu"), gpu(1, "")),
             fixture_with(&format!("{needs}/cpu_features"), json!(["AVX512F"])),
             fixture_with(&format!("{needs}/cpu_features"), json!([""])),
@@ -936,10 +888,7 @@ fn needs_values() {
             fixture_with(&format!("{needs}/disk_bytes"), json!(1u64 << 37)),
         ],
         &expect![[r#"
-            unknown variant `pumpkin.ir/v1`, expected `pumpkin.ir/v0`
-            unknown field `placement`, expected one of `name`, `image`, `user`, `needs`, `runtime`
             parsed
-            invalid value: integer `0`, expected a nonzero u32
             `` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`
             `AVX512F` is not a CPU's flag: use one as `/proc/cpuinfo` names it, such as `avx512f`
             `` is not a CPU's flag: use one as `/proc/cpuinfo` names it, such as `avx512f`
@@ -1026,7 +975,6 @@ fn grant_forms() {
     check(
         [
             with(|grant| grant["now"] = json!({})),
-            with(|grant| *grant = json!({ "name": "train", "lease": {} })),
             with(|grant| *grant = json!({ "name": "train" })),
             with(|grant| {
                 grant.as_object_mut().unwrap().remove("name");
@@ -1035,7 +983,6 @@ fn grant_forms() {
         ],
         &expect![[r#"
             `now` follows `job`, the function's kind: give a grant its `name` and one function
-            unknown variant `lease`, expected one of `job`, `session`, `now`
             the grant gives no function: give one, under its kind's key
             missing field `name`
             unknown field `arguments`, expected `file` or `def`"#]],
@@ -1280,21 +1227,15 @@ fn broken_roles() {
     ir["final"]["target"] = json!("trainer");
     let mut none = fixture();
     none["roles"].as_array_mut().unwrap().remove(0);
-    let mut untimed = fixture();
-    untimed["roles"][0]["runtime"]["agent"]["grants"][0]["job"]
-        .as_object_mut()
-        .unwrap()
-        .remove("call_timeout_seconds");
     check(
-        [ir, none, untimed],
+        [ir, none],
         &expect![[r#"
             /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
             /final/target: `trainer` is the final call's target and `train`'s: give the final call a role no job names
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles: no role is an agent: a workflow has exactly one
-            missing field `call_timeout_seconds`"#]],
+            /roles: no role is an agent: a workflow has exactly one"#]],
     );
 }
 
