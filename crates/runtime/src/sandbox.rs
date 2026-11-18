@@ -594,20 +594,17 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     /// Deletes what each provider still lists of the run, so that a run ends with none of its
     /// sandboxes left, and records each delete.
     pub(super) fn sweep(&self) -> Result<(), String> {
-        let swept = (self.providers.iter()).map(|(name, hosting)| {
-            let record = |ids: &[SandboxId], deleted: &Result<(), Undeleted>| {
-                let (logged, recorded) = self.record_deletes(name, ids, deleted);
-                self.send(logged);
-                recorded
-            };
-            sweep(name, hosting.provider, &self.run, &[], record).err()
+        let providers = (self.providers.iter()).map(|(name, hosting)| {
+            let provider: &dyn Sweep = hosting.provider;
+            (name, provider)
         });
-        let failures: Vec<String> = swept.flatten().collect();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        let record = |name: &Name, ids: &[SandboxId], deleted: &Result<(), Undeleted>| {
+            let (logged, recorded) = self.record_deletes(name, ids, deleted);
+            self.send(logged);
+            recorded
+        };
+        let (_, failed) = sweep(providers, &self.run, &[], record);
+        failed.map_or(Ok(()), Err)
     }
 }
 
@@ -617,11 +614,36 @@ pub(super) struct Deleted {
     pub(super) id: SandboxId,
 }
 
-/// Deletes the sandboxes of `run` that `provider` lists, and those of `also` that it doesn't,
-/// then calls `after` with the ids deleted and the result of the delete, to record it, whichever
-/// it was. Returns the listed ids, or why the list, the delete or `after` failed. Nothing is
-/// deleted, nor `after` called, if there are none.
-pub(super) fn sweep(
+/// Deletes the sandboxes of `run` that each of `providers` lists, and those of `also` on it that
+/// it doesn't, then calls `after` with the provider's name, the ids deleted and the result of the
+/// delete, to record it, whichever it was. Nothing is deleted on a provider, nor `after` called,
+/// if there are none.
+///
+/// Returns the ids that each provider whose sweep succeeded listed, by its name, once every
+/// provider is swept, and why each list, delete or `after` that failed did, if one did.
+pub(super) fn sweep<'p>(
+    providers: impl IntoIterator<Item = (&'p Name, &'p dyn Sweep)>,
+    run: &RunTag,
+    also: &[(Name, SandboxId)],
+    after: impl Fn(&Name, &[SandboxId], &Result<(), Undeleted>) -> Result<(), String>,
+) -> (Vec<(Name, Vec<SandboxId>)>, Option<String>) {
+    let (mut swept, mut failures) = (Vec::new(), Vec::new());
+    for (name, provider) in providers {
+        // A sandbox that its provider lists no more may have ended and left what only its delete
+        // removes.
+        let held = also.iter().filter(|(on, _)| on == name);
+        let held: Vec<SandboxId> = held.map(|(_, id)| id.clone()).collect();
+        let recorded = |ids: &[SandboxId], deleted: &_| after(name, ids, deleted);
+        match sweep_one(name, provider, run, &held, recorded) {
+            Ok(ids) => swept.push((name.clone(), ids)),
+            Err(error) => failures.push(error),
+        }
+    }
+    let failed = (!failures.is_empty()).then(|| failures.join("; "));
+    (swept, failed)
+}
+
+fn sweep_one(
     name: &Name,
     provider: &dyn Sweep,
     run: &RunTag,
