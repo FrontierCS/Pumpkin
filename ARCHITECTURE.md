@@ -57,8 +57,8 @@ name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `
 (`providers/ec2/boot`) boots each instance of the EC2 provider.
 
 `cargo xtask` (`xtask`) holds the contributor tasks, which `cargo xtask --help` lists. A repository
-that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which builds the Pumpkin it pins and
-runs it.
+that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which downloads the release it pins,
+or builds Pumpkin from source, and runs it.
 
 The key types are `ir::Workflow`, a workflow as written; `workflow::Workflow`, parsed, and
 `Placed`, its roles placed in the classes of sandbox that providers offer; `Core`, a run's
@@ -468,11 +468,13 @@ needs beside it; `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 
-The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. It fetches
-the commit that the repository's `.pumpkinversion` names, and a pinned toolchain, as its header
-says, then runs `cargo xtask install --root` into the repository's `.pumpkin`, and the `pumpkin`
-it installed. It keeps a git bundle of that commit in the install, which the controller target
-sends, so a controller builds the same commit with no credentials of its own.
+The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. When the
+repository's `.pumpkinversion` pins a release by the checksum of its archive, it downloads the
+archive, checks it and unpacks it into the repository's `.pumpkin`; otherwise it fetches the
+commit that the file names, and a pinned toolchain, as its header says, and runs
+`cargo xtask install --root` into `.pumpkin`. Then it runs the `pumpkin` it installed. Either way
+the install holds a git bundle of that commit, which the controller target sends, so a controller
+builds the same commit with no credentials of its own.
 
 **Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
 consumer builds what a checkout builds.

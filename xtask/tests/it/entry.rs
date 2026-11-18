@@ -1,7 +1,7 @@
 //! `deploy/pumpkin`'s refusals, against a local repository, with a stand-in `curl` that serves a
-//! file that is not rustup-init, on this machine, on one that lacks what building needs and on
-//! another platform, with a stand-in `uname`, and `cargo xtask install --root`, which the script
-//! runs.
+//! file that is not rustup-init, on this machine, on one that lacks what installing needs and on
+//! another platform, with a stand-in `uname`; its download of a release, with this machine's
+//! `curl` from a directory of releases, and `cargo xtask install --root`, which the script runs.
 
 use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -24,12 +24,28 @@ enum Machine<'a> {
     This,
     /// A stand-in `uname` names this system and machine.
     Other(&'a str, &'a str),
-    /// The `PATH` holds only what the script runs before it checks for what building needs.
-    Lacking,
+    /// The `PATH` holds only what the script runs before it checks for what installing needs, and
+    /// the script builds, or, if `release`, downloads a release.
+    Lacking {
+        release: bool,
+    },
     /// The repository that the script fetches from is not there.
     Unreachable,
     /// `curl` fails as it does with no network.
     Offline,
+    /// The script downloads the release `v1`, with this machine's `curl`, from a directory.
+    Release(Archive),
+}
+
+/// The archive of the release `v1` that the directory of releases holds.
+#[derive(Clone, Copy)]
+enum Archive {
+    /// Its `bin/pumpkin` names the commit of `v1`.
+    Named,
+    /// Its `bin/pumpkin` names another commit.
+    Misnamed,
+    /// There is none.
+    Absent,
 }
 
 /// Runs the script, as copied into a consumer's repository beside `.pumpkinversion`, which, if
@@ -38,7 +54,8 @@ enum Machine<'a> {
 /// that has ended left, on the `PATH` that [`path`] makes for `machine`, with `cargo`, if given,
 /// as the script that stands in for the toolchain's `cargo`, beside a `rustup` that says what it
 /// installs; checks its exit code, output, the temporary files left behind, in the caller's
-/// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`.
+/// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`. A
+/// `<checksum>` in `version` is the checksum of the archive that `machine` downloads.
 fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
     let held = tempfile::Builder::new()
         .prefix("pumpkin-entry-")
@@ -69,7 +86,41 @@ fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expec
     sh.set_var("GIT_DIR", &git);
     sh.set_var("GIT_WORK_TREE", &decoy);
     sh.set_var("GIT_INDEX_FILE", git.join("index"));
-    sh.change_dir(&source);
+    let commit = commit_in(&sh, &source);
+    let checksum = match machine {
+        Machine::Release(archive) => pack(&sh, scratch, archive, &commit),
+        _ => "0".repeat(64),
+    };
+    let version = version.map(|version| version.replace("<commit>", &commit));
+    consumer_files(machine, scratch, version.as_deref(), &checksum);
+    let state = stale_lock(&sh, &consumer);
+    if let Some(cargo) = cargo {
+        toolchain(&state, cargo);
+    }
+    let path = path(machine, &bin);
+    sh.change_dir(&consumer);
+    let repository = repository(machine, &source);
+    let script = sh.cmd("sh").arg("pumpkin").args(repository);
+    let output = script.env("PATH", path).env("TMPDIR", &tmp);
+    // As a git hook runs it: the script's own git commands must ignore these, which would send
+    // them to a repository that doesn't exist.
+    let poison = "/nonexistent/pumpkin-poison";
+    let output = output.env("GIT_DIR", poison).env("GIT_INDEX_FILE", poison);
+    let output = output.ignore_status().quiet().output().unwrap();
+    assert!(
+        decoyed() == before,
+        "a git command changed the decoy repository"
+    );
+    let report = report(&output, &tmp, &state, &commit);
+    let report = report.replace(&scratch.display().to_string(), "<scratch>");
+    let report = report.replace(&checksum, "<checksum>");
+    let report = report.replace(&commit, "<commit>");
+    expect.assert_eq(&report.replace(&commit[..9], "<digits>"));
+}
+
+/// Makes `source` a repository of one empty commit tagged `v1`, and returns the commit.
+fn commit_in(sh: &Shell, source: &Path) -> String {
+    sh.change_dir(source);
     alone(sh.cmd("git").args(["init", "--quiet"]))
         .run()
         .unwrap();
@@ -84,35 +135,62 @@ fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expec
     }
     commit.run().unwrap();
     alone(sh.cmd("git").args(["tag", "v1"])).run().unwrap();
-    let commit = alone(sh.cmd("git").args(["rev-parse", "HEAD"]))
+    alone(sh.cmd("git").args(["rev-parse", "HEAD"]))
         .read()
-        .unwrap();
-    fs::copy(SCRIPT, consumer.join("pumpkin")).unwrap();
+        .unwrap()
+}
+
+/// Writes into `<scratch>/consumer` the script and, if there is a `version`, `.pumpkinversion`
+/// with it, `<checksum>` replaced by `checksum`. For a release, the script has its releases in
+/// `<scratch>/releases`, which `curl` reads as files, in place of GitHub's.
+fn consumer_files(machine: Machine<'_>, scratch: &Path, version: Option<&str>, checksum: &str) {
+    let consumer = scratch.join("consumer");
     if let Some(version) = version {
-        let version = version.replace("<commit>", &commit);
+        let version = version.replace("<checksum>", checksum);
         fs::write(consumer.join(".pumpkinversion"), version).unwrap();
     }
-    let state = stale_lock(&sh, &consumer);
-    if let Some(cargo) = cargo {
-        toolchain(&state, cargo);
+    let mut text = fs::read_to_string(SCRIPT).unwrap();
+    if let Machine::Release(_) = machine {
+        let releases = "https://github.com/FrontierCS/Pumpkin/releases/download";
+        for (from, to) in [
+            (releases, format!("file://{}/releases", scratch.display())),
+            ("'=https'", "'=file'".to_owned()),
+        ] {
+            assert!(text.contains(from), "the script lacks {from}");
+            text = text.replace(from, &to);
+        }
     }
-    let path = path(machine, &bin);
-    sh.change_dir(&consumer);
-    let repository = repository(machine, &source);
-    let script = sh.cmd("sh").arg("pumpkin").arg(repository);
-    let output = script.env("PATH", path).env("TMPDIR", &tmp);
-    // As a git hook runs it: the script's own git commands must ignore these, which would send
-    // them to a repository that doesn't exist.
-    let poison = "/nonexistent/pumpkin-poison";
-    let output = output.env("GIT_DIR", poison).env("GIT_INDEX_FILE", poison);
-    let output = output.ignore_status().quiet().output().unwrap();
-    assert!(
-        decoyed() == before,
-        "a git command changed the decoy repository"
+    fs::write(consumer.join("pumpkin"), text).unwrap();
+}
+
+/// Puts the release `v1`'s archive, of the kind `archive`, in `<scratch>/releases/v1`, and returns
+/// its checksum. Its `bin/pumpkin`, a script, prints a version that names `commit`, by its first
+/// 9 digits as Pumpkin does, or another.
+fn pack(sh: &Shell, scratch: &Path, archive: Archive, commit: &str) -> String {
+    let named = match archive {
+        Archive::Named => &commit[..9],
+        Archive::Misnamed => &"0".repeat(9),
+        Archive::Absent => return "0".repeat(64),
+    };
+    let (packed, tree) = (scratch.join("releases/v1"), scratch.join("tree"));
+    fs::create_dir_all(&packed).unwrap();
+    fs::create_dir_all(tree.join("bin")).unwrap();
+    stand_in(
+        &tree.join("bin"),
+        "pumpkin",
+        &format!("#!/bin/sh\necho 'pumpkin 0.1.0 ({named})'\n"),
     );
-    let report = report(&output, &tmp, &state, &commit);
-    let report = report.replace(&scratch.display().to_string(), "<scratch>");
-    expect.assert_eq(&report.replace(&commit, "<commit>"));
+    fs::write(tree.join("pumpkin.bundle"), "").unwrap();
+    let file = packed.join("pumpkin-v1-x86_64-unknown-linux-musl.tar.gz");
+    let tar = sh.cmd("tar").args(["--create", "--gzip", "--file"]);
+    tar.arg(&file)
+        .arg("--directory")
+        .arg(&tree)
+        .args(["bin", "pumpkin.bundle"])
+        .run()
+        .unwrap();
+    let sum = sh.cmd("sha256sum").arg(&file).read().unwrap();
+    sum.split_whitespace().next().unwrap().to_owned()
 }
 
 /// What [`check`] checks of the script that ended with `output`: its exit code, its output, how
@@ -132,15 +210,16 @@ fn report(output: &Output, tmp: &Path, state: &Path, commit: &str) -> String {
 }
 
 /// The script's option that names `source`, the local repository, as where it fetches from, but
-/// on a machine that can't reach it, a path beside it that holds nothing.
-fn repository(machine: Machine<'_>, source: &Path) -> String {
+/// on a machine that can't reach it, a path beside it that holds nothing; none for a release.
+fn repository(machine: Machine<'_>, source: &Path) -> Option<String> {
     let source = match machine {
+        Machine::Release(_) | Machine::Lacking { release: true } => return None,
         Machine::Unreachable => source.with_file_name("nonexistent"),
-        Machine::This | Machine::Other(..) | Machine::Lacking | Machine::Offline => {
+        Machine::This | Machine::Other(..) | Machine::Lacking { .. } | Machine::Offline => {
             source.to_owned()
         }
     };
-    format!("--pumpkin-repository=file://{}", source.display())
+    Some(format!("--pumpkin-repository=file://{}", source.display()))
 }
 
 /// The `PATH` that the script runs on, on `machine`: `bin`, holding a stand-in `curl` and what
@@ -148,7 +227,7 @@ fn repository(machine: Machine<'_>, source: &Path) -> String {
 fn path(machine: Machine<'_>, bin: &Path) -> String {
     let path = env::var("PATH").unwrap();
     match machine {
-        Machine::Lacking => {
+        Machine::Lacking { .. } => {
             for tool in ["sh", "uname", "dirname"] {
                 let mut found = env::split_paths(&path).map(|dir| dir.join(tool));
                 let found = found.find(|tool| tool.is_file()).unwrap();
@@ -167,6 +246,7 @@ fn path(machine: Machine<'_>, bin: &Path) -> String {
             stand_in(bin, "curl", curl);
             return format!("{}:{path}", bin.display());
         }
+        Machine::Release(_) => return path,
         Machine::This | Machine::Unreachable => {}
     }
     stand_in(bin, "curl", CURL);
@@ -248,6 +328,15 @@ fn refusals() {
             left in the temporary directory: 0, and in .pumpkin/tmp: 1
             in .pumpkin: build.lock tmp"#]],
     );
+    check(
+        Machine::This,
+        Some("v1 <commit> 0123abcd\n"),
+        None,
+        &expect![[r#"
+            Some(1): pumpkin: .pumpkinversion's third word is not a SHA-256 checksum: write the 64-digit hexadecimal checksum from the .sha256 beside the release's archive, or no third word to build from source
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
+    );
 }
 
 #[test]
@@ -310,14 +399,14 @@ fn other_platform() {
 #[test]
 fn lacking() {
     check(
-        Machine::Lacking,
+        Machine::Lacking { release: false },
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
-        Some(1): pumpkin: building Pumpkin needs git, curl, sha256sum, cc (a C linker), which this machine lacks; on Debian or Ubuntu, run
-            sudo apt-get install git curl coreutils gcc libc6-dev
-        left in the temporary directory: 0, and in .pumpkin/tmp: 1
-        in .pumpkin: build.lock tmp"#]],
+            Some(1): pumpkin: building Pumpkin needs git, curl or wget, sha256sum, cc (a C linker), which this machine lacks; on Debian or Ubuntu, run
+                sudo apt-get install git curl coreutils gcc libc6-dev
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
 }
 
@@ -363,15 +452,104 @@ fn offline() {
 }
 
 #[test]
+fn lacking_for_release() {
+    check(
+        Machine::Lacking { release: true },
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(1): pumpkin: downloading Pumpkin needs curl or wget, sha256sum, tar, which this machine lacks; on Debian or Ubuntu, run
+                sudo apt-get install curl coreutils tar
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
+    );
+}
+
+#[test]
+fn release() {
+    check(
+        Machine::Release(Archive::Named),
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(0): pumpkin 0.1.0 (<digits>)
+            pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore <commit> tmp"#]],
+    );
+}
+
+#[test]
+fn release_checksum() {
+    let pinned = "0".repeat(64);
+    check(
+        Machine::Release(Archive::Named),
+        Some(&format!("v1 <commit> {pinned}\n")),
+        None,
+        &expect![[r#"
+            Some(1): pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
+            pumpkin: file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz has the SHA-256 checksum <checksum>, not 0000000000000000000000000000000000000000000000000000000000000000, which .pumpkinversion pins: if the release was rebuilt on purpose, pin the checksum in file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz.sha256 instead; otherwise do not run this download
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore tmp"#]],
+    );
+}
+
+#[test]
+fn release_commit() {
+    check(
+        Machine::Release(Archive::Misnamed),
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(1): pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
+            pumpkin: the pumpkin in file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz says 'pumpkin 0.1.0 (000000000)', which does not name commit <commit>: fix the tag or the commit in .pumpkinversion, or the release if it was built from another commit
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore tmp"#]],
+    );
+}
+
+#[test]
+fn release_absent() {
+    check(
+        Machine::Release(Archive::Absent),
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(37): pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
+            curl: (37) Couldn't open file <scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz
+            pumpkin: could not download file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz: check that this machine reaches github.com and release-assets.githubusercontent.com, and that tag v1 has a release at https://github.com/FrontierCS/Pumpkin/releases
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore tmp"#]],
+    );
+}
+
+/// What the stand-in `cargo` does as `cargo xtask install --root <stage>` is run: its output that
+/// of a build, and a `bin/pumpkin` in the stage.
+const BUILT: &str = "#!/bin/sh\necho '   Compiling pumpkin' >&2\nmkdir --parents \"$4/bin\"\n\
+                     printf '#!/bin/sh\\necho ran pumpkin\\n' > \"$4/bin/pumpkin\"\n\
+                     chmod +x \"$4/bin/pumpkin\"\necho \"$4/bin/pumpkin\"\n";
+
+#[test]
+fn build_with_checksum() {
+    // The option asks for a build from source, whatever `.pumpkinversion` pins.
+    check(
+        Machine::This,
+        Some("v1 <commit> <checksum>\n"),
+        Some(BUILT),
+        &expect![[r#"
+            Some(0): ran pumpkin
+            pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore <commit> cargo tmp"#]],
+    );
+}
+
+#[test]
 fn build_output() {
-    // As `cargo xtask install --root <stage>` is run, its output that of a build.
-    let built = "#!/bin/sh\necho '   Compiling pumpkin' >&2\nmkdir --parents \"$4/bin\"\n\
-                 printf '#!/bin/sh\\necho ran pumpkin\\n' > \"$4/bin/pumpkin\"\n\
-                 chmod +x \"$4/bin/pumpkin\"\necho \"$4/bin/pumpkin\"\n";
     check(
         Machine::This,
         Some("v1 <commit>\n"),
-        Some(built),
+        Some(BUILT),
         &expect![[r#"
             Some(0): ran pumpkin
             pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...

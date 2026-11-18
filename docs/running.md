@@ -9,21 +9,27 @@ page says what each is for and how they fit.
 ## Installing
 
 A repository of tasks runs Pumpkin through `./pumpkin`, a copy of `deploy/pumpkin`, beside a
-`.pumpkinversion` file of one line: the Pumpkin tag to run, then the full commit that the tag must
-name.
+`.pumpkinversion` file of one line: the Pumpkin tag to run, the full commit that the tag must
+name, and the SHA-256 checksum of the tag's release archive. The checksum is the first word of the
+`.sha256` file beside the archive on the release's page, under
+<https://github.com/FrontierCS/Pumpkin/releases>.
 
 ```console
 $ cp ../Pumpkin/deploy/pumpkin ./pumpkin
-$ echo "<tag> <commit>" > .pumpkinversion
+$ echo "<tag> <commit> <checksum>" > .pumpkinversion
 $ ./pumpkin --version
 ```
 
-The first run fetches the tag and checks that it names that commit, downloads a pinned Rust
-toolchain's installer and checks its SHA-256, builds Pumpkin and runs it; later runs start the
-built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, a C linker and TLS
-certificates, and names the packages to install if one is missing. `./pumpkin
---pumpkin-repository=<url> …`, as its first argument, fetches from another repository, such as a
-local clone.
+The first run downloads the release's archive, checks its SHA-256 against the checksum, unpacks it
+and runs it; later runs start the unpacked one at once. It needs Linux on x86-64, curl or wget,
+`sha256sum`, tar and TLS certificates, and names the packages to install if one is missing.
+
+With no checksum, the first run builds Pumpkin from source instead, for a tag that has no release
+or a change to try: it fetches the tag and checks that it names that commit, downloads a pinned
+Rust toolchain's installer and checks its SHA-256, builds Pumpkin and runs it. That needs git and
+a C linker as well, and about 1.5 GB. `./pumpkin --pumpkin-repository=<url> …`, as its first
+argument, builds from source fetched from another repository, such as a local clone, whatever
+`.pumpkinversion` holds after the commit.
 
 What Pumpkin writes for a repository is below `.pumpkin/` beside `./pumpkin`: the build, the
 runs' records in `.pumpkin/runs/`, and what builds and providers keep. It ignores itself in git,

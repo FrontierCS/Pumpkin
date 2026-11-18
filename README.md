@@ -248,7 +248,8 @@ answers; [docs/language.md](docs/language.md) holds the language.
 
 The operator, who runs `pumpkin` and holds the machine's configuration and keys, installs it in a
 repository of tasks as `./pumpkin`, a copy of [`deploy/pumpkin`](deploy/pumpkin) beside a
-`.pumpkinversion` that names the tag and the commit to build, on Linux x86-64. A machine whose
+`.pumpkinversion` that names the tag, the commit and the release's checksum, on Linux x86-64; the
+[running guide](docs/running.md#installing) says where to find them. A machine whose
 runs stay on its own Docker engine needs only this `~/.config/pumpkin/pumpkin.toml`:
 
 ```toml
