@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use super::copy::untar;
 use super::{Name, Reached, SHORT_TIMEOUT, finished};
 use crate::job::{JOBS, WAITING};
+use crate::progress::Entry;
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
@@ -64,7 +65,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         };
         let run = match state {
             "old" => {
-                listing.older.insert(id.to_owned());
+                listing.runs.entry(id.to_owned()).or_insert(Entry::Older);
                 continue;
             }
             "building" => Ok(crate::progress::Listed::Building {
@@ -91,7 +92,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         match run {
             Ok(run) => {
                 let row = crate::progress::Row::of(id, &run, now, None);
-                listing.runs.insert(id.to_owned(), row);
+                listing.runs.insert(id.to_owned(), Entry::Row(row));
             }
             Err(error) => {
                 say(error);
@@ -99,7 +100,8 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
             }
         }
     }
-    let jobs = listing.runs.values().filter(|run| run.live()).count();
+    let rows = listing.runs.values().filter_map(Entry::row);
+    let jobs = rows.filter(|row| row.live()).count();
     say(health.line(&reached.name, jobs));
     // As of when the controller began the listing, which is when it read what each run does.
     let lines = crate::progress::lines(&listing, None);
@@ -121,12 +123,9 @@ fn listed_here(
     let runs = PathBuf::from(crate::default_runs()?);
     let (mut listing, unlisted) = crate::listed_in(&runs, true, prefixes, since, now, None)?;
     let (ended, ended_unlisted) = crate::listed_in(kept, true, prefixes, since, now, None)?;
-    for (id, run) in ended.runs {
-        listing.runs.entry(id).or_insert(run);
+    for (id, entry) in ended.runs {
+        listing.runs.entry(id).or_insert(entry);
     }
-    let older = ended.older.into_iter();
-    let older: Vec<String> = older.filter(|id| !listing.runs.contains_key(id)).collect();
-    listing.older.extend(older);
     Ok((listing, unlisted + ended_unlisted))
 }
 
@@ -215,8 +214,11 @@ fn listed_there(
 /// each live copy, with the length of its log up to its last whole line (which it is cut to) and
 /// the other files it holds. A live copy of a run held as ended is removed.
 fn holding(listing: &crate::progress::Listing, live: &Path) -> Result<String, String> {
-    let ended = (listing.runs.iter()).filter_map(|(id, run)| run.ended().then_some(id));
-    let ended: BTreeSet<&String> = ended.chain(&listing.older).collect();
+    let ended = (listing.runs.iter()).filter(|(_, entry)| match entry {
+        Entry::Row(row) => row.ended(),
+        Entry::Older => true,
+    });
+    let ended: BTreeSet<&String> = ended.map(|(id, _)| id).collect();
     let mut held = String::new();
     for id in &ended {
         held.push_str(id);

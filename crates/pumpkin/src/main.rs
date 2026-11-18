@@ -224,8 +224,8 @@ fn unix_now() -> UnixTime {
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
-/// how many can't be listed, each said as it is found. A run that ended before `since` is named
-/// only in the listing's `older`. A `runs` that is missing is an empty listing if it is `default`.
+/// how many can't be listed, each said as it is found. A run that ended before `since` is listed
+/// as older. A `runs` that is missing is an empty listing if it is `default`.
 /// Each row is made at `now`, with its commands naming `named` as the runs directory.
 fn listed_in(
     runs: &Path,
@@ -251,20 +251,15 @@ fn listed_in(
             if let Some(since) = since
                 && ended(record.dir())?.is_some_and(|ended| ended < since)
             {
-                return Ok((id, None));
+                return Ok((id, progress::Entry::Older));
             }
             let listed = progress::Listed::run(&record, record.ending()?)?;
-            Ok((
-                id.clone(),
-                Some(progress::Row::of(&id, &listed, now, named)),
-            ))
+            let row = progress::Row::of(&id, &listed, now, named);
+            Ok((id, progress::Entry::Row(row)))
         });
         match run {
-            Ok((id, Some(run))) => {
-                listing.runs.insert(id, run);
-            }
-            Ok((id, None)) => {
-                listing.older.insert(id);
+            Ok((id, entry)) => {
+                listing.runs.insert(id, entry);
             }
             Err(error) => {
                 say(error);

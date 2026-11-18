@@ -50,9 +50,23 @@ pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<Duratio
 /// The runs that `ls` lists, by id.
 #[derive(Default)]
 pub(crate) struct Listing {
-    pub(crate) runs: BTreeMap<String, Row>,
-    /// The ids of the runs that ended before `listed_since`, which `ls` names in a line, not a row.
-    pub(crate) older: BTreeSet<String>,
+    pub(crate) runs: BTreeMap<String, Entry>,
+}
+
+/// A run in a listing.
+pub(crate) enum Entry {
+    Row(Row),
+    /// A run that ended before `listed_since`, which `ls` names in a line, not a row.
+    Older,
+}
+
+impl Entry {
+    pub(crate) fn row(&self) -> Option<&Row> {
+        match self {
+            Self::Row(row) => Some(row),
+            Self::Older => None,
+        }
+    }
 }
 
 /// A run as `ls` shows it: a job of a controller that has yet to start the run, or a run that
@@ -139,28 +153,37 @@ impl State {
 pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
-    for (id, row) in &listing.runs {
+    let mut older = Vec::new();
+    for (id, entry) in &listing.runs {
+        let row = match entry {
+            Entry::Row(row) => row,
+            Entry::Older => {
+                older.push(id.as_str());
+                continue;
+            }
+        };
         totals.add(row);
         lines.push_str(&line(id, &row.cells));
         lines.push('\n');
         lines.push_str(row.under());
     }
     let mut parts = Vec::new();
-    if !listing.runs.is_empty() {
+    let rows = !totals.states.is_empty();
+    if rows {
         parts.push(totals.line());
     }
-    if !listing.older.is_empty() {
-        if listing.runs.is_empty() {
+    if !older.is_empty() {
+        if !rows {
             parts.push("no run is live, or ended within a day".to_owned());
         }
-        let (are, them) = match listing.older.len() {
+        let (are, them) = match older.len() {
             1 => ("isn't", "it"),
             _ => ("aren't", "them"),
         };
         parts.push(format!(
             "{} that ended over a day ago {are} listed: to list {them}: {}",
-            crate::counted(listing.older.len(), "run"),
-            next::of_run("ls", runs, &prefixes(&listing.older).join(" "))
+            crate::counted(older.len(), "run"),
+            next::of_run("ls", runs, &prefixes(&older).join(" "))
         ));
     }
     if !parts.is_empty() {
@@ -172,7 +195,7 @@ pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
 
 /// The prefixes that name `ids`: the characters of their days, the first eight of an id, that all
 /// share, or else each day.
-fn prefixes(ids: &BTreeSet<String>) -> Vec<String> {
+fn prefixes(ids: &[&str]) -> Vec<String> {
     let days: BTreeSet<&str> = ids.iter().map(|id| id.get(..8).unwrap_or(id)).collect();
     let mut common = days.first().copied().unwrap_or_default();
     for day in &days {
