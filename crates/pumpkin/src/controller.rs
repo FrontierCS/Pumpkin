@@ -13,8 +13,8 @@
 //! key, it opens again under this machine's lock of enrolling, as the key may have just been
 //! enrolled, and if that is refused too, pushes the key through EC2 Instance Connect, opens, and
 //! appends the key to the controller user's `authorized_keys`. What goes over the connections is
-//! the submodules': `send`, `copy`, `listing`, `viewing` and `commands`; `listing` and `viewing` go
-//! over a link to `serve`, which `linking` opens.
+//! the submodules': `send`, `copy`, `listing`, `viewing` and `commands`; `listing` and `viewing`,
+//! and `commands` to find a run, go over a link to `serve`, which `linking` opens.
 //!
 //! A command on the controller is cut when its connection ends, and then says nothing of how far
 //! it got, so a command repeats only where its caller knows that running it again is safe.
@@ -47,7 +47,6 @@ use stdx::{Context as _, Deadline};
 pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, answers, find, kept};
-use crate::job::JOBS;
 use crate::workspace::Workspace;
 use crate::{config, manifest, next, say};
 
@@ -953,17 +952,5 @@ impl Reached {
             }
             Some(code) => Ok(code),
         }
-    }
-
-    /// The id of the job on the controller that `run` names, which may be a prefix of it.
-    fn resolve(&self, run: &str) -> Result<String, String> {
-        let script = format!("ls --format=single-column \"$HOME/{JOBS}\" 2>/dev/null || true");
-        let listed = self.call(&mut self.ssh(&script)?, None, "ssh", SHORT_TIMEOUT)?;
-        let names: Vec<String> = String::from_utf8_lossy(&listed)
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let among = format!("on controller `{}`", self.name);
-        runtime::named(&names, run, &among).map(str::to_owned)
     }
 }

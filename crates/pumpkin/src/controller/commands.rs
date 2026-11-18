@@ -1,10 +1,11 @@
 //! The commands that a machine whose runs go to a controller makes of it: `run`, `build`,
 //! `wait`, `cancel` and `reap`.
 //!
-//! Each runs a shell script on the controller over a session of [`Reached`], and what the script
-//! says is forwarded as it says it. A script ends with the code of what it ran: the codes this
-//! module names mean what the script found, and any other is the command's own. The record of a
-//! run that has ended is copied into this machine's runs directory.
+//! Each runs a shell script on the controller over a session of [`Reached`], `wait` and `cancel`
+//! once they have found the run among the jobs that the controller's `serve` lists, and what the
+//! script says is forwarded as it says it. A script ends with the code of what it ran: the codes
+//! this module names mean what the script found, and any other is the command's own. The record of
+//! a run that has ended is copied into this machine's runs directory.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -13,10 +14,12 @@ use std::time::SystemTime;
 
 use stdx::Context as _;
 
+use super::linking::Build;
 use super::send::{send, tree};
 use super::{Reached, SSH_FAILED};
 use crate::ending::Printed;
 use crate::job::{BUILDS, JOBS};
+use crate::link::JobsRequest;
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
@@ -174,8 +177,19 @@ pub(crate) fn wait(
     printed: Printed,
 ) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
-    let id = reached.resolve(run)?;
+    let id = job_id(&reached, run)?;
     follow(&reached, &id, None, printed)
+}
+
+/// The id of the job on the controller that `run` names, which may be a prefix of it.
+fn job_id(reached: &Reached, run: &str) -> Result<String, String> {
+    let build = Build::of_this("expected to send it to the controller, to find the run there")?;
+    let ids = reached.asked(&build, "finding the run", |linked| {
+        linked.ask(reached, JobsRequest {})
+    })?;
+    let name = &reached.name;
+    let ids = ids.map_err(|message| format!("controller `{name}` refused: {message}"))?;
+    runtime::named(&ids, run, &format!("on controller `{name}`")).map(str::to_owned)
 }
 
 fn follow(
@@ -360,7 +374,7 @@ fn with_modal(
 /// started is stopped and removed.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
-    let id = reached.resolve(run)?;
+    let id = job_id(&reached, run)?;
     let force = if force { " --force" } else { "" };
     let (script, modal) = with_modal(client, |flag| {
         format!(

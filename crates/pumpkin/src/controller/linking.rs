@@ -1,6 +1,6 @@
 //! A link ([`crate::link`]) to the controller's `serve` of this build, over a session of a shared
-//! master: the `serve` is uploaded there first if it has none, and a link that is cut is the
-//! caller's to open again, as only what reads goes over it.
+//! master: the `serve` is uploaded there first if it has none, and a link that is cut is opened
+//! again, as only what reads goes over it, by [`Reached::asked`] or by the caller.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
-use super::{Reached, SHORT_TIMEOUT, Session, Slot};
+use super::{OPENINGS, Reached, SHORT_TIMEOUT, Session, Slot};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
@@ -98,6 +98,36 @@ impl Linked {
         match Link::open(command) {
             Ok(link) => Ok(link.map(|link| Self { link, slot })),
             Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),
+        }
+    }
+}
+
+impl Reached {
+    /// What `ask` makes of a link to the `serve` of `build` there, opened as [`Linked::open`] opens
+    /// one, and asked again over another, after each of `AGAIN`'s pauses, while one is cut before
+    /// `ask` returns; `what` says what is asked, as in "listing the runs".
+    pub(super) fn asked<T>(
+        &self,
+        build: &Build,
+        what: &str,
+        mut ask: impl FnMut(&mut Linked) -> Result<T, Unlinked>,
+    ) -> Result<T, String> {
+        let mut attempt = 0;
+        loop {
+            let asked = Linked::open(self, build, OPENINGS).and_then(|mut linked| ask(&mut linked));
+            let (master, said) = match asked {
+                Ok(answer) => return Ok(answer),
+                Err(Unlinked::Cut { master, said }) => (master, said),
+                Err(Unlinked::Failed(error)) => return Err(error),
+            };
+            if !self.pause(attempt, master, &format!("{what} again")) {
+                let failed = format!(
+                    "{what} on controller `{}` failed, as `ssh` {said}",
+                    self.name
+                );
+                return Err(self.lost(master, failed));
+            }
+            attempt += 1;
         }
     }
 }

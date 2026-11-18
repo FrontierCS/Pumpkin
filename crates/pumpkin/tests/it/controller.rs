@@ -2363,6 +2363,7 @@ fn follow_carries_on() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0f000001");
     let log = [
         "building stand-in\n",
@@ -2468,6 +2469,7 @@ fn follow_cut_often() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0f000002");
     let log = (1..=10).fold(String::new(), |log, line| {
         log + &format!("line {line:02} of 10\n")
@@ -2526,6 +2528,7 @@ fn follow_cut_before_a_line() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0f000003");
     let _ = ended_job(&scratch, &id, "line 01 of 01\n");
     let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
@@ -2569,6 +2572,7 @@ fn master_opened_again() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0f000004");
     let _ = ended_job(&scratch, &id, "line 01 of 01\n");
     let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
@@ -2612,6 +2616,7 @@ fn follow_prints_the_outcome() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0f000004");
     let _ = ended_job(&scratch, &id, "line 01 of 01\n");
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
@@ -2967,6 +2972,48 @@ fn ls_fails_at_once_when_serve_ends() {
     );
 }
 
+#[test]
+fn wait_names_its_run_there() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = served(&scratch);
+    // Two runs' jobs, whose runs never started, with a prefix in common.
+    scratch.write("home/jobs/20261107-120000-1b8a0001/log", "");
+    scratch.write("home/jobs/20261107-130000-2c9b0002/log", "");
+    let mut steps = Vec::new();
+    for run in ["1b8a", "20261107", "9f"] {
+        let output = on_client(&scratch, &client, &["wait", run])
+            .output()
+            .unwrap();
+        steps.push(report(
+            format!("$ pumpkin wait {run}"),
+            &output,
+            &scratch.0,
+            false,
+        ));
+    }
+    steps.push(calls(&scratch));
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&hex, "<this build>")],
+        &expect![[r#"
+            $ pumpkin wait 1b8a
+            exit status: Some(1)
+            pumpkin: run 20261107-120000-1b8a0001's job on controller `alice` ended before the run started, as its log says above: once that is fixed, run the task again as it was sent; to see that log again: pumpkin wait 20261107-120000-1b8a0001
+            $ pumpkin wait 20261107
+            exit status: Some(1)
+            pumpkin: `20261107` matches 2 runs: name one by more of its id
+              20261107-120000-1b8a0001
+              20261107-130000-2c9b0002
+            $ pumpkin wait 9f
+            exit status: Some(1)
+            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/20261107-120000-1b8a0001" 2>/dev/null || exit 100, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
+    );
+}
+
 /// What `controller serve` does with `input` on its standard input.
 fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
     let mut serve = scratch.program(PUMPKIN, &["controller", "serve"]);
@@ -3017,7 +3064,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `reap`, expected one of `health`, `list`, `view` at line 1 column 14: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes"#]],
+              {"message":"unknown variant `reap`, expected one of `health`, `jobs`, `list`, `view` at line 1 column 14: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 
@@ -3082,6 +3129,7 @@ fn record_copy() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
+    let hex = served(&scratch);
     let id = id_ago(0, "0d000001");
     let _ = ended_job(&scratch, &id, "built\n");
     let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
@@ -3113,7 +3161,7 @@ fn record_copy() {
         if step == "changing" {
             let secret = Permissions::from_mode(0o600);
             fs::set_permissions(record.join("jobs/0/secret"), secret).unwrap();
-            // The calls of `wait`: the job's directory, the job, the list, then the archive.
+            // The calls of `wait`: the run's id, the job, the list, then the archive.
             let secret = record.join("jobs/0/secret");
             scratch.write(
                 "bin/before-4",
@@ -3185,7 +3233,9 @@ fn record_copy() {
         "bin/before-4",
         &format!("echo 150000 > '{}'\n", cut.display()),
     );
-    scratch.write("bin/count-out", "");
+    // From the cancel on: the run's id comes over a link, which a buffered output would stall.
+    let counted = scratch.0.join("bin/count-out");
+    scratch.write("bin/before-2", &format!("touch '{}'\n", counted.display()));
     lines.push("cut:".to_owned());
     lines.extend(copied_record(&scratch, &client, &["cancel", &id], &copy));
     let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
@@ -3211,45 +3261,45 @@ fn record_copy() {
     check(
         &scratch,
         &lines.join("\n"),
-        &[(id.as_str(), "<id>")],
+        &[(id.as_str(), "<id>"), (&hex, "<this build>")],
         &expect![[r#"
             unread:
             wait: exit status: 1
               pumpkin: controller `alice` sent run <id>'s record without what its `tar` couldn't read (exit status: 2): tar: jobs/0/secret: Cannot open: Permission denied: the copy here holds what came whole, but not its record.json, so no command reads it yet: once the controller's user can read each file named (`chmod u+r` there, below `~/.pumpkin/runs/<id>`), run the command again
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
             changing:
             wait: exit status: 1
               pumpkin: run <id>'s record changed on controller `alice` as it was copied: run the command again
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: 
             whole:
             wait: exit status: 0
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: jobs/0/secret, record.json
               model/marked: 755
               jobs: 0, 2
             unchanged:
             cancel: exit status: 0
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
               written: 
             changed:
             cancel: exit status: 0
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: log.jsonl, model/added
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1
               pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, carrying on, now, attempt 2 of 7
               pumpkin: controller `alice` listed `x` as a file or a directory of run <id>'s record, which names none below it, so nothing of it is copied: see what `~/.pumpkin/runs/<id>` holds there
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001
               written: model/big-1
             cut:
             cancel: exit status: 0
               pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, carrying on, now, attempt 2 of 7
-              the calls: ls --format=single-column "$HOME/jobs" 2>/dev/null || true, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: model/big-2, model/big-3
-              counted: 25, 0, 616, 616, 102400
+              counted: 0, 616, 616, 102400
             the copy (but `jobs/0/out`) is the record's:
               driver.pid 644
               jobs/0/secret 600
@@ -3273,6 +3323,7 @@ fn record_copy_refusals() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
+    served(&scratch);
     let id = id_ago(0, "0d000002");
     let _ = ended_job(&scratch, &id, "built\n");
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
