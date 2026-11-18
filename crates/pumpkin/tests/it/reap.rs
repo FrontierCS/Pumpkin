@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, older_finished, poll, ran,
-    report, returned, write_gone, write_on, write_record,
+    EC2, INFO, LOCAL, POISON, Scratch, Step, check, docker_table, invocation, older_finished, poll,
+    ran, report, returned, write_gone, write_on, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -330,8 +330,7 @@ esac
         calls.display()
     );
     let path = write_on(&scratch, SPREAD, "default", None, &docker);
-    let poison = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../xtask/poison/aws");
-    symlink(poison, scratch.0.join("bin/aws")).unwrap();
+    symlink(Path::new(POISON).join("aws"), scratch.0.join("bin/aws")).unwrap();
     let config = scratch.0.join("pumpkin.toml");
     scratch.write(
         "pumpkin.toml",

@@ -11,13 +11,13 @@
     reason = "a command line reports on its standard output and error"
 )]
 
+use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::{env, iter};
 
 use xshell::{Cmd, Shell};
 
@@ -335,14 +335,10 @@ fn root() -> &'static Path {
     root
 }
 
-/// `tests`, a command that runs tests, with the environment they need: `PATH` with `xtask/poison`
-/// first, whose `aws` fails, so that none reaches AWS, then xtask's own; and
-/// `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which pumpkin's tests put
-/// beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check` find it.
+/// `tests`, a command that runs tests, with `PUMPKIN_BUILDIFIER`, the pinned formatter
+/// ([`star::buildifier`]), which pumpkin's tests put beside each `pumpkin` they run, where
+/// `pumpkin fmt` and `pumpkin check` find it.
 fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
-    let path = env::var_os("PATH").unwrap_or_default();
-    let poisoned = iter::once(root().join("xtask/poison")).chain(env::split_paths(&path));
-    let tests = tests.env("PATH", env::join_paths(poisoned)?);
     Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
 }
 
