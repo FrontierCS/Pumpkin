@@ -8,10 +8,10 @@
 //! before an answer is whole may ask again over another.
 //!
 //! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
-//! by the SHA-256 of the client's own executable, so that both ends are always one build, as
-//! Bazel keys its install by a digest of what it ships
+//! by a SHA-256 of the client's own build, its executable and the files beside it ([`key`]), so
+//! that both ends are always one build, as Bazel keys its install by a digest of what it ships
 //! (<https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/cpp/startup_options.cc#L754-L762>).
-//! With none there, the command says [`Hello::Absent`], and the client uploads its executable
+//! With none there, the command says [`Hello::Absent`], and the client uploads its build
 //! ([`installing`]) and links again.
 
 use std::io::{self, BufReader, Write};
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
 use crate::progress::Listing;
-use crate::workspace;
+use crate::{manifest, workspace};
 
 // Well past the largest answer: a listing of a few thousand runs is a few MiB, and a body that a
 // record keeps is at most the 64 MiB that the gateway takes of a request.
@@ -335,17 +335,30 @@ pub(crate) fn refuse(output: &mut impl Write, message: String) -> io::Result<()>
 }
 
 /// The directory of `serve`'s installs, relative to the controller user's home: each is
-/// `<sha256>/pumpkin`, by the SHA-256 of the executable.
+/// `<sha256>/`, a build's files by their [`key`].
 pub(crate) fn installs() -> String {
     format!("{}/serve", workspace::DIR)
 }
 
 fn installed(digest: &Sha256Digest) -> String {
+    // An install holds its build's `bin/` whole, whose `pumpkin` is `serve`.
     format!("{}/{}/pumpkin", installs(), digest.hex())
 }
 
+/// The key of the install of `files`, each a file's name there and its SHA-256: the SHA-256 of
+/// what `sha256sum` lists of them, in their order.
+pub(crate) fn key(files: &[(&str, Sha256Digest)]) -> Sha256Digest {
+    manifest::sha256(listing(files).as_bytes())
+}
+
+fn listing(files: &[(&str, Sha256Digest)]) -> String {
+    (files.iter())
+        .map(|(name, digest)| [digest.hex(), "  ", name, "\n"].concat())
+        .collect()
+}
+
 /// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
-/// executable whose SHA-256 is `digest`, or, if there is none, one that prints the frame of
+/// build whose [`key`] is `digest`, or, if there is none, one that prints the frame of
 /// [`Hello::Absent`].
 pub(crate) fn command(digest: &Sha256Digest) -> String {
     let mut absent = Vec::new();
@@ -361,25 +374,28 @@ pub(crate) fn command(digest: &Sha256Digest) -> String {
     )
 }
 
-/// The script that installs what its standard input brings, the executable whose SHA-256 is
-/// `digest`, as the `serve` that [`command`] runs: written into a directory of its own beside the
-/// installs, checked, made 0555 and renamed into place whole, so that no `serve` runs a part of
-/// one. An install that another client renamed there first is as good.
-pub(crate) fn installing(digest: &Sha256Digest) -> String {
-    let (installs, hex) = (installs(), digest.hex());
+/// The script that installs what its standard input brings, a `tar` archive of `files`, each a
+/// file's name and its SHA-256, as the `serve` that [`command`] runs: written into a directory of
+/// its own beside the installs, checked, made 0555 and renamed into place whole, so that no
+/// `serve` runs a part of one. An install that another client renamed there first is as good.
+pub(crate) fn installing(files: &[(&str, Sha256Digest)]) -> String {
+    let (installs, key, listing) = (installs(), key(files), listing(files));
+    let hex = key.hex();
+    let names: Vec<&str> = files.iter().map(|(name, _)| *name).collect();
+    let names = names.join(" ");
     format!(
         r#"installs={installs}
 cd && mkdir --parents "$installs" && cd "$installs" || exit 1
 made=$(mktemp --directory .made.XXXXXX) || exit 1
 trap 'rm --recursive --force "$made"' EXIT
-cat > "$made/pumpkin" || exit 1
-if ! printf '%s  %s\n' {hex} "$made/pumpkin" | sha256sum --check --status; then
-    echo "the executable that arrived has a SHA-256 other than {hex}, as it changed while it was sent: run the command again" >&2
+tar --extract --directory="$made" -- {names} || exit 1
+if ! printf %s '{listing}' | (cd "$made" && sha256sum --check --status); then
+    echo "the files that arrived differ from those that this pumpkin hashed, as one changed while they were sent: run the command again" >&2
     exit 1
 fi
-chmod 0555 "$made/pumpkin" || exit 1
+(cd "$made" && chmod 0555 -- {names}) || exit 1
 mv --no-target-directory "$made" {hex} 2>/dev/null || [ -x {hex}/pumpkin ] || {{
-    echo "moving the executable that arrived to ~/$installs/{hex} failed: see that the controller's user may write there, and run the command again" >&2
+    echo "moving the files that arrived to ~/$installs/{hex} failed: see that the controller's user may write there, and run the command again" >&2
     exit 1
 }}
 "#

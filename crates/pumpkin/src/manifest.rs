@@ -188,7 +188,7 @@ pub(crate) fn digest(hex: &str) -> Option<Sha256Digest> {
     Sha256Digest::try_from(format!("sha256:{hex}")).ok()
 }
 
-fn sha256(bytes: &[u8]) -> Sha256Digest {
+pub(crate) fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
 

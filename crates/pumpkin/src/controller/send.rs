@@ -259,7 +259,7 @@ pub(super) fn send(
 
 /// A `tar` archive of `files`, each a name and what the file holds, each mode 0600: made in memory,
 /// so that what it holds of keys is never written on this machine but in the files that hold them.
-fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+pub(super) fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut archive = Vec::new();
     for (name, holds) in files {
         // The name, `config.toml`, `modal.toml` or an upstream's name of at most 64 bytes with
