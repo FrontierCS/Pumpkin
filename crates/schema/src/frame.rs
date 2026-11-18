@@ -21,12 +21,22 @@ pub fn write(writer: &mut impl Write, message: &impl Serialize, body: &[u8]) -> 
     let message = serde_json::to_vec(message).map_err(io::Error::other)?;
     let message_len = encode_len(message.len(), MAX_MESSAGE_BYTES, "message")?;
     let body_len = encode_len(body.len(), MAX_BODY_BYTES, "body")?;
-    let mut frame = Vec::with_capacity(8 + message.len() + body.len());
+    // Keep a small frame a single write. If its data exceeds one maximum message, write the
+    // body from the caller's buffer.
+    let (inline, separate) = if message.len() + body.len() <= MAX_MESSAGE_BYTES {
+        (body, &[][..])
+    } else {
+        (&[][..], body)
+    };
+    let mut frame = Vec::with_capacity(8 + message.len() + inline.len());
     frame.extend_from_slice(&message_len);
     frame.extend_from_slice(&message);
     frame.extend_from_slice(&body_len);
-    frame.extend_from_slice(body);
+    frame.extend_from_slice(inline);
     writer.write_all(&frame)?;
+    if !separate.is_empty() {
+        writer.write_all(separate)?;
+    }
     writer.flush()
 }
 
