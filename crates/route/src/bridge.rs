@@ -7,9 +7,10 @@ pub(crate) mod stream;
 
 pub(crate) use request::{explicit_messages, request};
 
-/// The request fields that the Responses answer echoes, and how its client reads that answer.
+/// What the route needs after translating the request to record the exchange and return its answer.
 #[derive(Debug)]
 pub(crate) struct Request {
+    pub(crate) repair: Option<crate::RequestRepair>,
     pub(crate) stream: bool,
     pub(crate) echo: serde_json::Value,
 }

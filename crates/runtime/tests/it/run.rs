@@ -178,6 +178,7 @@ pub(crate) fn serving(dir: &Path, url: &str, models: &[&str]) -> Serving {
             route::UpstreamModel {
                 name: model(format!("vendor/{name}")),
                 responses_via_chat: false,
+                request_repair: None,
             },
         )
     });

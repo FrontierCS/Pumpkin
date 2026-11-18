@@ -892,6 +892,9 @@ impl StandIn {
         serving.api = entry.api;
         for (name, model) in &mut serving.models {
             model.responses_via_chat = name.as_str() == "m-translated";
+            model.request_repair = model
+                .responses_via_chat
+                .then_some(route::RequestRepair::JoinAssistantToolText);
         }
         serving
     }
@@ -2643,13 +2646,14 @@ fn translated_model_exchange() {
     let argv = [
         "ops",
         "model m-translated count",
+        r#"model m-translated count {"input":[{"type":"function_call","call_id":"count_a","name":"count","arguments":"{}"},{"role":"assistant","content":"Counting."},{"type":"function_call_output","call_id":"count_a","output":"3"}]}"#,
         "model m-translated count again",
         "call submit 6 finalize=true",
     ];
     let mut ir = routed(ops_workflow(&argv, 30));
     ir["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["models"] = json!(["m-translated"]);
-    // The first answer costs 33 microusd with cache writes, 25 without them.
-    ir["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] = json!({"microusd":30});
+    // Two answers cost 66 microusd with cache writes, 50 without them.
+    ir["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["budget"] = json!({"microusd":60});
     let shown = executed(
         &System,
         "translated-model",
@@ -2662,16 +2666,21 @@ fn translated_model_exchange() {
         line.starts_with("provider.json routes:")
             || line.starts_with("outcome.json's usage:")
             || line.contains(r#""kind":"model_answered""#)
-            || line.starts_with("model request 0:")
-            || line.starts_with("model exchange 0 kept:")
+            || line.starts_with("model request ")
+            || line.starts_with("model exchange ")
     });
     expect![[r#"
         provider.json routes: {"agent":[{"api":"responses","models":{"m-translated":{"upstream_api":"chat","upstream_name":"vendor/m-translated","usd_per_mtok":{"cache_write":4.0,"cached":1.0,"input":2.0,"output":8.0}}},"upstream":"stand-in"}]}
-        outcome.json's usage: {"model_requests":2,"ran_ns":"<ns>","routes":[{"api":"responses","entry":0,"model_requests":2,"role":"agent","tokens":{"cache_write":4,"cached":3,"input":10,"output":1,"responses":1},"usd":0.000033}],"sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cache_write":4,"cached":3,"input":10,"output":1,"responses":1},"usd":"<usd>"}
+        outcome.json's usage: {"model_requests":3,"ran_ns":"<ns>","routes":[{"api":"responses","entry":0,"model_requests":3,"role":"agent","tokens":{"cache_write":8,"cached":6,"input":20,"output":2,"responses":2},"usd":0.000066}],"sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"cache_write":8,"cached":6,"input":20,"output":2,"responses":2},"usd":"<usd>"}
         {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","entry":0,"first_byte_ns":"<ns>","kept":{"request":{"body_bytes":147,"body_sha256":"fed2710eed841b4afdd6270de0fb0f6278f780cba05bf347520d81e9c2be87de","bytes":206,"dropped_headers":["user-agent"],"items":{"count":2,"field":"messages"}},"response":{"bytes":313},"upstream_api":"chat"},"kind":"model_answered","model":"m-translated","request":0,"upstream":"stand-in","upstream_status":200,"usage":{"cache_write_tokens":4,"cached_tokens":3,"input_tokens":10,"output_tokens":1}},"observed_ns":"<ns>","seq":3}
-        {"actions":[],"at_ns":"<ns>","event":{"answer":{"bar":"budget","kind":"barred","message":"the model budget of the role's entry for `m-translated`, $0.00003 at the configured prices, is exhausted: make no more requests for its models","status":400},"api":"responses","caller":"agent","entry":0,"kept":{"request":{"body_bytes":253,"body_sha256":"a2c0b65375177d5d1400a0a0a8498b25ed529d4b28bc6860ccfc55971925d443","bytes":253},"response":{"bytes":222}},"kind":"model_answered","request":1,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","entry":0,"first_byte_ns":"<ns>","kept":{"request":{"body_bytes":251,"body_sha256":"8e6442a7795154e498457d04d65d584fd44093658d03805f48cfb2d120ceef4a","bytes":206,"dropped_headers":["user-agent"],"items":{"count":2,"field":"messages"}},"request_repair":"join_assistant_tool_text","response":{"bytes":313},"upstream_api":"chat"},"kind":"model_answered","model":"m-translated","request":1,"upstream":"stand-in","upstream_status":200,"usage":{"cache_write_tokens":4,"cached_tokens":3,"input_tokens":10,"output_tokens":1}},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"bar":"budget","kind":"barred","message":"the model budget of the role's entry for `m-translated`, $0.00006 at the configured prices, is exhausted: make no more requests for its models","status":400},"api":"responses","caller":"agent","entry":0,"kept":{"request":{"body_bytes":253,"body_sha256":"a2c0b65375177d5d1400a0a0a8498b25ed529d4b28bc6860ccfc55971925d443","bytes":253},"response":{"bytes":222}},"kind":"model_answered","request":2,"upstream":"stand-in","upstream_status":null},"observed_ns":"<ns>","seq":6}
         model request 0: 200 [("content-type", "application/json")] {"created_at":123,"error":null,"id":"c","incomplete_details":null,"model":"m-translated","object":"response","output":[{"content":[{"annotations":[],"text":"three","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"status":"completed","store":false,"tool_choice":"auto","tools":[],"usage":{"input_tokens":10,"input_tokens_details":{"cache_write_tokens":4,"cached_tokens":3},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":11}}
-        model exchange 0 kept: request {"messages":["sha256:1c095c4d80e8e5c574bef753e03c99cc07a0488cc6018d44118a7580b4dd52cd","sha256:268fb0caed75fc0dcdf556c49e034940780f13fd8a9b661b3c1e3b4cce11ece6"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#]].assert_eq(&exchange.collect::<Vec<_>>().join("\n"));
+        model request 1: 200 [("content-type", "application/json")] {"created_at":123,"error":null,"id":"c","incomplete_details":null,"model":"m-translated","object":"response","output":[{"content":[{"annotations":[],"text":"three","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"status":"completed","store":false,"tool_choice":"auto","tools":[],"usage":{"input_tokens":10,"input_tokens_details":{"cache_write_tokens":4,"cached_tokens":3},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":11}}
+        model request 2: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the model budget of the role's entry for `m-translated`, $0.00006 at the configured prices, is exhausted: make no more requests for its models","param":null,"type":"invalid_request_error"}}
+        model exchange 0 kept: request {"messages":["sha256:1c095c4d80e8e5c574bef753e03c99cc07a0488cc6018d44118a7580b4dd52cd","sha256:268fb0caed75fc0dcdf556c49e034940780f13fd8a9b661b3c1e3b4cce11ece6"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}
+        model exchange 1 kept: request {"messages":["sha256:65f7672f44b17eaa37d46e80d117f1ff91ca388fbd04226edeb3964245502557","sha256:2559fd30483e7c4101d22c1d643e6eb13f3a4bf3fcaf2815cadd17784101f956"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}
+        model exchange 2 kept: request {"input":[{"content":"You are a simulated agent.","role":"user","type":"message"},{"content":"count","role":"user","type":"message"},{"content":[{"text":"again","type":"input_text"}],"role":"user","type":"message"}],"model":"m-translated","store":false}; response {"error":{"code":null,"message":"the model budget of the role's entry for `m-translated`, $0.00006 at the configured prices, is exhausted: make no more requests for its models","param":null,"type":"invalid_request_error"}}"#]].assert_eq(&exchange.collect::<Vec<_>>().join("\n"));
 }
 
 #[test]

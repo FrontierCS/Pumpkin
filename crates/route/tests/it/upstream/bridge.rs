@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use route::{Admission, Answer as Told, Key, Route, Upstream, UpstreamUrl};
+use route::{Admission, Answer as Told, Key, RequestRepair, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelName};
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -17,6 +17,14 @@ use super::{Answer, KEY, Kept, serve};
 pub(super) fn bridge_exchange(
     input: Value,
     answer: Option<Answer>,
+) -> (String, Option<Told>, Vec<u8>, Vec<u8>) {
+    checked_exchange(input, answer, None)
+}
+
+fn checked_exchange(
+    input: Value,
+    answer: Option<Answer>,
+    expected_repair: Option<RequestRepair>,
 ) -> (String, Option<Told>, Vec<u8>, Vec<u8>) {
     let scratch = TestDir::new();
     let dir = scratch.path();
@@ -30,6 +38,12 @@ pub(super) fn bridge_exchange(
     model.name = ModelName::try_from("vendor/small".to_owned()).unwrap();
     let endpoint = |path| UpstreamUrl::try_from(format!("http://{address}/v1/{path}")).unwrap();
     model.responses_via_chat = true;
+    let mut repaired = model.clone();
+    repaired.request_repair = Some(RequestRepair::JoinAssistantToolText);
+    allowed.insert(
+        ModelName::try_from("m-repaired".to_owned()).unwrap(),
+        repaired,
+    );
     let entry = (
         Route::new(Api::Responses, allowed, &listed(Api::Responses)),
         Upstream::new(
@@ -43,7 +57,7 @@ pub(super) fn bridge_exchange(
     let (holds, _) = mpsc::channel();
     let server =
         thread::spawn(move || serve(&listener, answer.into_iter().collect(), &heard_part, &holds));
-    let translated = input["model"] == "m-small";
+    let translated = input["model"] != "m-large";
     let incoming = post(|body| *body = input);
     let sandbox = thread::spawn(move || fake_sandbox(&socket, vec![incoming], Some(&parts), None));
     let (sender, arrivals) = mpsc::channel();
@@ -69,6 +83,7 @@ pub(super) fn bridge_exchange(
     assert_eq!(forwards, usize::from(answer.is_some()));
     let heard = sandbox.join().unwrap().pop().unwrap();
     let received = server.join().unwrap();
+    assert_eq!(kept.repair.get(), expected_repair);
     check_archive(answer, &received, &kept, translated);
     drop(session);
     drop(sockets);
@@ -250,4 +265,62 @@ fn function_round_trip() {
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `include`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}
         400 [("content-type", "application/json")] {"error":{"code":null,"message":"Chat translation cannot carry `unexpected`: omit it or use a native Responses model","param":null,"type":"invalid_request_error"}}
         replayed [{"arguments":"{}","call_id":"first","id":"fc_0_c","name":"count","status":"completed","type":"function_call"},{"content":[{"annotations":[],"logprobs":[],"text":"One more.","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"},{"arguments":"{}","call_id":"second","id":"fc_2_c","name":"count","status":"completed","type":"function_call"}] as [{"content":"How many?","role":"user"},{"content":[{"text":"One more.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"first","type":"function"},{"function":{"arguments":"{}","name":"count"},"id":"second","type":"function"}]},{"content":"3","role":"tool","tool_call_id":"second"},{"content":"3","role":"tool","tool_call_id":"first"}]"#]]);
+}
+
+#[test]
+fn model_scoped_history_repair() {
+    let call = |id| json!({"type":"function_call","call_id":id,"name":"count","arguments":"{}"});
+    let result = |id, output| json!({"type":"function_call_output","call_id":id,"output":output});
+    let message = |role, text| json!({"type":"message","role":role,"content":text});
+    let before = message("assistant", "First.");
+    let after = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Two."},{"type":"output_text","text":"Three."}]});
+    let (a, b) = (call("a"), call("b"));
+    let (ra, rb) = (result("a", "1"), result("b", "2"));
+    let user = message("user", "Count.");
+    let input = json!([user, before, a, b, after, rb, ra, user]);
+    let request = |model: &str, input: Value| json!({"model":model,"input":input,"store":false});
+    let (_, _, raw, _) = checked_exchange(
+        request("m-repaired", input.clone()),
+        Some(Answer::Json(TEXT)),
+        Some(RequestRepair::JoinAssistantToolText),
+    );
+    let sent: Value = serde_json::from_slice(&raw).unwrap();
+    expect![[r#"[{"content":"Count.","role":"user"},{"content":[{"text":"First.","type":"text"},{"text":"Two.","type":"text"},{"text":"Three.","type":"text"}],"role":"assistant","tool_calls":[{"function":{"arguments":"{}","name":"count"},"id":"a","type":"function"},{"function":{"arguments":"{}","name":"count"},"id":"b","type":"function"}]},{"content":"2","role":"tool","tool_call_id":"b"},{"content":"1","role":"tool","tool_call_id":"a"},{"content":"Count.","role":"user"}]"#]].assert_eq(&sent["messages"].to_string());
+
+    let unchanged = json!([user, before, a, b, rb, ra, user]);
+    let ask = |model, items| bridge_exchange(request(model, items), Some(Answer::Json(TEXT))).2;
+    assert_eq!(
+        ask("m-repaired", unchanged.clone()),
+        ask("m-small", unchanged)
+    );
+    let mut replay = json!([user, a, b, after, rb, ra, user]);
+    replay[1]["id"] = json!("fc_0_count");
+    replay[2]["id"] = json!("fc_1_count");
+    replay[3]["id"] = json!("msg_count");
+    assert_eq!(ask("m-repaired", replay.clone()), ask("m-small", replay));
+    let original = request("m-large", input.clone());
+    let native = bridge_exchange(original.clone(), Some(Answer::Json(NATIVE))).2;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&native).unwrap()["input"],
+        original["input"]
+    );
+    for (model, invalid) in [
+        ("m-small", input),
+        ("m-repaired", json!([a, b, after, ra])),
+        ("m-repaired", json!([a, a, after, ra, ra])),
+        ("m-repaired", json!([a, b, after, ra, ra])),
+        ("m-repaired", json!([a, after, result("x", "1")])),
+        ("m-repaired", json!([a, after, b, ra, rb])),
+        ("m-repaired", json!([a, b, ra, after, rb])),
+        ("m-repaired", json!([a, after, after, ra])),
+        ("m-repaired", json!([a, user, ra])),
+        ("m-repaired", json!([a, message("system", "Count."), ra])),
+        (
+            "m-repaired",
+            json!([a,{"role":"assistant","content":[{"type":"refusal","refusal":"No."}]},ra]),
+        ),
+    ] {
+        let (heard, told, _, _) = bridge_exchange(request(model, invalid), None);
+        assert!(matches!(told, Some(Told::Barred { .. })), "{heard}");
+    }
 }

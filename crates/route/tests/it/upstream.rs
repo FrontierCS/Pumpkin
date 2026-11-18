@@ -354,6 +354,7 @@ fn serve_one(
 #[derive(Default)]
 struct Kept {
     translated_to: Cell<Option<Api>>,
+    repair: Cell<Option<route::RequestRepair>>,
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
     first_output: Cell<Option<usize>>,
@@ -371,7 +372,8 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn upstream(&self, api: Option<Api>, _: &[String]) {
+    fn upstream(&self, api: Option<Api>, repair: Option<route::RequestRepair>, _: &[String]) {
+        self.repair.set(repair);
         self.translated_to.set(api);
     }
 

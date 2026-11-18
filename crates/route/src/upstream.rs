@@ -13,6 +13,7 @@ use std::{fmt, fs};
 use gateway::{IncomingModelRequest, ModelRequest};
 use schema::frame;
 use schema::ir::{Api, ModelBudget, ModelName, Name};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use stdx::Deadline;
 use ureq::http::header::{AUTHORIZATION, CONTENT_ENCODING};
@@ -76,6 +77,14 @@ pub struct Upstream {
 pub struct UpstreamModel {
     pub name: ModelName,
     pub responses_via_chat: bool,
+    pub request_repair: Option<RequestRepair>,
+}
+
+/// A machine-configured repair of a model's translated request history.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestRepair {
+    JoinAssistantToolText,
 }
 
 /// How the route answered a model request: never with what the request or the response held.
@@ -330,9 +339,13 @@ impl Upstream {
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
+        let repair = closed
+            .conversion
+            .as_ref()
+            .and_then(|request| request.repair);
         client
             .keep
-            .upstream(closed.translated_to(), closed.dropped_headers());
+            .upstream(closed.translated_to(), repair, closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url(closed)).config();
         let call = call.timeout_global(bound(client.by)).build();
