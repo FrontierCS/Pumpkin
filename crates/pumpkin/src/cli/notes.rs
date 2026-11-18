@@ -535,9 +535,10 @@ without it, nothing is published:
 `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
-controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-Session Manager plugin, and `ssh`, `tar`, `ssh-keygen`
-and `git`, from PATH; the controller's settings are the module's, but for
+controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, and
+`ssh`, `tar`, `ssh-keygen` and `git`, from PATH, and reach the controller at
+its private address, to which deploy/aws's `ssh_from` must admit this
+machine; the controller's settings are the module's, but for
 [controller.modal]. This machine's key to it, which the first command makes
 and enrols through EC2 Instance Connect, and the host key it pins, are in
 $HOME/.config/pumpkin/ssh/.

@@ -333,7 +333,7 @@ provider that offers what it needs, such as its CPUs, its memory or its GPU.
 
 The controller is the same `pumpkin`, on an EC2 instance of the operator's own, which
 [`deploy/aws`](deploy/aws/README.md) makes. A machine whose configuration names `[controller]`
-sends its runs there over ssh through SSM, and follows, lists, stops and views them there with the
+sends its runs there over ssh, and follows, lists, stops and views them there with the
 same commands; the controller builds the images and runs the drivers, so the operator's machine can
 go to sleep. It can also publish its runs to a read-only page for a team.
 [docs/providers.md](docs/providers.md) says how the pieces fit.

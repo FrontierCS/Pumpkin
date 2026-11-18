@@ -31,8 +31,8 @@ resource "aws_vpc_security_group_egress_rule" "sandbox_gateway" {
   referenced_security_group_id = aws_security_group.controller.id
 }
 
-# The controller is reached through SSM, which its agent dials out to, and its `sshd` only from
-# `ssh_from`; only the sandboxes reach its gateway. The group's description stays as it is, since
+# The controller's `sshd` is reached only from `ssh_from`, and its gateway only from the
+# sandboxes. The group's description stays as it is, since
 # the provider replaces a group whose description changes, with every rule in it.
 resource "aws_security_group" "controller" {
   name        = "${local.prefix}-controller"

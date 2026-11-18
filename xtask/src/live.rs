@@ -306,9 +306,13 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
     let shared = repo
         .join(".pumpkin/controller")
         .join(format!("{}.{}", settings.name, settings.region));
-    let instance = fs::read_to_string(shared.join("lock"))
-        .map_err(|error| format!("reading the controller's instance failed: {error}"))?;
-    let host = format!("pumpkin@{}", instance.trim());
+    let found = fs::read_to_string(shared.join("found"))
+        .map_err(|error| format!("reading where the controller was found failed: {error}"))?;
+    let found: serde_json::Value = serde_json::from_str(&found)?;
+    let Some(address) = found["address"].as_str() else {
+        return Err(format!("the controller's `found` names no address: {found}").into());
+    };
+    let host = format!("pumpkin@{address}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
     // `ControlPath=0` is the client's own ssh connection to the controller: a socket in `shared`,
     // which is why the command runs there.

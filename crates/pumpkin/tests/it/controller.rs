@@ -1185,7 +1185,6 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
         ("ssh", SSH),
         ("systemctl", SYSTEMCTL),
         ("systemd-run", SYSTEMD_RUN),
-        ("session-manager-plugin", ""),
     ] {
         scratch.write_executable(&format!("bin/{name}"), script.as_bytes());
     }
@@ -1267,7 +1266,7 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
 }
 
 // The first `ls` makes the client's key and the shared connections and finds no controller, as the
-// stand-in `aws` describes none; the lock and socket written then are what a controller found
+// stand-in `aws` describes none; the `found` and socket written then are what a controller found
 // over a master that answers leaves.
 fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     let socket = scratch.0.join(SHARED).join("0");
@@ -1276,10 +1275,18 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     }
     let first = on_client(scratch, client, &["ls"]).output().unwrap();
     assert!(!first.status.success(), "{first:?}");
-    fs::write(scratch.0.join(SHARED).join("lock"), INSTANCE).unwrap();
-    // As `ssh` makes a master's socket, which only its user may reach.
-    fs::write(&socket, "").unwrap();
-    fs::set_permissions(&socket, Permissions::from_mode(0o600)).unwrap();
+    // An address that the kernel refuses a connection to at once, as it is a broadcast's, so that
+    // a probe of it reaches no network.
+    let found = json!({ "instance": INSTANCE, "address": "255.255.255.255" });
+    // As the client keeps `found`, and `ssh` makes a master's socket, which only its user may
+    // reach.
+    for (path, text) in [
+        (scratch.0.join(SHARED).join("found"), found.to_string()),
+        (socket, String::new()),
+    ] {
+        fs::write(&path, text).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
@@ -1359,6 +1366,8 @@ fn keys_on_standard_input() {
 fn modes_of_what_the_client_keeps() {
     let scratch = Scratch::new("controller-modes");
     let (_, id, _) = started_job(&scratch);
+    // The test's own, which `connect` wrote.
+    fs::remove_file(scratch.0.join(SHARED).join("found")).unwrap();
     let lines = [
         format!(
             "this machine's key: {}",
@@ -1460,15 +1469,6 @@ fn target_refusals() {
         &scratch.0,
         false,
     ));
-    fs::remove_file(scratch.0.join("bin/session-manager-plugin")).unwrap();
-    let mut unplugged = on_client(&scratch, &client, &["ls"]);
-    let invoked = invocation(&unplugged);
-    lines.push(report(
-        invoked,
-        &unplugged.output().unwrap(),
-        &scratch.0,
-        false,
-    ));
     let calls = fs::read_to_string(scratch.0.join("bin/calls")).unwrap_or_default();
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap_or_default();
     lines.push(format!(
@@ -1492,9 +1492,6 @@ fn target_refusals() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8/pumpkin.bundle isn't there, which the controller builds Pumpkin 1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 from: build it here with `./pumpkin --version`, after removing <scratch>/repo/.pumpkin/1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8 if it was built without one
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin ls
-            exit status: Some(1)
-            pumpkin: the Session Manager plugin, `session-manager-plugin`, isn't on PATH, and `aws ssm start-session` needs it to reach the controller: install it, as AWS's Session Manager docs say
             calls of aws and ssh: 0"#]],
     );
 }
@@ -1964,7 +1961,7 @@ fn send_over_streams() {
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
-            the connections: 0 600, 0-0 600, 1 600, 1-0 600, 1.log 600, 2 600, 2-0 600, 2.log 600, lock 600, upload 600"#]],
+            the connections: 0 600, 0-0 600, 1 600, 1-0 600, 1.log 600, 2 600, 2-0 600, 2.log 600, found 600, lock 600, upload 600"#]],
     );
 }
 
@@ -2075,7 +2072,7 @@ fn send_over_the_connection_held() {
               stand-in/task.star: 444, 1 link
               a manifest: the task's tree
               incoming/: none
-            the connections: 0 600, 0-0 600, 0-1 600, 1.log 600, lock 600, upload 600"#]],
+            the connections: 0 600, 0-0 600, 0-1 600, 1.log 600, found 600, lock 600, upload 600"#]],
     );
 }
 
@@ -2847,6 +2844,10 @@ fn ls_refusals() {
     connect(&scratch, &client);
     served(&scratch);
     let mut steps = Vec::new();
+    // No master answers, and nothing does where the controller was found, so it is found again,
+    // which the stand-in `aws` refuses.
+    scratch.write("bin/unanswered-0", "");
+    steps.push(ls_ran(&scratch, &client, &[]));
     scratch.write("bin/answer", "Welcome to the controller!\n");
     steps.push(ls_ran(&scratch, &client, &[]));
     // A run of this build that doesn't read, beside one that does.
@@ -2868,6 +2869,9 @@ fn ls_refusals() {
         &steps.join("\n"),
         &[],
         &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: controller `alice` didn't answer SSH at 255.255.255.255, where it was last found: Network is unreachable (os error 101); finding it again: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: linking to controller `alice` failed: its hello is no frame that `pumpkin controller serve` sends: a frame's message is 1466264675 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to
@@ -3296,7 +3300,7 @@ fn record_copy_refusals() {
               pumpkin: controller `alice` listed `f 1 1000000000.0000000000 ../x` as a file or a directory of run <id>'s record, which names none below it, so nothing of it is copied: see what `~/.pumpkin/runs/<id>` holds there
             more files than it takes: exit status: 1
               pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
-              pumpkin: run <id>'s record on controller `alice` holds over 100000 files and directories, more than a copy takes: in a shell on it (`aws ssm start-session`), pack the directories of `~/.pumpkin/runs/<id>` that hold the most into an archive each (`tar --create --remove-files`), then run the command again
+              pumpkin: run <id>'s record on controller `alice` holds over 100000 files and directories, more than a copy takes: in a shell on it (`ssh -i <scratch>/client/.config/pumpkin/ssh/key -o UserKnownHostsFile=<scratch>/client/.config/pumpkin/ssh/known_hosts -o HostKeyAlias=alice.us-west-1 pumpkin@255.255.255.255`), pack the directories of `~/.pumpkin/runs/<id>` that hold the most into an archive each (`tar --create --remove-files`), then run the command again
             a member above it: exit status: 1
               pumpkin: copying run <id>'s record from controller `alice` to <scratch>/repo/.pumpkin/runs/<id>
               pumpkin: extracting run <id>'s record, as controller `alice` sent it, failed (exit status: 2), as said above
