@@ -477,7 +477,7 @@ fn states() {
             pumpkin: runs/<unknown signal, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -486,7 +486,7 @@ fn states() {
             pumpkin: runs/<unknown signal, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -504,7 +504,7 @@ fn states() {
             pumpkin: runs/<unknown state, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -513,7 +513,7 @@ fn states() {
             pumpkin: runs/<unknown state, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads

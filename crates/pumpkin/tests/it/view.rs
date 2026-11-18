@@ -680,7 +680,7 @@ fn follows_a_live_run() {
     );
     scratch.write(
         &format!("runs/{id}/outcome.json"),
-        &json!({ "state": "failed" }),
+        &json!({ "state": "failed", "reason": "stopped" }),
     );
     drop(driver);
     let ended = served.get(&format!("/api/runs/{id}/since?log={next}"));
@@ -1588,7 +1588,7 @@ fn traces_a_caller() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -1673,7 +1673,7 @@ fn traces_a_caller() {
     // while none holds it: the trace is read again from the log as it stands.
     for other in 0..9 {
         let other = format!("20261110-170100-{other:08x}");
-        let outcome = Some(json!({ "state": "failed" }));
+        let outcome = Some(json!({ "state": "failed", "reason": "stopped" }));
         write_run(
             &scratch,
             &other,
@@ -2007,7 +2007,7 @@ fn traces_a_messages_exchange() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -2350,7 +2350,7 @@ fn diffs_two_requests() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -2508,7 +2508,7 @@ fn places_steps_whatever_their_answers_order() {
         done,
         started_at,
         &lines,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &places,
     );
     let dir = write_run(&scratch, live, started_at, &lines, None, &places);
@@ -2615,13 +2615,18 @@ fn places_steps_whatever_their_answers_order() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the reads and their snapshot"
+)]
 fn holds_each_live_trace_and_the_last_three_ended() {
     let scratch = Scratch::new();
     let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
     let callers = ["agent", "job-0", "job-1", "job-2"];
     let response = json!({ "status": "completed", "output": [said("done")] }).to_string();
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    for (id, outcome) in [(ended, Some(json!({ "state": "failed" }))), (live, None)] {
+    let failed = json!({ "state": "failed", "reason": "stopped" });
+    for (id, outcome) in [(ended, Some(failed)), (live, None)] {
         let mut model = Model::new(&scratch.0.join("runs").join(id));
         let log: Vec<Value> = (0..)
             .zip(callers)
