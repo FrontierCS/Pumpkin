@@ -47,8 +47,7 @@ impl From<String> for Unlinked {
 pub(super) struct Linked {
     // Before the slot, so that the link's `ssh` ends before its session is given up.
     link: Link,
-    master: usize,
-    _slot: Slot,
+    slot: Slot,
 }
 
 impl Linked {
@@ -74,7 +73,7 @@ impl Linked {
     /// the link goes to.
     pub(super) fn health(&mut self, reached: &Reached) -> Result<Result<Health, String>, Unlinked> {
         let asked = self.link.health();
-        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 
     /// The runs whose ids start with one of `prefixes`, or the message of the refusal, as
@@ -85,7 +84,7 @@ impl Linked {
         prefixes: &[String],
     ) -> Result<Result<Listed, String>, Unlinked> {
         let asked = self.link.list(prefixes);
-        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 
     /// The view's reply to a `GET` of `target`, or the message of the refusal, as
@@ -97,20 +96,15 @@ impl Linked {
         deflate: bool,
     ) -> Result<Result<Viewed, String>, Unlinked> {
         let asked = self.link.view(target, deflate);
-        asked.map_err(|unanswered| unlinked(reached, self.master, unanswered))
+        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 
     /// `None` if the controller has no `serve` of `build`.
     fn connect(reached: &Reached, build: &Build) -> Result<Option<Self>, Unlinked> {
         let Session { command, slot } = reached.ssh(&link::command(&build.digest))?;
-        let master = slot.master;
         match Link::open(command) {
-            Ok(link) => Ok(link.map(|link| Self {
-                link,
-                master,
-                _slot: slot,
-            })),
-            Err(unanswered) => Err(unlinked(reached, master, unanswered)),
+            Ok(link) => Ok(link.map(|link| Self { link, slot })),
+            Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),
         }
     }
 }
