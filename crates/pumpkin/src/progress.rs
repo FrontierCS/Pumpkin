@@ -49,12 +49,14 @@ pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<UnixTim
 }
 
 /// The runs that `ls` lists, by id.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct Listing {
     pub(crate) runs: BTreeMap<String, Entry>,
 }
 
 /// A run in a listing.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Entry {
     Row(Row),
     /// A run that ended before `listed_since`, which `ls` names in a line, not a row.

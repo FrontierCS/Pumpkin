@@ -15,9 +15,9 @@ use test_support::BUSYBOX;
 
 use super::view::Served;
 use super::{
-    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, Prices, Scratch, StandIn, asked, cpu_list, cut,
-    docker_table, ended, install, invocation, lease_places, older_finished, poll, report, returned,
-    whole_log, workflow, write_run,
+    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, PUMPKIN, Prices, Scratch, StandIn, asked, cpu_list,
+    cut, docker_table, ended, install, invocation, lease_places, masked, older_finished, poll,
+    report, returned, whole_log, workflow, write_record, write_run,
 };
 
 fn parameter() -> String {
@@ -153,11 +153,17 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     for (value, name) in shown {
         text = text.replace(value, name);
     }
-    // The uptime that the controller's health reports varies.
+    // The uptime and the disk that the controller's health reports vary.
     let lines = text.lines().map(|line| match line.split_once("`: up ") {
         Some((before, after)) => {
             let rest = after.split_once(',').map_or("", |(_, rest)| rest);
-            format!("{before}`: up <t>,{rest}")
+            let (rest, disk) = rest.split_once(", disk ").unwrap_or((rest, ""));
+            let disk = disk
+                .split_once("% used")
+                .map_or(disk.to_owned(), |(_, rest)| {
+                    format!(", disk <n>% used{rest}")
+                });
+            format!("{before}`: up <t>,{rest}{disk}")
         }
         None => line.to_owned(),
     });
@@ -1124,9 +1130,9 @@ const KEY: &str = "sk-client-stand-in";
 // controller's user. A file in `bin` shapes it: `refused-M` closes the connection that opens
 // master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
 // command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
-// holds, `cut-out-M` ends any other command's output so, and `answer` is one command's output;
-// `count-out` notes in `counted` the bytes of each other command's output, but for a listing's
-// first line, the machine's uptime, which is as long as the machine has been up.
+// holds, `cut-out-M` ends any other command's output so, as a cut connection does, whatever the
+// command goes on to do, and `answer` is one command's output; `count-out` notes in `counted` the
+// bytes of each other command's output.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1151,14 +1157,16 @@ if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$c
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if [ "$first" != 'cd "$HOME/store/incoming"' ]; then
-    if [ -e "$dir/answer" ]; then cat "$dir/answer"; rm "$dir/answer"; exit 0; fi
+    if mv "$dir/answer" "$dir/answered" 2>/dev/null; then exec cat "$dir/answered"; fi
     if [ -e "$dir/cut-out-$master" ]; then
-        sh -c "$*" | head --bytes="$(cat "$dir/cut-out-$master")"
-        rm "$dir/cut-out-$master"; touch "$dir/unanswered-$master"; exit 255
+        exec 3<&0; mkfifo "$dir/fifo-$$"
+        sh -c "$*" <&3 > "$dir/fifo-$$" &
+        dd bs=1 count="$(cat "$dir/cut-out-$master")" status=none < "$dir/fifo-$$"
+        rm "$dir/cut-out-$master" "$dir/fifo-$$"; touch "$dir/unanswered-$master"; exit 255
     fi
     [ -e "$dir/count-out" ] || exec sh -c "$*"
     sh -c "$*" > "$dir/out-$$"; status=$?
-    cat "$dir/out-$$"; sed '1{/^up /d}' "$dir/out-$$" | wc --bytes >> "$dir/counted"; exit "$status"
+    cat "$dir/out-$$"; wc --bytes < "$dir/out-$$" >> "$dir/counted"; exit "$status"
 fi
 if [ -e "$dir/cut-$master" ]; then
     head --bytes="$(cat "$dir/cut-$master")" | sh -c "$*"
@@ -2610,290 +2618,225 @@ fn follow_prints_the_outcome() {
     );
 }
 
-fn live_run(scratch: &Scratch, id: &str, lines_count: usize) -> File {
-    let record = format!("home/.pumpkin/runs/{id}");
-    let args = ["stand-in/task.star"];
-    scratch.write(
-        &format!("{record}/record.json"),
-        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+// As the first `ls` installs it, but as a link to this test's `pumpkin`, which writes nothing.
+fn served(scratch: &Scratch) -> String {
+    let hex = sha256(&fs::read(PUMPKIN).unwrap());
+    let dir = scratch.0.join(format!("home/.pumpkin/serve/{hex}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
+    hex
+}
+
+/// Moves the records that `write_record` wrote to `to`, below the scratch directory.
+fn move_runs(scratch: &Scratch, to: &str) {
+    for entry in fs::read_dir(scratch.0.join("runs")).unwrap() {
+        let entry = entry.unwrap();
+        let dir = scratch.0.join(to).join(entry.file_name());
+        fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        fs::rename(entry.path(), dir).unwrap();
+    }
+}
+
+fn days_ago(path: &Path, days: u64) {
+    let at = SystemTime::now() - Duration::from_hours(24 * days);
+    File::open(path).unwrap().set_modified(at).unwrap();
+}
+
+fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> String {
+    let mut ls = on_client(scratch, client, &["ls"]);
+    ls.args(args);
+    let output = ls.output().unwrap();
+    let invoked = format!("$ pumpkin ls {}", args.join(" "));
+    report(invoked.trim_end().to_owned(), &output, &scratch.0, false)
+}
+
+#[test]
+fn ls_answered_there() {
+    let scratch = Scratch::new("controller-ls-there");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let (ended, live, old) = (
+        "20261107-120000-1b8a0001",
+        "20261107-120100-1b8a0002",
+        "20261106-120000-1b8a0003",
     );
-    let mut ir: serde_json::Value = serde_json::from_str(test_support::WORKFLOW).unwrap();
-    ir["name"] = json!("stand-in");
-    scratch.write(&format!("{record}/ir.json"), &ir);
-    scratch.write(&format!("{record}/driver.pid"), "4242\n");
-    grow(scratch, id, lines_count, "");
-    let driver = File::open(scratch.0.join(format!("{record}/driver.pid"))).unwrap();
+    let failed = json!({ "state": "failed", "reason": "r" });
+    write_record(&scratch, ended, true, Some(returned(7.0)));
+    write_record(&scratch, live, true, None);
+    write_record(&scratch, old, true, Some(failed.clone()));
+    move_runs(&scratch, "home/.pumpkin/runs");
+    let there = scratch.0.join("home/.pumpkin/runs");
+    days_ago(&there.join(format!("{old}/outcome.json")), 2);
+    let driver = File::open(there.join(format!("{live}/driver.pid"))).unwrap();
     driver.lock().unwrap();
-    driver
-}
-
-fn grow(scratch: &Scratch, id: &str, lines_count: usize, part: &str) {
-    let path = scratch.0.join(format!("home/.pumpkin/runs/{id}/log.jsonl"));
-    let mut text = String::new();
-    for index in 0..lines_count {
-        let padding = format!("{index:0>85}");
-        text.extend(["{\"padding\":\"", &padding, "\"}\n"]);
+    // The jobs: one of a run that has a record, and one of each state yet to start a run.
+    let (waiting, building) = ("20261107-130000-2c9b0004", "20261107-130100-2c9b0005");
+    let unstarted = ["20261107-130200-2c9b0006", "20261106-130300-2c9b0007"];
+    for id in [ended, waiting, building].iter().chain(&unstarted) {
+        scratch.write(&format!("home/jobs/{id}/log"), "");
     }
-    text.push_str(part);
-    let mut log = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .unwrap();
-    std::io::Write::write_all(&mut log, text.as_bytes()).unwrap();
-}
-
-fn listed(scratch: &Scratch, client: &[(String, String); 2], ids: &[&str]) -> Vec<String> {
-    let ls = on_client(scratch, client, &["ls"]).output().unwrap();
-    let mut lines = vec![say_listed(scratch, &ls)];
-    lines.extend(kept(scratch, ids));
-    lines
-}
-
-fn say_listed(scratch: &Scratch, ls: &std::process::Output) -> String {
-    let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
-    let _ = fs::remove_file(scratch.0.join("bin/counted"));
-    let said = String::from_utf8_lossy(&ls.stderr);
-    let mut lines = vec![format!(
-        "ls: {}, {} rows, {} bytes",
-        ls.status,
-        String::from_utf8_lossy(&ls.stdout).lines().count(),
-        counted.trim()
-    )];
-    let said = (said.lines())
-        .filter(|line| !line.starts_with("pumpkin: controller `alice`: up"))
-        .filter(|line| !line.contains("of its log can't be read by this pumpkin"));
-    lines.extend(said.map(|line| format!("  {line}")));
-    lines.join("\n")
-}
-
-fn kept(scratch: &Scratch, ids: &[&str]) -> Vec<String> {
-    let mut lines = Vec::new();
-    for id in ids {
-        let log = fs::read(scratch.0.join(format!("home/.pumpkin/runs/{id}/log.jsonl"))).unwrap();
-        let end = log
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1);
-        let place = ["live", "ended", "runs"].into_iter().find_map(|place| {
-            let copy = match place {
-                "runs" => scratch.0.join(format!("repo/.pumpkin/runs/{id}")),
-                _ => scratch.0.join(format!("{SHARED}/{place}/{id}")),
-            };
-            copy.exists().then_some(())?;
-            let held = fs::read(copy.join("log.jsonl")).unwrap_or_default();
-            let files = modes(&copy);
-            let files = files
-                .replace(" 644", "")
-                .replace(" 600", "")
-                .replace(" 664", "");
-            Some(format!(
-                "{place}, its log {} bytes, the controller's to its last newline: {}; {files}",
-                held.len(),
-                held == log[..end]
-            ))
-        });
-        lines.push(format!(
-            "  {id}: {}",
-            place.unwrap_or_else(|| "none".to_owned())
-        ));
+    scratch.write(&format!("run/pumpkin/{waiting}/waiting"), "");
+    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{building}"))).unwrap();
+    days_ago(
+        &scratch.0.join(format!("home/jobs/{}/log", unstarted[1])),
+        2,
+    );
+    // The copies here: of a run that the controller lacks, and of one that it lists otherwise.
+    let lacked = "20261107-110000-0d0c0008";
+    write_record(&scratch, lacked, true, Some(returned(3.0)));
+    write_record(&scratch, ended, true, Some(failed));
+    move_runs(&scratch, "repo/.pumpkin/runs");
+    let mut steps = [&[][..], &["20261106"]].map(|args| ls_ran(&scratch, &client, args));
+    // The rows whose times are relative to now.
+    for varying in ["20261107-1201", "20261107-13", "20261106-13"] {
+        steps = steps.map(|ran| masked(&ran, varying));
     }
-    lines
+    drop(driver);
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[],
+        &expect![[r#"
+        $ pumpkin ls
+        exit status: Some(0)
+        pumpkin: controller `alice`: up <t>, 3 jobs, disk <n>% used
+        printed:
+          20261107-110000-0d0c0008 finished          -  -               -  -: score=3 metrics={"solved":3}
+          20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+          20261107-120100-1b8a0002 publishing      <t>                  -  -
+          20261107-130000-2c9b0004 waiting         <t>                  -  -
+          20261107-130100-2c9b0005 building        <t>                  -  -
+          20261107-130200-2c9b0006 unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261107-130200-2c9b0006
+          6 runs: 1 waiting, 1 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls 20261106
+        $ pumpkin ls 20261106
+        exit status: Some(0)
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        printed:
+          20261106-120000-1b8a0003 failed            -  -               -  -
+          20261106-130300-2c9b0007 unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261106-130300-2c9b0007
+          2 runs: 1 failed, 1 unstarted"#]],
+    );
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
-fn ls_by_offsets() {
-    let scratch = Scratch::new("controller-ls-offsets");
+fn ls_lists_other_formats_unread() {
+    let scratch = Scratch::new("controller-ls-unread");
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
-    scratch.write("bin/count-out", "");
-    let ids = [
-        id_ago(0, "0e000001"),
-        id_ago(0, "0e000002"),
-        id_ago(0, "0e000003"),
-    ];
-    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let ids = &ids[..];
-    let mut drivers: Vec<File> = (ids.iter()).map(|id| live_run(&scratch, id, 100)).collect();
-    let mut lines = vec!["first, with no copies:".to_owned()];
-    lines.extend(listed(&scratch, &client, ids));
-    lines.push("again, with nothing new:".to_owned());
-    lines.extend(listed(&scratch, &client, ids));
-    grow(&scratch, ids[0], 2, "{\"padding\":\"part");
-    lines.push("run 0 grown by 2 lines and part of a third:".to_owned());
-    lines.extend(listed(&scratch, &client, ids));
-    let log = scratch
-        .0
-        .join(format!("home/.pumpkin/runs/{}/log.jsonl", ids[1]));
-    fs::remove_file(&log).unwrap();
-    grow(&scratch, ids[1], 3, "");
-    let copy = scratch
-        .0
-        .join(format!("{SHARED}/live/{}/log.jsonl", ids[2]));
-    let held = fs::read(&copy).unwrap();
-    fs::write(&copy, &held[..held.len() - 30]).unwrap();
-    lines.push("run 1's log replaced by a shorter one, run 2's copy cut inside a line:".to_owned());
-    lines.extend(listed(&scratch, &client, ids));
-    grow(&scratch, ids[0], 1, "");
+    served(&scratch);
+    let other =
+        json!({ "version": "9.9.9", "commit": { "hash": "0f3a2b1c9d8e", "date": "2026-11-08" } });
+    let record = json!({ "record_version": "pumpkin.record/v9", "pumpkin": other, "args": [] });
     scratch.write(
-        &format!("home/.pumpkin/runs/{}/outcome.json", ids[0]),
-        &returned(1.0),
+        "home/.pumpkin/runs/20261107-120200-3d0c0002/record.json",
+        &record,
     );
-    drop(drivers.remove(0));
-    lines.push("run 0 ended:".to_owned());
-    lines.extend(listed(&scratch, &client, ids));
-    let mut copy = fs::OpenOptions::new().append(true).open(&copy).unwrap();
-    std::io::Write::write_all(&mut copy, &[b'x'; 5000]).unwrap();
-    lines.push("again, run 2's copy ending in a part of a line longer than a read:".to_owned());
-    lines.extend(listed(&scratch, &client, ids));
-    grow(&scratch, ids[1], 100, "");
-    grow(&scratch, ids[2], 100, "");
-    let both: Vec<Child> = (0..2)
-        .map(|_| {
-            let mut ls = on_client(&scratch, &client, &["ls"]);
-            ls.stdout(Stdio::null()).stderr(Stdio::null());
-            ls.spawn().unwrap()
-        })
-        .collect();
-    let ended: Vec<String> = (both.into_iter())
-        .map(|child| child.wait_with_output().unwrap().status.to_string())
-        .collect();
-    let counted = fs::read_to_string(scratch.0.join("bin/counted")).unwrap();
-    let mut counted: Vec<&str> = counted.lines().collect();
-    counted.sort_unstable();
-    lines.push(format!(
-        "runs 1 and 2 grown by 100 lines, then two ls at once: {}; bytes {}",
-        ended.join(", "),
-        counted.join(" and ")
-    ));
-    lines.extend(kept(&scratch, ids));
-    fs::remove_file(scratch.0.join("bin/counted")).unwrap();
-    let log = scratch
-        .0
-        .join(format!("home/.pumpkin/runs/{}/log.jsonl", ids[1]));
-    let aside = log.with_extension("aside");
-    fs::rename(&log, &aside).unwrap();
-    fs::create_dir(&log).unwrap();
-    let ls = on_client(&scratch, &client, &["ls"]).output().unwrap();
-    lines.push("run 1's log unreadable, as a directory:".to_owned());
-    lines.push(say_listed(&scratch, &ls));
-    fs::remove_dir(&log).unwrap();
-    fs::rename(&aside, &log).unwrap();
-    let (job, record) = (
-        format!("home/jobs/{}", ids[2]),
-        format!("home/.pumpkin/runs/{}", ids[2]),
-    );
-    scratch.write(&format!("{job}/log"), "");
-    scratch.write(&format!("{job}/out"), &format!("{}\n", ids[2]));
-    scratch.write_executable(&format!("{job}/pumpkin"), b"#!/bin/sh\nexit 102\n");
-    scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
-    drop(drivers.remove(1));
-    // Uncounted: what `wait` moves is no listing's.
-    fs::remove_file(scratch.0.join("bin/count-out")).unwrap();
-    let waited = on_client(&scratch, &client, &["wait", ids[2]])
-        .output()
-        .unwrap();
-    scratch.write("bin/count-out", "");
-    lines.push(format!(
-        "run 2 ended, and `wait` copied it ({}):",
-        waited.status
-    ));
-    lines.extend(listed(&scratch, &client, ids));
-    let shown: Vec<(&str, String)> = (ids.iter().enumerate())
-        .map(|(index, id)| (*id, format!("<run {index}>")))
-        .collect();
-    let shown: Vec<(&str, &str)> = (shown.iter())
-        .map(|(id, name)| (*id, name.as_str()))
-        .collect();
+    let steps = ls_ran(&scratch, &client, &[]);
     check(
         &scratch,
-        &lines.join("\n"),
-        &shown,
+        &steps,
+        &[],
         &expect![[r#"
-            first, with no copies:
-            ls: exit status: 0, 4 rows, 48750 bytes
-              <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            again, with nothing new:
-            ls: exit status: 0, 4 rows, 1146 bytes
-              <run 0>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            run 0 grown by 2 lines and part of a third:
-            ls: exit status: 0, 4 rows, 2682 bytes
-              <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 1>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            run 1's log replaced by a shorter one, run 2's copy cut inside a line:
-            ls: exit status: 0, 4 rows, 8821 bytes
-              <run 0>: live, its log 10200 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            run 0 ended:
-            ls: exit status: 0, 4 rows, 3705 bytes
-              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
-              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            again, run 2's copy ending in a part of a line longer than a read:
-            ls: exit status: 0, 4 rows, 1108 bytes
-              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
-              <run 1>: live, its log 300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 10000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            runs 1 and 2 grown by 100 lines, then two ls at once: exit status: 0, exit status: 0; bytes 1110 and 23636
-              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
-              <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: live, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            run 1's log unreadable, as a directory:
-            ls: exit status: 1, 0 rows, 42 bytes
-              tail: error reading '.pumpkin/runs/<run 1>/log.jsonl': Is a directory
-              reading the log of run <run 1> for the listing failed, as said above: run the command again
-              pumpkin: listing the runs on controller `alice` failed (exit status: 1), as said above
-            run 2 ended, and `wait` copied it (exit status: 0):
-            ls: exit status: 0, 4 rows, 1074 bytes
-              <run 0>: ended, its log 10316 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json
-              <run 1>: live, its log 10300 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-              <run 2>: runs, its log 20000 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, outcome.json, record.json"#]],
+        $ pumpkin ls
+        exit status: Some(0)
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        printed:
+          20261107-120200-3d0c0002 unread            -                  -  made by pumpkin 9.9.9 (0f3a2b1c9 2026-11-08)
+          1 run: 1 unread"#]],
     );
 }
 
 #[test]
-fn ls_before_a_line() {
-    let scratch = Scratch::new("controller-ls-before-a-line");
+fn ls_installs_its_serve_there() {
+    let scratch = Scratch::new("controller-ls-installs");
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
-    scratch.write("bin/count-out", "");
-    let id = id_ago(0, "0e000004");
-    let ids = [id.as_str()];
-    let _driver = live_run(&scratch, &id, 0);
-    grow(&scratch, &id, 0, "{\"padding\":\"part");
-    let mut lines = vec!["no line yet, listed three times:".to_owned()];
-    for _ in 0..3 {
-        lines.extend(listed(&scratch, &client, &ids));
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a0001",
+        true,
+        Some(returned(7.0)),
+    );
+    move_runs(&scratch, "home/.pumpkin/runs");
+    // Another build's install, and what an install left, that none used for two days, and the
+    // install of a build used since.
+    let installs = scratch.0.join("home/.pumpkin/serve");
+    for (name, days) in [
+        ("a".repeat(64), 2),
+        (".made.Xy12Zq".to_owned(), 2),
+        ("b".repeat(64), 0),
+    ] {
+        fs::create_dir_all(installs.join(&name)).unwrap();
+        days_ago(&installs.join(name), days);
     }
-    grow(&scratch, &id, 0, "\"}\n");
-    lines.push("its line finished, twice:".to_owned());
+    let mut steps = Vec::new();
     for _ in 0..2 {
-        lines.extend(listed(&scratch, &client, &ids));
+        steps.push(ls_ran(&scratch, &client, &[]));
+        steps.push(calls(&scratch));
     }
+    let hex = sha256(&fs::read(PUMPKIN).unwrap());
+    // Sorted as named in the snapshot, as this build's SHA-256 sorts anywhere.
+    let mut left: Vec<String> = (modes(&installs).split(", "))
+        .map(|install| install.replace(&hex, "<this build>"))
+        .collect();
+    left.sort();
+    steps.push(format!("installs: {}", left.join(", ")));
+    steps.push(format!("the install: {}", modes(&installs.join(&hex))));
     check(
         &scratch,
-        &lines.join("\n"),
-        &[(id.as_str(), "<run>")],
+        &steps.join("\n"),
+        &[(&hex, "<this build>")],
         &expect![[r#"
-            no line yet, listed three times:
-            ls: exit status: 0, 2 rows, 6190 bytes
-              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 6190 bytes
-              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            ls: exit status: 0, 2 rows, 6190 bytes
-              <run>: live, its log 0 bytes, the controller's to its last newline: true; driver.pid, ir.json, record.json
-            its line finished, twice:
-            ls: exit status: 0, 2 rows, 7214 bytes
-              <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json
-            ls: exit status: 0, 2 rows, 1071 bytes
-              <run>: live, its log 19 bytes, the controller's to its last newline: true; driver.pid, ir.json, log.jsonl, record.json"#]],
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice` has no serve of this pumpkin: installing it there
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+              1 run: 1 finished
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+              1 run: 1 finished
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin
+            installs: <this build> 700, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 775
+            the install: pumpkin 555"#]],
+    );
+}
+
+#[test]
+fn ls_carries_on_after_a_cut() {
+    let scratch = Scratch::new("controller-ls-cut");
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = served(&scratch);
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a0001",
+        true,
+        Some(returned(7.0)),
+    );
+    move_runs(&scratch, "home/.pumpkin/runs");
+    // Past the hello, within the answer to `Health`.
+    scratch.write("bin/cut-out-0", "40");
+    let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&hex, "<this build>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: listing the runs again, now, attempt 2 of 7
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+              1 run: 1 finished
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
 
@@ -2902,69 +2845,97 @@ fn ls_refusals() {
     let scratch = Scratch::new("controller-ls-refusals");
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
-    let (linked, link) = (id_ago(0, "0e000001"), id_ago(0, "0e000002"));
-    let outside = scratch.0.join("outside");
-    scratch.write("outside/log.jsonl", "kept, with no newline");
-    scratch.write(&format!("{SHARED}/x/kept"), "kept\n");
-    scratch.write("outside-abs/kept", "kept\n");
-    let archive = scratch.0.join("archive");
-    scratch.write(&format!("archive/{linked}/record.json"), "{}");
-    symlink(
-        outside.join("log.jsonl"),
-        archive.join(format!("{linked}/log.jsonl")),
-    )
-    .unwrap();
-    symlink(&outside, archive.join(&link)).unwrap();
-    let tar = stdx::process::command("tar", Environment::Only(&["PATH"]))
-        .args(["--create", "--file=-", "--directory"])
-        .arg(&archive)
-        .args([&linked, &link])
-        .output()
-        .unwrap();
-    assert!(tar.status.success(), "{tar:?}");
-    let absolute = scratch.0.join("outside-abs");
-    let states = format!(
-        "../x live 0\n{} live 0\n{linked} live 0\n{link} live 0\ntar\n",
-        absolute.display()
+    served(&scratch);
+    let mut steps = Vec::new();
+    scratch.write("bin/answer", "Welcome to the controller!\n");
+    steps.push(ls_ran(&scratch, &client, &[]));
+    // A run of this build that doesn't read, beside one that does.
+    write_record(
+        &scratch,
+        "20261107-120000-1b8a0001",
+        true,
+        Some(returned(7.0)),
     );
-    let mut answer = states.into_bytes();
-    answer.extend(tar.stdout);
-    fs::write(scratch.0.join("bin/answer"), answer).unwrap();
-    let mut lines = Vec::new();
-    for _ in 0..2 {
-        let ls = on_client(&scratch, &client, &["ls"]).output().unwrap();
-        lines.push(format!("ls: {}", ls.status));
-        let said = String::from_utf8_lossy(&ls.stderr);
-        let said = said.lines().filter(|line| !line.contains("`alice`: up"));
-        lines.extend(said.map(|line| format!("  {line}")));
-    }
-    let live = scratch.0.join(format!("{SHARED}/live"));
-    lines.push(format!("live: {}", modes(&live)));
-    for kept in [
-        format!("{SHARED}/x/kept"),
-        "outside-abs/kept".to_owned(),
-        "outside/log.jsonl".to_owned(),
-    ] {
-        let text = fs::read_to_string(scratch.0.join(&kept)).unwrap();
-        lines.push(format!("{kept}: {text:?}"));
-    }
+    write_record(&scratch, "20261107-120100-1b8a0002", false, None);
+    move_runs(&scratch, "home/.pumpkin/runs");
+    steps.push(ls_ran(&scratch, &client, &[]));
+    let runs = scratch.0.join("home/.pumpkin/runs");
+    fs::rename(&runs, scratch.0.join("aside")).unwrap();
+    fs::write(&runs, "").unwrap();
+    steps.push(ls_ran(&scratch, &client, &[]));
     check(
         &scratch,
-        &lines.join("\n"),
-        &[(linked.as_str(), "<linked>"), (link.as_str(), "<link>")],
+        &steps.join("\n"),
+        &[],
         &expect![[r#"
-            ls: exit status: 1
-              pumpkin: controller `alice` listed `../x` as a run, which is no run's id, so `ls` keeps nothing of it: see what `~/.pumpkin/runs` holds there, and run `ls` again
-              pumpkin: controller `alice` listed `<scratch>/outside-abs` as a run, which is no run's id, so `ls` keeps nothing of it: see what `~/.pumpkin/runs` holds there, and run `ls` again
-              pumpkin: the controller sent `<linked>/log.jsonl` as no regular file, which a run's record never holds, so `ls` keeps nothing of it: see what `~/.pumpkin/runs/<linked>` holds there, and run `ls` again
-              pumpkin: the controller sent `<link>` as no directory, which a run's record never holds, so `ls` keeps nothing of it: see what `~/.pumpkin/runs/<link>` holds there, and run `ls` again
-              pumpkin: controller `alice`: 0 jobs
-              pumpkin: a run can't be listed, as said above
-            ls: exit status: 0
-            live: gone
-            repo/.pumpkin/controller/alice.us-west-1/x/kept: "kept\n"
-            outside-abs/kept: "kept\n"
-            outside/log.jsonl: "kept, with no newline""#]],
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: linking to controller `alice` failed: its hello is no frame that `pumpkin controller serve` sends: a frame's message is 1466264675 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: <scratch>/home/.pumpkin/runs/20261107-120100-1b8a0002/driver.pid isn't there: expected the record of a run to have it
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: 1 run can't be listed, as said above
+            printed:
+              20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
+              1 run: 1 finished
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs: Not a directory (os error 20): expected the directory that runs are recorded in, as `--runs` names it"#]],
+    );
+}
+
+/// What `controller serve` does with `input` on its standard input.
+fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
+    let mut serve = scratch.program(PUMPKIN, &["controller", "serve"]);
+    serve.env("HOME", scratch.0.join("home"));
+    serve
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = serve.spawn().unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let mut lines = vec![output.status.to_string()];
+    let mut out = &output.stdout[..];
+    while let Some((message, body)) = schema::frame::read::<serde_json::Value>(&mut out).unwrap() {
+        lines.push(format!("  {message}, and a body of {} bytes", body.len()));
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    lines.extend(said.lines().map(|line| format!("  said: {line}")));
+    lines.join("\n")
+}
+
+#[test]
+fn serve_refusals() {
+    let scratch = Scratch::new("controller-serve-refusals");
+    let mut steps = vec!["no request:".to_owned(), serve_fed(&scratch, b"")];
+    let mut past = (u32::try_from(schema::frame::MAX_MESSAGE_BYTES).unwrap() + 1)
+        .to_be_bytes()
+        .to_vec();
+    past.extend(b"{}");
+    steps.push("a frame past the cap:".to_owned());
+    steps.push(serve_fed(&scratch, &past));
+    let mut other = Vec::new();
+    schema::frame::write(&mut other, &json!({ "type": "reap" }), &[]).unwrap();
+    steps.push("a message that is no request:".to_owned());
+    steps.push(serve_fed(&scratch, &other));
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[],
+        &expect![[r#"
+        no request:
+        exit status: 0
+          {"type":"serving"}, and a body of 0 bytes
+        a frame past the cap:
+        exit status: 1
+          {"type":"serving"}, and a body of 0 bytes
+          {"message":"a frame's message is 65537 bytes: it holds at most 65536: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes
+        a message that is no request:
+        exit status: 1
+          {"type":"serving"}, and a body of 0 bytes
+          {"message":"unknown variant `reap`, expected `health` or `list` at line 1 column 14: expected a request, with no body, as a client of this pumpkin sends","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 

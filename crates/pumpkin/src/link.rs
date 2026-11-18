@@ -1,0 +1,288 @@
+//! The link between a client and its controller: `pumpkin controller serve` ([`crate::serve`]),
+//! of the client's own build, on the standard input and output of one `ssh`, in
+//! [`schema::frame`]'s frames.
+//!
+//! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one request
+//! at a time ([`Ask`]), and each gets one [`Answer`], whose body, if it has one, follows in frames
+//! of its own. A request only reads, so a client whose link ends before an answer is whole may
+//! ask again over another.
+//!
+//! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
+//! by the SHA-256 of the client's own executable, so that both ends are always one build, as
+//! Bazel keys its install by a digest of what it ships
+//! (<https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/cpp/startup_options.cc#L754-L762>).
+//! With none there, the command says [`Hello::Absent`], and the client uploads its executable
+//! ([`installing`]) and links again.
+
+use std::io::{self, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+use schema::frame::{self, MAX_BODY_BYTES};
+use schema::ir::Sha256Digest;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use stdx::Context as _;
+
+use crate::controller::Slot;
+use crate::workspace;
+
+// Well past the largest answer: a listing of a few thousand runs is a few MiB.
+const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// What `serve` says first, in a frame with no body.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Hello {
+    /// It answers what follows.
+    Serving,
+    /// The controller has no `serve` of the client's build, so [`command`] printed this.
+    Absent,
+}
+
+/// A request, in a frame with no body.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Ask {
+    Health,
+    /// The runs, and the jobs yet to start one, whose ids start with one of `prefixes`, or all
+    /// with none, as `ls` lists them: an ended run that ended before `since_unix_secs` is named
+    /// only as older ([`crate::progress::listed_since`]).
+    List {
+        prefixes: Vec<String>,
+        since_unix_secs: Option<u64>,
+    },
+}
+
+/// The answer to a request.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Answer {
+    Health(Health),
+    /// The listing, a [`crate::progress::Listing`]'s JSON, in a body of `body_bytes`;
+    /// `unlisted_count` runs couldn't be listed, as `serve` said on its standard error.
+    Listed {
+        body_bytes: u64,
+        unlisted_count: u64,
+    },
+    /// Nothing took effect, for the reason that `message` gives, with what to do.
+    Refused {
+        message: String,
+    },
+}
+
+impl Answer {
+    fn body_bytes(&self) -> u64 {
+        match self {
+            Self::Listed { body_bytes, .. } => *body_bytes,
+            Self::Health(_) | Self::Refused { .. } => 0,
+        }
+    }
+}
+
+/// The controller's own health.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Health {
+    pub(crate) up_seconds: u64,
+    pub(crate) disk_used_percent: u8,
+    pub(crate) boot: Boot,
+}
+
+/// The state of the controller's boot, the unit `pumpkin-boot.service`, as `systemctl` gives it.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Boot {
+    Done,
+    Running,
+    /// It failed: its main process exited with `status`, at `at`, as `systemctl` words the time.
+    Failed {
+        status: i32,
+        at: String,
+    },
+    /// `systemctl` gave no state.
+    Unknown,
+}
+
+/// The message of each frame of an answer's body: the frame's body is the next part of it.
+#[derive(Serialize, Deserialize)]
+struct Part;
+
+/// Writes `answer`, then `body`, whose length it gives, in frames of at most [`MAX_BODY_BYTES`].
+pub(crate) fn send(output: &mut impl Write, answer: &Answer, body: &[u8]) -> io::Result<()> {
+    assert_eq!(
+        answer.body_bytes(),
+        body.len() as u64,
+        "an answer gives its body's length"
+    );
+    frame::write(output, answer, &[])?;
+    for part in body.chunks(MAX_BODY_BYTES) {
+        frame::write(output, &Part, part)?;
+    }
+    Ok(())
+}
+
+/// The directory of `serve`'s installs, relative to the controller user's home: each is
+/// `<sha256>/pumpkin`, by the SHA-256 of the executable.
+pub(crate) fn installs() -> String {
+    format!("{}/serve", workspace::DIR)
+}
+
+fn installed(digest: &Sha256Digest) -> String {
+    format!("{}/{}/pumpkin", installs(), digest.hex())
+}
+
+/// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
+/// executable whose SHA-256 is `digest`, or, if there is none, one that prints the frame of
+/// [`Hello::Absent`].
+pub(crate) fn command(digest: &Sha256Digest) -> String {
+    let mut absent = Vec::new();
+    if let Err(error) = frame::write(&mut absent, &Hello::Absent, &[]) {
+        unreachable!("a `Vec` takes every byte of a frame with no body: {error}");
+    }
+    // Each byte as the octal escape that `printf` reads in its format, so that none is the shell's.
+    let escaped: Vec<String> = absent.iter().map(|byte| format!("\\{byte:03o}")).collect();
+    format!(
+        "serve={}\ncd && [ -x \"$serve\" ] && exec \"$serve\" controller serve\nprintf '{}'\n",
+        installed(digest),
+        escaped.concat()
+    )
+}
+
+/// The script that installs what its standard input brings, the executable whose SHA-256 is
+/// `digest`, as the `serve` that [`command`] runs: written into a directory of its own beside the
+/// installs, checked, made 0555 and renamed into place whole, so that no `serve` runs a part of
+/// one. An install that another client renamed there first is as good.
+pub(crate) fn installing(digest: &Sha256Digest) -> String {
+    let (installs, hex) = (installs(), digest.hex());
+    format!(
+        r#"installs={installs}
+cd && mkdir --parents "$installs" && cd "$installs" || exit 1
+made=$(mktemp --directory .made.XXXXXX) || exit 1
+trap 'rm --recursive --force "$made"' EXIT
+cat > "$made/pumpkin" || exit 1
+if ! printf '%s  %s\n' {hex} "$made/pumpkin" | sha256sum --check --status; then
+    echo "the executable that arrived has a SHA-256 other than {hex}, as it changed while it was sent: run the command again" >&2
+    exit 1
+fi
+chmod 0555 "$made/pumpkin" || exit 1
+mv --no-target-directory "$made" {hex} 2>/dev/null || [ -x {hex}/pumpkin ] || {{
+    echo "moving the executable that arrived to ~/$installs/{hex} failed: see that the controller's user may write there, and run the command again" >&2
+    exit 1
+}}
+"#
+    )
+}
+
+/// Why a link gave no answer.
+pub(crate) enum Unanswered {
+    /// The frames ended before what was asked for was whole, as when the connection is cut: how.
+    /// What only reads may be asked again, over another link.
+    Unreached(String),
+    /// `ssh` didn't run, or what arrived is no frame that `serve` sends, which asking again would
+    /// meet again: why.
+    Failed(String),
+}
+
+/// An `ssh` that runs [`command`], its standard input and output, and the session of the master
+/// that it goes over, held until the link is dropped, which ends the `ssh`.
+pub(crate) struct Link {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    _slot: Slot,
+}
+
+impl Link {
+    /// Runs `ssh`, an `ssh` that runs [`command`] over the session that `slot` holds, and reads
+    /// its hello: `None` if it is [`Hello::Absent`].
+    pub(crate) fn open(mut ssh: Command, slot: Slot) -> Result<Option<Self>, Unanswered> {
+        let child = ssh.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
+        let mut child = (child.context("running `ssh` failed")).map_err(Unanswered::Failed)?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            unreachable!(
+                "the child's standard input or output is missing, though both are piped just above"
+            )
+        };
+        let mut link = Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            _slot: slot,
+        };
+        match link.received("its hello")? {
+            Hello::Serving => Ok(Some(link)),
+            Hello::Absent => Ok(None),
+        }
+    }
+
+    /// The answer to `ask`, and its body.
+    pub(crate) fn ask(&mut self, ask: &Ask) -> Result<(Answer, Vec<u8>), Unanswered> {
+        if let Err(error) = frame::write(&mut self.stdin, ask, &[]) {
+            return Err(match error.kind() {
+                io::ErrorKind::BrokenPipe => {
+                    Unanswered::Unreached("ended before the request".to_owned())
+                }
+                _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
+            });
+        }
+        let answer: Answer = self.received("the answer")?;
+        let body_bytes = answer.body_bytes();
+        if body_bytes > MAX_ANSWER_BODY_BYTES {
+            return Err(Unanswered::Failed(format!(
+                "its answer's body is of {body_bytes} bytes: expected {} MiB at most",
+                MAX_ANSWER_BODY_BYTES / 1024 / 1024
+            )));
+        }
+        let mut body = Vec::new();
+        while (body.len() as u64) < body_bytes {
+            let (Part, part) = self.read("the answer's body")?;
+            let left = body_bytes - body.len() as u64;
+            if part.is_empty() || part.len() as u64 > left {
+                return Err(Unanswered::Failed(format!(
+                    "a part of its answer's body is of {} bytes: expected 1 to {left}, what is \
+                     left of the body that the answer gives",
+                    part.len()
+                )));
+            }
+            body.extend_from_slice(&part);
+        }
+        Ok((answer, body))
+    }
+
+    /// The message of the next frame, which has no body; `what` names it.
+    fn received<T: DeserializeOwned>(&mut self, what: &str) -> Result<T, Unanswered> {
+        let (message, body) = self.read(what)?;
+        if !body.is_empty() {
+            return Err(Unanswered::Failed(format!(
+                "{what} has a {}-byte body: expected none",
+                body.len()
+            )));
+        }
+        Ok(message)
+    }
+
+    fn read<T: DeserializeOwned>(&mut self, what: &str) -> Result<(T, Vec<u8>), Unanswered> {
+        match frame::read(&mut self.stdout) {
+            Ok(Some(read)) => Ok(read),
+            Ok(None) => Err(Unanswered::Unreached(format!("ended before {what}"))),
+            Err(error) => Err(match error.kind() {
+                io::ErrorKind::UnexpectedEof => {
+                    Unanswered::Unreached(format!("ended within {what}"))
+                }
+                io::ErrorKind::InvalidData => Unanswered::Failed(format!(
+                    "{what} is no frame that `pumpkin controller serve` sends: {error}: expected \
+                     its frames alone on the standard output there, which a shell's startup file \
+                     may write to"
+                )),
+                _ => Unanswered::Failed(format!("reading {what} from `ssh` failed: {error}")),
+            }),
+        }
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        // What it was asked is answered or given up on, and a `serve` still there ends with it.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

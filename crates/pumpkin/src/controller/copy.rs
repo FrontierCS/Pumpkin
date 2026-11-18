@@ -220,7 +220,7 @@ enum Archived {
 
 /// Makes the directory `sent`, for the owner alone, and returns the `tar` that extracts its
 /// standard input into it: each member below it, as `tar` takes none above it.
-pub(super) fn untar(sent: &Path) -> Result<Command, String> {
+fn untar(sent: &Path) -> Result<Command, String> {
     DirBuilder::new()
         .mode(0o700)
         .create(sent)

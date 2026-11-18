@@ -217,8 +217,7 @@ fn kept() -> Result<PathBuf, String> {
 /// The connections that the workspace's commands share to one controller, in
 /// `controller/<name>.<region>/` of the workspace: up to `MASTERS` masters, each by its control
 /// socket, named by its index, its `SESSIONS` session locks, `<index>-<session>`, and its log,
-/// `<index>.log`; the locks `lock`, `upload` and `listed`; and what `ls` keeps, `ended/` and
-/// `live/`.
+/// `<index>.log`; and the locks `lock` and `upload`.
 // Each `ssh` runs in that directory and names a socket by its name alone, so its path, with the
 // suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace is.
 struct Shared {
@@ -234,7 +233,7 @@ struct Lock {
 }
 
 /// A session of connection `master`, held for as long as the slot lives.
-struct Slot {
+pub(crate) struct Slot {
     master: usize,
     _file: File,
 }
@@ -260,31 +259,6 @@ impl Shared {
         let file = private(&path)?;
         file.lock().context(path.display())?;
         Ok(Lock { file, path })
-    }
-
-    fn ended(&self) -> PathBuf {
-        self.dir.join("ended")
-    }
-
-    fn live(&self) -> PathBuf {
-        self.dir.join("live")
-    }
-
-    // Two `ls` take turns, so that neither grows a copy that the other has grown since it read the
-    // copy's length.
-    fn listing(&self, name: &Name) -> Result<File, String> {
-        let path = self.dir.join("listed");
-        let file = private(&path)?;
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
-        }
-        say(format_args!(
-            "waiting for another `ls` of controller `{name}`, which grows the same copies of its runs"
-        ));
-        file.lock().context(path.display())?;
-        Ok(file)
     }
 
     fn log(&self, master: usize) -> PathBuf {

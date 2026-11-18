@@ -110,21 +110,6 @@ impl Row {
         }
     }
 
-    /// Whether the run has ended with an `outcome.json`, which no later look changes: a lost run
-    /// has none, so it is neither live nor ended.
-    pub(crate) fn ended(&self) -> bool {
-        match self.stage {
-            Stage::Finished { .. } | Stage::Failed | Stage::Interrupted => true,
-            Stage::Waiting
-            | Stage::Building
-            | Stage::Publishing
-            | Stage::Running { .. }
-            | Stage::Lost
-            | Stage::Unstarted
-            | Stage::Unread => false,
-        }
-    }
-
     pub(crate) fn has_result(&self) -> bool {
         match self.stage {
             Stage::Finished { result } => result,
