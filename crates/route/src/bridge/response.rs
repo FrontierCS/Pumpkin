@@ -42,18 +42,49 @@ pub(super) fn usage(tokens: Option<Usage>) -> Value {
     let Some(tokens) = tokens else {
         return Value::Null;
     };
-    let mut used = json!({
-        "input_tokens":tokens.input_tokens,
-        "output_tokens":tokens.output_tokens,
-        "total_tokens":tokens.input_tokens.saturating_add(tokens.output_tokens),
-    });
-    if let Some(cached) = tokens.cached_tokens {
-        used["input_tokens_details"] = json!({"cached_tokens":cached});
-    }
-    if let Some(reasoning) = tokens.reasoning_tokens {
-        used["output_tokens_details"] = json!({"reasoning_tokens":reasoning});
-    }
-    used
+    json!({
+        "input_tokens": tokens.input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": tokens.cached_tokens.unwrap_or_default(),
+            "cache_write_tokens": tokens.cache_write_tokens.unwrap_or_default(),
+        },
+        "output_tokens": tokens.output_tokens,
+        "output_tokens_details": {"reasoning_tokens":tokens.reasoning_tokens.unwrap_or_default()},
+        "total_tokens": tokens.input_tokens.saturating_add(tokens.output_tokens),
+    })
+}
+
+/// The public error code drives client recovery. Free-form messages and unknown identifiers
+/// can contain private provider diagnostics; keep those in the archive.
+pub(crate) fn provider_error(error: &Value) -> Value {
+    let code = error["code"].as_str().unwrap_or_default();
+    let message = match code {
+        "context_length_exceeded" => "the model request exceeds the context window",
+        "invalid_prompt" | "invalid_request_error" => "the model provider rejected the request",
+        "insufficient_quota"
+        | "credit_balance_exhausted"
+        | "organization_spend_limit_exceeded"
+        | "project_spend_limit_exceeded"
+        | "usage_not_included" => "the model provider's allocation is exhausted",
+        "rate_limit_exceeded" | "slow_down" => "the model provider rate-limited the request",
+        "server_error" | "server_is_overloaded" | "policy_capacity_unavailable" => {
+            "the model provider could not serve the request"
+        }
+        "content_policy_violation"
+        | "bio_policy"
+        | "cyber_policy"
+        | "misalignment_policy_violation" => {
+            "the model provider refused the request under its policy"
+        }
+        _ => {
+            return json!({"code":"server_error","message":"the model provider refused the Chat request"});
+        }
+    };
+    json!({"code":code,"message":message})
+}
+
+pub(super) fn call_item_id(response_id: &str, output_index: usize) -> String {
+    format!("fc_{output_index}_{response_id}")
 }
 
 pub(super) fn message(id: &str, status: &str, parts: Value) -> Value {
@@ -151,7 +182,7 @@ fn output(id: &str, status: &str, choice: &Value) -> Option<Vec<Value>> {
                 return None;
             }
             output.push(call(
-                &format!("fc_{call_id}"),
+                &call_item_id(id, output.len()),
                 call_id,
                 name,
                 function["arguments"].as_str()?,

@@ -5,13 +5,16 @@
 
 mod output;
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use output::Output;
 use serde_json::{Value, json};
 
-use super::response::{model_name, response, usage};
-use crate::usage::{CHAT, Failure, MAX_HELD_BYTES, Usage};
+use super::response::{model_name, provider_error, response, usage};
+use crate::sse::{Frame, Frames};
+use crate::usage::{CHAT, Failure, Usage};
 
 enum Error {
     Invalid(&'static str),
@@ -32,11 +35,46 @@ struct Events<'a> {
 }
 
 impl Events<'_> {
+    fn start(&mut self, response: Value) -> io::Result<()> {
+        let mut event = json!({});
+        event["response"] = response;
+        self.send("response.created", event.clone())?;
+        self.send("response.in_progress", event)
+    }
+
     fn send(&mut self, kind: &str, mut event: Value) -> io::Result<()> {
         event["type"] = json!(kind);
         event["sequence_number"] = json!(*self.sequence);
         *self.sequence += 1;
         (self.emit)(format!("event: {kind}\ndata: {event}\n\n").as_bytes())
+    }
+}
+
+pub(crate) enum End {
+    Forwarded {
+        usage: Option<Usage>,
+        failed: Option<Failure>,
+    },
+    Cut {
+        usage: Option<Usage>,
+        failed: Failure,
+    },
+}
+
+enum Failed {
+    Provider(Failure),
+    Cut(Failure),
+}
+
+impl Failed {
+    fn end(self, usage: Option<Usage>, broken: bool) -> End {
+        match self {
+            Self::Provider(failed) if !broken => End::Forwarded {
+                usage,
+                failed: Some(failed),
+            },
+            Self::Provider(failed) | Self::Cut(failed) => End::Cut { usage, failed },
+        }
     }
 }
 
@@ -46,13 +84,13 @@ pub(crate) struct Stream {
     upstream_name: String,
     identity: Option<(String, u64, String)>,
     sequence: u64,
-    line: Vec<u8>,
-    data: Option<Vec<u8>>,
+    frames: Frames,
+    began: bool,
     output: Output,
     usage: Option<Usage>,
     reason: Option<&'static str>,
     done: bool,
-    failed: Option<Failure>,
+    failed: Option<Failed>,
 }
 
 impl Stream {
@@ -63,8 +101,8 @@ impl Stream {
             upstream_name: upstream_name.to_owned(),
             identity: None,
             sequence: 0,
-            line: Vec::new(),
-            data: None,
+            frames: Frames::default(),
+            began: false,
             output: Output::default(),
             usage: None,
             reason: None,
@@ -75,68 +113,60 @@ impl Stream {
 
     pub(crate) fn feed(
         &mut self,
-        bytes: &[u8],
+        mut bytes: &[u8],
         mut emit: impl FnMut(&[u8]) -> io::Result<()>,
+        mut first_output: impl FnMut(),
     ) -> io::Result<()> {
-        match self.read(bytes, &mut emit) {
-            Ok(()) => Ok(()),
-            Err(Error::Invalid(message)) => self.fail("invalid_chat_stream", message, &mut emit),
-            Err(Error::Unsent(error)) => Err(error),
-        }
-    }
-
-    fn read(&mut self, bytes: &[u8], emit: &mut Sink<'_>) -> Result<(), Error> {
-        for part in bytes.split_inclusive(|&byte| byte == b'\n') {
-            if self.failed.is_some() {
-                break;
-            }
-            let line = part.strip_suffix(b"\n");
-            let piece = line.unwrap_or(part);
-            if piece.len() > MAX_HELD_BYTES - self.line.len() {
-                return Err(Error::Invalid("Chat event exceeds the route's byte limit"));
-            }
-            self.line.extend_from_slice(piece);
-            if line.is_none() {
-                continue;
-            }
-            let raw = std::mem::take(&mut self.line);
-            let line = raw.strip_suffix(b"\r").unwrap_or(&raw);
-            if line.is_empty() {
-                if let Some(data) = self.data.take() {
-                    self.chunk(data[b"data:".len()..].trim_ascii(), emit)?;
+        while !bytes.is_empty() {
+            let result = match self.frames.next(&mut bytes) {
+                Ok(Some(frame)) => self.chunk(&frame, &mut emit, &mut first_output),
+                Ok(None) => break,
+                Err(message) => Err(Error::Invalid(message)),
+            };
+            match result {
+                Err(Error::Invalid(message)) if self.failed.is_none() => {
+                    self.cut("invalid_chat_stream", message, &mut emit)?;
                 }
-            } else if line.starts_with(b"data:") {
-                if self.data.is_some() {
-                    return Err(Error::Invalid("expected one Chat data line per event"));
-                }
-                self.data = Some(raw);
-            } else if !(line.starts_with(b":") || line.starts_with(b"event:")) {
-                return Err(Error::Invalid("expected a Chat data event"));
+                Err(Error::Unsent(error)) => return Err(error),
+                Ok(()) | Err(Error::Invalid(_)) => {}
             }
         }
         Ok(())
     }
 
-    fn chunk(&mut self, data: &[u8], emit: &mut Sink<'_>) -> Result<(), Error> {
-        if self.done {
-            return Err(Error::Invalid("Chat data followed [DONE]"));
-        }
+    fn chunk(
+        &mut self,
+        frame: &Frame,
+        emit: &mut Sink<'_>,
+        first_output: &mut dyn FnMut(),
+    ) -> Result<(), Error> {
+        let data = frame.data.trim_ascii();
         if data == b"[DONE]" {
-            if self.reason.is_none() {
-                return Err(Error::Invalid("Chat stream ended without a finish reason"));
+            if self.done || self.reason.is_none() {
+                return Err(Error::Invalid("unexpected end marker in Chat stream"));
             }
             self.done = true;
             return Ok(());
         }
-        let chunk: Value = serde_json::from_slice(data)
+        let mut chunk: Value = serde_json::from_slice(data)
             .map_err(|_| Error::Invalid("invalid JSON in Chat stream"))?;
-        if !chunk["error"].is_null() || chunk["type"] == "error" {
-            self.fail(
-                "upstream_error",
-                "the model provider reported a stream error",
-                emit,
-            )?;
+        self.usage = CHAT(self.usage, &chunk);
+        if !self.began && (crate::read::dialect(schema::ir::Api::Chat).output)(&chunk) {
+            self.began = true;
+            first_output();
+        }
+        // The provider may report its usage after the caller has heard a terminal failure.
+        if self.failed.is_some() {
             return Ok(());
+        }
+        if self.done {
+            return Err(Error::Invalid("Chat data followed [DONE]"));
+        }
+        if frame.error_event && chunk.is_object() && chunk["error"].is_null() {
+            chunk["type"] = json!("error");
+        }
+        if !chunk["error"].is_null() || chunk["type"] == "error" {
+            return self.upstream_error(&chunk, emit);
         }
         if !chunk["moderation"].is_null() {
             return Err(Error::Invalid(
@@ -147,7 +177,6 @@ impl Stream {
             return Err(Error::Invalid("expected a Chat completion chunk"));
         }
         let id = self.begin(&chunk, emit)?;
-        self.usage = CHAT(self.usage, &chunk);
         let choices = chunk["choices"]
             .as_array()
             .ok_or(Error::Invalid("Chat chunk has no choices array"))?;
@@ -184,6 +213,21 @@ impl Stream {
         Ok(())
     }
 
+    fn upstream_error(&mut self, chunk: &Value, emit: &mut Sink<'_>) -> Result<(), Error> {
+        let raw = chunk
+            .get("error")
+            .filter(|error| !error.is_null())
+            .unwrap_or(chunk);
+        if !raw.is_object() {
+            return Err(Error::Invalid("expected a Chat error object"));
+        }
+        let Some(failed) = Failure::of(chunk, "code") else {
+            unreachable!("a Chat error has a nested error or the error event type")
+        };
+        self.fail(Failed::Provider(failed), provider_error(raw), emit)?;
+        Ok(())
+    }
+
     fn begin<'a>(&mut self, chunk: &'a Value, emit: &mut Sink<'_>) -> Result<&'a str, Error> {
         let id = chunk["id"]
             .as_str()
@@ -217,57 +261,89 @@ impl Stream {
                 sequence: &mut self.sequence,
                 emit,
             };
-            events.send("response.created", json!({"response":start}))?;
-            events.send("response.in_progress", json!({"response":start}))?;
+            events.start(start)?;
         }
         Ok(id)
     }
 
-    fn fail(&mut self, code: &'static str, message: &str, emit: &mut Sink<'_>) -> io::Result<()> {
-        if self.failed.is_some() {
-            return Ok(());
-        }
-        self.failed = Some(Failure::new(code));
+    pub(crate) fn observed(&self) -> (Option<Usage>, Option<Failure>) {
+        let failed = self.failed.as_ref().map(|failed| match failed {
+            Failed::Provider(failure) | Failed::Cut(failure) => failure.clone(),
+        });
+        (self.usage, failed)
+    }
+
+    fn cut(&mut self, code: &'static str, message: &str, emit: &mut Sink<'_>) -> io::Result<()> {
+        self.fail(
+            Failed::Cut(Failure::new(code)),
+            json!({"code":"server_error","message":message}),
+            emit,
+        )
+    }
+
+    fn fail(&mut self, failed: Failed, error: Value, emit: &mut Sink<'_>) -> io::Result<()> {
+        self.failed = Some(failed);
         let mut events = Events {
             sequence: &mut self.sequence,
             emit,
         };
-        let Some((id, created, _)) = &self.identity else {
-            return events.send("error", json!({"code":code,"message":message,"param":null}));
+        // An error may precede every Chat chunk. The Responses lifecycle then needs an ID
+        // of its own, distinct from an upstream completion.
+        let local;
+        let (id, created) = if let Some((id, at, _)) = &self.identity {
+            (id, *at)
+        } else {
+            local = local_identity()?;
+            let (id, at) = &local;
+            events.start(response(
+                &self.echo,
+                id,
+                &self.model,
+                *at,
+                "in_progress",
+                json!([]),
+                Value::Null,
+            ))?;
+            (id, *at)
         };
         let mut body = response(
             &self.echo,
             id,
             &self.model,
-            *created,
+            created,
             "failed",
             self.output.snapshot("incomplete"),
             usage(self.usage),
         );
-        body["error"] = json!({"code":"server_error","message":message});
+        body["error"] = error;
         events.send("response.failed", json!({"response":body}))
     }
 
     pub(crate) fn broken(
         mut self,
         mut emit: impl FnMut(&[u8]) -> io::Result<()>,
-    ) -> io::Result<Option<Failure>> {
-        self.fail(
-            "incomplete_chat_stream",
-            "the model provider's Chat stream broke off",
-            &mut emit,
-        )?;
-        Ok(self.failed)
+    ) -> io::Result<End> {
+        if self.failed.is_none() {
+            self.cut(
+                "incomplete_chat_stream",
+                "the model provider's Chat stream broke off",
+                &mut emit,
+            )?;
+        }
+        let Some(failed) = self.failed else {
+            unreachable!("cut set the stream's ending")
+        };
+        Ok(failed.end(self.usage, true))
     }
 
     pub(crate) fn finish(
         mut self,
         mut emit: impl FnMut(&[u8]) -> io::Result<()>,
-    ) -> io::Result<Option<Failure>> {
-        if self.failed.is_some() {
-            return Ok(self.failed);
+    ) -> io::Result<End> {
+        if let Some(failed) = self.failed.take() {
+            return Ok(failed.end(self.usage, false));
         }
-        if !self.done || !self.line.is_empty() || self.data.is_some() {
+        if !self.done || self.frames.pending() {
             return self.broken(emit);
         }
         let Some(reason) = self.reason else {
@@ -288,8 +364,11 @@ impl Stream {
         };
         match self.output.close(status, id, &mut events) {
             Err(Error::Invalid(message)) => {
-                self.fail("invalid_chat_stream", message, &mut emit)?;
-                return Ok(self.failed);
+                self.cut("invalid_chat_stream", message, &mut emit)?;
+                let Some(failed) = self.failed else {
+                    unreachable!("cut set the stream's ending")
+                };
+                return Ok(failed.end(self.usage, false));
             }
             Err(Error::Unsent(error)) => return Err(error),
             Ok(()) => {}
@@ -307,8 +386,23 @@ impl Stream {
             body["incomplete_details"] = json!({"reason":reason});
         }
         events.send(&format!("response.{status}"), json!({"response":body}))?;
-        Ok(incomplete.then(|| Failure::new(reason)))
+        Ok(End::Forwarded {
+            usage: self.usage,
+            failed: incomplete.then(|| Failure::new(reason)),
+        })
     }
+}
+
+fn local_identity() -> io::Result<(String, u64)> {
+    let mut random = [0; 16];
+    File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    Ok((
+        format!("resp_pumpkin_{:032x}", u128::from_be_bytes(random)),
+        created.as_secs(),
+    ))
 }
 
 fn optional<'a>(value: &'a Value, key: &str) -> Result<Option<&'a str>, Error> {

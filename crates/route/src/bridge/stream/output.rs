@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use super::super::response::{call, message};
+use super::super::response::{call, call_item_id, message};
 use super::{Error, Events, optional};
 use crate::usage::MAX_HELD_BYTES;
 
@@ -27,6 +27,7 @@ enum Item {
         parts: Vec<Part>,
     },
     Call {
+        item_id: String,
         id: String,
         name: String,
         arguments: String,
@@ -103,11 +104,12 @@ impl Item {
                 message(id, status, Value::Array(parts))
             }
             Self::Call {
+                item_id,
                 id,
                 name,
                 arguments,
             } => call(
-                &format!("fc_{id}"),
+                item_id,
                 id,
                 name,
                 if empty { "" } else { arguments },
@@ -118,13 +120,13 @@ impl Item {
 
     fn call_delta(
         index: usize,
-        id: &str,
+        item_id: &str,
         arguments: &str,
         events: &mut Events<'_>,
     ) -> Result<(), Error> {
         events.send(
             "response.function_call_arguments.delta",
-            json!({"item_id":format!("fc_{id}"),"output_index":index,"delta":arguments}),
+            json!({"item_id":item_id,"output_index":index,"delta":arguments}),
         )?;
         Ok(())
     }
@@ -174,7 +176,7 @@ impl Output {
                 .as_array()
                 .ok_or(Error::Invalid("expected an array of Chat tool calls"))?
             {
-                self.tool(tool, events)?;
+                self.tool(tool, response_id, events)?;
             }
         }
         Ok(())
@@ -222,7 +224,12 @@ impl Output {
         Ok(())
     }
 
-    fn tool(&mut self, tool: &Value, events: &mut Events<'_>) -> Result<(), Error> {
+    fn tool(
+        &mut self,
+        tool: &Value,
+        response_id: &str,
+        events: &mut Events<'_>,
+    ) -> Result<(), Error> {
         let tool_index = tool["index"]
             .as_u64()
             .ok_or(Error::Invalid("Chat tool delta has no index"))?;
@@ -238,9 +245,11 @@ impl Output {
         let index = if let Some(&index) = self.calls.get(&tool_index) {
             index
         } else {
-            self.hold(size_of::<Item>())?;
             let index = self.items.len();
+            let item_id = call_item_id(response_id, index);
+            self.hold(size_of::<Item>() + item_id.len())?;
             self.items.push(Item::Call {
+                item_id,
                 id: String::new(),
                 name: String::new(),
                 arguments: String::new(),
@@ -249,6 +258,7 @@ impl Output {
             index
         };
         let Item::Call {
+            item_id,
             id,
             name,
             arguments,
@@ -266,7 +276,7 @@ impl Output {
         arguments.push_str(arguments_delta);
         if index < self.added {
             if !arguments_delta.is_empty() {
-                Item::call_delta(index, id, arguments_delta, events)?;
+                Item::call_delta(index, item_id, arguments_delta, events)?;
             }
         } else {
             self.publish(false, events)?;
@@ -281,6 +291,7 @@ impl Output {
                 id,
                 name,
                 arguments,
+                ..
             } = item
             {
                 if id.is_empty() || name.is_empty() {
@@ -310,8 +321,10 @@ impl Output {
                         p.kind.event("delta", id, index, part, &p.text, events)?;
                     }
                 }
-                Item::Call { id, arguments, .. } if !arguments.is_empty() => {
-                    Item::call_delta(index, id, arguments, events)?;
+                Item::Call {
+                    item_id, arguments, ..
+                } if !arguments.is_empty() => {
+                    Item::call_delta(index, item_id, arguments, events)?;
                 }
                 Item::Call { .. } => {}
             }
@@ -344,11 +357,12 @@ impl Output {
                     }
                 }
                 Item::Call {
-                    id,
+                    item_id,
                     name,
                     arguments,
+                    ..
                 } => {
-                    events.send("response.function_call_arguments.done",json!({"item_id":format!("fc_{id}"),"output_index":index,"name":name,"arguments":arguments}))?;
+                    events.send("response.function_call_arguments.done",json!({"item_id":item_id,"output_index":index,"name":name,"arguments":arguments}))?;
                 }
             }
             events.send(

@@ -71,7 +71,17 @@ Text parts and string function arguments pass through.
 All pending calls need results before the next turn. Declare ordinary function tools with an
 explicit boolean `strict`: Responses and Chat default an omitted value differently. Text,
 function calls, refusals and length-limited answers can be returned whole or as a stream. A
-stream requests token usage from Chat; a provider that omits it leaves spend unknown.
+stream requests token usage from Chat. Accounting uses the provider's reported input, output,
+cache reads and cache writes. A provider that omits usage leaves spend unknown. A client can
+replay the output items, with their IDs, in their original order even when text followed a call.
+An interrupted Chat stream delivers a failed Responses event and leaves a cut exchange in the
+run record. If the stream fails before the provider supplies a completion ID, the failed
+response gets a local ID starting with `resp_pumpkin_` and a local creation time.
+
+The bridge preserves `context_length_exceeded` in `response.failed` for Codex's context-window
+recovery. The default OpenAI Python 3.46.0 stream reader accepts that event. Explicit strict
+validation against that SDK's generated `ResponseFailedEvent` rejects the code because its
+nested error enum omits it.
 
 The bridge accepts `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`,
 `max_output_tokens`, `prompt_cache_key`, `metadata`, `reasoning.effort`, `text.verbosity` and

@@ -8,9 +8,9 @@ use ureq::http::Response;
 
 use super::{Answer, Client, Closed, Relayed, relay, request_id};
 use crate::Keep;
-use crate::bridge::stream::Stream;
+use crate::bridge::stream::{End, Stream};
 use crate::bridge::{Request, response};
-use crate::usage::{Failure, Scan, Usage};
+use crate::usage::{Failure, Usage};
 
 pub(super) fn answer(
     closed: &Closed<'_>,
@@ -49,16 +49,20 @@ pub(super) fn answer(
             &mut body,
             client.respond(status, headers, by),
             keep,
-            scan,
             report,
         );
     }
-    let relayed = relay(&mut body, &mut scan, keep, |_| Ok(()));
+    let relayed = relay(&mut body, keep, |bytes| {
+        if scan.feed(bytes) {
+            keep.first_output();
+        }
+        Ok(())
+    });
     let (usage, _, held) = scan.finish();
     let whole = matches!(relayed, Relayed::Whole);
     let converted = if whole && success {
-        held.and_then(|chat| {
-            response::whole(&request.echo, model.as_str(), upstream_name, &chat, usage)
+        held.as_ref().and_then(|chat| {
+            response::whole(&request.echo, model.as_str(), upstream_name, chat, usage)
         })
     } else {
         None
@@ -74,12 +78,10 @@ pub(super) fn answer(
             Some(Failure::new("invalid_chat_completion")),
         )
     } else {
-        (
-            status,
-            error("the model provider refused the Chat request"),
-            false,
-            None,
-        )
+        let mut error = response::provider_error(&held.unwrap_or_default()["error"]);
+        error["type"] = json!("upstream_error");
+        error["param"] = serde_json::Value::Null;
+        (status, json!({"error":error}), false, None)
     };
     let client = client.respond(client_status, headers, by);
     let sent = client.and_then(|mut client| -> io::Result<ModelResponse> {
@@ -99,7 +101,6 @@ fn streamed(
     body: &mut impl io::Read,
     client: io::Result<ModelResponse>,
     keep: &dyn Keep,
-    mut scan: Scan,
     report: impl FnOnce(bool, Option<Usage>, Option<Failure>),
 ) -> io::Result<()> {
     let mut client = match client {
@@ -110,24 +111,26 @@ fn streamed(
         }
     };
     let mut emit = |bytes: &[u8]| client.send(bytes);
-    let relayed = relay(body, &mut scan, keep, |bytes| stream.feed(bytes, &mut emit));
-    let (usage, failed, _) = scan.finish();
-    let (terminal, cut) = match relayed {
-        Relayed::Whole => (stream.finish(emit), false),
-        Relayed::BrokeOff => (stream.broken(emit), true),
+    let relayed = relay(body, keep, |bytes| {
+        stream.feed(bytes, &mut emit, || keep.first_output())
+    });
+    let (usage, failed) = stream.observed();
+    let terminal = match relayed {
+        Relayed::Whole => stream.finish(emit),
+        Relayed::BrokeOff => stream.broken(emit),
         Relayed::Unsent(error) => {
             report(true, usage, failed);
             return Err(error);
         }
     };
     match terminal {
-        Ok(converted) => {
-            report(cut, usage, failed.or(converted));
-            if cut { client.cut() } else { client.end() }
-        }
+        Ok(End::Cut { usage, failed }) => report(true, usage, Some(failed)),
+        Ok(End::Forwarded { usage, failed }) => report(false, usage, failed),
         Err(error) => {
             report(true, usage, failed);
-            Err(error)
+            return Err(error);
         }
     }
+    // The caller received a complete Responses terminal event, even for an upstream cut.
+    client.end()
 }

@@ -419,7 +419,12 @@ impl Closed<'_> {
     pub(crate) fn scan(&self) -> usage::Scan {
         let rules = self.upstream_rules();
         let output = read::dialect(rules.api).output;
-        usage::Scan::new(rules.usage, rules.failure_code, output)
+        usage::Scan::new(
+            rules.usage,
+            rules.failure_code,
+            output,
+            rules.api == Api::Chat,
+        )
     }
 
     /// `answered`, the model that a response says answered the request, as the request named it,

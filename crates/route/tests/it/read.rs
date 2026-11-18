@@ -41,7 +41,10 @@ fn check(cases: &[(&str, Api, &[u8])], expect: &Expect) {
             );
         }
         if let Some(at) = first_output {
-            assert_eq!(response[at - 1], b'\n', "{name}: first output at {at}");
+            assert!(
+                matches!(response[at - 1], b'\r' | b'\n'),
+                "{name}: first output at {at}"
+            );
         }
         writeln!(
             out,
@@ -187,11 +190,11 @@ fn answers() {
 
             failed: 2 events, first output by byte None of 587, stop Some("failed"), whole: true
 
-            of Chat Completions: 5 events, first output by byte Some(203) of 1206, stop Some("stop"), whole: true
+            of Chat Completions: 5 events, first output by byte Some(204) of 1206, stop Some("stop"), whole: true
               Reasoning { text: "The user is" }
               Assistant { text: "pumpkin" }
 
-            torn in its text: 3 events, first output by byte Some(203) of 787, stop None, whole: false
+            torn in its text: 3 events, first output by byte Some(204) of 787, stop None, whole: false
               Reasoning { text: "The user is" }
 
             no stream: 0 events, first output by byte None of 798, stop Some("tool_calls"), whole: true
@@ -230,6 +233,8 @@ fn answers_of_forms_no_record_keeps() {
                 Api::Responses,
                 br#"{"output":[{"id":"ws_1","type":"web_search_call"}],"status":"completed"}"#,
             ),
+            ("whole refusal", Api::Chat, br#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"Declined."},"finish_reason":"stop"}]}"#),
+            ("streamed refusal", Api::Chat, b"id: 1\ndata: {\"choices\":[\ndata: {\"index\":0,\"delta\":{\"refusal\":\"Declined.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
             ("of tool calls", Api::Chat, CHAT_CALLS.as_bytes()),
             ("of a custom call", Api::Chat, CHAT_CUSTOM.as_bytes()),
             (
@@ -267,17 +272,23 @@ fn answers_of_forms_no_record_keeps() {
             of an item of no known form: 0 events, first output by byte None of 72, stop Some("completed"), whole: true
               Other { json: Object {"id": String("ws_1"), "type": String("web_search_call")} }
 
-            of tool calls: 5 events, first output by byte Some(218) of 563, stop Some("tool_calls"), whole: true
+            whole refusal: 0 events, first output by byte None of 116, stop Some("stop"), whole: true
+              Assistant { text: "Declined." }
+
+            streamed refusal: 1 events, first output by byte Some(101) of 115, stop Some("stop"), whole: true
+              Assistant { text: "Declined." }
+
+            of tool calls: 5 events, first output by byte Some(219) of 563, stop Some("tool_calls"), whole: true
               Call { id: Some("call_1"), name: "ls", arguments: "{}" }
               Call { id: Some("call_2"), name: "cat", arguments: "{\"path\":\"a\"}" }
 
-            of a custom call: 4 events, first output by byte Some(226) of 412, stop Some("tool_calls"), whole: true
+            of a custom call: 4 events, first output by byte Some(227) of 412, stop Some("tool_calls"), whole: true
               Call { id: Some("call_1"), name: "apply_patch", arguments: "*** Begin Patch" }
 
             of a custom call, no stream: 0 events, first output by byte None of 205, stop Some("tool_calls"), whole: true
               Call { id: Some("call_1"), name: "apply_patch", arguments: "*** Begin Patch" }
 
-            of reasoning in both fields: 1 events, first output by byte Some(105) of 106, stop Some("stop"), whole: true
+            of reasoning in both fields: 1 events, first output by byte Some(106) of 106, stop Some("stop"), whole: false
               Reasoning { text: "a" }
 
             an error: 0 events, first output by byte None of 48, stop None, whole: true
