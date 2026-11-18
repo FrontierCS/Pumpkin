@@ -225,7 +225,7 @@ fn listed(
     let now = crate::unix_now();
     let runs = home.join(crate::job::runs());
     let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
-    unstarted(home, &runs, (prefixes, since, now), &mut listing)?;
+    unstarted(home, prefixes, since, now, &mut listing)?;
     let body = serde_json::to_vec(&listing).map_err(|error| format!("the listing: {error}"))?;
     let answer = Answer::Listed {
         body_bytes: body.len() as u64,
@@ -235,13 +235,14 @@ fn listed(
 }
 
 /// Adds to `listing` each job in `home`'s `JOBS` whose id starts with one of `prefixes`, or each
-/// with none, whose run has no directory in `runs`: `waiting` for a build slot, `building`, or
-/// `unstarted` once its unit has ended, but only named as older if its log is from before
-/// `since`.
+/// with none, that `listing` doesn't hold as a run or as older: `waiting` for a build slot,
+/// `building`, or `unstarted` once its unit has ended, but only named as older if its log is
+/// from before `since`.
 fn unstarted(
     home: &Path,
-    runs: &Path,
-    (prefixes, since, now): (&[String], Option<UnixTime>, UnixTime),
+    prefixes: &[String],
+    since: Option<UnixTime>,
+    now: UnixTime,
     listing: &mut Listing,
 ) -> Result<(), String> {
     let jobs = home.join(JOBS);
@@ -257,7 +258,9 @@ fn unstarted(
         let Some(id) = name.to_str().filter(|id| !id.starts_with('.')) else {
             continue;
         };
-        if !crate::picked(prefixes, id) || exists(&runs.join(id))? {
+        // A run whose directory is made, or whose record is written, after `listed_in` read the
+        // runs is not in `listing` yet, and its job is its row, so that no job drops out.
+        if !crate::picked(prefixes, id) || listing.runs.contains_key(id) {
             continue;
         }
         let asked = runtime::minted(id);
