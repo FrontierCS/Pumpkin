@@ -317,7 +317,7 @@ fn executed_ir<H: Shown>(
     also: &[Also],
 ) -> String {
     let at = interruption(also);
-    let runs = Runs::new(name);
+    let runs = Runs::new();
     let stand_in = model_routed(ir).then(StandIn::start);
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
@@ -3230,7 +3230,7 @@ fn nanos(value: &Value) -> Option<u64> {
 // before it publishes, and a third is then prepared.
 #[test]
 fn holds_until_its_end() {
-    let runs = Runs::new("holds-until-its-end");
+    let runs = Runs::new();
     let sim = Sim::new().with_cpus(16);
     let ir: ir::Workflow = serde_json::from_value(workflow(&["exit", "0"])).unwrap();
     let unpriced = BTreeMap::new();

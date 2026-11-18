@@ -218,12 +218,14 @@ fn check(cases: &[Case], expect: &Expect) {
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
 fn exchanged(cases: &[Case]) -> String {
-    // Kept if the test fails.
+    // Kept if the test fails, which shows where. The prefix stays short and fixed: a socket's
+    // path under this directory holds 107 bytes at most.
     let dir = tempfile::Builder::new()
-        .prefix(&format!("route-{}-", thread::current().name().unwrap()))
+        .prefix("route-")
         .tempdir()
         .unwrap()
         .keep();
+    eprintln!("the scratch directory is {}", dir.display());
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let made: Vec<Result<(Route, Upstream), String>> = (0..)

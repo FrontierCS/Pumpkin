@@ -30,17 +30,19 @@ use test_support::{WORKFLOW, files};
 
 use crate::sim::Sim;
 
-/// The runs directory of test `name`. Dropping it removes it, unless the test failed, when it
-/// shows where the records are.
+/// A test's runs directory. Dropping it removes it, unless the test failed, when it shows where
+/// the records are.
 pub(crate) struct Runs {
     pub(crate) dir: PathBuf,
     scratch: TempDir,
 }
 
 impl Runs {
-    pub(crate) fn new(name: &str) -> Self {
+    pub(crate) fn new() -> Self {
+        // The prefix stays short and fixed: a socket's path under this directory holds 107 bytes
+        // at most.
         let scratch = tempfile::Builder::new()
-            .prefix(&format!("runtime-{name}-"))
+            .prefix("runtime-")
             .tempdir()
             .unwrap();
         let dir = scratch.path().to_owned();
@@ -72,7 +74,7 @@ fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
 ) {
-    let runs = Runs::new("prepare");
+    let runs = Runs::new();
     let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
     let unpriced = BTreeMap::new();
     let sources = BTreeMap::from([(ir::Label::parse("//task.star").unwrap(), String::new())]);
