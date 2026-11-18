@@ -52,7 +52,8 @@ pub(crate) enum Ask {
         prefixes: Vec<String>,
     },
     /// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
-    /// ([`crate::view`]), whose body may come deflated if `deflate`.
+    /// ([`crate::view`]), whose body may come deflated if `deflate`. What fails, such as a run
+    /// that isn't there, is answered with the view's status for it, never refused.
     View {
         target: String,
         deflate: bool,
@@ -109,7 +110,8 @@ enum Head {
     },
 }
 
-/// The controller's own health.
+/// What the controller's machine reads of itself: how long it has been up, its disk and its boot.
+/// It judges nothing: it reads the same whether or not the controller can run a job.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Health {
     pub(crate) up_seconds: u64,
