@@ -6,7 +6,8 @@
 //! it starts
 //! (<https://github.com/zed-industries/zed/blob/e231594b6b8818ea8d668ee2eb73e1fb09300654/crates/remote_server/src/server.rs#L1429-L1449>).
 //! Then it answers each request until its input ends, brings no request for [`IDLE`], or breaks
-//! the protocol, which it refuses and exits 1.
+//! the protocol, which it refuses and exits 1. It marks its install as used again as each request
+//! arrives, so that a `serve` kept for days by an open page keeps its install.
 
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
@@ -57,6 +58,7 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     while arrives(&input)? {
         let broken = match frame::read::<Ask>(&mut input) {
             Ok(Some((ask, body))) if body.is_empty() => {
+                mark_install_used();
                 let (answer, body) = answered(&home, ask);
                 link::send(&mut output, &answer, &body).context(written)?;
                 continue;
@@ -118,11 +120,32 @@ fn prune(installs: &Path) {
     }
 }
 
+/// Marks this `serve`'s install as used now, saying, but going on past, what it can't do.
+fn mark_install_used() {
+    let exe = match crate::workspace::exe("expected it to mark its install as used") {
+        Ok(exe) => exe,
+        Err(error) => return say(error),
+    };
+    let Some(install) = exe.parent() else {
+        return say(format_args!(
+            "{} has no directory to mark as used",
+            exe.display()
+        ));
+    };
+    if let Err(error) = mark_used(install, SystemTime::now()) {
+        say(error);
+    }
+}
+
+fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
+    let touched = File::open(install).and_then(|dir| dir.set_modified(now));
+    touched.context(install.display())
+}
+
 fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), String> {
     let path = entry.path();
     if Some(entry.file_name().as_os_str()) == own {
-        let touched = File::open(&path).and_then(|dir| dir.set_modified(now));
-        return touched.context(path.display());
+        return mark_used(&path, now);
     }
     let modified = entry.metadata().and_then(|metadata| metadata.modified());
     let modified = modified.context(path.display())?;
