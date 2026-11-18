@@ -484,11 +484,6 @@ fn job_refusals() {
             parameter(),
             format!("{UPSTREAMS}\n[docker]\ncontext = \"elsewhere\"\n"),
         ),
-        (
-            "a key_file that names a path",
-            parameter(),
-            UPSTREAMS.replace("\"gateway.key\"", "\"/etc/shadow\""),
-        ),
     ];
     for (case, parameter, sent) in cases {
         write_parameter(&scratch, &parameter);
@@ -549,10 +544,6 @@ fn job_refusals() {
             6 | [docker]
               |  ^^^^^^
             unknown field `docker`, expected `upstreams` or `modal`
-            a key_file that names a path:
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(1)
-            pumpkin: what the run sent gives upstream `gateway` no `key_file` that names a file it sent: send each key as a file of its own
             $ PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
@@ -1413,18 +1404,28 @@ fn target_refusals() {
         fs::read_to_string(&config).unwrap()
     );
     scratch.write("both.toml", &both);
-    let mut refused = on_client(
-        &scratch,
-        &client,
-        &["run", "stand-in/task.star", "--config", "../both.toml"],
+    // A class that Modal's settings refuse, so that it is refused before anything is sent.
+    let misnamed = SENT_MODAL.replace("[modal]", "[controller.modal]");
+    let misnamed = format!(
+        "{}\n{}",
+        fs::read_to_string(&config).unwrap(),
+        misnamed.replace("cpu_millis", "cpus_millis")
     );
-    let invoked = invocation(&refused);
-    lines.push(report(
-        invoked,
-        &refused.output().unwrap(),
-        &scratch.0,
-        false,
-    ));
+    scratch.write("misnamed.toml", &misnamed);
+    for named in ["../both.toml", "../misnamed.toml"] {
+        let mut refused = on_client(
+            &scratch,
+            &client,
+            &["run", "stand-in/task.star", "--config", named],
+        );
+        let invoked = invocation(&refused);
+        lines.push(report(
+            invoked,
+            &refused.output().unwrap(),
+            &scratch.0,
+            false,
+        ));
+    }
     let mut runs = on_client(
         &scratch,
         &client,
@@ -1483,6 +1484,13 @@ fn target_refusals() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../both.toml
             exit status: Some(1)
             pumpkin: ../both.toml: it names `[controller]` beside `[providers]`: a machine's runs go either to its controller or to its own providers, so keep `[controller]`, beside `[upstreams]`, or remove it
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../misnamed.toml
+            exit status: Some(1)
+            pumpkin: ../misnamed.toml: TOML parse error at line 12, column 78
+               |
+            12 | classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpus_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
+               |                                                                              ^^^^^^^^^^^
+            unknown field `cpus_millis`, expected one of `gpu`, `gpu_model`, `cpu_millis`, `memory_bytes`, `startup_seconds`, `usd_per_hour`
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
             exit status: Some(1)
             pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out

@@ -41,7 +41,7 @@ use stdx::process::Environment;
 use crate::controller::bounded;
 use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
-use crate::{cli, publish, say, star};
+use crate::{cli, config, publish, say, star};
 
 pub(crate) const JOBS: &str = "jobs";
 
@@ -405,26 +405,13 @@ struct Parameter {
     value: String,
 }
 
-/// What the client sent of its configuration (`crate::config::Client::sent`): its `[upstreams]`
-/// tables, each `key_file` a file of the job's directory in tmpfs, and its Modal provider's
-/// settings, if it names one.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Sent {
-    #[serde(default)]
-    upstreams: toml::Table,
-    #[serde(default)]
-    modal: Option<toml::Table>,
-}
-
 /// A job's configuration, as TOML: the controller's settings, which `cli` reads from the SSM
 /// parameter `parameter`, with `[gateway] private` at the controller's private IPv4 address, port
 /// 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from` at the
 /// controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any; and
-/// the client's `[upstreams]`, each `key_file` a file in `sent`.
+/// the client's `[upstreams]`, each `key_file` its file in `sent`.
 ///
-/// Fails if the settings set `gateway` or `upstreams`, which each job sets, or if the client sent
-/// a key file that isn't a file of `sent`.
+/// Fails if the settings set `gateway` or `upstreams`, which each job sets.
 fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     let got: GotParameter =
         cli.json(&["ssm", "get-parameter", "--name", parameter], Bound::Call)?;
@@ -447,9 +434,9 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("{}: {error}", config.display())),
     };
-    let Sent {
+    let config::Sent {
         mut upstreams,
-        mut modal,
+        modal,
     } = toml::from_str(&text).map_err(|error| {
         let error = error.to_string();
         format!(
@@ -457,6 +444,11 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
             error.trim_end()
         )
     })?;
+    let written = |error: toml::ser::Error| format!("writing the job's configuration: {error}");
+    let mut modal = modal
+        .map(toml::Table::try_from)
+        .transpose()
+        .map_err(written)?;
     let modal_config = sent.join(SENT_MODAL);
     let modal_config = modal_config
         .try_exists()
@@ -469,20 +461,10 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
         }
     }
     take_modal(&mut tables, modal.as_ref(), &named)?;
-    for (name, upstream) in &mut upstreams {
-        let file = (upstream.get("key_file").and_then(toml::Value::as_str)).map(PathBuf::from);
-        let file = file.filter(|file| file.file_name() == Some(file.as_os_str()));
-        let (Some(file), Some(upstream)) = (file, upstream.as_table_mut()) else {
-            return Err(format!(
-                "what the run sent gives upstream `{name}` no `key_file` that names a file it \
-                 sent: send each key as a file of its own"
-            ));
-        };
-        let file = sent.join(file).to_string_lossy().into_owned();
-        upstream.insert("key_file".to_owned(), file.into());
-    }
-    tables.insert("upstreams".to_owned(), upstreams.into());
-    toml::to_string(&tables).map_err(|error| format!("writing the job's configuration: {error}"))
+    upstreams.keys_in(sent);
+    let upstreams = toml::Value::try_from(upstreams).map_err(written)?;
+    tables.insert("upstreams".to_owned(), upstreams);
+    toml::to_string(&tables).map_err(written)
 }
 
 /// Makes each Modal provider of the controller's settings, `tables`, the one that the client sent,

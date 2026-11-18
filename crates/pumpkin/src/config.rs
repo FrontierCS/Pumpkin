@@ -61,14 +61,31 @@ pub(crate) struct Controller {
 }
 
 /// The Modal provider of a client's jobs. A job completes it with `images`, which the
-/// controller's settings give, and `dials_from` ([`crate::job`]), and so checks `profile` and
-/// `classes` there, where they are the provider's own settings.
+/// controller's settings give, and `dials_from` ([`crate::job`]).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientModal {
     config: Option<PathBuf>,
     profile: String,
-    classes: toml::Table,
+    classes: BTreeMap<Name, modal::SandboxClass>,
+}
+
+/// What a client sends of its configuration with each job, which the job reads: its upstreams,
+/// each with its key in a file of its own beside this, named by [`key_file`], and its Modal
+/// provider's `profile` and `classes`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Sent {
+    #[serde(default)]
+    pub(crate) upstreams: Upstreams,
+    pub(crate) modal: Option<SentModal>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SentModal {
+    profile: String,
+    classes: BTreeMap<Name, modal::SandboxClass>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +215,13 @@ impl Upstreams {
         let models = self.0.values().flat_map(|upstream| &upstream.models);
         let priced = models.filter_map(|model| Some((model.name.clone(), model.usd_per_mtok?)));
         priced.collect()
+    }
+
+    /// Points each upstream's `key_file` at its key in `dir`, where a client sends it with a job.
+    pub(crate) fn keys_in(&mut self, dir: &Path) {
+        for (name, upstream) in &mut self.0 {
+            upstream.key_file = dir.join(key_file(name));
+        }
     }
 
     fn serves(&self, entry: &ApiRoute) -> Result<Serving, String> {
@@ -412,34 +436,29 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
 }
 
 impl Client {
-    /// The configuration that a job reads, as TOML, and the key files to send with it: each with
-    /// the name that the text gives it, and the path of its source.
-    pub(crate) fn sent(&self) -> Result<(String, Vec<(String, PathBuf)>), String> {
+    /// What a job is sent of this configuration, and the key files to send with it: each the name
+    /// of its file there and the path of its source here.
+    pub(crate) fn sent(&self) -> (Sent, Vec<(String, PathBuf)>) {
         let mut upstreams = self.upstreams.clone();
         let mut keys = Vec::new();
         for (name, upstream) in &mut upstreams.0 {
-            let file = format!("{name}.key");
+            let file = key_file(name);
+            // A job of an earlier build reads the key from the file that `key_file` names.
             let source = std::mem::replace(&mut upstream.key_file, PathBuf::from(&file));
             keys.push((file, source));
         }
-        let upstreams = toml::Value::try_from(upstreams)
-            .map_err(|error| format!("writing what the job is sent: {error}"))?;
-        let mut sent = toml::Table::from_iter([("upstreams".to_owned(), upstreams)]);
-        if let Some(ClientModal {
-            config: _,
-            profile,
-            classes,
-        }) = &self.controller.modal
-        {
-            let modal = toml::Table::from_iter([
-                ("profile".to_owned(), profile.clone().into()),
-                ("classes".to_owned(), classes.clone().into()),
-            ]);
-            sent.insert("modal".to_owned(), modal.into());
-        }
-        let text = toml::to_string(&sent)
-            .map_err(|error| format!("writing what the job is sent: {error}"))?;
-        Ok((text, keys))
+        let modal = (self.controller.modal.as_ref()).map(|modal| {
+            let ClientModal {
+                config: _,
+                profile,
+                classes,
+            } = modal;
+            SentModal {
+                profile: profile.clone(),
+                classes: classes.clone(),
+            }
+        });
+        (Sent { upstreams, modal }, keys)
     }
 
     /// The contents of Modal's configuration file, or `None` if `[controller.modal]` is absent or
@@ -468,6 +487,11 @@ impl Client {
         })?;
         Ok(Some(read))
     }
+}
+
+/// The name of the file that a job is sent the key of upstream `name` in.
+fn key_file(name: &Name) -> String {
+    format!("{name}.key")
 }
 
 fn unique(upstreams: &Upstreams) -> Result<(), String> {
