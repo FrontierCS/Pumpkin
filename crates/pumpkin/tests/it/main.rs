@@ -1167,11 +1167,16 @@ fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
     // its workspace by the path it runs from, this one.
     fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
-    // The formatter that `cargo xtask ci` names, which `pumpkin fmt` and `pumpkin check` run from
-    // beside the `pumpkin` that runs.
-    if let Some(buildifier) = std::env::var_os("PUMPKIN_BUILDIFIER") {
-        fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
-    }
+    // The pinned formatter, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin`
+    // that runs, by the link that `.cargo/config.toml` names.
+    let link = env!("PUMPKIN_BUILDIFIER");
+    let buildifier = fs::canonicalize(link).unwrap_or_else(|error| {
+        panic!(
+            "{link} doesn't lead to the formatter ({error}): make it with `cargo xtask \
+             install-tools`"
+        )
+    });
+    fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
     dir.join("pumpkin")
 }
 
