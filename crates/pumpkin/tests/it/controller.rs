@@ -1989,7 +1989,6 @@ fn send_carries_on() {
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 3.0 MiB
-            pumpkin: reading the upload: unexpected end of file
             pumpkin: controller `alice` didn't answer: ended during the upload: starting the job again now, attempt 2 of 7
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.0 MiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
@@ -3150,6 +3149,56 @@ fn ls_refusals() {
             $ pumpkin ls
             exit status: Some(1)
             pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs: Not a directory (os error 20): expected the directory that runs are recorded in, as `--runs` names it"#]],
+    );
+}
+
+#[test]
+fn repair_uses_the_location_found_while_it_waited() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let dir = scratch.0.join(SHARED);
+    let lock = File::open(dir.join("lock")).unwrap();
+    lock.lock().unwrap();
+    let _ = noted(&scratch);
+    let _ = calls(&scratch);
+    for call in 1..=2 {
+        scratch.write(
+            &format!("bin/before-{call}"),
+            &format!("echo 0 > '{}/bin/cut-out'\n", scratch.0.display()),
+        );
+    }
+    let mut child = on_client(&scratch, &client, &["ls"])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("waiting for another command") {
+        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
+    }
+    // The repair ahead of this one found the same instance and atomically replaced its cache.
+    fs::copy(dir.join("found"), dir.join("found.new")).unwrap();
+    fs::rename(dir.join("found.new"), dir.join("found")).unwrap();
+    drop(lock);
+    let output = ended(child, stderr, said);
+    assert!(output.status.success(), "{output:?}");
+    let attempts = fs::read_to_string(scratch.0.join("bin/scripts"))
+        .unwrap()
+        .lines()
+        .count();
+    check(
+        &scratch,
+        &format!(
+            "SSH attempts: {attempts}\nAWS calls: {}",
+            noted(&scratch).len()
+        ),
+        &[],
+        &expect![[r#"
+            SSH attempts: 3
+            AWS calls: 0"#]],
     );
 }
 

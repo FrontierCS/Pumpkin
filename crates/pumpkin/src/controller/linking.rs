@@ -125,8 +125,7 @@ impl Linked {
     }
 
     fn connect(reached: &Reached, build: &Build, at: &Located) -> Result<Option<Self>, Unlinked> {
-        let diagnostics = tempfile::NamedTempFile::new()
-            .context("creating a temporary file for SSH diagnostics failed")?;
+        let diagnostics = reached.location.diagnostics()?;
         let mut ssh = Reached::ssh_command();
         ssh.arg("-E").arg(diagnostics.path());
         reached.remote(&mut ssh, at, &link::command(&build.key));
@@ -147,13 +146,20 @@ impl Reached {
                 Err(Unlinked::Failed(error)) => return Err(error),
                 Err(Unlinked::Cut { said, denied }) => (said, denied),
             };
-            if denied && !enrolled || !repaired && attempt > 0 {
+            if attempt + 1 == OPENINGS || denied && enrolled {
+                let hosts = self.kept.join("known_hosts");
+                let error = format!(
+                    "{said}: check SSH access to the controller and the host key pinned for `{}` in {}, then run the command again",
+                    self.alias,
+                    hosts.display()
+                );
+                self.location.failed(&self.name, &found, &error)?;
+                return Err(error);
+            }
+            if denied || !repaired && attempt > 0 {
                 found = self.repair(&found, denied, &said)?;
                 repaired = true;
                 enrolled |= denied;
-            } else if denied || attempt + 1 == OPENINGS {
-                self.location.failed(&self.name, &found, &said)?;
-                return Err(said);
             }
             let pause = Duration::from_secs(((1_u64 << attempt) - 1).min(30));
             say(format_args!(
@@ -171,9 +177,8 @@ impl Reached {
         self.connected(build, self.found()?)
     }
 
-    /// What `ask` makes of a link to the `serve` of `build` there, opened as [`Self::opening`] opens
-    /// one, and asked again over another, after each of `AGAIN`'s pauses, while one is cut before
-    /// `ask` returns; `what` says what is asked, as in "listing the runs".
+    /// Keeps a link to this build across requests, asking again after a cut. `what` names the
+    /// operation, as in "listing the runs".
     pub(super) fn asked<T>(
         &mut self,
         build: &Build,
@@ -206,6 +211,8 @@ impl Reached {
             };
             drop(linked);
             let Some(pause) = AGAIN.get(attempt) else {
+                let error =
+                    format!("{error}: run the command again when the controller is reachable");
                 self.location.failed(&self.name, &found, &error)?;
                 return Err(error);
             };
@@ -283,8 +290,7 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
             .collect::<Result<Vec<_>, String>>()?;
         manifest::archive(&read)
     };
-    let diagnostics = tempfile::NamedTempFile::new()
-        .context("creating a temporary file for SSH diagnostics failed")?;
+    let diagnostics = reached.location.diagnostics()?;
     let mut ssh = Reached::ssh_command();
     ssh.arg("-E").arg(diagnostics.path());
     reached.remote(&mut ssh, at, &link::installing(&build.hashed.manifest));

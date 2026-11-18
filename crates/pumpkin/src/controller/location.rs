@@ -38,6 +38,13 @@ impl Location {
         Ok(Self { dir })
     }
 
+    pub(super) fn diagnostics(&self) -> Result<tempfile::NamedTempFile, String> {
+        tempfile::Builder::new()
+            .prefix(".ssh-")
+            .tempfile_in(&self.dir)
+            .context(self.dir.display())
+    }
+
     pub(super) fn found(&self) -> Result<Option<Found>, String> {
         let path = self.dir.join("found");
         let Some(file) = open(&path)? else {
