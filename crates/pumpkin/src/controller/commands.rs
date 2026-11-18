@@ -68,14 +68,14 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
         "run {} goes to controller `{name}`",
         id.as_str()
     ));
-    let reached = Reached::reach(&client.controller)?;
-    let build = send(&reached, client, &id, JobKind::Run, &tree, &args)?;
+    let mut reached = Reached::reach(&client.controller)?;
+    let build = send(&mut reached, client, &id, JobKind::Run, &tree, &args)?;
     let id = id.as_str();
     say(format_args!(
         "run {id} is a job on controller `{name}`, which builds it, then runs it"
     ));
     if let Some(printed) = wait {
-        return follow(&reached, &build, id, config.as_deref(), printed);
+        return follow(&mut reached, &build, id, config.as_deref(), printed);
     }
     crate::advise("follow it", &next::of_run("wait", None, id));
     crate::advise("stop it", &next::of_run("cancel", None, id));
@@ -92,15 +92,15 @@ pub(crate) fn wait(
     run: &str,
     printed: Printed,
 ) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
-    let (build, id) = job_id(&reached, run)?;
-    follow(&reached, &build, &id, None, printed)
+    let mut reached = Reached::reach(&client.controller)?;
+    let (build, id) = job_id(&mut reached, run)?;
+    follow(&mut reached, &build, &id, None, printed)
 }
 
 /// The id of the job on the controller that `run` names, which may be a prefix of it.
-fn job_id(reached: &Reached, run: &str) -> Result<(Build, String), String> {
+fn job_id(reached: &mut Reached, run: &str) -> Result<(Build, String), String> {
     let build = Build::of_this("expected to send it to the controller, to find the run there")?;
-    let ids = reached.asked(&build, "finding the run", |linked| {
+    let ids = reached.asked(&build, "finding the run", |reached, linked| {
         linked.ask(reached, JobsRequest {})
     })?;
     let name = &reached.name;
@@ -110,14 +110,15 @@ fn job_id(reached: &Reached, run: &str) -> Result<(Build, String), String> {
 }
 
 fn follow(
-    reached: &Reached,
+    reached: &mut Reached,
     build: &Build,
     id: &str,
     config: Option<&str>,
     printed: Printed,
 ) -> Result<ExitCode, String> {
+    let finished = follow::job(reached, build, id)?;
     let name = &reached.name;
-    match follow::job(reached, build, id)? {
+    match finished {
         Finished::Ran { writer } => said_here(reached, build, id, writer, config, printed),
         Finished::Unstarted => Err(format!(
             "run {id}'s job on controller `{name}` ended before the run started, as its log \
@@ -135,7 +136,7 @@ fn follow(
 /// does, after printing what `printed` asks for, ending with the command that runs it again from
 /// here.
 fn said_here(
-    reached: &Reached,
+    reached: &mut Reached,
     build: &Build,
     id: &str,
     writer: Option<String>,
@@ -206,10 +207,10 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
     } = flags;
     let id = runtime::new_id(SystemTime::now())?;
     let tree = tree(&entry, &args)?;
-    let reached = Reached::reach(&client.controller)?;
-    let build = send(&reached, client, &id, JobKind::Build, &tree, &args)?;
-    let name = &reached.name;
-    match follow::job(&reached, &build, id.as_str())? {
+    let mut reached = Reached::reach(&client.controller)?;
+    let build = send(&mut reached, client, &id, JobKind::Build, &tree, &args)?;
+    let name = &client.controller.name;
+    match follow::job(&mut reached, &build, id.as_str())? {
         Finished::Built(ir) => {
             crate::print(&ir).context("printing the IR failed")?;
             Ok(ExitCode::SUCCESS)
@@ -226,18 +227,18 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
 
 /// Stops the run that `run` names on the controller and copies its record once it has ended.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
-    let (build, id) = job_id(&reached, run)?;
+    let mut reached = Reached::reach(&client.controller)?;
+    let (build, id) = job_id(&mut reached, run)?;
     let modal = client.modal_file()?;
     let request = CancelRequest {
         id: id.clone(),
         force,
         modal_bytes: modal.as_ref().map(Vec::len),
     };
-    let name = &reached.name;
-    let answer = reached.asked(&build, "cancelling the run", |linked| {
+    let name = &client.controller.name;
+    let answer = reached.asked(&build, "cancelling the run", |reached, linked| {
         linked.ask_with_body(
-            &reached,
+            reached,
             request.clone(),
             modal.as_deref().unwrap_or_default(),
         )
@@ -259,7 +260,7 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
             ));
         }
         CancelAnswer::Ended | CancelAnswer::EndedUnreached => {
-            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
+            said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
             if matches!(answer, CancelAnswer::EndedUnreached) {
                 crate::advise(
                     "remove what it left once its provider can be reached",
@@ -274,14 +275,14 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
 
 /// Removes on the controller what runs left, as `pumpkin reap` does there.
 pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
+    let mut reached = Reached::reach(&client.controller)?;
     let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
     let modal = client.modal_file()?;
     let request = crate::link::ReapRequest {
         modal_bytes: modal.as_ref().map(Vec::len),
     };
-    let report = reached.asked(&build, "reaping the runs", |linked| {
-        linked.ask_with_body(&reached, request, modal.as_deref().unwrap_or_default())
+    let report = reached.asked(&build, "reaping the runs", |reached, linked| {
+        linked.ask_with_body(reached, request, modal.as_deref().unwrap_or_default())
     })??;
     report.report(None, crate::Reaper::Controller)
 }

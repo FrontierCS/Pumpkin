@@ -621,8 +621,7 @@ pub(crate) struct Link {
 
 impl Link {
     /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
-    /// [`Hello::Absent`]. A session that `ssh` goes over is the caller's to hold until the link is
-    /// dropped.
+    /// [`Hello::Absent`].
     pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
         let child = ssh.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
         let mut child = (child.context("running `ssh` failed")).map_err(Unanswered::Failed)?;

@@ -1,15 +1,14 @@
-//! A link ([`crate::link`]) to the controller's `serve` of this build, over a session of a shared
-//! master: the `serve` is uploaded there first if it has none, and a link that is cut is opened
-//! again, by [`Reached::asked`] or by the caller.
+//! One SSH connection to this build's `serve`. A command keeps it for all its requests.
+//! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
-use std::collections::BTreeSet;
-use std::fs;
-use std::num::NonZeroU32;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::time::Duration;
+use std::{fs, thread};
 
 use schema::ir::Sha256Digest;
-use stdx::Context as _;
+use stdx::{Context as _, Deadline};
 
-use super::{OPENINGS, Reached, SHORT_TIMEOUT, Session, Slot};
+use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
@@ -65,13 +64,8 @@ impl Build {
     }
 }
 
-/// Why no answer came over a link.
 pub(super) enum Unlinked {
-    /// The link, over connection `master`, ended before what was asked for was whole, and the
-    /// connection no longer answers, as when it is cut: asking again, over another, may answer.
-    /// `said` is how the frames ended, in Pumpkin's words.
-    Cut { master: usize, said: String },
-    /// Asking again would fail again: why, with what was being done.
+    Cut { said: String, denied: bool },
     Failed(String),
 }
 
@@ -81,27 +75,19 @@ impl From<String> for Unlinked {
     }
 }
 
-/// A link to the controller's `serve`, held, with its session, until it is dropped.
 pub(super) struct Linked {
-    // Before the slot, so that the link's `ssh` ends before its session is given up.
     link: Link,
-    slot: Slot,
+    // OpenSSH puts only its own diagnostics here. The remote command's stderr stays the user's.
+    diagnostics: tempfile::NamedTempFile,
 }
 
 impl Linked {
-    /// Opens a link to the `serve` of `build` there, uploading `build`'s files first if the
-    /// controller has none; an opening of a connection that doesn't get through is made up to
-    /// `openings` times in all.
-    pub(super) fn open(
-        reached: &Reached,
-        build: &Build,
-        openings: NonZeroU32,
-    ) -> Result<Self, Unlinked> {
-        if let Some(linked) = Self::connect(reached, build, openings)? {
+    pub(super) fn open(reached: &Reached, build: &Build, at: &Located) -> Result<Self, Unlinked> {
+        if let Some(linked) = Self::connect(reached, build, at)? {
             return Ok(linked);
         }
-        install(reached, build)?;
-        Self::connect(reached, build, openings)?.ok_or_else(|| {
+        install(reached, build, at)?;
+        Self::connect(reached, build, at)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
@@ -111,7 +97,6 @@ impl Linked {
             ))
         })
     }
-
     /// The answer to `request`, or the message of its refusal: `reached` is the controller that
     /// the link goes to.
     pub(super) fn ask<R: Request>(
@@ -136,85 +121,147 @@ impl Linked {
         reached: &Reached,
         read: impl FnOnce(&mut Link) -> Result<T, Unanswered>,
     ) -> Result<T, Unlinked> {
-        let asked = read(&mut self.link);
-        asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
+        read(&mut self.link).map_err(|error| unlinked(reached, &self.diagnostics, error))
     }
 
-    /// `None` if the controller has no `serve` of `build`.
-    fn connect(
-        reached: &Reached,
-        build: &Build,
-        openings: NonZeroU32,
-    ) -> Result<Option<Self>, Unlinked> {
-        let slot = reached.slot_opening(&BTreeSet::new(), openings)?;
-        let Session { command, slot } = reached.session(&link::command(&build.key), slot);
-        match Link::open(command) {
-            Ok(link) => Ok(link.map(|link| Self { link, slot })),
-            Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),
+    fn connect(reached: &Reached, build: &Build, at: &Located) -> Result<Option<Self>, Unlinked> {
+        let diagnostics = tempfile::NamedTempFile::new()
+            .context("creating a temporary file for SSH diagnostics failed")?;
+        let mut ssh = Reached::ssh_command();
+        ssh.arg("-E").arg(diagnostics.path());
+        reached.remote(&mut ssh, at, &link::command(&build.key));
+        match Link::open(ssh) {
+            Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
+            Err(error) => Err(unlinked(reached, &diagnostics, error)),
         }
     }
 }
 
 impl Reached {
-    /// What `ask` makes of a link to the `serve` of `build` there, opened as [`Linked::open`] opens
+    fn connected(&self, build: &Build, mut found: Found) -> Result<(Linked, Found), String> {
+        let mut repaired = false;
+        let mut enrolled = false;
+        for attempt in 0..OPENINGS {
+            let (said, denied) = match Linked::open(self, build, &found.at) {
+                Ok(link) => return Ok((link, found)),
+                Err(Unlinked::Failed(error)) => return Err(error),
+                Err(Unlinked::Cut { said, denied }) => (said, denied),
+            };
+            if denied && !enrolled || !repaired && attempt > 0 {
+                found = self.repair(&found, denied, &said)?;
+                repaired = true;
+                enrolled |= denied;
+            } else if denied || attempt + 1 == OPENINGS {
+                self.location.failed(&self.name, &found, &said)?;
+                return Err(said);
+            }
+            let pause = Duration::from_secs(((1_u64 << attempt) - 1).min(30));
+            say(format_args!(
+                "{said}: opening it again {}, attempt {} of {OPENINGS}",
+                when(pause),
+                attempt + 2
+            ));
+            thread::sleep(pause);
+        }
+        unreachable!("the last opening returns above")
+    }
+
+    /// Opens the first link of a command, starting the controller if its opening needs repair.
+    pub(super) fn opening(&self, build: &Build) -> Result<(Linked, Found), String> {
+        self.connected(build, self.found()?)
+    }
+
+    /// What `ask` makes of a link to the `serve` of `build` there, opened as [`Self::opening`] opens
     /// one, and asked again over another, after each of `AGAIN`'s pauses, while one is cut before
     /// `ask` returns; `what` says what is asked, as in "listing the runs".
     pub(super) fn asked<T>(
-        &self,
+        &mut self,
         build: &Build,
         what: &str,
-        mut ask: impl FnMut(&mut Linked) -> Result<T, Unlinked>,
+        mut ask: impl FnMut(&Self, &mut Linked) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
-        self.carrying_on(build, what, |linked, _| ask(linked))
+        self.carrying_on(build, what, |reached, linked, _| ask(reached, linked))
     }
 
     /// As [`Self::asked`], with the pauses starting over each time `ask` reports progress.
     pub(super) fn carrying_on<T>(
-        &self,
+        &mut self,
         build: &Build,
         what: &str,
-        mut ask: impl FnMut(&mut Linked, &mut dyn FnMut()) -> Result<T, Unlinked>,
+        mut ask: impl FnMut(&Self, &mut Linked, &mut dyn FnMut()) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
         let mut attempt = 0;
         loop {
-            let asked = Linked::open(self, build, OPENINGS)
-                .and_then(|mut linked| ask(&mut linked, &mut || attempt = 0));
-            let (master, said) = match asked {
-                Ok(answer) => return Ok(answer),
-                Err(Unlinked::Cut { master, said }) => (master, said),
+            let (mut linked, found) = match self.linked.take() {
+                Some(link) => link,
+                None => self.opening(build)?,
+            };
+            let error = match ask(self, &mut linked, &mut || attempt = 0) {
+                Ok(answer) => {
+                    self.linked = Some((linked, found));
+                    return Ok(answer);
+                }
+                Err(Unlinked::Cut { said, .. }) => said,
                 Err(Unlinked::Failed(error)) => return Err(error),
             };
-            if !self.pause(attempt, master, &format!("{what} again")) {
-                let failed = format!(
-                    "{what} on controller `{}` failed, as `ssh` {said}",
-                    self.name
-                );
-                return Err(self.lost(master, failed));
-            }
+            drop(linked);
+            let Some(pause) = AGAIN.get(attempt) else {
+                self.location.failed(&self.name, &found, &error)?;
+                return Err(error);
+            };
             attempt += 1;
+            say(format_args!(
+                "{error}: {what} again {}, attempt {} of {}",
+                when(*pause),
+                attempt + 1,
+                AGAIN.len() + 1
+            ));
+            thread::sleep(*pause);
         }
     }
 }
 
-fn unlinked(reached: &Reached, master: usize, unanswered: Unanswered) -> Unlinked {
+fn unlinked(
+    reached: &Reached,
+    diagnostics: &tempfile::NamedTempFile,
+    error: Unanswered,
+) -> Unlinked {
     let name = &reached.name;
-    match unanswered {
-        // A `serve` that ended on its own, with the connection up, would end the same way again.
-        Unanswered::Unreached(said) if !reached.shared.answers(master, &reached.host()) => {
-            Unlinked::Cut { master, said }
+    match error {
+        Unanswered::Unreached(ended) => {
+            let line = last_line(diagnostics);
+            let denied = line
+                .as_ref()
+                .is_some_and(|line| line.contains("Permission denied ("));
+            let said = line.map_or(ended, |line| format!("ssh says: {line}"));
+            Unlinked::Cut {
+                said: format!("controller `{name}` didn't answer: {said}"),
+                denied,
+            }
         }
-        Unanswered::Unreached(said) => Unlinked::Failed(format!(
-            "linking to controller `{name}` failed: its `serve` ended before it answered in \
-             full (the link {said}): what it printed above says why"
-        )),
         Unanswered::Failed(error) => {
             Unlinked::Failed(format!("linking to controller `{name}` failed: {error}"))
         }
     }
 }
 
+fn last_line(file: &tempfile::NamedTempFile) -> Option<String> {
+    // OpenSSH's MSGBUFSIZ is 1024. Leave room for the timestamp and a line ending.
+    const TAIL_BYTES: u64 = 2048;
+    let mut file = file.reopen().ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .last()
+        .map(str::to_owned)
+}
+
 /// Uploads `build`'s files to the controller, as the install whose `serve` a link runs there.
-fn install(reached: &Reached, build: &Build) -> Result<(), String> {
+fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinked> {
     let name = &reached.name;
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
@@ -236,8 +283,29 @@ fn install(reached: &Reached, build: &Build) -> Result<(), String> {
             .collect::<Result<Vec<_>, String>>()?;
         manifest::archive(&read)
     };
-    let mut session = reached.ssh(&link::installing(&build.hashed.manifest))?;
-    let installed = reached.call(&mut session, Some(&archive), "ssh", SHORT_TIMEOUT);
-    let installed = installed.map_err(|error| format!("installing it failed: {error}"));
-    installed.map(drop)
+    let diagnostics = tempfile::NamedTempFile::new()
+        .context("creating a temporary file for SSH diagnostics failed")?;
+    let mut ssh = Reached::ssh_command();
+    ssh.arg("-E").arg(diagnostics.path());
+    reached.remote(&mut ssh, at, &link::installing(&build.hashed.manifest));
+    let installed = stdx::process::fed(&mut ssh, &archive, Deadline::after(SHORT_TIMEOUT));
+    match installed {
+        Ok(Some(result)) if result.status.success() => Ok(()),
+        Ok(Some(result)) if !result.stderr.is_empty() => Err(Unlinked::Failed(format!(
+            "installing serve failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim_end()
+        ))),
+        Ok(None) => Err(Unlinked::Failed(format!(
+            "installing serve timed out after {} s",
+            SHORT_TIMEOUT.as_secs()
+        ))),
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(Unlinked::Failed(
+            format!("installing serve failed: {error}"),
+        )),
+        Ok(Some(_)) | Err(_) => Err(unlinked(
+            reached,
+            &diagnostics,
+            Unanswered::Unreached("ended during the install".to_owned()),
+        )),
+    }
 }

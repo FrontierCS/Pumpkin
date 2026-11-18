@@ -62,7 +62,7 @@ struct State {
 
 /// Where a controller was found: its instance, and the private address at which its `sshd`
 /// answered.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Located {
     pub(super) instance: String,
     pub(super) address: IpAddr,
@@ -283,25 +283,26 @@ impl Reached {
         locked(&self.kept.join("enrol"), waiting)
     }
 
-    pub(super) fn enrol(&self, master: usize) -> Result<(), String> {
+    pub(super) fn enrol(&self, at: &Located) -> Result<(), String> {
         let public = self.kept.join("key.pub");
         let public = fs::read(&public).context(public.display())?;
-        let mut ssh = self.shared.command("ssh");
-        ssh.args(self.ssh_options(master)).arg(self.host());
-        ssh.arg("umask 077 && mkdir --parents .ssh && cat >> .ssh/authorized_keys");
+        let mut ssh = self.ssh(
+            at,
+            "umask 077 && mkdir --parents .ssh && cat >> .ssh/authorized_keys",
+        );
         let fed = stdx::process::fed(&mut ssh, &public, Deadline::after(SHORT_TIMEOUT));
         finished(fed, "ssh", SHORT_TIMEOUT).map(|_| ())
     }
 
     /// Pushes this machine's public key to the instance with EC2 Instance Connect, which accepts it
     /// for a minute: the connection that uses it must begin within.
-    pub(super) fn push(&self) -> Result<(), String> {
+    pub(super) fn push(&self, at: &Located) -> Result<(), String> {
         let public = format!("file://{}", self.kept.join("key.pub").display());
         let args = [
             "ec2-instance-connect",
             "send-ssh-public-key",
             "--instance-id",
-            &self.located.instance,
+            &at.instance,
             "--instance-os-user",
             USER,
             "--ssh-public-key",

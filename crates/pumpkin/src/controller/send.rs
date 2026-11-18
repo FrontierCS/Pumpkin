@@ -165,7 +165,7 @@ fn needed(
 /// The keys go on the connection's standard input, to the job's directory in tmpfs, and are not
 /// stored.
 pub(super) fn send(
-    reached: &Reached,
+    reached: &mut Reached,
     client: &config::Client,
     id: &RunTag,
     kind: JobKind,
@@ -207,7 +207,7 @@ pub(super) fn send(
         modal_bytes,
     };
     let (mut install_left, mut tree_left) = (None, None);
-    match reached.carrying_on(&build, "starting the job", |linked, advanced| {
+    match reached.carrying_on(&build, "starting the job", |reached, linked, advanced| {
         upload(
             linked,
             reached,

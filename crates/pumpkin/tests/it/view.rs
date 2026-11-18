@@ -36,8 +36,8 @@ impl Served {
         let mut child = command.spawn().unwrap();
         let mut said = String::new();
         let mut stderr = BufReader::new(child.stderr.take().unwrap());
-        for _ in 0..2 {
-            stderr.read_line(&mut said).unwrap();
+        while !said.contains("http://127.0.0.1:") {
+            assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
         }
         let address = said.split_once("http://127.0.0.1:").unwrap().1;
         let (port, token) = address.trim_end().split_once("/?t=").unwrap();

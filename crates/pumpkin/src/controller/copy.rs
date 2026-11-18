@@ -23,7 +23,7 @@ use crate::say;
 const SCRATCH_RANDOM: usize = 6;
 
 impl Reached {
-    pub(super) fn copy(&self, build: &Build, id: &str) -> Result<Option<String>, String> {
+    pub(super) fn copy(&mut self, build: &Build, id: &str) -> Result<Option<String>, String> {
         let id = RunTag::try_from(id.to_owned())?;
         let runs = PathBuf::from(crate::default_runs()?);
         fs::create_dir_all(&runs).context(runs.display())?;
@@ -46,14 +46,14 @@ impl Reached {
         lock.lock().context(scratch.path().display())?;
         drop(runs_lock);
         let what = format!("copying run {}'s record", id.as_str());
-        let answer = self.carrying_on(build, &what, |linked, progress| {
+        let answer = self.carrying_on(build, &what, |reached, linked, progress| {
             let present = Entries::at(&copy)?;
             let held = present.held(MAX_REQUEST_BODY_BYTES);
             let ask = Ask::Copy(CopyRequest {
                 id: id.as_str().to_owned(),
                 held_bytes: held.len(),
             });
-            linked.stream(self, |link| {
+            linked.stream(reached, |link| {
                 link.send(&ask, &held)?;
                 receive(link, &copy, scratch.path(), &present, progress)
             })

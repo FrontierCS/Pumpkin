@@ -38,8 +38,7 @@ use crate::say;
 use crate::view::Answering;
 
 /// How long to wait for a request before ending: a page that is open polls every few seconds, so
-/// a minute with none is a closed page or a lost connection, and ending lets the `ssh` session,
-/// and the master it goes over, end too.
+/// a minute with none is a closed page or a lost connection, and ending closes its SSH connection.
 pub(crate) const IDLE: Duration = Duration::from_mins(1);
 
 // How long an install lasts that no `serve` uses: a day, as a store's partial blobs last, so

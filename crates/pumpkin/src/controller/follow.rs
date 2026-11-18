@@ -14,11 +14,11 @@ pub(super) enum Finished {
     Unbuilt,
 }
 
-pub(super) fn job(reached: &Reached, build: &Build, id: &str) -> Result<Finished, String> {
+pub(super) fn job(reached: &mut Reached, build: &Build, id: &str) -> Result<Finished, String> {
     let mut shown = Shown::default();
     let what = format!("following job {id}");
     reached
-        .carrying_on(build, &what, |linked, progress| {
+        .carrying_on(build, &what, |reached, linked, progress| {
             let read = linked.stream(reached, |link| shown.read(link, id, progress));
             shown.end_line();
             read
