@@ -2494,21 +2494,10 @@ fn store_collection() {
     );
 }
 
-fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
+fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
     scratch.write(&format!("{job}/out"), &format!("{id}\n"));
-    let said = [
-        format!("pumpkin: following run {id}: ending this command does not stop it\n"),
-        "pumpkin:    0:01 the agent started on local\n".to_owned(),
-        "pumpkin:    0:09 the work phase ended\n".to_owned(),
-    ];
-    let mut own = "#!/bin/sh\n".to_owned();
-    for line in &said {
-        own.extend(["printf '%s' '", line, "' >&2\n"]);
-    }
-    own.push_str("exit 102\n");
-    scratch.write_executable(&format!("{job}/pumpkin"), own.as_bytes());
     let record = format!("home/.pumpkin/runs/{id}");
     let args = ["stand-in/task.star"];
     scratch.write(
@@ -2517,113 +2506,183 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
     );
     scratch.write(&format!("{record}/driver.pid"), "4242\n");
     scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
-    said
+}
+
+fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
+    let mut frame = Vec::new();
+    schema::frame::write(&mut frame, message, body).unwrap();
+    frame.len()
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn follow_carries_on() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let _ = start(&scratch, &client);
+    connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000001");
-    let log = [
-        "building stand-in\n",
-        "step 1 of 2\n",
-        "binary\0\n",
-        "step 2 of 2\n",
-        "step 2 of 2\n",
-        "publish",
-    ];
-    let said = ended_job(&scratch, &id, &log.concat());
-    let logged = log[..5].concat().len();
-    // `before-N` cuts the follower's connection: the second script of a `wait`, after `calls` ran.
-    let cuts = [
-        ("inside the log's second line", log[0].len() + 5),
-        (
-            "at the end of the log's second line",
-            log[0].len() + log[1].len(),
-        ),
-        ("inside the log's last line", logged + 3),
-        (
-            "inside the follower's second line",
-            logged + "publish\0pumpkin: the log ends\0\n".len() + said[0].len() + 10,
-        ),
-    ];
+    let log = "building\0task\nstep 1\nstep 1\npublish";
+    ended_job(&scratch, &id, log);
+    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
+    let logged = frame_bytes(&json!({ "type": "logged" }), log.as_bytes());
     let mut lines = Vec::new();
-    for (at, bytes) in cuts {
-        let path = scratch.0.join("bin/scripts");
-        let calls = fs::read_to_string(&path).map_or(0, |text| text.lines().count());
-        let cut = scratch.0.join("bin/cut-out-0");
+    for (when, bytes) in [
+        ("within the log", hello + logged - 1),
+        ("after the log", hello + logged),
+        ("within the ending", hello + logged + 8),
+    ] {
+        let _ = calls(&scratch);
         scratch.write(
-            &format!("bin/before-{}", calls + 2),
-            &format!("echo {bytes} > '{}'\n", cut.display()),
+            "bin/before-2",
+            &format!("echo {bytes} > '{}/bin/cut-out-0'", scratch.0.display()),
         );
-        // The copy that the last `wait` made, from which a `wait` would say the run's ending.
         let _ = fs::remove_dir_all(scratch.0.join(format!("repo/.pumpkin/runs/{id}")));
         let waited = on_client(&scratch, &client, &["wait", &id])
             .output()
             .unwrap();
-        let stderr = String::from_utf8(waited.stderr)
-            .unwrap()
-            .replace('\0', "<NUL>");
-        let shown: Vec<&str> = stderr
-            .lines()
-            .take_while(|line| !line.starts_with("pumpkin: copying run"))
-            .collect();
-        lines.push(format!("cut {at}, after {bytes} bytes:"));
-        lines.extend(shown.iter().map(|line| format!("  {line}")));
+        assert!(waited.status.success(), "{waited:?}");
+        let stderr = String::from_utf8(waited.stderr).unwrap();
+        let (shown, _) = stderr.split_once("pumpkin: copying run").unwrap();
+        lines.push(format!("cut {when}: {:?}", shown.replace('\0', "<NUL>")));
     }
     check(
         &scratch,
         &lines.join("\n"),
         &[(id.as_str(), "<id>")],
         &expect![[r#"
-            cut inside the log's second line, after 23 bytes:
-              building stand-in
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-              step 1 of 2
-              binary<NUL>
-              step 2 of 2
-              step 2 of 2
-              publish
-              pumpkin: following run <id>: ending this command does not stop it
-              pumpkin:    0:01 the agent started on local
-              pumpkin:    0:09 the work phase ended
-            cut at the end of the log's second line, after 30 bytes:
-              building stand-in
-              step 1 of 2
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-              binary<NUL>
-              step 2 of 2
-              step 2 of 2
-              publish
-              pumpkin: following run <id>: ending this command does not stop it
-              pumpkin:    0:01 the agent started on local
-              pumpkin:    0:09 the work phase ended
-            cut inside the log's last line, after 65 bytes:
-              building stand-in
-              step 1 of 2
-              binary<NUL>
-              step 2 of 2
-              step 2 of 2
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-              publish
-              pumpkin: following run <id>: ending this command does not stop it
-              pumpkin:    0:01 the agent started on local
-              pumpkin:    0:09 the work phase ended
-            cut inside the follower's second line, after 189 bytes:
-              building stand-in
-              step 1 of 2
-              binary<NUL>
-              step 2 of 2
-              step 2 of 2
-              publish
-              pumpkin: following run <id>: ending this command does not stop it
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-              pumpkin:    0:01 the agent started on local
-              pumpkin:    0:09 the work phase ended"#]],
+            cut within the log: "pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\nbuilding<NUL>task\nstep 1\nstep 1\npublish\n"
+            cut after the log: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\n"
+            cut within the ending: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\n""#]],
+    );
+}
+
+#[test]
+fn follow_repeats_no_milestone() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0f000005");
+    let log = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
+    let dir = write_run(
+        &scratch,
+        &id,
+        asked(&id, 30),
+        &[log],
+        None,
+        &lease_places(Prices::Nothing),
+    );
+    let driver = File::open(dir.join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    move_runs(&scratch, "home/.pumpkin/runs");
+    scratch.write(&format!("home/jobs/{id}/out"), &id);
+    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
+    let first = format!("following run {id}: ending this command does not stop it");
+    let said = frame_bytes(&json!({ "type": "said", "body_bytes": first.len() }), &[]);
+    let part = frame_bytes(&serde_json::Value::Null, first.as_bytes());
+    let _ = calls(&scratch);
+    // Cut within the second milestone. The next link sees both milestones in the live record.
+    scratch.write(
+        "bin/before-2",
+        &format!(
+            "echo {} > '{}/bin/cut-out-0'",
+            hello + said + part + 3,
+            scratch.0.display()
+        ),
+    );
+    let mut child = on_client(&scratch, &client, &["wait", &id])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("the agent started") && stderr.read_line(&mut said).unwrap() > 0 {}
+    scratch.write(
+        &format!("home/.pumpkin/runs/{id}/outcome.json"),
+        &returned(1.0),
+    );
+    drop(driver);
+    let output = ended(child, stderr, said);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let shown: Vec<_> = stderr
+        .lines()
+        .filter(|line| {
+            line.contains("ending this command")
+                || line.contains("the agent started on")
+                || line.contains("attempt 2 of 7")
+        })
+        .collect();
+    check(
+        &scratch,
+        &shown.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            pumpkin: following run <id>: ending this command does not stop it
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
+            pumpkin:    0:01 the agent started on aws/judge"#]],
+    );
+}
+
+#[test]
+fn build_carries_on_inside_the_ir() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let ir = r#"{"workflow":"whole IR"}"#;
+    let log = "building the images\n";
+    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
+    let logged = frame_bytes(&json!({ "type": "logged" }), log.as_bytes());
+    let head = frame_bytes(&json!({ "type": "built", "body_bytes": ir.len() }), &[]);
+    let part = frame_bytes(&serde_json::Value::Null, ir.as_bytes());
+    // Arm the cut as the unit is recorded, so it reaches the Follow after the start.
+    let recorder = format!(
+        "{SYSTEMD_RUN}echo {} > '{}/bin/cut-out-0'\n",
+        hello + logged + head + part - 1,
+        scratch.0.display()
+    );
+    scratch.write_executable("bin/systemd-run", recorder.as_bytes());
+    let mut build = on_client(&scratch, &client, &["build", "stand-in/task.star"])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let dir = poll(|| {
+        fs::read_dir(scratch.0.join("home/builds"))
+            .ok()?
+            .next()?
+            .ok()
+    });
+    let id = dir.file_name();
+    let id = id.to_str().unwrap();
+    scratch.write(&format!("home/builds/{id}/log"), log);
+    // A build's out can already hold bytes while its job still runs.
+    scratch.write(&format!("home/builds/{id}/out"), "{");
+    let mut stderr = BufReader::new(build.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.ends_with(log) && stderr.read_line(&mut said).unwrap() > 0 {}
+    scratch.write(&format!("home/builds/{id}/out"), ir);
+    fs::remove_dir_all(scratch.0.join("run/pumpkin").join(id)).unwrap();
+    let output = ended(build, stderr, said);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let logged = stderr
+        .lines()
+        .filter(|line| *line == log.trim_end())
+        .count();
+    let again = stderr.matches("attempt 2 of 7").count();
+    check(
+        &scratch,
+        &format!(
+            "job's log shown {logged} time(s), {again} immediate retries\nIR on stdout: {}",
+            String::from_utf8(output.stdout).unwrap()
+        ),
+        &[],
+        &expect![[r#"
+            job's log shown 1 time(s), 1 immediate retries
+            IR on stdout: {"workflow":"whole IR"}"#]],
     );
 }
 
@@ -2631,58 +2690,49 @@ fn follow_carries_on() {
 fn follow_cut_often() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let _ = start(&scratch, &client);
+    connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000002");
-    let log = (1..=10).fold(String::new(), |log, line| {
-        log + &format!("line {line:02} of 10\n")
-    });
-    let _ = ended_job(&scratch, &id, &log);
-    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
-    let calls = calls.lines().count();
-    let cut = scratch.0.join("bin/cut-out-0");
-    // Each connection is cut inside the second line it prints, so it shows one line.
-    for cut_index in 0..9 {
+    ended_job(&scratch, &id, "");
+    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
+    let logged = frame_bytes(&json!({ "type": "logged" }), b"line 01\n");
+    let _ = calls(&scratch);
+    // A new line on each connection advances the byte offset and starts the pauses over.
+    for index in 1..=9 {
         scratch.write(
-            &format!("bin/before-{}", calls + 2 + cut_index),
-            &format!("echo 17 > '{}'\n", cut.display()),
+            &format!("bin/before-{}", index + 1),
+            &format!(
+                "echo 'line {index:02}' >> '{0}/home/jobs/{id}/log'\necho {1} > '{0}/bin/cut-out-0'\n",
+                scratch.0.display(), hello + logged + 2
+            ),
         );
     }
     let waited = on_client(&scratch, &client, &["wait", &id])
         .output()
         .unwrap();
+    assert!(waited.status.success(), "{waited:?}");
     let stderr = String::from_utf8(waited.stderr).unwrap();
-    let shown: Vec<&str> = stderr
+    let (shown, _) = stderr.split_once("pumpkin: copying run").unwrap();
+    let lines: Vec<_> = shown
         .lines()
-        .take_while(|line| !line.starts_with("pumpkin: copying run"))
+        .filter(|line| line.starts_with("line "))
         .collect();
+    let again = shown.matches("attempt 2 of 7").count();
     check(
         &scratch,
-        &shown.join("\n"),
-        &[(id.as_str(), "<id>")],
+        &format!("{}\n{again} immediate retries", lines.join("\n")),
+        &[],
         &expect![[r#"
-            line 01 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 02 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 03 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 04 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 05 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 06 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 07 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 08 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 09 of 10
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            line 10 of 10
-            pumpkin: following run <id>: ending this command does not stop it
-            pumpkin:    0:01 the agent started on local
-            pumpkin:    0:09 the work phase ended"#]],
+            line 01
+            line 02
+            line 03
+            line 04
+            line 05
+            line 06
+            line 07
+            line 08
+            line 09
+            9 immediate retries"#]],
     );
 }
 
@@ -2690,16 +2740,15 @@ fn follow_cut_often() {
 fn follow_cut_before_a_line() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let _ = start(&scratch, &client);
+    connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000003");
-    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
-    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
-    let calls = calls.lines().count();
+    ended_job(&scratch, &id, "line 01 of 01\n");
+    let _ = calls(&scratch);
     let cut = scratch.0.join("bin/cut-out-0");
     for cut_index in 0..3 {
         scratch.write(
-            &format!("bin/before-{}", calls + 2 + cut_index),
+            &format!("bin/before-{}", 2 + cut_index),
             &format!("echo 0 > '{}'\n", cut.display()),
         );
     }
@@ -2725,8 +2774,8 @@ fn follow_cut_before_a_line() {
         &shown.join("\n"),
         &[(id.as_str(), "<id>")],
         &expect![[r#"
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, in 5 s, attempt 3 of 7"#]],
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, in 5 s, attempt 3 of 7"#]],
     );
 }
 
@@ -2734,19 +2783,18 @@ fn follow_cut_before_a_line() {
 fn master_opened_again() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let _ = start(&scratch, &client);
+    connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000004");
-    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
-    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
-    let calls = calls.lines().count();
+    ended_job(&scratch, &id, "line 01 of 01\n");
+    let _ = calls(&scratch);
     // As the `wait` finds the run, its master ends, and the follow's opening of it is closed once.
     let (socket, refused) = (
         scratch.0.join(SHARED).join("0"),
         scratch.0.join("bin/refused-0"),
     );
     scratch.write(
-        &format!("bin/before-{}", calls + 1),
+        "bin/before-1",
         &format!("rm '{}'\ntouch '{}'\n", socket.display(), refused.display()),
     );
     let waited = on_client(&scratch, &client, &["wait", &id])
@@ -2755,7 +2803,7 @@ fn master_opened_again() {
     let stderr = String::from_utf8(waited.stderr).unwrap();
     let mut shown: Vec<&str> = stderr
         .lines()
-        .take_while(|line| !line.starts_with("pumpkin: following run"))
+        .take_while(|line| !line.starts_with("pumpkin: copying run"))
         .collect();
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     let openings = format!(
@@ -2778,60 +2826,89 @@ fn master_opened_again() {
 fn follow_prints_the_outcome() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let _ = start(&scratch, &client);
+    connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000004");
-    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
+    ended_job(&scratch, &id, "line 01 of 01\n");
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
-    let followed = |job: &str| {
-        let mut lines = Vec::new();
-        for args in [&["wait", &id][..], &["wait", "--outcome", &id]] {
-            // Else `wait` would say the run's ending from the copy that the last one made.
-            let _ = fs::remove_dir_all(&copy);
-            let waited = on_client(&scratch, &client, args).output().unwrap();
-            let stderr = String::from_utf8(waited.stderr).unwrap();
-            let ended = stderr.lines().find(|line| line.contains(" finished "));
-            let copied = fs::read(copy.join("outcome.json")).unwrap();
-            let printed = match &waited.stdout {
-                printed if printed.is_empty() => "nothing",
-                printed if *printed == copied => "the copy's outcome.json",
-                _ => "something else",
-            };
-            lines.extend([
-                format!("followed by {job}: $ pumpkin {}", args.join(" ")),
-                format!("  {}", waited.status),
-                format!("  said: {}", ended.unwrap()),
-                format!("  printed: {printed}"),
-            ]);
-        }
-        lines
-    };
-    let mut lines = followed("its own pumpkin");
-    fs::remove_file(scratch.0.join(format!("home/jobs/{id}/pumpkin"))).unwrap();
-    let current = "#!/bin/sh\necho \"pumpkin: run $2 finished with a result\" >&2\n";
-    scratch.write_executable("home/current-pumpkin", current.as_bytes());
-    lines.extend(followed("the controller's current pumpkin"));
+    let mut lines = Vec::new();
+    for args in [&["wait", &id][..], &["wait", "--outcome", &id]] {
+        let _ = fs::remove_dir_all(&copy);
+        let waited = on_client(&scratch, &client, args).output().unwrap();
+        assert!(waited.status.success(), "{waited:?}");
+        let stderr = String::from_utf8(waited.stderr).unwrap();
+        let ended = stderr
+            .lines()
+            .find(|line| line.contains(" finished "))
+            .unwrap();
+        let copied = fs::read(copy.join("outcome.json")).unwrap();
+        let printed = match &waited.stdout {
+            output if output.is_empty() => "nothing",
+            output if *output == copied => "the copy's outcome.json",
+            _ => "something else",
+        };
+        lines.extend([
+            format!("$ pumpkin {}", args.join(" ")),
+            ended.to_owned(),
+            format!("printed: {printed}"),
+        ]);
+    }
     check(
         &scratch,
         &lines.join("\n"),
         &[(id.as_str(), "<id>")],
         &expect![[r#"
-            followed by its own pumpkin: $ pumpkin wait <id>
-              exit status: 0
-              said: pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
-              printed: nothing
-            followed by its own pumpkin: $ pumpkin wait --outcome <id>
-              exit status: 0
-              said: pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
-              printed: the copy's outcome.json
-            followed by the controller's current pumpkin: $ pumpkin wait <id>
-              exit status: 0
-              said: pumpkin: run <id> finished with a result
-              printed: nothing
-            followed by the controller's current pumpkin: $ pumpkin wait --outcome <id>
-              exit status: 0
-              said: pumpkin: run <id> finished with a result
-              printed: the copy's outcome.json"#]],
+            $ pumpkin wait <id>
+            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+            printed: nothing
+            $ pumpkin wait --outcome <id>
+            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+            printed: the copy's outcome.json"#]],
+    );
+}
+
+#[test]
+fn follow_copies_another_writers_record() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0f000006");
+    ended_job(&scratch, &id, "build output\n");
+    let path = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{id}/record.json"));
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let mut lines = Vec::new();
+    for record in [
+        json!({ "pumpkin": { "version": "1.2.3" }, "record_version": "another form" }).to_string(),
+        "{".to_owned(),
+        json!({ "pumpkin": super::this_build(), "record_version": "another form" }).to_string(),
+    ] {
+        let _ = fs::remove_dir_all(&copy);
+        fs::write(&path, &record).unwrap();
+        let waited = on_client(&scratch, &client, &["wait", &id])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(waited.stderr).unwrap();
+        let copied = fs::read_to_string(copy.join("record.json")).ok() == Some(record);
+        lines.push(format!(
+            "{}; copied the record: {copied}\n  {}",
+            waited.status,
+            stderr.lines().last().unwrap()
+        ));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            exit status: 1; copied the record: true
+              pumpkin: copied run <id>'s record to <scratch>/repo/.pumpkin/runs/<id>; it was made by pumpkin 1.2.3: read it with that build
+            exit status: 1; copied the record: true
+              pumpkin: <scratch>/repo/.pumpkin/runs/<id>/record.json: EOF while parsing an object at line 1 column 1
+            exit status: 1; copied the record: false
+              pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs/<id>/record.json holds record_version "another form": expected "pumpkin.record/v0", which this `pumpkin` reads"#]],
     );
 }
 
@@ -3213,7 +3290,7 @@ fn wait_names_its_run_there() {
             $ pumpkin wait 9f
             exit status: Some(1)
             pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/20261107-120000-1b8a0001" 2>/dev/null || exit 100, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
 
@@ -3284,7 +3361,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `reap`, expected one of `health`, `jobs`, `list`, `view`, `start` at line 1 column 14: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `reap`, expected one of `follow`, `health`, `jobs`, `list`, `view`, `start` at line 1 column 14: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
@@ -3363,7 +3440,12 @@ fn record_copy() {
     connect(&scratch, &client);
     let hex = served(&scratch);
     let id = id_ago(0, "0d000001");
-    let _ = ended_job(&scratch, &id, "built\n");
+    ended_job(&scratch, &id, "built\n");
+    symlink(
+        scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin")),
+        scratch.0.join(format!("home/jobs/{id}/pumpkin")),
+    )
+    .unwrap();
     let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
     let at = |path: &str| format!("home/.pumpkin/runs/{id}/{path}");
@@ -3498,16 +3580,16 @@ fn record_copy() {
             unread:
             wait: exit status: 1
               pumpkin: controller `alice` sent run <id>'s record without what its `tar` couldn't read (exit status: 2): tar: jobs/0/secret: Cannot open: Permission denied: the copy here holds what came whole, but not its record.json, so no command reads it yet: once the controller's user can read each file named (`chmod u+r` there, below `~/.pumpkin/runs/<id>`), run the command again
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
             changing:
             wait: exit status: 1
               pumpkin: run <id>'s record changed on controller `alice` as it was copied: run the command again
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: 
             whole:
             wait: exit status: 0
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/jobs/<id>" 2>/dev/null || exit 100, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, cd "$HOME/.pumpkin/runs/<id>" && find . -mindepth 1 \( -type f -o -type d \) -printf '%y %s %T@ %P\0' | head --zero-terminated --lines=100001, cd "$HOME/.pumpkin/runs/<id>" && exec tar --create --null --verbatim-files-from --no-recursion --files-from=- --file=-
               written: jobs/0/secret, record.json
               model/marked: 755
               jobs: 0, 2
@@ -3557,7 +3639,7 @@ fn record_copy_refusals() {
     connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0d000002");
-    let _ = ended_job(&scratch, &id, "built\n");
+    ended_job(&scratch, &id, "built\n");
     let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
     let archive = scratch.0.join("archive");
     scratch.write("archive/escape", "escaped\n");
