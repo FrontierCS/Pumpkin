@@ -470,8 +470,7 @@ fn answers_over_a_pipe() {
     let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
     let driver = write_served(&scratch);
     fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
-    let mut view = scratch.pumpkin(&["view"]);
-    view.env("HOME", scratch.0.join("home"));
+    let view = scratch.pumpkin(&["view"]);
     let served = Served::of(view);
     let mut piped = Piped::start(&scratch);
     let mut said = Vec::new();

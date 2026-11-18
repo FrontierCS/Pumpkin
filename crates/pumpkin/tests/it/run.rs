@@ -1465,8 +1465,7 @@ fn configurations() {
         command
     };
     let config = |name: &str| run("workflow/task.star", &["--config", &format!("{name}.toml")]);
-    let mut home = run("workflow/task.star", &[]);
-    home.env("HOME", scratch.0.join("home"));
+    let home = run("workflow/task.star", &[]);
     let mut homeless = run("workflow/task.star", &[]);
     homeless.env_remove("HOME");
     let mut served = config("conf/served");
@@ -1512,7 +1511,7 @@ fn configurations() {
         false,
         &[],
         &expect![[r#"
-            $ HOME=<scratch>/home pumpkin run workflow/task.star --sandboxd sandboxd --runs runs
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs
             exit status: Some(1)
             pumpkin: the configuration <scratch>/home/.config/pumpkin/pumpkin.toml can't be read (No such file or directory (os error 2)): write one there, as `pumpkin help config` says, or name another file with `--config`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
@@ -1992,7 +1991,7 @@ fn runs_on_docker() {
     let docker_config = env::var_os("DOCKER_CONFIG").map_or(home.join(".docker"), PathBuf::from);
     let docker_config = docker_config.into_os_string().into_string().unwrap();
     let mut exits = run("exits/task.star", &[]);
-    (exits.env("HOME", scratch.0.join("home"))).env("DOCKER_CONFIG", &docker_config);
+    exits.env("DOCKER_CONFIG", &docker_config);
     let config = ["--runs", "runs", "--config", "conf/pumpkin.toml"];
     let commands = [
         run("asks/task.star", &config),
@@ -2039,7 +2038,7 @@ fn runs_on_docker() {
             the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
             the final call's answer: data: POST /v1/chat/completions HTTP/1.1 Some("Bearer sk-test") {"messages":[{"content":"grade","role":"user"}],"model":"vendor/gpt-6-astra"}\n\n
             outcome.json: {"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
-            $ DOCKER_CONFIG=<docker config> HOME=<scratch>/home pumpkin run exits/task.star --sandboxd <sandboxd> --wait
+            $ DOCKER_CONFIG=<docker config> pumpkin run exits/task.star --sandboxd <sandboxd> --wait
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
             pumpkin: run <id> started
@@ -2162,7 +2161,7 @@ fn writes_only_in_its_workspace() {
         .join("\n")
         .replace(scratch.0.to_str().unwrap(), "<scratch>");
     expect![[r#"
-        $ env --unset=DOCKER_CONFIG HOME=<scratch>/home TMPDIR=<scratch>/tmp env --unset=XDG_CACHE_HOME env --unset=XDG_CONFIG_HOME env --unset=XDG_DATA_HOME pumpkin run examples/hello/task.star --wait --config pumpkin.toml
+        $ env --unset=DOCKER_CONFIG TMPDIR=<scratch>/tmp env --unset=XDG_CACHE_HOME env --unset=XDG_CONFIG_HOME env --unset=XDG_DATA_HOME pumpkin run examples/hello/task.star --wait --config pumpkin.toml
         exit status: Some(0)
         pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
         pumpkin: run <id> started

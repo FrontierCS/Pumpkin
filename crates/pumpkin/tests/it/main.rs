@@ -201,6 +201,10 @@ impl Scratch {
     fn program(&self, program: impl AsRef<Path>, args: &[&str]) -> Command {
         let mut command = stdx::process::command(program.as_ref(), Environment::Inherited);
         command.args(args).current_dir(&self.0);
+        // A home of the test's own, so that no test reads or writes below the machine's.
+        let home = self.0.join("home");
+        fs::create_dir_all(&home).unwrap();
+        command.env("HOME", home);
         command
     }
 }
@@ -348,9 +352,12 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 }
 
 fn invocation(command: &Command) -> String {
-    let set = command.get_envs().map(|(name, value)| match value {
-        Some(value) => format!("{}={} ", name.display(), value.display()),
-        None => format!("env --unset={} ", name.display()),
+    // The home that `Scratch::program` gives each command, `<scratch>/home`, is the rule: it is not
+    // shown.
+    let set = command.get_envs().filter_map(|(name, value)| match value {
+        Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
+        Some(value) => Some(format!("{}={} ", name.display(), value.display())),
+        None => Some(format!("env --unset={} ", name.display())),
     });
     let args = command.get_args().map(|arg| match arg.to_string_lossy() {
         arg if arg.is_empty() => Cow::Borrowed("''"),
