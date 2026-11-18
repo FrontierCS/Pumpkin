@@ -194,7 +194,8 @@ fn health() -> Result<Health, String> {
         size_bytes,
         free_bytes,
     } = crate::job::disk(crate::job::VOLUME)?;
-    // Rounded up, as `df` rounds the share used.
+    // The share of the disk that an ordinary user may not write, rounded up: it counts the blocks
+    // reserved for root as used, so it reads a few points above `df`'s.
     let used = size_bytes.saturating_sub(free_bytes).saturating_mul(100);
     let percent = used.div_ceil(size_bytes.max(1)).min(100);
     let Ok(disk_used_percent) = u8::try_from(percent) else {
