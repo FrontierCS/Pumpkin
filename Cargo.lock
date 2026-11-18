@@ -163,7 +163,6 @@ dependencies = [
  "serde",
  "serde_json",
  "stdx",
- "tempfile",
  "test-support",
 ]
 
@@ -189,7 +188,7 @@ dependencies = [
  "schema",
  "serde_json",
  "stdx",
- "tempfile",
+ "test-support",
 ]
 
 [[package]]
@@ -248,7 +247,6 @@ dependencies = [
  "schema",
  "serde_json",
  "stdx",
- "tempfile",
  "test-support",
  "tls",
 ]
@@ -544,7 +542,6 @@ dependencies = [
  "schema",
  "serde_json",
  "stdx",
- "tempfile",
  "test-support",
  "ureq",
 ]
@@ -565,7 +562,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "stdx",
- "tempfile",
  "test-support",
  "tls",
 ]
@@ -629,7 +625,6 @@ dependencies = [
  "schema",
  "serde_json",
  "stdx",
- "tempfile",
  "test-support",
  "xflags",
 ]
@@ -762,8 +757,8 @@ dependencies = [
  "rustls",
  "schema",
  "serde_json",
+ "sha2",
  "stdx",
- "tempfile",
  "tls",
 ]
 
@@ -1002,7 +997,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stdx",
- "tempfile",
+ "test-support",
  "toml",
  "xflags",
  "xshell",

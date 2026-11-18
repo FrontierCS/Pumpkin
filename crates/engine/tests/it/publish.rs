@@ -12,6 +12,7 @@ use engine::{ContextName, Engine, Platform};
 use expect_test::expect;
 use schema::ir::Image;
 use stdx::process::Environment;
+use test_support::TestDir;
 
 /// The variable that names the child's directory, which holds the stand-in, in a child that
 /// [`publishes_at_once`] runs, whose `PATH` finds the stand-in first.
@@ -61,10 +62,7 @@ fn publishes_at_once() {
     if let Some(dir) = env::var_os(CHILD) {
         return child(Path::new(&dir));
     }
-    let scratch = tempfile::Builder::new()
-        .prefix("publish-")
-        .tempdir()
-        .unwrap();
+    let scratch = TestDir::new();
     let dir = scratch.path();
     fs::create_dir_all(dir.join("bin")).unwrap();
     let docker = dir.join("bin/docker");

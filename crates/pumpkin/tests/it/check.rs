@@ -263,7 +263,7 @@ pub(super) fn write_variants(scratch: &Scratch, label: &str) {
     reason = "most of it is the cases and their snapshot"
 )]
 fn tasks() {
-    let scratch = Scratch::new("check-tasks");
+    let scratch = Scratch::new();
     write_repository(&scratch, "");
     scratch.write("tasks/broken/task.star", &task(0));
     let unpinned = "FROM busybox:1.37\nCOPY judge/run /opt/judge/\n";
@@ -521,7 +521,7 @@ fn tasks() {
 
 #[test]
 fn lints() {
-    let scratch = Scratch::new("check-lints");
+    let scratch = Scratch::new();
     write_repository(&scratch, "");
     let library = fs::read_to_string(scratch.0.join("lib/bench.star")).unwrap();
     let sloppy = r#"
@@ -589,7 +589,7 @@ def _helper():
 
 #[test]
 fn variants() {
-    let scratch = Scratch::new("check-variants");
+    let scratch = Scratch::new();
     write_variants(&scratch, "pumpkin.test=unbuilt");
     let bench = |args: &[&str]| {
         let mut command = scratch.pumpkin(&["check", "tasks/bench/task.star", "--arg", "model=m"]);
@@ -634,7 +634,7 @@ fn variants() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn roots() {
-    let scratch = Scratch::new("check-roots");
+    let scratch = Scratch::new();
     write_repository(&scratch, "repo/");
     write_repository(&scratch, "unshared/");
     fs::remove_dir_all(scratch.0.join("unshared/shared")).unwrap();
@@ -831,7 +831,7 @@ fn roots() {
 
 #[test]
 fn library() {
-    let scratch = Scratch::new("check-library");
+    let scratch = Scratch::new();
     write_repository(&scratch, "");
     write_repository(&scratch, "images/");
     let library = LIBRARY.replace(
@@ -891,7 +891,7 @@ fn library() {
 fn library_lints() {
     // The standard library's files as a task's, below `//`, so that `check` lints
     // them, as it doesn't the library's own.
-    let scratch = Scratch::new("check-library-lints");
+    let scratch = Scratch::new();
     write_repository(&scratch, "");
     copy(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library"),
@@ -921,7 +921,7 @@ const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
 
 #[test]
 fn examples() {
-    let scratch = Scratch::new("check-examples");
+    let scratch = Scratch::new();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut names: Vec<String> = (fs::read_dir(&examples).unwrap())
         .map(Result::unwrap)
@@ -995,7 +995,7 @@ fn bodies() {
     const SUBMIT: &str = "def submit(run: Run, payload: Payload, finalize: bool = False):";
     // The `def` line of `LIBRARY`'s final call's body.
     const FINAL: &str = "def final_call(target: Target, payload: Payload):";
-    let scratch = Scratch::new("check-bodies");
+    let scratch = Scratch::new();
     // A task below `dir` whose library gives the agent a job function, `check`, whose body is
     // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image,
     // and a now function, `final`, whose body's `def` line is `submit`, and a final call whose

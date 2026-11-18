@@ -18,7 +18,6 @@ tls = { path = "../tls" }
 test-support = { path = "../test-support" }
 expect-test.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -33,7 +33,7 @@ use super::{
     reason = "most of it is the cases and their snapshot"
 )]
 fn usage() {
-    let scratch = Scratch::new("usage");
+    let scratch = Scratch::new();
     let same = |args: &[&str], like: &[&str]| {
         let ran = |args| scratch.pumpkin(args).output().unwrap();
         let same = ran(args) == ran(like);
@@ -911,7 +911,7 @@ fn usage() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn unrunnable() {
-    let scratch = Scratch::new("unrunnable");
+    let scratch = Scratch::new();
     scratch.write_task(
         "workflow",
         &serde_json::from_str::<Value>(WORKFLOW).unwrap(),
@@ -1090,7 +1090,7 @@ fn modes() {
 /// What `pumpkin run` under `umask`, with a runs directory whose parent is missing too, shows:
 /// its invocation, then the modes of the directories it made.
 fn modes_under(umask: libc::mode_t) -> String {
-    let scratch = Scratch::new(&format!("modes-{umask:03o}"));
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     let mut run = scratch.pumpkin(&["run", "lacking/task.star", "--sandboxd", "sandboxd"]);
     run.args(["--runs", "shared/runs", "--config", "pumpkin.toml"]);
@@ -1114,7 +1114,7 @@ fn modes_under(umask: libc::mode_t) -> String {
 
 #[test]
 fn ancestors() {
-    let scratch = Scratch::new("ancestors");
+    let scratch = Scratch::new();
     let dirs = [
         // Not writable by its group, which may or may not be the user's private group.
         ("shared", 0o757),
@@ -1168,7 +1168,7 @@ fn ancestors() {
 
 #[test]
 fn ancestors_writable_by_their_group() {
-    let scratch = Scratch::new("group");
+    let scratch = Scratch::new();
     let private = scratch.0.join("private");
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, Permissions::from_mode(0o775)).unwrap();
@@ -1276,7 +1276,7 @@ fn modes_below(dir: &Path) -> String {
     reason = "most of it is the cases and their snapshot"
 )]
 fn refusals() {
-    let scratch = Scratch::new("refusals");
+    let scratch = Scratch::new();
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     scratch.write_task("workflow", &ir);
     let mut budgeted = ir.clone();
@@ -1450,7 +1450,7 @@ fn refusals() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn configurations() {
-    let scratch = Scratch::new("configurations");
+    let scratch = Scratch::new();
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     scratch.write_task("workflow", &ir);
     ir["roles"][0]["runtime"]["agent"]
@@ -1965,7 +1965,7 @@ impl Upstream {
     reason = "most of it is the cases and their snapshot"
 )]
 fn runs_on_docker() {
-    let scratch = Scratch::new("docker");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2108,7 +2108,7 @@ fn runs_on_docker() {
     reason = "most of it is the steps and their snapshot"
 )]
 fn writes_only_in_its_workspace() {
-    let scratch = Scratch::new("workspace");
+    let scratch = Scratch::new();
     let label = format!("pumpkin.test=workspace-{}", std::process::id());
     let _images = Labelled(label.clone());
     write_hello(&scratch, &label);
@@ -2371,7 +2371,7 @@ const LEASING_AGENT: &str = r#"#!/bin/sh
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn leases_on_docker() {
-    let scratch = Scratch::new("leases");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2474,7 +2474,7 @@ const LEASING_FINAL: &str = r#"
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn final_call_leases_on_docker() {
-    let scratch = Scratch::new("isolation");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2550,7 +2550,7 @@ fn final_call_leases_on_docker() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn ops_on_docker() {
-    let scratch = Scratch::new("ops");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2659,7 +2659,7 @@ fn cpus() {
         eprintln!("skipped: the machine has {cores} cores, and the test needs 5 at least");
         return;
     }
-    let scratch = Scratch::new("cpus");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     let threads = machine_cpus() / cores;
     let sized = |name: &str, [agent, train, last]: [u64; 3]| {

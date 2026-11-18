@@ -16,8 +16,8 @@ use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
 use schema::ir::{Api, ModelBudget};
 use stdx::Deadline;
-use test_support::HUNG;
 use test_support::http::{read_request, write_chunk};
+use test_support::{HUNG, TestDir};
 
 use super::kept::{CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM};
 use super::read::CHAT_CUSTOM;
@@ -218,14 +218,8 @@ fn check(cases: &[Case], expect: &Expect) {
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
 fn exchanged(cases: &[Case]) -> String {
-    // Kept if the test fails, which shows where. The prefix stays short and fixed: a socket's
-    // path under this directory holds 107 bytes at most.
-    let dir = tempfile::Builder::new()
-        .prefix("route-")
-        .tempdir()
-        .unwrap()
-        .keep();
-    eprintln!("the scratch directory is {}", dir.display());
+    let scratch = TestDir::new();
+    let dir = scratch.path();
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let made: Vec<Result<(Route, Upstream), String>> = (0..)
@@ -242,7 +236,7 @@ fn exchanged(cases: &[Case]) -> String {
     let (holds, held) = mpsc::channel();
     let stand_in = thread::spawn(move || serve(&stand_in, answers, &heard_part, &holds));
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(&dir);
+    let (_sockets, registration, socket) = meeting(dir);
     let mut requests = Vec::new();
     let mut hangs_up = None;
     for case in &forwarded {
@@ -297,7 +291,6 @@ fn exchanged(cases: &[Case]) -> String {
         .collect();
     let shown = lines.join("\n").replace(&address, "<stand-in>");
     drop(session);
-    fs::remove_dir_all(&dir).unwrap();
     shown.replace(&dir.display().to_string(), "<dir>")
 }
 
