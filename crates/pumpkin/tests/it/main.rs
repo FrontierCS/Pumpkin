@@ -49,6 +49,10 @@ mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
+/// The directory of an `aws` that fails each call, which [`Scratch::program`] puts first on the
+/// `PATH` of each command.
+const POISON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/poison");
+
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
 const SCORE: &str =
@@ -206,6 +210,11 @@ impl Scratch {
         let home = self.0.join("home");
         fs::create_dir_all(&home).unwrap();
         command.env("HOME", home);
+        // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
+        // own first on the `PATH` it gives.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let poisoned = iter::once(PathBuf::from(POISON)).chain(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(poisoned).unwrap());
         command
     }
 }
@@ -359,10 +368,16 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 }
 
 fn invocation(command: &Command) -> String {
-    // The home that `Scratch::program` gives each command, `<scratch>/home`, is the rule: it is not
-    // shown.
+    // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
+    // one that starts with `POISON`, are the rule: they are not shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
+        Some(value)
+            if name == "PATH"
+                && std::env::split_paths(value).next() == Some(PathBuf::from(POISON)) =>
+        {
+            None
+        }
         Some(value) => Some(format!("{}={} ", name.display(), value.display())),
         None => Some(format!("env --unset={} ", name.display())),
     });
