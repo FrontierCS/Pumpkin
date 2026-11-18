@@ -242,7 +242,9 @@ pub(super) fn send(
     if let Some(modal) = client.modal_file()? {
         files.push((SENT_MODAL.to_owned(), modal));
     }
-    let archive = archive(&files);
+    // Each name, `config.toml`, `modal.toml` or an upstream's name of at most 64 bytes with
+    // `.key`, fits the 100 bytes of a name in the archive.
+    let archive = manifest::archive(&files);
     let script = starting(&client.controller, id, kind, tree, words);
     let mut ssh = reached.ssh(&script)?;
     let output = ssh.output(Some(&archive), Deadline::after(SHORT_TIMEOUT));
@@ -255,22 +257,6 @@ pub(super) fn send(
     finished(output, "ssh", SHORT_TIMEOUT)
         .map(|_| ())
         .map_err(|error| reached.lost(master, error))
-}
-
-/// A `tar` archive of `files`, each a name and what the file holds, each mode 0600: made in memory,
-/// so that what it holds of keys is never written on this machine but in the files that hold them.
-pub(super) fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut archive = Vec::new();
-    for (name, holds) in files {
-        // The name, `config.toml`, `modal.toml` or an upstream's name of at most 64 bytes with
-        // `.key`, fits its field's 100 bytes.
-        archive.extend_from_slice(&manifest::header(name, 0o600, holds.len() as u64));
-        archive.extend_from_slice(holds);
-        archive.resize(archive.len().next_multiple_of(manifest::BLOCK), 0);
-    }
-    // Two blocks of zeros end it.
-    archive.resize(archive.len() + 2 * manifest::BLOCK, 0);
-    archive
 }
 
 /// The script that the controller runs to start the job: it unpacks the archive on its standard

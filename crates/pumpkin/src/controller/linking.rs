@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
-use super::{OPENINGS, Reached, SHORT_TIMEOUT, Session, Slot, send};
+use super::{OPENINGS, Reached, SHORT_TIMEOUT, Session, Slot};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
-// What `cargo xtask install` lays out beside `pumpkin` in `bin/`, of which a build may lack some.
+// What `cargo xtask install` lays out beside `pumpkin` in `bin/` (its `built`, in
+// `xtask/src/main.rs`, which this mirrors), of which a build may lack some.
 const BESIDE: [&str; 5] = [
     "buildifier",
     "ec2-boot",
@@ -23,8 +24,9 @@ const BESIDE: [&str; 5] = [
     "sandboxd",
 ];
 
-/// This build's files, its executable and those beside it, which the controller installs whole
-/// and runs the `pumpkin` of as `serve`.
+/// This build's files, which the controller installs whole and runs the `pumpkin` of as `serve`:
+/// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
+/// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
     /// Each file's name in the install and where it is here.
     files: Vec<(&'static str, PathBuf)>,
@@ -178,10 +180,13 @@ fn install(reached: &Reached, build: &Build) -> Result<(), String> {
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
-    let read = (build.files.iter())
-        .map(|(name, path)| Ok(((*name).to_owned(), fs::read(path).context(path.display())?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    let archive = send::archive(&read);
+    // The files are dropped once in the archive, so that the upload holds one copy of them.
+    let archive = {
+        let read = (build.files.iter())
+            .map(|(name, path)| Ok(((*name).to_owned(), fs::read(path).context(path.display())?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        manifest::archive(&read)
+    };
     let mut session = reached.ssh(&link::installing(&build.hashed))?;
     let installed = reached.call(&mut session, Some(&archive), "ssh", SHORT_TIMEOUT);
     let installed = installed.map_err(|error| format!("installing it failed: {error}"));

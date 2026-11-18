@@ -2674,7 +2674,7 @@ fn follow_prints_the_outcome() {
 
 // As the first `ls` installs it, but as links to the client's files, which write nothing.
 fn served(scratch: &Scratch) -> String {
-    let (_, key) = listed(&client_bin(scratch));
+    let key = key(&client_bin(scratch));
     let dir = scratch.0.join(format!("home/.pumpkin/serve/{key}"));
     fs::create_dir_all(&dir).unwrap();
     for name in BUILT {
@@ -2690,26 +2690,28 @@ fn client_bin(scratch: &Scratch) -> PathBuf {
     scratch.0.join(format!("repo/.pumpkin/{PINNED}/bin"))
 }
 
-// What `sha256sum` lists of a build's files in `bin`, and the SHA-256 of that, its install's key.
-fn listed(bin: &Path) -> (String, String) {
+// The install key of a build's files in `bin`: the SHA-256 of what `sha256sum` lists of them.
+fn key(bin: &Path) -> String {
     let mut listing = String::new();
     for name in BUILT {
         let hex = sha256(&fs::read(bin.join(name)).unwrap());
         listing.extend([&hex, "  ", name, "\n"]);
     }
-    let key = sha256(listing.as_bytes());
-    (listing, key)
+    sha256(listing.as_bytes())
 }
 
-// The listing of the files in `bin`, each SHA-256 of a file of the client's build named by it.
-fn listing_of(scratch: &Scratch, bin: &Path) -> String {
-    let (mut listing, _) = listed(bin);
-    for name in BUILT {
-        let hex = sha256(&fs::read(client_bin(scratch).join(name)).unwrap());
-        listing = listing.replace(&hex, &format!("<the client's {name}>"));
-    }
-    let lines = listing.trim_end().replace('\n', "\n  ");
-    format!("its listing:\n  {lines}")
+// Whether each file of the install in `bin` is the client's file of its name.
+fn files_of(scratch: &Scratch, bin: &Path) -> String {
+    let lines = BUILT.map(|name| {
+        let client = fs::read(client_bin(scratch).join(name)).unwrap();
+        let other = if fs::read(bin.join(name)).unwrap() == client {
+            ""
+        } else {
+            "other than "
+        };
+        format!("  {name}: {other}the client's {name}")
+    });
+    format!("its files:\n{}", lines.join("\n"))
 }
 
 /// Moves the records that `write_record` wrote to `to`, below the scratch directory.
@@ -2860,7 +2862,7 @@ fn ls_installs_its_serve_there() {
         steps.push(ls_ran(&scratch, &client, &[]));
         steps.push(calls(&scratch));
     }
-    let (_, hex) = listed(&client_bin(&scratch));
+    let hex = key(&client_bin(&scratch));
     // Sorted as named in the snapshot, as this build's SHA-256 sorts anywhere.
     let mut left: Vec<String> = (modes(&installs).split(", "))
         .map(|install| install.replace(&hex, "<this build>"))
@@ -2868,7 +2870,7 @@ fn ls_installs_its_serve_there() {
     left.sort();
     steps.push(format!("installs: {}", left.join(", ")));
     steps.push(format!("the install: {}", modes(&installs.join(&hex))));
-    steps.push(listing_of(&scratch, &installs.join(&hex)));
+    steps.push(files_of(&scratch, &installs.join(&hex)));
     check(
         &scratch,
         &steps.join("\n"),
@@ -2891,9 +2893,9 @@ fn ls_installs_its_serve_there() {
             the calls: serve=.pumpkin/serve/<this build>/pumpkin
             installs: <this build> 700, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 775
             the install: buildifier 555, pumpkin 555
-            its listing:
-              <the client's pumpkin>  pumpkin
-              <the client's buildifier>  buildifier"#]],
+            its files:
+              pumpkin: the client's pumpkin
+              buildifier: the client's buildifier"#]],
     );
 }
 
@@ -2986,7 +2988,7 @@ fn ls_fails_at_once_when_serve_ends() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
-    let (_, hex) = listed(&client_bin(&scratch));
+    let hex = key(&client_bin(&scratch));
     // The connection stays up, so asking again would end the same way.
     let script = "#!/bin/sh\necho 'serve: cannot start' >&2\nexit 1\n";
     scratch.write_executable(
@@ -3682,10 +3684,10 @@ fn view_installs_its_serve_there() {
         steps.push(got(&served, &window, &["end"]));
         steps.push(calls(&scratch));
     }
-    let (_, hex) = listed(&client_bin(&scratch));
+    let hex = key(&client_bin(&scratch));
     let install = scratch.0.join(format!("home/.pumpkin/serve/{hex}"));
     steps.push(format!("the install: {}", modes(&install)));
-    steps.push(listing_of(&scratch, &install));
+    steps.push(files_of(&scratch, &install));
     drop(driver);
     check(
         &scratch,
@@ -3701,9 +3703,9 @@ fn view_installs_its_serve_there() {
             end: 309222
             the calls: none
             the install: buildifier 555, pumpkin 555
-            its listing:
-              <the client's pumpkin>  pumpkin
-              <the client's buildifier>  buildifier"#]],
+            its files:
+              pumpkin: the client's pumpkin
+              buildifier: the client's buildifier"#]],
     );
 }
 
