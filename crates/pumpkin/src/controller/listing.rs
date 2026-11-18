@@ -40,7 +40,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         prefixes: prefixes.to_vec(),
         since_unix_secs: since.map(|since| since.since_epoch().as_secs()),
     };
-    let (health, mut listing, unlisted) = answered(&reached, &list)?;
+    let ((health, mut listing, unlisted), asked) = answered(&reached, &list)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -56,7 +56,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     ));
     let lines = crate::progress::lines(&listing, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
-    said_when(now);
+    said_when(asked);
     let unlisted = unlisted + unlisted_here;
     if unlisted > 0 {
         let runs = crate::counted(unlisted, "run");
@@ -65,10 +65,10 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the controller's `serve` answers, which this installs there first if there is none;
-/// asked again over another link, after each of `AGAIN`'s pauses, while one ends before it has
-/// answered, as asking only reads.
-fn answered(reached: &Reached, list: &Ask) -> Result<Answers, String> {
+/// What the controller's `serve` answers, which this installs there first if there is none, and
+/// when the listing was asked for, as `serve` makes its rows then; asked again over another link,
+/// after each of `AGAIN`'s pauses, while one ends before it has answered, as asking only reads.
+fn answered(reached: &Reached, list: &Ask) -> Result<(Answers, UnixTime), String> {
     let exe = workspace::exe("expected to send it to the controller, to list the runs there")?;
     let (digest, _) = manifest::file_sha256(&exe)?;
     let name = &reached.name;
@@ -77,11 +77,17 @@ fn answered(reached: &Reached, list: &Ask) -> Result<Answers, String> {
         let Session { command, slot } = reached.ssh(&link::command(&digest))?;
         let master = slot.master;
         let asked = Link::open(command, slot).and_then(|link| match link {
-            Some(mut link) => Ok(Some((link.ask(&Ask::Health)?, link.ask(list)?))),
+            Some(mut link) => {
+                let health = link.ask(&Ask::Health)?;
+                let asked = crate::unix_now();
+                Ok(Some((health, link.ask(list)?, asked)))
+            }
             None => Ok(None),
         });
         let said = match asked {
-            Ok(Some((health, listed))) => return answers(name, health, listed),
+            Ok(Some((health, listed, asked))) => {
+                return answers(name, health, listed).map(|answers| (answers, asked));
+            }
             Ok(None) if !installed => {
                 install(reached, &exe, &digest)?;
                 installed = true;
