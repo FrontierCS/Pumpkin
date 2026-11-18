@@ -47,7 +47,9 @@ use run::{driver_run, run, start};
 
 const MODAL_HELPER: &str = "pumpkin-modal.py";
 
-// musl's allocator is much slower than glibc's at reading a run's records.
+// musl's allocator is much slower than glibc's at reading a run's records, as ripgrep found of its
+// own work, and mimalloc builds with a C compiler alone, where jemalloc needs `make`:
+// <https://github.com/BurntSushi/ripgrep/blob/91f5d22ef48bde459d90a8c7dbeab416e97d0f2b/crates/core/main.rs#L19-L36>
 #[cfg(target_env = "musl")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
