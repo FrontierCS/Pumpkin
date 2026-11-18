@@ -109,6 +109,7 @@ pub(super) enum Event {
     AgentFailed {
         reason: String,
     },
+    AgentCollected,
     OpArrived {
         request: Request,
     },
@@ -186,6 +187,7 @@ impl Event {
             | Self::AgentStarted
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
+            | Self::AgentCollected
             | Self::OpRefused
             | Self::CallStarted { .. }
             | Self::CallTimedOut { .. }
@@ -215,6 +217,7 @@ impl Event {
             | Self::AgentStarted
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
+            | Self::AgentCollected
             | Self::OpArrived { .. }
             | Self::OpRefused
             | Self::LeaseReady { .. }

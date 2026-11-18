@@ -43,7 +43,7 @@ export function lanesOf(record) {
   const event = /** @type {Record<string, any>} */ (record.event || {});
   const caller = event.caller;
   if (typeof caller === "string") lanes.add(caller.replace("-", " "));
-  if (event.kind === "agent_started" || event.kind === "agent_exited" || event.kind === "agent_failed") lanes.add("agent");
+  if (["agent_started", "agent_exited", "agent_failed", "agent_collected"].includes(event.kind)) lanes.add("agent");
   if (event.job !== undefined) lanes.add("job " + event.job);
   if (event.lease !== undefined) lanes.add("lease " + event.lease);
   if (event.sandbox) lanes.add(String(event.sandbox).replace("-", " "));
