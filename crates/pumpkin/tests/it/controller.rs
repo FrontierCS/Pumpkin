@@ -176,7 +176,7 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     reason = "most of it is the configuration's snapshot"
 )]
 fn job() {
-    let scratch = Scratch::new("controller-job");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
@@ -444,7 +444,7 @@ fn job() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn job_refusals() {
-    let scratch = Scratch::new("controller-job-refusals");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let id = id_ago(0, "0b000004");
@@ -631,7 +631,7 @@ fn job_ended_whole(mut child: Child) -> String {
     reason = "most of it is the jobs' steps and the snapshot"
 )]
 fn job_admission() {
-    let scratch = Scratch::new("controller-job-admission");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     scratch.write_task("built", &workflow(&image('0'), &["true"]));
@@ -773,7 +773,7 @@ fn job_admission() {
     reason = "most of it is the jobs' steps and the snapshot"
 )]
 fn job_publish_wait() {
-    let scratch = Scratch::new("controller-job-publish-wait");
+    let scratch = Scratch::new();
     // The controller's engine is rootful, of which the job says nothing.
     let rootful = INFO.replace(r#","name=rootless""#, "");
     let _stand_in = StandIn::with(&scratch, &rootful, IMAGE);
@@ -912,7 +912,7 @@ fn job_publish_wait() {
     reason = "most of it is the job's command line and the snapshot"
 )]
 fn job_publish_fails() {
-    let scratch = Scratch::new("controller-job-publish-fails");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let publish = "[publish]\nbucket = \"pumpkin-alice-public\"\ndistribution = \"E2STANDIN\"\n\
@@ -1014,7 +1014,7 @@ fn job_publish_fails() {
     reason = "most of it is the records and the snapshot"
 )]
 fn boot() {
-    let scratch = Scratch::new("controller-boot");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let home = scratch.0.join("home");
@@ -1312,7 +1312,7 @@ fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) 
 
 #[test]
 fn keys_on_standard_input() {
-    let scratch = Scratch::new("controller-keys");
+    let scratch = Scratch::new();
     let (_, id, ran) = started_job(&scratch);
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     let sent = fs::read_to_string(scratch.0.join(format!("run/pumpkin/{id}/gateway.key")));
@@ -1364,7 +1364,7 @@ fn keys_on_standard_input() {
 // No file of the client's that another user may read, but a public key.
 #[test]
 fn modes_of_what_the_client_keeps() {
-    let scratch = Scratch::new("controller-modes");
+    let scratch = Scratch::new();
     let (_, id, _) = started_job(&scratch);
     // The test's own, which `connect` wrote.
     fs::remove_file(scratch.0.join(SHARED).join("found")).unwrap();
@@ -1404,7 +1404,7 @@ fn modes_of_what_the_client_keeps() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn target_refusals() {
-    let scratch = Scratch::new("controller-target-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let mut lines = Vec::new();
     let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
@@ -1696,7 +1696,7 @@ fn tree_files(scratch: &Scratch, dir: &Path) -> Vec<String> {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn send_by_content() {
-    let scratch = Scratch::new("controller-send");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
@@ -1785,7 +1785,7 @@ fn send_by_content() {
 
 #[test]
 fn send_refused_piece() {
-    let scratch = Scratch::new("controller-send-refused");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     // A piece whole as its size goes, left with other bytes, as by a file changed meanwhile.
@@ -1862,7 +1862,7 @@ fn received(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
 
 #[test]
 fn send_carries_on() {
-    let scratch = Scratch::new("controller-send-carries-on");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
     // The connection that carries the first piece ends part way through it; the other ends whole.
@@ -1907,7 +1907,7 @@ fn send_carries_on() {
 
 #[test]
 fn send_over_streams() {
-    let scratch = Scratch::new("controller-send-streams");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     // With the task's few small files, 33 MiB is three streams' worth.
     let files = [
@@ -1967,7 +1967,7 @@ fn send_over_streams() {
 
 #[test]
 fn send_over_one_connection() {
-    let scratch = Scratch::new("controller-send-one-connection");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
     let shared = scratch.0.join(SHARED);
@@ -2029,7 +2029,7 @@ fn send_over_one_connection() {
 
 #[test]
 fn send_over_the_connection_held() {
-    let scratch = Scratch::new("controller-send-connection-held");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
     // Master 1 can't be opened, so both streams go over master 0.
@@ -2078,7 +2078,7 @@ fn send_over_the_connection_held() {
 
 #[test]
 fn send_refusals() {
-    let scratch = Scratch::new("controller-send-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let mut lines = Vec::new();
     for name in [&b"repo/stand-in/a\nb"[..], b"repo/stand-in/\xff"] {
@@ -2117,7 +2117,7 @@ fn send_refusals() {
 
 #[test]
 fn send_changed_file() {
-    let scratch = Scratch::new("controller-send-changed");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     // Shortened once it is hashed, as the first call to the controller begins.
@@ -2156,7 +2156,7 @@ fn send_changed_file() {
 
 #[test]
 fn send_bundle_and_gone() {
-    let scratch = Scratch::new("controller-send-gone");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
     let (_, first) = start(&scratch, &client);
@@ -2203,7 +2203,7 @@ fn send_bundle_and_gone() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn store_collection() {
-    let scratch = Scratch::new("controller-store-collection");
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
@@ -2351,7 +2351,7 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) -> [String; 3] {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn follow_carries_on() {
-    let scratch = Scratch::new("controller-follow-carries-on");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000001");
@@ -2456,7 +2456,7 @@ fn follow_carries_on() {
 
 #[test]
 fn follow_cut_often() {
-    let scratch = Scratch::new("controller-follow-cut-often");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000002");
@@ -2514,7 +2514,7 @@ fn follow_cut_often() {
 
 #[test]
 fn follow_cut_before_a_line() {
-    let scratch = Scratch::new("controller-follow-cut-before-a-line");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000003");
@@ -2557,7 +2557,7 @@ fn follow_cut_before_a_line() {
 
 #[test]
 fn follow_prints_the_outcome() {
-    let scratch = Scratch::new("controller-follow-prints-the-outcome");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     let _ = start(&scratch, &client);
     let id = id_ago(0, "0f000004");
@@ -2649,7 +2649,7 @@ fn ls_ran(scratch: &Scratch, client: &[(String, String); 2], args: &[&str]) -> S
 
 #[test]
 fn ls_answered_there() {
-    let scratch = Scratch::new("controller-ls-there");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
@@ -2718,7 +2718,7 @@ fn ls_answered_there() {
 
 #[test]
 fn ls_lists_other_formats_unread() {
-    let scratch = Scratch::new("controller-ls-unread");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
@@ -2746,7 +2746,7 @@ fn ls_lists_other_formats_unread() {
 
 #[test]
 fn ls_installs_its_serve_there() {
-    let scratch = Scratch::new("controller-ls-installs");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     write_record(
@@ -2807,7 +2807,7 @@ fn ls_installs_its_serve_there() {
 
 #[test]
 fn ls_carries_on_after_a_cut() {
-    let scratch = Scratch::new("controller-ls-cut");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let hex = served(&scratch);
@@ -2839,7 +2839,7 @@ fn ls_carries_on_after_a_cut() {
 
 #[test]
 fn ls_refusals() {
-    let scratch = Scratch::new("controller-ls-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
@@ -2891,7 +2891,7 @@ fn ls_refusals() {
 
 #[test]
 fn ls_fails_at_once_when_serve_ends() {
-    let scratch = Scratch::new("controller-ls-serve-ends");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let hex = sha256(&fs::read(PUMPKIN).unwrap());
@@ -2938,7 +2938,7 @@ fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
 
 #[test]
 fn serve_refusals() {
-    let scratch = Scratch::new("controller-serve-refusals");
+    let scratch = Scratch::new();
     let mut steps = vec!["no request:".to_owned(), serve_fed(&scratch, b"")];
     let mut past = (u32::try_from(schema::frame::MAX_MESSAGE_BYTES).unwrap() + 1)
         .to_be_bytes()
@@ -3027,7 +3027,7 @@ fn copied_record(
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy() {
-    let scratch = Scratch::new("controller-record-copy");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let id = id_ago(0, "0d000001");
@@ -3218,7 +3218,7 @@ fn record_copy() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn record_copy_refusals() {
-    let scratch = Scratch::new("controller-record-copy-refusals");
+    let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     let id = id_ago(0, "0d000002");
@@ -3371,7 +3371,7 @@ fn got(served: &Served, path: &str, fields: &[&str]) -> String {
 
 #[test]
 fn views_the_controllers_runs_over_a_reopened_connection() {
-    let scratch = Scratch::new("controller-views-runs");
+    let scratch = Scratch::new();
     let (client, driver, [ended, live]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3415,7 +3415,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
 
 #[test]
 fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
-    let scratch = Scratch::new("controller-views-lost");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3446,7 +3446,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
 
 #[test]
 fn view_answers_502_for_a_reply_it_cant_read() {
-    let scratch = Scratch::new("controller-views-unread");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let hex = served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
@@ -3500,7 +3500,7 @@ fn view_answers_502_for_a_reply_it_cant_read() {
 
 #[test]
 fn view_installs_its_serve_there() {
-    let scratch = Scratch::new("controller-view-installs");
+    let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let window = format!("/api/runs/{ended}/log?at=0");
@@ -3536,7 +3536,7 @@ fn view_installs_its_serve_there() {
 // The stand-in controller has no job of the run, which is what the cancel says.
 #[test]
 fn view_cancels_on_the_controller() {
-    let scratch = Scratch::new("controller-view-cancels");
+    let scratch = Scratch::new();
     let (client, driver, [_, live]) = viewed(&scratch);
     served(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));

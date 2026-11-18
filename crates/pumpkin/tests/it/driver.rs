@@ -33,8 +33,8 @@ enum Whom {
     Both,
 }
 
-fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool) -> String {
-    let scratch = Scratch::new(name);
+fn unstarted(at: &str, whom: Whom, signal_name: &str, released: bool) -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold(at);
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -68,8 +68,8 @@ fn unstarted(name: &str, at: &str, whom: Whom, signal_name: &str, released: bool
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-fn unlogged(name: &str) -> String {
-    let scratch = Scratch::new(name);
+fn unlogged() -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("image");
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -86,8 +86,8 @@ fn unlogged(name: &str) -> String {
     text.replace(&scratch.0.display().to_string(), "<scratch>")
 }
 
-fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
-    let scratch = Scratch::new(name);
+fn on_engine(task: &str, info: &str, image: &str) -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::with(&scratch, info, image);
     let text = ran(
         stand_in.run(&format!("{task}/task.star"), &[]),
@@ -99,7 +99,7 @@ fn on_engine(name: &str, task: &str, info: &str, image: &str) -> String {
 
 #[test]
 fn lacks_its_image() {
-    let scratch = Scratch::new("lacking");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     check(
         &scratch,
@@ -127,14 +127,14 @@ fn loses_its_log() {
         pumpkin: run <id> failed: <scratch>/runs/<id>/driver.log: No such file or directory (os error 2); its record is <scratch>/runs/<id>
         pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
         record: driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lib/train.star, sources/task/stand-in/final.star, sources/task/stand-in/submit.star, sources/task/stand-in/task.star
-        outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}"#]].assert_eq(&unlogged("unlogged"));
+        outcome.json: {"reason":"<scratch>/runs/<id>/driver.log: No such file or directory (os error 2)","state":"failed"}"#]].assert_eq(&unlogged());
 }
 
 #[test]
 fn refuses_the_classic_store() {
     let containerd = r#"["driver-type","io.containerd.snapshotter.v1"]"#;
     let classic = INFO.replace(containerd, r#"["Backing Filesystem","extfs"]"#);
-    let shown = on_engine("classic", "stand-in", &classic, IMAGE);
+    let shown = on_engine("stand-in", &classic, IMAGE);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -145,12 +145,7 @@ fn refuses_the_classic_store() {
 #[test]
 fn refuses_an_undescribed_image() {
     let descriptor = r#","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
-    let shown = on_engine(
-        "undescribed",
-        "stand-in",
-        INFO,
-        &IMAGE.replace(descriptor, ""),
-    );
+    let shown = on_engine("stand-in", INFO, &IMAGE.replace(descriptor, ""));
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -165,7 +160,7 @@ fn refuses_an_undescribed_image() {
 fn refuses_unlimited_swap() {
     // The task builds its image, and no build starts: the refusal comes first.
     let unlimited = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
-    let shown = on_engine("unlimited", "unbuilt", &unlimited, IMAGE);
+    let shown = on_engine("unbuilt", &unlimited, IMAGE);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run unbuilt/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -175,7 +170,7 @@ fn refuses_unlimited_swap() {
 
 #[test]
 fn unstarted_context_driver_term() {
-    let shown = unstarted("unstarted", "context", Whom::Driver, "TERM", false);
+    let shown = unstarted("context", Whom::Driver, "TERM", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -185,7 +180,7 @@ fn unstarted_context_driver_term() {
 
 #[test]
 fn unstarted_context_run_kill() {
-    let shown = unstarted("unstarted", "context", Whom::Run, "KILL", false);
+    let shown = unstarted("context", Whom::Run, "KILL", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         ended by signal: 9
@@ -194,7 +189,7 @@ fn unstarted_context_run_kill() {
 
 #[test]
 fn unstarted_context_both_int() {
-    let shown = unstarted("unstarted", "context", Whom::Both, "INT", false);
+    let shown = unstarted("context", Whom::Both, "INT", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         ended by signal: 2
@@ -203,7 +198,7 @@ fn unstarted_context_both_int() {
 
 #[test]
 fn unstarted_image_driver_kill() {
-    let shown = unstarted("unstarted", "image", Whom::Driver, "KILL", false);
+    let shown = unstarted("image", Whom::Driver, "KILL", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -225,7 +220,7 @@ fn unstarted_image_driver_kill() {
 
 #[test]
 fn unstarted_image_driver_term_released() {
-    let shown = unstarted("unstarted", "image", Whom::Driver, "TERM", true);
+    let shown = unstarted("image", Whom::Driver, "TERM", true);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         exit status: Some(1)
@@ -243,7 +238,7 @@ fn unstarted_image_driver_term_released() {
 
 #[test]
 fn unstarted_image_both_int() {
-    let shown = unstarted("unstarted", "image", Whom::Both, "INT", false);
+    let shown = unstarted("image", Whom::Both, "INT", false);
     expect![[r#"
         $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
         ended by signal: 2
@@ -278,7 +273,7 @@ fn detached(stand_in: &StandIn, invoked: String, output: &Output, driver: i64) -
 }
 
 fn returns() -> String {
-    let scratch = Scratch::new("detaches-returns");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -288,7 +283,7 @@ fn returns() -> String {
 }
 
 fn interrupted() -> String {
-    let scratch = Scratch::new("detaches-interrupted");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &["--wait"]);
@@ -307,7 +302,7 @@ fn interrupted() -> String {
 }
 
 fn stopped() -> String {
-    let scratch = Scratch::new("detaches-stopped");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("image");
     stand_in.hold("create");
@@ -329,8 +324,9 @@ fn stopped() -> String {
 
 #[test]
 fn detaches() {
-    let scratch = Scratch::new("detaches");
+    // Each makes a directory of its own first, as a test holds one at a time.
     let steps = [returns(), interrupted(), stopped()].map(Step::Ran);
+    let scratch = Scratch::new();
     check(
         &scratch,
         steps,
@@ -393,8 +389,8 @@ fn detaches() {
     );
 }
 
-fn signaled(name: &str, ignoring: bool, signals: &[&str], released: bool) -> String {
-    let scratch = Scratch::new(name);
+fn signaled(ignoring: bool, signals: &[&str], released: bool) -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -457,13 +453,14 @@ fn has(mask: u64, number: libc::c_int) -> bool {
 
 #[test]
 fn signaled_after_the_start() {
-    let scratch = Scratch::new("signaled");
+    // Each makes a directory of its own first, as a test holds one at a time.
     let steps = [
-        signaled("signaled-term", false, &["TERM"], true),
-        signaled("signaled-hup", false, &["HUP"], true),
-        signaled("signaled-int-twice", false, &["INT", "INT"], true),
-        signaled("signaled-ignoring", true, &["HUP", "TERM"], true),
+        signaled(false, &["TERM"], true),
+        signaled(false, &["HUP"], true),
+        signaled(false, &["INT", "INT"], true),
+        signaled(true, &["HUP", "TERM"], true),
     ];
+    let scratch = Scratch::new();
     check(
         &scratch,
         steps.map(Step::Ran),
@@ -570,7 +567,7 @@ fn session(pid: i64) -> Option<i64> {
     reason = "most of it is the run's steps and their snapshot"
 )]
 fn lost_on_docker() {
-    let scratch = Scratch::new("lost");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -684,7 +681,7 @@ fn lost_on_docker() {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn signaled_on_docker() {
-    let scratch = Scratch::new("signaled-docker");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let containers = containers(&context);

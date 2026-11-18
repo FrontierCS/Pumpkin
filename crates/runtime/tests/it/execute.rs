@@ -31,11 +31,11 @@ use schema::workflow::{ByRole, Placed, Workflow};
 use serde_json::{Value, json};
 use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
-use test_support::{WORKFLOW, files, sandboxes, standard_outputs};
+use test_support::{TestDir, WORKFLOW, files, sandboxes, standard_outputs};
 
 use crate::body::Bodies;
 use crate::host::{LateTake, SimHost, SlowSync, Synced};
-use crate::run::{PROVIDER, Runs, compact_outcome, placed, placed_on, providers_of, serving};
+use crate::run::{PROVIDER, compact_outcome, placed, placed_on, providers_of, serving};
 use crate::sim::{
     self, BRIEF, HUNG, Journal, LAST, LOST, MUTE, REFUSED_ONCE, SCRIBBLED, SLOW, Sim, UNDELETABLE,
     UNFREEZABLE, UNLISTABLE, UNPUBLISHED, VANISHING,
@@ -317,15 +317,15 @@ fn executed_ir<H: Shown>(
     also: &[Also],
 ) -> String {
     let at = interruption(also);
-    let runs = Runs::new();
+    let runs = TestDir::new();
     let stand_in = model_routed(ir).then(StandIn::start);
     let ready = (providers.iter()).map(|(name, provider)| (*name, provider.ready()));
     let ready: BTreeMap<&str, &Ready> = ready.collect();
     let placed = placed_on(ir, &ready).unwrap();
-    let servings = StandIn::servings(stand_in.as_ref(), placed.workflow(), &runs.dir);
+    let servings = StandIn::servings(stand_in.as_ref(), placed.workflow(), runs.path());
     let hard_end = lasts(&placed);
     let id = new_id(SystemTime::now()).unwrap();
-    let record = runs.dir.join(id.as_str());
+    let record = runs.path().join(id.as_str());
     for (_, sim) in providers {
         sim.records(&record);
     }
@@ -333,7 +333,7 @@ fn executed_ir<H: Shown>(
     let on = providers_of(&placed, |name| named(&interrupting, name));
     let prices = prices();
     let (models, recorded) = kept(&placed, &servings, &prices);
-    let run = Run::prepare(host, placed.clone(), on, &runs.dir, id, models, recorded).unwrap();
+    let run = Run::prepare(host, placed.clone(), on, runs.path(), id, models, recorded).unwrap();
     let (record, tag) = (run.dir().to_owned(), RunTag::try_from(run.id().to_owned()));
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
@@ -3230,13 +3230,13 @@ fn nanos(value: &Value) -> Option<u64> {
 // before it publishes, and a third is then prepared.
 #[test]
 fn holds_until_its_end() {
-    let runs = Runs::new();
+    let runs = TestDir::new();
     let sim = Sim::new().with_cpus(16);
     let ir: ir::Workflow = serde_json::from_value(workflow(&["exit", "0"])).unwrap();
     let unpriced = BTreeMap::new();
     let prepare = |name: &str| {
         let placed = placed(&ir, sim.ready()).unwrap();
-        let dir = runs.dir.join(name);
+        let dir = runs.path().join(name);
         let Ok(servings) = placed
             .workflow()
             .by_role(|_| Ok::<_, Infallible>(Vec::new()));

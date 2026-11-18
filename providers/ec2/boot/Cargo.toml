@@ -16,8 +16,8 @@ stdx = { path = "../../../crates/stdx" }
 serde_json.workspace = true
 
 [dev-dependencies]
+test-support = { path = "../../../crates/test-support" }
 expect-test.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

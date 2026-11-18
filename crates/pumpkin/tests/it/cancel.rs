@@ -24,11 +24,10 @@ const UNLOCKED: &str = "20261108-120200-0b000003";
 const GONE: &str = "20261108-120300-0c000004";
 
 /// What becomes of `pumpkin cancel`, with `force` if given, of a run that `run` started in a
-/// scratch directory of its own, `name`, while the stand-in held its driver at `create`: once
-/// `cancel` says that it is stopping the run, or killing its driver, the stand-in lets the
-/// driver go on.
-fn live(name: &str, force: &[&str]) -> String {
-    let scratch = Scratch::new(name);
+/// scratch directory of its own while the stand-in held its driver at `create`: once `cancel`
+/// says that it is stopping the run, or killing its driver, the stand-in lets the driver go on.
+fn live(force: &[&str]) -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -61,7 +60,9 @@ fn live(name: &str, force: &[&str]) -> String {
     reason = "most of it is the cases and their snapshot"
 )]
 fn cancels() {
-    let scratch = Scratch::new("cancels");
+    // Each makes a directory of its own first, as a test holds one at a time.
+    let [stopped, killed] = [live(&[]), live(&["--force"])];
+    let scratch = Scratch::new();
     write_record(&scratch, LOST, true, None);
     let failed = json!({ "state": "failed", "reason": "r" });
     write_record(&scratch, FAILED, true, Some(failed));
@@ -76,8 +77,8 @@ fn cancels() {
         )
     };
     let steps = [
-        live("cancels-live", &[]),
-        live("cancels-force", &["--force"]),
+        stopped,
+        killed,
         cancel(LOST),
         cancel(FAILED),
         cancel("0b0000"),

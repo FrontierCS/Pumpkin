@@ -21,6 +21,9 @@ use stdx::process::Environment;
 pub mod edge;
 pub mod http;
 pub mod suite;
+mod test_dir;
+
+pub use test_dir::TestDir;
 
 /// A complete workflow, in the IR's JSON.
 ///

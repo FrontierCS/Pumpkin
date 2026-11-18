@@ -8,8 +8,7 @@
 )]
 #![expect(
     clippy::print_stderr,
-    reason = "a failed test shows where its scratch directory is, and one that can't remove its \
-              images says so"
+    reason = "a test says which image it can't remove, and why it skips"
 )]
 
 use std::borrow::Cow;
@@ -29,8 +28,7 @@ use engine::{ContextName, Engine};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
-use tempfile::TempDir;
-use test_support::{BUSYBOX, WORKFLOW, files};
+use test_support::{BUSYBOX, TestDir, WORKFLOW, files};
 
 mod build;
 mod cancel;
@@ -84,10 +82,11 @@ def final_call(target: Target, payload: Payload):
 
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
-/// Field `0` is its canonical path. A test that panics leaves the directory and prints where it
-/// is; one that ends and can't remove it fails, as a leftover would otherwise stay unseen:
-/// `TempDir` ignores what its removal fails with.
-struct Scratch(PathBuf, TempDir);
+/// Field `0` is its canonical path.
+struct Scratch(
+    PathBuf,
+    #[expect(dead_code, reason = "held for its drop, which removes it")] TestDir,
+);
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
@@ -104,11 +103,8 @@ const SUBMIT_BODY: &str = "<the body of submit.star>";
 const FINAL_BODY: &str = "<the body of final.star>";
 
 impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("pumpkin-{name}-"))
-            .tempdir()
-            .unwrap();
+    fn new() -> Self {
+        let dir = TestDir::new();
         // `run` refuses a runs directory below one that its group may write, which the umask, or a
         // setgid temporary directory, could make this one.
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
@@ -216,21 +212,6 @@ impl Scratch {
         let poisoned = iter::once(PathBuf::from(POISON)).chain(std::env::split_paths(&path));
         command.env("PATH", std::env::join_paths(poisoned).unwrap());
         command
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if thread::panicking() {
-            self.1.disable_cleanup(true);
-            eprintln!("the test's scratch directory is {}", self.0.display());
-        } else if let Err(error) = fs::remove_dir_all(&self.0) {
-            self.1.disable_cleanup(true);
-            panic!(
-                "the scratch directory {} can't be removed: {error}",
-                self.0.display()
-            );
-        }
     }
 }
 
