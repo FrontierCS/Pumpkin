@@ -19,7 +19,9 @@ use stdx::Deadline;
 use test_support::http::{read_request, write_chunk};
 use test_support::{HUNG, TestDir};
 
-use super::kept::{CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM};
+use super::kept::{
+    CHAT_ANSWER, CHAT_STREAM, MESSAGES_CUT, MESSAGES_STREAM, RESPONSES_CUT, RESPONSES_STREAM,
+};
 use super::read::CHAT_CUSTOM;
 use super::{
     Request, chat, fake_sandbox, listed, meeting, messages, models, next_model_request, post,
@@ -151,6 +153,8 @@ struct Case {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Answer {
     Streams(Parts),
+    /// As [`Answer::Streams`], under this `content-type`.
+    Labelled(&'static str, Parts),
     Json(&'static str),
     Refuses,
     RefusesKey(u16),
@@ -430,12 +434,14 @@ fn serve(
         // What the sandbox heard of earlier answers.
         while heard_part.try_recv().is_ok() {}
         match answer {
-            Answer::Streams(_) | Answer::BreaksOff => {
-                let parts = match answer {
-                    Answer::Streams(parts) => parts,
-                    _ => PARTS,
+            Answer::Streams(_) | Answer::Labelled(..) | Answer::BreaksOff => {
+                let (content_type, parts) = match answer {
+                    Answer::Streams(parts) => ("text/event-stream", parts),
+                    Answer::Labelled(content_type, parts) => (content_type, parts),
+                    _ => ("text/event-stream", PARTS),
                 };
-                write!(connection, "HTTP/1.1 200 OK\r\n{STREAM_HEAD}").unwrap();
+                let labelled = STREAM_HEAD.replacen("text/event-stream", content_type, 1);
+                write!(connection, "HTTP/1.1 200 OK\r\n{labelled}").unwrap();
                 // The rest waits for the sandbox to hear the first part, so a route that holds
                 // a stream back fails here.
                 write_chunk(&mut connection, parts[0]);
@@ -745,4 +751,50 @@ fn first_output_as_read() {
         a stream of Messages broken off, split at 384 of 525: begun by 525
     "#]]
     .assert_eq(&shown);
+}
+
+// Bodies kept from real upstreams, each under the `content-type` of the other framing, as a proxy
+// may label them.
+#[test]
+fn mislabelled() {
+    let bodies = [
+        (
+            "a stream",
+            Api::Responses,
+            "application/json",
+            RESPONSES_STREAM,
+        ),
+        (
+            "a stream of Chat Completions",
+            Api::Chat,
+            "application/json",
+            CHAT_STREAM,
+        ),
+        (
+            "an answer of Chat Completions",
+            Api::Chat,
+            "text/event-stream",
+            CHAT_ANSWER,
+        ),
+    ];
+    let cases = bodies.map(|(name, api, content_type, body)| {
+        let (first, rest) = body.split_at(body.floor_char_boundary(body.len() / 2));
+        let answer = Answer::Labelled(content_type, [first, rest]);
+        match api {
+            Api::Responses => case(name, answer),
+            Api::Chat => chat_case(name, answer),
+            Api::Messages => messages_case(name, answer),
+        }
+    });
+    let exchanged = exchanged(&cases);
+    let mut shown = String::new();
+    for ((name, _, content_type, _), line) in bodies.iter().zip(exchanged.lines()) {
+        let told = line.split("; told: ").nth(1).unwrap();
+        writeln!(shown, "{name} as {content_type}: {told}").unwrap();
+    }
+    expect![[r#"
+        a stream as application/json: Some(Forwarded { model: ModelName("m-large"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 102967, output_tokens: 88, cached_tokens: Some(102720), cache_write_tokens: None, reasoning_tokens: Some(4) }), failed: None }); kept: request 552 bytes, response 6988 bytes, its output begun by byte 3494; key refused: false
+        a stream of Chat Completions as application/json: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 20, output_tokens: 57, cached_tokens: Some(0), cache_write_tokens: None, reasoning_tokens: Some(52) }), failed: None }); kept: request 355 bytes, response 1206 bytes, its output begun by byte 603; key refused: false
+        an answer of Chat Completions as text/event-stream: Some(Forwarded { model: ModelName("m-small"), status: 200, request_id: Some("req_1"), usage: Some(Usage { input_tokens: 3323, output_tokens: 57, cached_tokens: Some(0), cache_write_tokens: None, reasoning_tokens: Some(34) }), failed: None }); kept: request 355 bytes, response 798 bytes; key refused: false
+    "#]].assert_eq(&shown);
 }

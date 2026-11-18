@@ -30,7 +30,7 @@ mod trace;
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -701,14 +701,23 @@ impl View {
 
     fn record(&self, id: &str) -> Result<Record, Failed> {
         let dir = self.runs.join(id);
-        // Said without the runs directory, which is the server's, not the page's.
-        if !dir.try_exists().context(dir.display())? {
+        let path = dir.join("record.json");
+        let has = match path.try_exists() {
+            // A file is no run, as the list shows directories alone.
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+            has => has,
+        };
+        if !has.context(path.display())? {
+            // Said without the runs directory, which is the server's, not the page's.
             return Err(Failed::NotFound(format!(
                 "no run that this view serves matches `{id}`: name the id of one that its list \
                  shows"
             )));
         }
-        Record::open(&dir).map_err(|error| Failed::NotFound(error.into()))
+        Record::open(&dir).map_err(|error| match error {
+            ReadError::Form(error) => Failed::NotFound(error),
+            ReadError::Failed(error) => Failed::Unreadable(error),
+        })
     }
 
     /// Run `id`, held, or else of `record`, looked at again. Its fold is dropped if the look

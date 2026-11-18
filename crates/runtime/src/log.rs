@@ -21,7 +21,8 @@
 //!
 //! A reader takes a line only once it ends in a newline, skips an event or action `kind` it doesn't
 //! know, lists a part it can't read as unread rather than failing, and takes as optional what an
-//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`.
+//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`; an older
+//! log's note of the agent's collect stands for its `agent_collected`.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -56,7 +57,7 @@ mod usage;
 pub use call::{CallEnd, CallOf, CallSpan, CallStart};
 pub use fold::{LogFold, StartedOver, TakenLine};
 pub(super) use fold::{final_call, lines, progress};
-pub use logged::Direction;
+pub use logged::{CallerName, Direction};
 pub(super) use progress::places;
 pub use progress::{
     AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
@@ -219,7 +220,7 @@ impl<'h, H: Host> Log<'h, H> {
         };
         let mut event = json!({
             "kind": "model_answered",
-            "caller": logged::Caller::from(caller),
+            "caller": logged::CallerName::from(caller),
             "request": request,
             "upstream_status": upstream_status,
             "answer": answer,
@@ -259,10 +260,11 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
+            Entry::AgentCollected => self.told(json!({ "kind": "agent_collected" })),
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
-                    "caller": logged::Caller::from(caller),
+                    "caller": logged::CallerName::from(caller),
                     "request": request,
                 });
                 self.observed(started, event, &[])
@@ -366,6 +368,9 @@ impl<'h, H: Host> Log<'h, H> {
 
 pub(super) enum Entry {
     Note(String),
+    /// The agent's sandbox frozen and what it left collected, as `agent_collected`: the run is
+    /// done with it.
+    AgentCollected,
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
@@ -457,7 +462,7 @@ fn event_json(event: &Event) -> Value {
         } => json!({
             "kind": "op_arrived",
             "op": op.0,
-            "caller": logged::Caller::from(*caller),
+            "caller": logged::CallerName::from(*caller),
             "request": request_json(request),
         }),
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
@@ -673,7 +678,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         } => json!({
             "kind": "start_lease",
             "lease": lease.0,
-            "holder": logged::Caller::from(*holder),
+            "holder": logged::CallerName::from(*holder),
             "grant": workflow.session(*grant).name.as_str(),
             "instance": instance,
             "start_by_ns": nanos(*start_by),

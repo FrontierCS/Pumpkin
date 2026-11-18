@@ -47,6 +47,19 @@ mod sandboxes;
 /// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
 const MIB: u64 = 1024 * 1024;
 
+/// The memory that `role` asks for, in MiB, or why Modal can't give it.
+fn memory_mib(role: &Role) -> Result<u64, String> {
+    let memory_bytes = role.resources.memory_bytes.get();
+    if !memory_bytes.is_multiple_of(MIB) {
+        return Err(format!(
+            "role `{}` asks for {memory_bytes} bytes of memory, which Modal gives in whole MiB: \
+             ask for a multiple of {MIB}",
+            role.name
+        ));
+    }
+    Ok(memory_bytes / MIB)
+}
+
 /// The provider's settings, in a table such as [the crate's](crate#settings).
 ///
 /// They name the workspace's profile, and Modal's configuration file that holds it, the images'
@@ -328,8 +341,12 @@ impl Provider for Modal<'_> {
     }
 
     // Each sandbox has resources of its own, which no other run shares, so a run holds nothing
-    // beforehand.
-    fn reserve(&self, _run: &RunTag, _phases: &[Vec<Role>]) -> Result<Reservation, String> {
+    // beforehand. A role whose memory Modal can't give is refused here, before anything is
+    // published for it, not at each of its creates.
+    fn reserve(&self, _run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+        for role in phases.iter().flatten() {
+            memory_mib(role)?;
+        }
         Ok(Reservation::new(()))
     }
 

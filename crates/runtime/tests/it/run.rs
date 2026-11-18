@@ -624,6 +624,47 @@ fn reads_other_builds_lines() {
         None [Unread { line: 1, part: Event, reason: "missing field `unix_ns`" }]"#]].assert_eq(&read.join("\n"));
 }
 
+// The agent's sandbox is gone once collected, as `agent_collected` says, or an older build's note,
+// and else once deleted.
+#[test]
+fn reads_agent_end() {
+    let dir = TestDir::new();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
+    let noted = r#"{"seq":1,"at_ns":"30000000000","note":"collected from the agent's sandbox: out, nothing; log, nothing"}"#;
+    let reworded = r#"{"seq":1,"at_ns":"30000000000","note":"the agent's sandbox left nothing"}"#;
+    let collected =
+        r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected"},"actions":[]}"#;
+    let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent"},"actions":[]}"#;
+    let logs = [
+        ("this build's", &[started, noted, collected, deleted][..]),
+        (
+            "with its note worded otherwise",
+            &[started, reworded, collected, deleted],
+        ),
+        ("an older build's", &[started, noted, deleted]),
+        ("never collected", &[started, deleted]),
+    ];
+    let mut read = Vec::new();
+    for (name, lines) in logs {
+        let mut log = lines.join("\n");
+        log.push('\n');
+        fs::write(record.join("log.jsonl"), log).unwrap();
+        let progress = Record::open(&record).unwrap().progress().unwrap().progress;
+        let gone = progress.unwrap().agent.sandbox.gone;
+        read.push(format!("{name}: gone {gone:?}"));
+    }
+    expect![[r#"
+        this build's: gone Some(31s)
+        with its note worded otherwise: gone Some(31s)
+        an older build's: gone Some(30s)
+        never collected: gone Some(40s)"#]]
+    .assert_eq(&read.join("\n"));
+}
+
 // Each span runs between the core's times, its `observed_ns`, but where a record has none, as
 // lease 1's delete, its `at_ns`.
 /// [`WORKFLOW`] with its agent named `solver`, holding `grants`.

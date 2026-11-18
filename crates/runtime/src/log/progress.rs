@@ -468,6 +468,8 @@ impl Reading {
             | None => None,
         };
         let mut work = request.and_then(Work::asked);
+        // A log without `agent_collected` marks the agent's collect by this note alone; in one
+        // with it, it follows the note and sets the time again.
         if let Some(note) = &line.note
             && note.starts_with("collected from the agent's sandbox")
         {
@@ -504,6 +506,7 @@ impl Reading {
                 self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
                 self.agent.sandbox.gone.get_or_insert(at);
             }
+            logged::Event::AgentCollected => self.agent.sandbox.gone = Some(at),
             logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
@@ -571,7 +574,7 @@ impl Reading {
             }
             logged::Event::ModelRequestStarted { caller, request } => {
                 self.model.in_flight.insert(*request, at);
-                if let logged::Caller::Job(job) = caller
+                if let logged::CallerName::Job(job) = caller
                     && let Some(call) = self.call(*job)
                 {
                     call.model.in_flight.insert(*request, at);
@@ -602,10 +605,10 @@ impl Reading {
                 self.model.take(at, &answered);
                 // The caller's own, which the run's count too.
                 match caller {
-                    Some(logged::Caller::Agent) => {
+                    Some(logged::CallerName::Agent) => {
                         self.agent.model.get_or_insert_default().take(at, &answered);
                     }
-                    Some(logged::Caller::Job(job)) => {
+                    Some(logged::CallerName::Job(job)) => {
                         if let Some(call) = self.call(*job) {
                             call.model.take(at, &answered);
                         }
@@ -721,13 +724,13 @@ impl Reading {
         &mut self,
         at: Duration,
         lease: u64,
-        holder: Option<logged::Caller>,
+        holder: Option<logged::CallerName>,
         grant: &str,
         roles: &Roles,
     ) {
         let holder = match holder {
-            Some(logged::Caller::Job(job)) => Some(job),
-            Some(logged::Caller::Agent) | None => None,
+            Some(logged::CallerName::Job(job)) => Some(job),
+            Some(logged::CallerName::Agent) | None => None,
         };
         let call = holder.and_then(|holder| self.calls.iter().find(|call| call.job == holder));
         let role = match call {
