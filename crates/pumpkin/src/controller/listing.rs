@@ -36,7 +36,12 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
     let since = crate::progress::listed_since(prefixes, now);
-    let ((health, mut listing, unlisted), asked) = answered(&reached, prefixes, since)?;
+    let Answers {
+        health,
+        mut listing,
+        unlisted,
+        asked,
+    } = answered(&reached, prefixes, since)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -61,14 +66,14 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the controller's `serve` answers, which this installs there first if there is none, and
-/// when the listing was asked for, as `serve` makes its rows then; asked again over another link,
-/// after each of `AGAIN`'s pauses, while one ends before it has answered, as asking only reads.
+/// What the controller's `serve` answers, which this installs there first if there is none; asked
+/// again over another link, after each of `AGAIN`'s pauses, while one ends before it has answered,
+/// as asking only reads.
 fn answered(
     reached: &Reached,
     prefixes: &[String],
     since: Option<UnixTime>,
-) -> Result<(Answers, UnixTime), String> {
+) -> Result<Answers, String> {
     let exe = workspace::exe("expected to send it to the controller, to list the runs there")?;
     let (digest, _) = manifest::file_sha256(&exe)?;
     let name = &reached.name;
@@ -86,7 +91,7 @@ fn answered(
         });
         let said = match asked {
             Ok(Some((health, listed, asked))) => {
-                return answers(name, health, listed).map(|answers| (answers, asked));
+                return answers(name, health, listed, asked);
             }
             Ok(None) if !installed => {
                 install(reached, &exe, &digest)?;
@@ -129,14 +134,22 @@ fn install(reached: &Reached, exe: &Path, digest: &Sha256Digest) -> Result<(), S
     installed.map(drop)
 }
 
-/// The health, or why there is none, the listing and how many runs couldn't be listed.
-type Answers = (Result<Health, String>, Listing, usize);
-
 /// What `serve` answered to `Health` and to `List`.
+struct Answers {
+    /// The controller's health, or why there is none.
+    health: Result<Health, String>,
+    listing: Listing,
+    /// How many runs couldn't be listed.
+    unlisted: usize,
+    /// When the listing was asked for, as `serve` makes its rows then.
+    asked: UnixTime,
+}
+
 fn answers(
     name: &Name,
     health: Result<Health, String>,
     listed: Result<Listed, String>,
+    asked: UnixTime,
 ) -> Result<Answers, String> {
     let Listed {
         listing,
@@ -145,7 +158,12 @@ fn answers(
     let health = health
         .map_err(|message| format!("controller `{name}` says nothing of its health: {message}"));
     let unlisted = usize::try_from(unlisted_count).unwrap_or(usize::MAX);
-    Ok((health, listing, unlisted))
+    Ok(Answers {
+        health,
+        listing,
+        unlisted,
+        asked,
+    })
 }
 
 /// What `ls` says of the controller, whose `health` that is, with `jobs` live.
