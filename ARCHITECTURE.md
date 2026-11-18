@@ -472,9 +472,11 @@ The consumer entry, a POSIX shell script that a repository copies in as `./pumpk
 repository's `.pumpkinversion` pins a release by the checksum of its archive, it downloads the
 archive, checks it and unpacks it into the repository's `.pumpkin`; otherwise it fetches the
 commit that the file names, and a pinned toolchain, as its header says, and runs
-`cargo xtask install --root` into `.pumpkin`. Then it runs the `pumpkin` it installed. Either way
-the install holds a git bundle of that commit, which the controller target sends, so a controller
-builds the same commit with no credentials of its own.
+`cargo xtask install --root` into `.pumpkin`. A release's archive is kept as `<checksum>.tar.gz`
+in the user's cache, `pumpkin/` in `$XDG_CACHE_HOME` or `~/.cache`, so each release is downloaded
+once per user; a kept archive is checked again before it is unpacked. Then it runs the `pumpkin` it
+installed. Either way the install holds a git bundle of that commit, which the controller target
+sends, so a controller builds the same commit with no credentials of its own.
 
 **Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
 consumer builds what a checkout builds.
@@ -664,11 +666,11 @@ All that `pumpkin` writes on a machine is below its workspace's `.pumpkin` direc
 of its own that it is handed as it connects. Outside it are only the configuration and the tools'
 credentials, which it reads; the runs' records, where `--runs` names another directory; the files
 that `fmt` and `lock` rewrite, which their command lines name; the Docker engine's images and its
-ledger of CPUs, which every run on the engine shares; and the machine's key to its controllers,
-with the host keys it pinned. On a controller, below the controller user's home, as the `job`
-module lays out, the jobs also keep the store of the files that clients sent, the trees of links
-into it and each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the
-clients upload.
+ledger of CPUs, which every run on the engine shares; the cache of release archives that
+`deploy/pumpkin` keeps; and the machine's key to its controllers, with the host keys it pinned.
+On a controller, below the controller user's home, as the `job` module lays out, the jobs also
+keep the store of the files that clients sent, the trees of links into it and each job's own
+directory, and its `.pumpkin` keeps the installs of `serve` that the clients upload.
 
 ### Testing
 

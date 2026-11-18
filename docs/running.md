@@ -21,8 +21,10 @@ $ ./pumpkin --version
 ```
 
 The first run downloads the release's archive, checks its SHA-256 against the checksum, unpacks it
-and runs it; later runs start the unpacked one at once. It needs Linux on x86-64, curl or wget,
-`sha256sum`, tar and TLS certificates, and names the packages to install if one is missing.
+and runs it; later runs start the unpacked one at once. A release is downloaded once per user: the
+archive is kept in `${XDG_CACHE_HOME:-~/.cache}/pumpkin/`, and another repository that pins the same
+release checks it again and unpacks it. It needs Linux on x86-64, curl or wget, `sha256sum`, tar
+and TLS certificates, and names the packages to install if one is missing.
 
 With no checksum, the first run builds Pumpkin from source instead, for a tag that has no release
 or a change to try: it fetches the tag and checks that it names that commit, downloads a pinned
@@ -34,9 +36,9 @@ argument, builds from source fetched from another repository, such as a local cl
 What Pumpkin writes for a repository is below `.pumpkin/` beside `./pumpkin`: the build, the
 runs' records in `.pumpkin/runs/`, and what builds and providers keep. It ignores itself in git,
 and deleting it loses only the records and the build. Outside it are only the Docker engine's
-images, the records of a run whose `--runs` names another directory, the files that `fmt` and
-`lock` rewrite, and the ssh key that a machine keeps for its controller, in
-`~/.config/pumpkin/ssh/`.
+images, the cache of release archives, the records of a run whose `--runs` names another
+directory, the files that `fmt` and `lock` rewrite, and the ssh key that a machine keeps for its
+controller, in `~/.config/pumpkin/ssh/`.
 
 ## The machine's configuration
 

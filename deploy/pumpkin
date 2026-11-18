@@ -3,13 +3,17 @@
 # this file into a repository as `./pumpkin`, and run `./pumpkin check task.star` from anywhere.
 #
 # Everything lives in `.pumpkin/` beside this file, which ignores itself in git and is safe to
-# delete; nothing is written elsewhere. `.pumpkinversion` holds Pumpkin's tag, then the full
-# commit the tag must name, then, for a release, the SHA-256 checksum of its archive, which is
-# the first word of the `.sha256` beside the archive on the release page.
+# delete; the one thing written elsewhere is the cache of release archives, `pumpkin/` in
+# `$XDG_CACHE_HOME`, or in `$HOME/.cache` if that is not set, which every repository of the user
+# shares. `.pumpkinversion` holds Pumpkin's tag, then the full commit the tag must name, then, for
+# a release, the SHA-256 checksum of its archive, which is the first word of the `.sha256` beside
+# the archive on the release page.
 #
 # With a checksum, it downloads the release's archive, which GitHub Actions built when the tag
-# was pushed, checks it against the checksum, and unpacks it. It needs Linux x86_64, curl or
-# wget, sha256sum, tar and TLS certificates, which it checks for first.
+# was pushed, checks it against the checksum, and unpacks it. It keeps the archive in the cache,
+# as `<checksum>.tar.gz`, so that another repository that pins the release downloads nothing. It
+# needs Linux x86_64, curl or wget, sha256sum, tar and TLS certificates, which it checks for
+# first.
 #
 # With no checksum, it builds Pumpkin from source: it fetches a pinned toolchain, verifies its
 # SHA-256, and hands over to it; the rest is Rust, in `cargo xtask install`. It needs Linux
@@ -148,6 +152,10 @@ fi
 
 entry="$state/$commit"
 
+# Where release archives are kept, one file per checksum: none, if there is no cache or home.
+cache=${XDG_CACHE_HOME:-${HOME:+$HOME/.cache}}
+cache=${cache:+$cache/pumpkin}
+
 # Runs a command with only these variables of the environment: Rust's own, kept in `.pumpkin/`
 # and never in ~/.rustup and ~/.cargo, a temporary directory there too, for the compilers' files,
 # and what downloads need. The rest can't steer the build, as `RUSTFLAGS` would, nor make git work
@@ -231,22 +239,40 @@ build() {
     mv "$scratch/pumpkin.bundle" "$stage/pumpkin.bundle"
 }
 
-# Downloads the release's archive into `$scratch`, checks it against the pin, and unpacks it into
-# `$stage`, where `bin/pumpkin` must name the commit that `.pumpkinversion` does.
+# Takes the release's archive from the cache if it holds one with the pinned checksum, else
+# downloads it, into the cache if that can be written and else into `$scratch`, and checks it
+# against the pin; then unpacks it into `$stage`, where `bin/pumpkin` must name the commit that
+# `.pumpkinversion` does.
 release() {
     archive="pumpkin-$tag-$RELEASE_TARGET.tar.gz"
     url="$PUMPKIN_RELEASES/$tag/$archive"
-    say "downloading Pumpkin $tag ($commit) from $url ..."
-    download "$url" "$scratch/$archive" || {
-        status=$?
-        say "could not download $url: check that this machine reaches github.com and release-assets.githubusercontent.com, and that tag $tag has a release at ${PUMPKIN_REPOSITORY%.git}/releases"
-        exit "$status"
-    }
-    downloaded=$(checksum_of "$scratch/$archive")
-    [ "$downloaded" = "$checksum" ] ||
-        fail "$url has the SHA-256 checksum $downloaded, not $checksum, which .pumpkinversion pins: if the release was rebuilt on purpose, pin the checksum in $url.sha256 instead; otherwise do not run this download"
+    file="$scratch/$archive"
+    kept="${cache:+$cache/$checksum.tar.gz}"
+    if [ -n "$kept" ] && [ "$(checksum_of "$kept" 2> /dev/null)" = "$checksum" ]; then
+        file=$kept
+    else
+        say "downloading Pumpkin $tag ($commit) from $url ..."
+        if [ -n "$cache" ] && mkdir --parents "$cache" 2> /dev/null &&
+            partial=$(mktemp "$cache/partial.XXXXXX" 2> /dev/null); then
+            file=$partial
+        fi
+        download "$url" "$file" || {
+            status=$?
+            say "could not download $url: check that this machine reaches github.com and release-assets.githubusercontent.com, and that tag $tag has a release at ${PUMPKIN_REPOSITORY%.git}/releases"
+            exit "$status"
+        }
+        downloaded=$(checksum_of "$file")
+        [ "$downloaded" = "$checksum" ] ||
+            fail "$url has the SHA-256 checksum $downloaded, not $checksum, which .pumpkinversion pins: if the release was rebuilt on purpose, pin the checksum in $url.sha256 instead; otherwise do not run this download"
+        # A rename, so that runs at once never see a part-written file: the last wins, with the
+        # same bytes.
+        if [ -n "$partial" ]; then
+            mv "$partial" "$kept"
+            file=$kept
+        fi
+    fi
     mkdir "$stage"
-    tar --extract --gzip --file "$scratch/$archive" --directory "$stage" ||
+    tar --extract --gzip --file "$file" --directory "$stage" ||
         fail "$url could not be unpacked, though it has the checksum that .pumpkinversion pins: the release is broken; write only the tag and the commit in .pumpkinversion to build from source"
     # It prints the commit's first 9 digits.
     version=$("$stage/bin/pumpkin" --version 2> /dev/null) || version=
@@ -267,7 +293,8 @@ obtain() {
     stage="$state/stage"
     rm --recursive --force "$stage"
     log="$scratch/log"
-    trap 'rm --recursive --force "$scratch" "$stage"' EXIT
+    partial=''
+    trap 'rm --recursive --force "$scratch" "$stage" "$partial"' EXIT
     trap 'exit 1' HUP INT TERM
     case "$method" in
         download) release ;;

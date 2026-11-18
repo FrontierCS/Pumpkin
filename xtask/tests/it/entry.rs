@@ -1,7 +1,8 @@
 //! `deploy/pumpkin`'s refusals, against a local repository, with a stand-in `curl` that serves a
 //! file that is not rustup-init, on this machine, on one that lacks what installing needs and on
 //! another platform, with a stand-in `uname`; its download of a release, with this machine's
-//! `curl` from a directory of releases, and `cargo xtask install --root`, which the script runs.
+//! `curl` from a directory of releases, and the cache of release archives that it keeps in a
+//! scratch home, and `cargo xtask install --root`, which the script runs.
 
 use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -46,6 +47,11 @@ enum Archive {
     Misnamed,
     /// There is none.
     Absent,
+    /// As `Named`, but a first repository installed it, so the cache holds it, and then it was
+    /// removed from the directory.
+    Cached,
+    /// As `Named`, but the cache holds a file of other bytes by its name.
+    Stale,
 }
 
 /// Runs the script, as copied into a consumer's repository beside `.pumpkinversion`, which, if
@@ -54,24 +60,28 @@ enum Archive {
 /// that has ended left, on the `PATH` that [`path`] makes for `machine`, with `cargo`, if given,
 /// as the script that stands in for the toolchain's `cargo`, beside a `rustup` that says what it
 /// installs; checks its exit code, output, the temporary files left behind, in the caller's
-/// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`. A
-/// `<checksum>` in `version` is the checksum of the archive that `machine` downloads.
+/// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds, and for a release the
+/// cache in the scratch home, against `expect`. A `<checksum>` in `version` is the checksum of the
+/// archive that `machine` downloads.
 fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
     let held = tempfile::Builder::new()
         .prefix("pumpkin-entry-")
         .tempdir()
         .unwrap();
     let scratch = held.path();
-    let (source, consumer, bin, tmp) = (
+    let (source, consumer, bin, tmp, home) = (
         scratch.join("source"),
         scratch.join("consumer"),
         scratch.join("bin"),
         scratch.join("tmp"),
+        scratch.join("home"),
     );
-    for dir in [&source, &consumer, &bin, &tmp] {
+    for dir in [&source, &consumer, &bin, &tmp, &home] {
         fs::create_dir_all(dir).unwrap();
     }
     let sh = Shell::new().unwrap();
+    // The cache of release archives is below this home, and this machine's own is out of reach.
+    sh.set_var("HOME", &home);
     // A repository that git's variables name for every command here, as those that
     // `git rebase --exec` sets do, which none of the git commands here may touch.
     let decoy = scratch.join("decoy");
@@ -92,30 +102,75 @@ fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expec
         _ => "0".repeat(64),
     };
     let version = version.map(|version| version.replace("<commit>", &commit));
-    consumer_files(machine, scratch, version.as_deref(), &checksum);
+    consumer_files(machine, scratch, "consumer", version.as_deref(), &checksum);
     let state = stale_lock(&sh, &consumer);
     if let Some(cargo) = cargo {
         toolchain(&state, cargo);
     }
     let path = path(machine, &bin);
+    let cache = home.join(".cache/pumpkin");
+    match machine {
+        Machine::Release(Archive::Cached) => {
+            let first = scratch.join("first");
+            fs::create_dir(&first).unwrap();
+            consumer_files(machine, scratch, "first", version.as_deref(), &checksum);
+            sh.change_dir(&first);
+            let first = scripted(&sh, None, &path, &tmp).quiet().output().unwrap();
+            assert!(first.status.success(), "the first install failed");
+            fs::remove_dir_all(scratch.join("releases")).unwrap();
+        }
+        Machine::Release(Archive::Stale) => stale(&cache, &checksum),
+        _ => {}
+    }
     sh.change_dir(&consumer);
     let repository = repository(machine, &source);
-    let script = sh.cmd("sh").arg("pumpkin").args(repository);
-    let output = script.env("PATH", path).env("TMPDIR", &tmp);
-    // As a git hook runs it: the script's own git commands must ignore these, which would send
-    // them to a repository that doesn't exist.
-    let poison = "/nonexistent/pumpkin-poison";
-    let output = output.env("GIT_DIR", poison).env("GIT_INDEX_FILE", poison);
+    let output = scripted(&sh, repository, &path, &tmp);
     let output = output.ignore_status().quiet().output().unwrap();
     assert!(
         decoyed() == before,
         "a git command changed the decoy repository"
     );
-    let report = report(&output, &tmp, &state, &commit);
+    let kept = matches!(machine, Machine::Release(_)).then_some(cache.as_path());
+    named(&sh, &cache);
+    let report = report(&output, &tmp, &state, kept, &commit);
     let report = report.replace(&scratch.display().to_string(), "<scratch>");
     let report = report.replace(&checksum, "<checksum>");
     let report = report.replace(&commit, "<commit>");
     expect.assert_eq(&report.replace(&commit[..9], "<digits>"));
+}
+
+/// Puts in `cache` a file that is not the archive, by the name of the archive with `checksum`.
+fn stale(cache: &Path, checksum: &str) {
+    fs::create_dir_all(cache).unwrap();
+    fs::write(cache.join(format!("{checksum}.tar.gz")), "other bytes").unwrap();
+}
+
+/// Asserts that `cache`, if there is one, holds each file by its own checksum, and no other.
+fn named(sh: &Shell, cache: &Path) {
+    if !cache.exists() {
+        return;
+    }
+    for file in files(cache) {
+        let sum = sha256(sh, &cache.join(&file));
+        assert_eq!(
+            file,
+            Path::new(&format!("{sum}.tar.gz")),
+            "a stray file in the cache"
+        );
+    }
+}
+
+/// The script, `pumpkin` in the directory the shell is in, with `repository`, if given, as its
+/// option, on `path`, with `tmp` as the temporary directory and no `XDG_CACHE_HOME`, so the cache
+/// is below the shell's `HOME`. The `GIT_DIR` and `GIT_INDEX_FILE` that a git hook runs it with
+/// are poisoned: the script's own git commands must ignore them, which would send them to a
+/// repository that doesn't exist.
+fn scripted<'a>(sh: &'a Shell, repository: Option<String>, path: &str, tmp: &Path) -> Cmd<'a> {
+    let poison = "/nonexistent/pumpkin-poison";
+    let script = sh.cmd("sh").arg("pumpkin").args(repository);
+    let script = script.env("PATH", path).env("TMPDIR", tmp);
+    let script = script.env("GIT_DIR", poison).env("GIT_INDEX_FILE", poison);
+    script.env_remove("XDG_CACHE_HOME")
 }
 
 /// Makes `source` a repository of one empty commit tagged `v1`, and returns the commit.
@@ -140,11 +195,17 @@ fn commit_in(sh: &Shell, source: &Path) -> String {
         .unwrap()
 }
 
-/// Writes into `<scratch>/consumer` the script and, if there is a `version`, `.pumpkinversion`
-/// with it, `<checksum>` replaced by `checksum`. For a release, the script has its releases in
-/// `<scratch>/releases`, which `curl` reads as files, in place of GitHub's.
-fn consumer_files(machine: Machine<'_>, scratch: &Path, version: Option<&str>, checksum: &str) {
-    let consumer = scratch.join("consumer");
+/// Writes into `<scratch>/<name>`, a consumer, the script and, if there is a `version`,
+/// `.pumpkinversion` with it, `<checksum>` replaced by `checksum`. For a release, the script has
+/// its releases in `<scratch>/releases`, which `curl` reads as files, in place of GitHub's.
+fn consumer_files(
+    machine: Machine<'_>,
+    scratch: &Path,
+    name: &str,
+    version: Option<&str>,
+    checksum: &str,
+) {
+    let consumer = scratch.join(name);
     if let Some(version) = version {
         let version = version.replace("<checksum>", checksum);
         fs::write(consumer.join(".pumpkinversion"), version).unwrap();
@@ -168,7 +229,7 @@ fn consumer_files(machine: Machine<'_>, scratch: &Path, version: Option<&str>, c
 /// 9 digits as Pumpkin does, or another.
 fn pack(sh: &Shell, scratch: &Path, archive: Archive, commit: &str) -> String {
     let named = match archive {
-        Archive::Named => &commit[..9],
+        Archive::Named | Archive::Cached | Archive::Stale => &commit[..9],
         Archive::Misnamed => &"0".repeat(9),
         Archive::Absent => return "0".repeat(64),
     };
@@ -189,23 +250,33 @@ fn pack(sh: &Shell, scratch: &Path, archive: Archive, commit: &str) -> String {
         .args(["bin", "pumpkin.bundle"])
         .run()
         .unwrap();
-    let sum = sh.cmd("sha256sum").arg(&file).read().unwrap();
+    sha256(sh, &file)
+}
+
+/// The SHA-256 checksum of `file`.
+fn sha256(sh: &Shell, file: &Path) -> String {
+    let sum = sh.cmd("sha256sum").arg(file).read().unwrap();
     sum.split_whitespace().next().unwrap().to_owned()
 }
 
 /// What [`check`] checks of the script that ended with `output`: its exit code, its output, how
-/// many files it left in `tmp`, the caller's temporary directory, and in `state`'s `tmp/`, and
-/// what `state`, its `.pumpkin/`, holds, with `commit` as `<commit>`.
-fn report(output: &Output, tmp: &Path, state: &Path, commit: &str) -> String {
+/// many files it left in `tmp`, the caller's temporary directory, and in `state`'s `tmp/`, what
+/// `state`, its `.pumpkin/`, holds, and, if there is a `cache`, what it holds, with `commit` as
+/// `<commit>`.
+fn report(output: &Output, tmp: &Path, state: &Path, cache: Option<&Path>, commit: &str) -> String {
     let left = |dir: &Path| fs::read_dir(dir).map_or(0, Iterator::count);
+    let cache = cache.map_or_else(String::new, |cache| {
+        format!("\nin the cache: {}", listed(cache, commit))
+    });
     format!(
-        "{:?}: {}{}left in the temporary directory: {}, and in .pumpkin/tmp: {}\nin .pumpkin: {}",
+        "{:?}: {}{}left in the temporary directory: {}, and in .pumpkin/tmp: {}\nin .pumpkin: {}{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
         left(tmp),
         left(&state.join("tmp")),
         listed(state, commit),
+        cache,
     )
 }
 
@@ -475,7 +546,38 @@ fn release() {
             Some(0): pumpkin 0.1.0 (<digits>)
             pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: .gitignore <commit> tmp"#]],
+            in .pumpkin: .gitignore <commit> tmp
+            in the cache: <checksum>.tar.gz"#]],
+    );
+}
+
+#[test]
+fn release_cached() {
+    // The second repository downloads nothing: the archive is gone from the directory of releases.
+    check(
+        Machine::Release(Archive::Cached),
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(0): pumpkin 0.1.0 (<digits>)
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore <commit> tmp
+            in the cache: <checksum>.tar.gz"#]],
+    );
+}
+
+#[test]
+fn release_stale() {
+    check(
+        Machine::Release(Archive::Stale),
+        Some("v1 <commit> <checksum>\n"),
+        None,
+        &expect![[r#"
+            Some(0): pumpkin 0.1.0 (<digits>)
+            pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore <commit> tmp
+            in the cache: <checksum>.tar.gz"#]],
     );
 }
 
@@ -490,7 +592,8 @@ fn release_checksum() {
             Some(1): pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
             pumpkin: file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz has the SHA-256 checksum <checksum>, not 0000000000000000000000000000000000000000000000000000000000000000, which .pumpkinversion pins: if the release was rebuilt on purpose, pin the checksum in file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz.sha256 instead; otherwise do not run this download
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: .gitignore tmp"#]],
+            in .pumpkin: .gitignore tmp
+            in the cache: "#]],
     );
 }
 
@@ -504,7 +607,8 @@ fn release_commit() {
             Some(1): pumpkin: downloading Pumpkin v1 (<commit>) from file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz ...
             pumpkin: the pumpkin in file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz says 'pumpkin 0.1.0 (000000000)', which does not name commit <commit>: fix the tag or the commit in .pumpkinversion, or the release if it was built from another commit
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: .gitignore tmp"#]],
+            in .pumpkin: .gitignore tmp
+            in the cache: <checksum>.tar.gz"#]],
     );
 }
 
@@ -519,7 +623,8 @@ fn release_absent() {
             curl: (37) Couldn't open file <scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz
             pumpkin: could not download file://<scratch>/releases/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.gz: check that this machine reaches github.com and release-assets.githubusercontent.com, and that tag v1 has a release at https://github.com/FrontierCS/Pumpkin/releases
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
-            in .pumpkin: .gitignore tmp"#]],
+            in .pumpkin: .gitignore tmp
+            in the cache: "#]],
     );
 }
 
