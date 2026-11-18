@@ -761,33 +761,21 @@ impl View {
         if log == end && !live {
             return Ok(json!({ "end": end, "live": live }));
         }
-        if log == end {
+        let mut reply = if log == end {
             // A live run's clock goes on while its log is quiet, as on a long call.
-            return Ok(json!({
-                "end": end,
-                "live": live,
-                "run": run_json(held, named.as_deref(), again),
-            }));
-        }
-        let Window { records, past } = window(held, from)?;
-        Ok(json!({
-            "end": end,
-            "live": live,
-            "run": run_json(held, named.as_deref(), again),
-            "records": records,
-            "next": past,
-        }))
+            json!({ "end": end })
+        } else {
+            window_json(held, from)?
+        };
+        reply["live"] = json!(live);
+        reply["run"] = run_json(held, named.as_deref(), again);
+        Ok(reply)
     }
 
     fn log_json(&mut self, id: &RunTag, at: u64, log_epoch: Option<u64>) -> Result<Value, Failed> {
         let held = self.held(id)?;
         let at = line_at(held, at, log_epoch)?;
-        let Window { records, past } = window(held, at)?;
-        Ok(json!({
-            "records": records,
-            "next": past,
-            "end": held.fold.taken(),
-        }))
+        Ok(window_json(held, at)?)
     }
 
     /// Drops the folds of the runs that have ended, but the [`HELD_ENDED_RUNS`] read last.
@@ -848,28 +836,21 @@ fn line_at(held: &Held, byte: u64, log_epoch: Option<u64>) -> Result<usize, Fail
     })
 }
 
-/// Whole lines of a log, as records, and the byte at which the next window begins.
-struct Window {
-    records: Vec<Value>,
-    past: u64,
-}
-
-fn window(held: &Held, from: usize) -> Result<Window, String> {
+fn window_json(held: &Held, from: usize) -> Result<Value, String> {
+    let end = held.fold.taken();
     let starts = &held.lines[from..];
     let mut read = from..from;
     if let Some(&start) = starts.first() {
-        let ends = starts[1..].iter().copied().chain([held.fold.taken()]);
+        let ends = starts[1..].iter().copied().chain([end]);
         let within = ends.take_while(|end| end - start <= LOG_WINDOW_BYTES);
         read.end += within.count().max(1);
     }
-    Ok(Window {
-        past: held
-            .lines
-            .get(read.end)
-            .copied()
-            .unwrap_or(held.fold.taken()),
-        records: lines(held, read)?,
-    })
+    let next = held.lines.get(read.end).copied().unwrap_or(end);
+    let mut reply = json!({ "end": end, "next": next });
+    // Move the parsed records into the reply: `json!` would serialize each into a second tree.
+    // https://github.com/serde-rs/json/blob/44d9c53e2507636c0c2afee0c9c132095dddb7df/src/macros.rs#L277-L279
+    reply["records"] = Value::Array(lines(held, read)?);
+    Ok(reply)
 }
 
 fn lines(held: &Held, read: std::ops::Range<usize>) -> Result<Vec<Value>, String> {
