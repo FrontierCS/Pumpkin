@@ -102,7 +102,7 @@ variable "controller_volume_throughput" {
 }
 
 variable "ssh_from" {
-  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as the person's machine's private address as a `/32` when it is in the controller's VPC; none by default, so the controller is reached through SSM alone."
+  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as the person's machine's private address as a `/32`: `pumpkin` reaches the controller at its private address, from the controller's VPC or a network routed to it. None by default, so no `pumpkin` reaches the controller."
   type        = list(string)
   default     = []
 

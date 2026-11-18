@@ -236,27 +236,6 @@ impl Cli {
         &self.version
     }
 
-    /// The command that `ssh`'s `ProxyCommand` runs to reach an instance, whose ID `ssh`
-    /// substitutes for `%h`, at the port it substitutes for `%p`: a session of SSM's
-    /// `AWS-StartSSHSession`, in the region, which the Session Manager plugin carries. `ssh` runs
-    /// it with its own environment, so it is to run as [`proxied`](Self::proxied) makes it.
-    pub fn ssh_proxy(&self) -> String {
-        format!(
-            "aws --no-cli-pager --region {} ssm start-session --target %h --document-name \
-             AWS-StartSSHSession --parameters portNumber=%p",
-            self.region.0
-        )
-    }
-
-    /// `program`, such as `ssh`, found on `PATH`, given only the environment that `aws` gets, so
-    /// that the `aws` it runs, as [`ssh_proxy`](Self::ssh_proxy) has `ssh` run it, finds its own
-    /// configuration alone.
-    pub fn proxied(program: &str) -> Command {
-        let mut command = stdx::process::command(program, CALL_ENVIRONMENT);
-        command.envs(RETRIES);
-        command
-    }
-
     /// Runs `aws` with `args`, killed at `bound`, and parses the JSON it prints.
     pub fn json<T: DeserializeOwned>(&self, args: &[&str], bound: Bound) -> Result<T, String> {
         serde_json::from_slice(&self.run(args, bound)?).map_err(|error| {
@@ -425,7 +404,9 @@ impl Cli {
 }
 
 fn aws() -> Command {
-    Cli::proxied("aws")
+    let mut command = stdx::process::command("aws", CALL_ENVIRONMENT);
+    command.envs(RETRIES);
+    command
 }
 
 /// What `output`, that of an `aws` command, printed on standard output, unless the command

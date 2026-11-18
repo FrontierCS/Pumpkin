@@ -1,14 +1,17 @@
-//! Finding a controller's EC2 instance by its tag, starting it, and enrolling this machine's
-//! key with it through EC2 Instance Connect.
+//! Finding a controller's EC2 instance by its tag, starting it, waiting until its `sshd` answers
+//! at its private address, and enrolling this machine's key with it through EC2 Instance Connect.
 
 use std::fs::{self, DirBuilder};
+use std::io::{self, Read as _};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, thread};
 
-use aws::{Bound, Cli};
-use serde::Deserialize;
+use aws::{Bound, Cli, Region};
+use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
@@ -16,13 +19,19 @@ use super::{Name, Reached, SHORT_TIMEOUT, USER, bounded, finished};
 use crate::say;
 
 // The tag that `deploy/aws` puts on the controller's instance, valued with the controller's name.
-pub(super) const TAG: &str = "pumpkin:controller";
+const TAG: &str = "pumpkin:controller";
 
-// How long a stopped controller has to run and be seen by SSM. An instance that EC2 starts runs
-// and registers with SSM within a few minutes; past this, something else is wrong.
+// How long a controller has, from its launch, to run and have its `sshd` answer and admit logins.
+// An instance that EC2 starts does all three within a few minutes; past this, something else is
+// wrong.
 const START_TIMEOUT: Duration = Duration::from_mins(10);
 
-const START_POLL: Duration = Duration::from_secs(5);
+pub(super) const START_POLL: Duration = Duration::from_secs(5);
+
+// How long a probe of `sshd` waits to connect, and then for its banner. Inside the controller's
+// VPC each takes milliseconds, so a longer wait would only delay the next probe. SkyPilot's:
+// https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L500-L501
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -38,27 +47,27 @@ struct Reservation {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub(super) struct Instance {
-    pub(super) instance_id: String,
-    pub(super) state: State,
+struct Instance {
+    #[serde(rename = "InstanceId")]
+    id: String,
+    state: State,
+    /// When it last started, as RFC 3339.
+    launch_time: String,
+    private_ip_address: Option<IpAddr>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub(super) struct State {
-    pub(super) name: String,
+struct State {
+    name: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Information {
-    instance_information_list: Vec<Seen>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Seen {
-    ping_status: String,
+/// Where a controller was found: its instance, and the private address at which its `sshd`
+/// answered.
+#[derive(Deserialize, Serialize)]
+pub(super) struct Located {
+    pub(super) instance: String,
+    pub(super) address: IpAddr,
 }
 
 /// The directory that holds this machine's `ssh` key to its controllers, `key` and `key.pub`,
@@ -103,7 +112,27 @@ pub(super) fn kept() -> Result<PathBuf, String> {
     Ok(kept)
 }
 
-pub(super) fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
+/// Finds controller `name` in `region` by its tag, starts it if it is stopped, and waits until its
+/// `sshd` answers; returns where it is, and the deadline by which it is to admit logins,
+/// `START_TIMEOUT` after its launch.
+pub(super) fn find(region: &Region, name: &Name) -> Result<(Located, Deadline), String> {
+    let cli = Cli::connect(region.clone())?;
+    let tag = format!("Name=tag:{TAG},Values={name}");
+    let live = |instance: &Instance| {
+        !matches!(instance.state.name.as_str(), "shutting-down" | "terminated")
+    };
+    let mut instances = instances(&cli, &tag)?.into_iter().filter(live);
+    let (Some(instance), None) = (instances.next(), instances.next()) else {
+        return Err(format!(
+            "no one instance in {} carries the tag {TAG}={name}: name the controller that \
+             `deploy/aws` made, with the `name` and `region` it was applied with",
+            region.as_str()
+        ));
+    };
+    ready(&cli, name, &instance.id)
+}
+
+fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
     let args = ["ec2", "describe-instances", "--filters", filter];
     let found: Reservations = cli.json(&args, Bound::Call)?;
     Ok(found
@@ -113,27 +142,30 @@ pub(super) fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String
         .collect())
 }
 
-pub(super) fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
+fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(Located, Deadline), String> {
     let by = Deadline::after(START_TIMEOUT);
-    let mut started = false;
+    let mut started = None;
     loop {
         let found = instances(cli, &format!("Name=instance-id,Values={id}"))?;
-        let state = found.into_iter().next().map(|instance| instance.state.name);
-        let state = state.unwrap_or_default();
-        match state.as_str() {
-            "running" if seen(cli, id)? => return Ok(()),
-            "stopped" if !started => {
+        let Some(instance) = found.into_iter().next() else {
+            return Err(format!(
+                "controller `{name}`, {id}, is no longer there: run the command again"
+            ));
+        };
+        match instance.state.name.as_str() {
+            "running" => return answering(name, instance, started),
+            "stopped" if started.is_none() => {
                 say(format_args!(
                     "starting controller `{name}`, {id}, which is stopped"
                 ));
                 let start = ["ec2", "start-instances", "--instance-ids", id];
                 cli.run(&start, Bound::Call)?;
-                started = true;
+                started = Some(Instant::now());
                 continue;
             }
             // On its way to running, or to being stopped, which a start then follows.
-            "pending" | "running" | "stopping" | "stopped" => {}
-            _ => {
+            "pending" | "stopping" | "stopped" => {}
+            state => {
                 return Err(format!(
                     "controller `{name}`, {id}, is {state}: start it again once it can be"
                 ));
@@ -141,8 +173,8 @@ pub(super) fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
         }
         if by.remaining().is_none() {
             return Err(format!(
-                "controller `{name}`, {id}, is {state} after {} s: expected it to run, and SSM to \
-                 see it, by then",
+                "controller `{name}`, {id}, is {} after {} s: expected it to run by then",
+                instance.state.name,
                 START_TIMEOUT.as_secs()
             ));
         }
@@ -150,14 +182,93 @@ pub(super) fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
     }
 }
 
-fn seen(cli: &Cli, id: &str) -> Result<bool, String> {
-    let filter = format!("Key=InstanceIds,Values={id}");
-    let args = ["ssm", "describe-instance-information", "--filters", &filter];
-    let information: Information = cli.json(&args, Bound::Call)?;
-    Ok(information
-        .instance_information_list
-        .iter()
-        .any(|seen| seen.ping_status == "Online"))
+/// Waits until the `sshd` of `instance`, which runs, answers at its private address, until
+/// `START_TIMEOUT` after its launch, and says how long that took if this command `started` it.
+fn answering(
+    name: &Name,
+    instance: Instance,
+    started: Option<Instant>,
+) -> Result<(Located, Deadline), String> {
+    let Instance {
+        id,
+        state: _,
+        launch_time,
+        private_ip_address,
+    } = instance;
+    let Some(address) = private_ip_address else {
+        return Err(format!(
+            "controller `{name}`, {id}, runs with no private address: expected the one of its \
+             subnet that `deploy/aws` gives it"
+        ));
+    };
+    let launched: Timestamp = launch_time.parse().map_err(|error| {
+        format!(
+            "the launch time that `aws ec2 describe-instances` printed, `{launch_time}`, isn't \
+             a time: {error}"
+        )
+    })?;
+    let launched = Duration::try_from(launched.as_duration()).unwrap_or_default();
+    let by = Deadline::at_unix(launched.saturating_add(START_TIMEOUT));
+    let waiting = Instant::now();
+    loop {
+        let Err(error) = answers(address) else {
+            if let Some(started) = started {
+                say(format_args!(
+                    "controller `{name}` answers, after {} s",
+                    started.elapsed().as_secs()
+                ));
+            }
+            let located = Located {
+                instance: id,
+                address,
+            };
+            return Ok((located, by));
+        };
+        if by.remaining().is_none() {
+            let why = match error.kind() {
+                // A security group drops what it doesn't admit, so a refusal is the instance's.
+                io::ErrorKind::ConnectionRefused => {
+                    "nothing listens there, as when the controller is stopping though EC2 says it \
+                     runs, or its `sshd` is down: run the command again shortly"
+                }
+                io::ErrorKind::TimedOut
+                | io::ErrorKind::HostUnreachable
+                | io::ErrorKind::NetworkUnreachable => {
+                    "this machine doesn't reach the controller's VPC, or `deploy/aws`'s `ssh_from` \
+                     doesn't admit it: apply it with this machine's address among them"
+                }
+                _ => "run the command again",
+            };
+            return Err(format!(
+                "controller `{name}`, {id}, didn't answer SSH at its private address, {address}, \
+                 in the {} s it was waited for: {error}: {why}",
+                waiting.elapsed().as_secs()
+            ));
+        }
+        thread::sleep(START_POLL);
+    }
+}
+
+/// Whether an `sshd` answers at `address` within `PROBE_TIMEOUT`, with a banner that begins
+/// `SSH-`, or why not.
+// A banner, which a booting controller's `sshd` sends before it admits logins, so that a login
+// still has to be tried, as SkyPilot tries one after the banner:
+// https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L478-L515
+pub(super) fn answers(address: IpAddr) -> io::Result<()> {
+    // The port of `sshd`, which `deploy/aws` admits.
+    let at = SocketAddr::new(address, 22);
+    let mut stream = TcpStream::connect_timeout(&at, PROBE_TIMEOUT)?;
+    let mut banner = [0; 4];
+    let read = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let read = read.and_then(|()| stream.read_exact(&mut banner));
+    read.map_err(|error| io::Error::new(error.kind(), format!("it sent no banner: {error}")))?;
+    if banner != *b"SSH-" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "what answers on port 22 isn't `sshd`",
+        ));
+    }
+    Ok(())
 }
 
 impl Reached {
@@ -179,12 +290,13 @@ impl Reached {
             "ec2-instance-connect",
             "send-ssh-public-key",
             "--instance-id",
-            &self.instance,
+            &self.located.instance,
             "--instance-os-user",
             USER,
             "--ssh-public-key",
             &public,
         ];
-        self.cli.run(&args, Bound::Call).map(|_| ())
+        let cli = Cli::connect(self.region.clone())?;
+        cli.run(&args, Bound::Call).map(|_| ())
     }
 }

@@ -51,7 +51,8 @@ impl Reached {
         let what = format!("copying run {}'s record again, carrying on", id.as_str());
         let mut attempt = 0;
         loop {
-            let (files, dirs) = listed_record(&self.name, &id, &self.list_record(&id, &what)?)?;
+            let listed = self.list_record(&id, &what)?;
+            let (files, dirs) = listed_record(&self.name, &self.shell(), &id, &listed)?;
             let mut wanted = BTreeMap::new();
             for file in files {
                 if !held(&copy, &file)? {
@@ -262,9 +263,11 @@ fn record_list(id: &RunTag) -> String {
 }
 
 /// The files and directories of the record, from what `record_list`'s script printed. Fails if
-/// there are more than `RECORD_FILES`, or a path isn't below the record.
+/// there are more than `RECORD_FILES`, or a path isn't below the record; `shell` is a command
+/// that opens a shell on the controller.
 fn listed_record(
     name: &Name,
+    shell: &str,
     id: &RunTag,
     printed: &[u8],
 ) -> Result<(Vec<Listed>, Vec<PathBuf>), String> {
@@ -274,7 +277,7 @@ fn listed_record(
     if lines.len() > RECORD_FILES {
         return Err(format!(
             "run {}'s record on controller `{name}` holds over {RECORD_FILES} files and \
-             directories, more than a copy takes: in a shell on it (`aws ssm start-session`), \
+             directories, more than a copy takes: in a shell on it (`{shell}`), \
              pack the directories of `{there}` that hold the most into an archive each (`tar \
              --create --remove-files`), then run the command again",
             id.as_str()

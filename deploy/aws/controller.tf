@@ -1,5 +1,5 @@
 # The person's controller, which builds the tasks' images and runs the drivers, and runs no role.
-# The person reaches it through SSM, or over ssh from `ssh_from`, and it stops itself when idle
+# The person reaches it over ssh from `ssh_from`, and it stops itself when idle
 # (controller.yaml), so it costs only its volume between runs.
 
 resource "aws_iam_role" "controller" {
@@ -11,7 +11,8 @@ resource "aws_iam_role" "controller" {
   })
 }
 
-# The SSM agent's registration and sessions, through which the person reaches the controller.
+# The SSM agent's registration and sessions, through which the clients of the last tag reach the
+# controller.
 resource "aws_iam_role_policy_attachment" "controller_ssm" {
   role       = aws_iam_role.controller.name
   policy_arn = "${local.arn}:iam::aws:policy/AmazonSSMManagedInstanceCore"

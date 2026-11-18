@@ -7,7 +7,7 @@ configuration and keys. This page says what each is, what it needs, and where ea
 `pumpkin help config` holds every key of the machine's configuration, and
 [`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
-![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh through SSM to the controller, which builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories.](figures/providers.svg)
+![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh to the controller, which builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories.](figures/providers.svg)
 
 ## Placing a run
 
@@ -54,13 +54,13 @@ The controller is the same `pumpkin`, on an EC2 instance of the operator's own, 
 `pumpkin controller`. Only the instance that `deploy/aws` makes can be one: its jobs read their
 settings, such as the EC2 provider's launch templates, from the module's SSM parameter, and the
 machine finds, starts and enrols with it through EC2. A machine whose configuration names
-`[controller]` sends it each run, over
-ssh through SSM: `pumpkin run` sends the files of the task's repository that git lists and the
+`[controller]` sends it each run, over ssh: `pumpkin run` sends the files of the task's
+repository that git lists and the
 task reaches, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
 with the same arguments, and `wait` copies an ended run's record back to the machine.
 
-![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
+![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
 
 The controller starts when a command needs it and stops itself once it has been idle a while,
 with no job and no ssh session; at boot it reaps what lost runs left. A machine's keys go to it
