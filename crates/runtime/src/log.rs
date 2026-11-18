@@ -43,7 +43,7 @@ use serde_json::{Value, json};
 use stdx::Context;
 
 use super::sandbox::Deleted;
-use super::{Clock, Durable, Host, record};
+use super::{Clock, Durable, Host, Stopped, record};
 
 mod call;
 mod fold;
@@ -717,9 +717,9 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
     }
 }
 
-/// How a run finished, for `outcome.json`, in the form of [`outcome::Finished`].
-pub(super) fn outcome_json(outcome: &Outcome) -> Value {
-    json!(outcome::Finished::from(outcome))
+/// How a run ended, for `outcome.json`, in the form of [`outcome::Ended`].
+pub(super) fn outcome_json(ended: &Result<Outcome, Stopped>) -> Value {
+    json!(outcome::Ended::from(ended))
 }
 
 /// `values` in order, each as `{"name": …, "value": …}`.
