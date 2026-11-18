@@ -74,7 +74,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note" x="290" y="434"><tspan class="code">serve</tspan> · <tspan class="code">Link</tspan></text>
 <path class="arrow" d="M618 500H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="479">an ended run's record: what differs from</text>
-<text class="note" x="290" y="494">the copy here, in one archive · <tspan class="code">copy</tspan></text>
+<text class="note" x="290" y="494">the copy here, one file at a time · <tspan class="code">copy</tspan></text>
 <rect class="box" x="32" y="572" width="228" height="88" rx="8"/>
 <text class="name mid" x="146" y="592"><tspan class="code">pumpkin</tspan> <tspan class="code">view</tspan></text>
 <text class="note mid" x="146" y="609">serves the page, the token</text>

@@ -14,6 +14,8 @@
 //! With none there, the command says [`Hello::Absent`], and the client uploads its build
 //! ([`installing`]) and links again.
 
+pub(crate) mod copy;
+
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -31,7 +33,7 @@ use crate::{config, manifest, workspace};
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
 // Room for the keys and configuration that arrive with a job.
-const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
 
 /// What `serve` says first, in a frame with no body.
 #[derive(Serialize, Deserialize)]
@@ -64,6 +66,7 @@ pub(crate) trait Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
+    Copy(copy::CopyRequest),
     Follow { id: String, log_from_bytes: u64 },
     Health(HealthRequest),
     Jobs(JobsRequest),
@@ -75,6 +78,7 @@ pub(crate) enum Ask {
 impl Ask {
     fn body_bytes(&self) -> io::Result<usize> {
         let bytes = match self {
+            Self::Copy(copy) => Some(copy.held_bytes),
             Self::Start(start) => start
                 .key_bytes
                 .iter()
