@@ -135,9 +135,6 @@ fn write_build(
     }
 }
 
-/// A record of the runs directory by its run's id, or why it didn't open.
-pub type Opened = (String, Result<Record, String>);
-
 /// The lock on a record's `driver.pid`, an exclusive `flock` held until it is dropped, by the
 /// process that drives the run.
 ///
@@ -372,18 +369,19 @@ impl Record {
         Self::open(&runs.join(id))
     }
 
-    /// Opens each record in `runs`, in the order of their ids, each with its id; a directory that
-    /// holds no `record.json` is skipped, and one that doesn't open is an error in its place.
-    pub fn all(runs: &Path) -> Result<Vec<Opened>, String> {
-        let mut records = Vec::new();
+    /// Opens each record in `runs`, by its id; a directory that holds no `record.json` is
+    /// skipped, and one that doesn't open is an error in its place.
+    pub fn all(runs: &Path) -> Result<BTreeMap<String, Result<Self, String>>, String> {
+        let mut records = BTreeMap::new();
         for name in names(runs)? {
             let dir = runs.join(&name);
             let has = dir.join("record.json").try_exists();
-            match has.context(dir.display()) {
-                Ok(false) => {}
-                Ok(true) => records.push((name, Self::open(&dir))),
-                Err(error) => records.push((name, Err(error))),
-            }
+            let record = match has.context(dir.display()) {
+                Ok(false) => continue,
+                Ok(true) => Self::open(&dir),
+                Err(error) => Err(error),
+            };
+            records.insert(name, record);
         }
         Ok(records)
     }
