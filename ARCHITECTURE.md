@@ -479,6 +479,16 @@ builds the same commit with no credentials of its own.
 **Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
 consumer builds what a checkout builds.
 
+### `.github/workflows`
+
+`release.yml` publishes a release when a tag is pushed. A runner builds `cargo xtask install` for
+`x86_64-unknown-linux-musl`, so `pumpkin` and `sandboxd` are static, adds the tag's git bundle, and
+publishes the result as `pumpkin-<tag>-x86_64-unknown-linux-musl.tar.gz` with its `.sha256`, which
+`deploy/pumpkin` downloads.
+
+**Architecture Invariant:** the archive is laid out as an install entry in `.pumpkin` is, `bin`
+and `pumpkin.bundle`, so `deploy/pumpkin` unpacks it in place.
+
 ### `deploy/aws`
 
 The Terraform module that makes one person's Pumpkin on AWS, as [its README](deploy/aws/README.md)

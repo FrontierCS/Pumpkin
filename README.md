@@ -348,3 +348,5 @@ go to sleep. It can also publish its runs to a read-only page for a team.
 - Models: [routes, budgets and prices](docs/models.md).
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
   [`docs/dev/`](docs/dev/), the rules for changing it.
+- Releasing: pushing a tag publishes its release, which `./pumpkin` downloads, as
+  [`release.yml`](.github/workflows/release.yml) builds it.
