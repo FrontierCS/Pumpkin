@@ -28,6 +28,7 @@ use gateway::{
     Arrival, Dialer, GatewayAddress, GrantListener, IncomingModelRequest, IncomingOp, Process, Put,
     Registration, Session, Sockets,
 };
+use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
 use schema::sandbox::op::{OpReply, OpsReply};
 use schema::sandbox::tree::Limits;
@@ -35,7 +36,7 @@ use schema::sandbox::{
     Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
     MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit,
     PROTOCOL_VERSION, REGISTRATION_GRANT_BYTES, RegistrationGrant, RelativePath, SOCKET_NAME,
-    SocketDial, TcpDial, ToSandbox, file_mode, frame,
+    SocketDial, TcpDial, ToSandbox, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;

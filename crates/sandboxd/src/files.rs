@@ -12,8 +12,8 @@ use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
+use schema::frame::MAX_BODY_BYTES;
 use schema::ir::AbsolutePath;
-use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{Entry, FromSandbox, RelativePath, Root, tree_mode};
 use stdx::Context;

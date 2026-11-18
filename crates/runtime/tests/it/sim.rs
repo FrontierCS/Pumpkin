@@ -39,6 +39,7 @@ use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
     Role, RunTag, SandboxId, SandboxdRef, Sweep,
 };
+use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
 use schema::sandbox::op::{
     JobState, Last, LeaseStatusReply, OpCall, OpReply, SessionOp, StatusReply, TransferStatus,
@@ -46,7 +47,7 @@ use schema::sandbox::op::{
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, Listening, PROTOCOL_VERSION,
     RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial,
-    ToSandbox, dir_mode, file_mode, frame, log_dir, out_dir, pumpkin_dir,
+    ToSandbox, dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde_json::{Map, Value, json};

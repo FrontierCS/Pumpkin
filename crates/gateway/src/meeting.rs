@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use schema::frame;
 use schema::ir::{GpuModel, Name};
 use schema::sandbox::{
     Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, OpPayloadLimit,
-    REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial, TcpDial, frame,
+    REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial, TcpDial,
 };
 use stdx::Deadline;
 
@@ -724,7 +725,7 @@ fn read_hello(
         stopped,
         stop: None,
     };
-    let hello = frame::read_hello(&mut polled);
+    let hello = schema::sandbox::read_hello(&mut polled);
     connection
         .set_nonblocking(false)
         .map_err(|error| context("the sandbox's connection can't be made blocking", &error))?;

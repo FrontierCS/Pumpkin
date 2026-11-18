@@ -24,6 +24,7 @@
 //! [`CONTROL_SOCKET`]; a role with a model route has the model endpoint at [`MODEL_PORT`].
 
 use std::fmt;
+use std::io::{self, Read};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -32,10 +33,10 @@ use op::{OpCall, OpReply};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::frame;
 pub use crate::ir::values::RelativePath;
 use crate::ir::{AbsolutePath, Argv, Env, EnvVar, GpuModel, Mode};
 
-pub mod frame;
 pub mod op;
 pub mod tree;
 
@@ -235,7 +236,29 @@ const _: () = assert!(8 * (96 + 3) + 128 <= MAX_HELLO_BYTES);
 // retransmission timeout, 1 s, and then at twice the wait before each time.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// What `sandboxd` sends first on every session; [`frame::read_hello`] reads one.
+/// Reads a [`Hello`], the frame that opens a session, or `None` if the connection ended cleanly
+/// before it.
+///
+/// It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone, one with a body, and
+/// a message that isn't JSON or is no hello.
+pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
+    frame::read_bodiless(reader, MAX_HELLO_BYTES, ["the hello", "a hello"])
+}
+
+/// Reads a [`HelloReply`], the answer to a hello, or `None` if the connection ended cleanly before
+/// it.
+///
+/// It reads a message of at most [`frame::MAX_MESSAGE_BYTES`] and no body, and refuses a longer
+/// frame from its lengths alone.
+pub fn read_hello_reply(reader: &mut impl Read) -> io::Result<Option<HelloReply>> {
+    frame::read_bodiless(
+        reader,
+        frame::MAX_MESSAGE_BYTES,
+        ["the answer to the hello", "an answer"],
+    )
+}
+
+/// What `sandboxd` sends first on every session; [`read_hello`] reads one.
 ///
 /// Its body is empty, and its message `{"version":v}`, with `v` its [`PROTOCOL_VERSION`], and
 /// `"grant":"…"` where it presents a grant, and `"gpus":[…]` where it saw GPUs.

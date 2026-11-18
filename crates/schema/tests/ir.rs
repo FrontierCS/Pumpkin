@@ -13,17 +13,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroU64};
 
 use expect_test::{Expect, expect};
-use schema::ir;
 use schema::sandbox::op::{
     self, CommandEnd, CommandStatus, LeaseRemaining, LeaseState, LeaseStatusReply, OpReply,
     TransferEnd, TransferStatus,
 };
 use schema::sandbox::{
     Endpoint, ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant,
-    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout, frame,
+    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout,
     pumpkin_dir, pumpkin_subdirs,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
+use schema::{frame, ir};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 

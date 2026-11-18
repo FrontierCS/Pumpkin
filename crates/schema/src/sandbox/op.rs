@@ -29,7 +29,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{ExitStatus, frame};
+use super::ExitStatus;
+use crate::frame;
 use crate::ir::{AbsolutePath, Argument, Argv, Name, Resources};
 
 /// The most bytes of why a transfer failed, and of why a runner failed, that a lease's status

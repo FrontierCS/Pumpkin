@@ -28,13 +28,14 @@ use std::{fs, thread};
 
 use expect_test::{Expect, expect};
 use gateway::{Arrival, Dialer, GatewayAddress, GrantListener, Process, Put, Session, Sockets};
+use schema::frame;
+use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
-use schema::sandbox::frame::MAX_BODY_BYTES;
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
     PROTOCOL_VERSION, RegistrationGrant, RelativePath, Root, SANDBOXD_GRANT, SOCKET_NAME,
-    SocketDial, TcpDial, ToSandbox, dir_mode, file_mode, frame,
+    SocketDial, TcpDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::process::Environment;
