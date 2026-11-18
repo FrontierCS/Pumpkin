@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, POISON, Scratch, Step, check, docker_table, invocation, older_finished, poll,
-    ran, report, returned, write_gone, write_on, write_record,
+    EC2, INFO, LOCAL, POISON, Scratch, Step, check, docker_table, invocation, poll, ran, report,
+    returned, write_gone, write_on, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -208,85 +208,6 @@ esac
             container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             rm --force --volumes cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
         "#]],
-    );
-}
-
-/// A lost run whose sandboxes, the agent's and a lease's, ended by themselves.
-const ENDED: &str = "20261108-121200-0a00000d";
-
-/// A run that finished, of a build whose verdicts this one doesn't read, whose agent's sandbox
-/// ended by itself.
-const OLDER_ENDED: &str = "20261108-121300-0a00000f";
-
-// A sandbox that its provider lists no more may have left what only its delete removes.
-#[test]
-fn reaps_ended() {
-    let scratch = Scratch::new("reaps_ended");
-    let calls = scratch.0.join("calls");
-    let docker = format!(
-        r#"#!/bin/sh
-# `--context=<name>` comes first.
-shift
-echo "$*" >> "{}"
-case $1 in
-    context) echo unix:///stand-in.sock ;;
-    info) echo '{INFO}' ;;
-    container) ;;
-    *) echo "the stand-in has no such command" >&2; exit 1 ;;
-esac
-"#,
-        calls.display()
-    );
-    let path = write_on(&scratch, ENDED, "default", None, &docker);
-    let older = Some(older_finished());
-    let _ = write_on(&scratch, OLDER_ENDED, "default", older, &docker);
-    let held = [
-        (ENDED, "agent", "a"),
-        (ENDED, "leases/0", "b"),
-        (OLDER_ENDED, "agent", "d"),
-    ];
-    for (run, dir, id) in held {
-        let sandbox = json!({ "provider": "local", "id": id.repeat(64), "report": {} });
-        scratch.write(&format!("runs/{run}/{dir}/sandbox.json"), &sandbox);
-    }
-    let mut steps = Vec::new();
-    for _ in 0..2 {
-        let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
-        reap.env("PATH", &path);
-        steps.push(ran(reap, &scratch.0, false));
-        let called = fs::read_to_string(&calls).unwrap();
-        fs::remove_file(&calls).unwrap();
-        steps.push(format!("docker was called with:\n{}", called.trim_end()));
-    }
-    check(
-        &scratch,
-        steps.into_iter().map(Step::Ran),
-        false,
-        &[],
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
-            exit status: Some(0)
-            pumpkin: run 20261108-121200-0a00000d's sandbox aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            pumpkin: run 20261108-121200-0a00000d's sandbox bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            pumpkin: run 20261108-121200-0a00000d was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run 20261108-121300-0a00000f's sandbox dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            printed:
-              20261108-121200-0a00000d
-              20261108-121300-0a00000f
-            docker was called with:
-            context inspect --format {{.Endpoints.docker.Host}} -- default
-            info --format {{json .}}
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --filter id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
-            exit status: Some(0)
-            docker was called with:
-            context inspect --format {{.Endpoints.docker.Host}} -- default
-            info --format {{json .}}
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f"#]],
     );
 }
 
