@@ -2742,15 +2742,15 @@ fn cpus() {
         .replace(&format!("the {cores} that"), "the <cores> that");
     lines.push(format!("{refused}\nrecords made: {}", runs_made(&scratch)));
     stand_in.release("create");
-    for id in [&first, &second] {
+    // Each run's driver outlives its `pumpkin run`, and writes into the scratch until it ends.
+    let ended = |id: &str| {
         let wait = scratch.pumpkin(&["wait", id, "--runs", "runs"]).output();
-        lines.push(format!(
-            "the run ended: {}",
-            wait.unwrap().status.code() == Some(3)
-        ));
-    }
+        format!("the run ended: {}", wait.unwrap().status.code() == Some(3))
+    };
+    lines.extend([&first, &second].map(|id| ended(id)));
     let third = stand_in.run("third/task.star", &[]).output().unwrap();
     lines.push(format!("then the third starts: {}", third.status.success()));
+    lines.push(ended(String::from_utf8(third.stdout).unwrap().trim()));
     check(
         &scratch,
         lines.into_iter().map(Step::Ran),
@@ -2768,6 +2768,7 @@ fn cpus() {
             records made: 2
             the run ended: true
             the run ended: true
-            then the third starts: true"#]],
+            then the third starts: true
+            the run ended: true"#]],
     );
 }
