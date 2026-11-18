@@ -68,9 +68,6 @@ pub(crate) const UNLISTABLE: &str = "/sim/unlistable";
 /// A create that fails without naming the sandbox it made, which never dials.
 pub(crate) const LOST: &str = "/sim/lost";
 
-/// A sandbox whose hello names a protocol version later than the gateway's.
-pub(crate) const LATER: &str = "/sim/later";
-
 /// A create that takes two seconds of real time, or until its deadline if that comes first, in
 /// which case it fails, leaving the sandbox for the run's list to find, which, where it listens,
 /// ends itself as no gateway claims it.
@@ -85,7 +82,7 @@ pub(crate) const BRIEF: &str = "brief";
 
 // Far longer than a simulated sandbox takes to start, so that a busy machine makes a start that
 // succeeds wait longer, never fail.
-const BRIEF_STARTUP: u64 = 2;
+const BRIEF_STARTUP: u64 = 1;
 
 const AWAIT_POLL: Duration = Duration::from_millis(10);
 
@@ -102,9 +99,6 @@ pub(crate) const UNDELETABLE: &str = "/sim/undeletable";
 /// call once.
 pub(crate) const REFUSED_ONCE: &str = "/sim/refused-once";
 
-/// A sandbox whose delete takes a second of real time.
-pub(crate) const DAWDLING: &str = "/sim/dawdling";
-
 /// A sandbox where a process changes `out` until a freeze kills it, so that a collect of `out`
 /// before the freeze fails, as `sandboxd`'s of a tree that changes as it is collected does.
 pub(crate) const SCRIBBLED: &str = "/sim/scribbled";
@@ -119,10 +113,6 @@ pub(crate) const LAST: &str = "/sim/last";
 
 // How long a delete of a `LAST` sandbox waits before the test fails instead of hanging.
 const LAST_WAITS: Duration = Duration::from_secs(60);
-
-// Far longer than a run takes to collect what a call's sandbox holds and delete it, and far
-// shorter than the bounds of the runs whose tests use it.
-const DAWDLE: Duration = Duration::from_secs(1);
 
 // A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
 // end returns while it runs, which the suite then sees (`Subject::held`): far longer than the
@@ -191,7 +181,6 @@ struct Reserved {
 struct Sandbox {
     run: RunTag,
     refusals: u32,
-    linger: Duration,
     last: bool,
     listing: Listing,
     // Shared with the sandbox's thread, which prints to its console and hands over its
@@ -665,16 +654,11 @@ impl Sim {
             dialing,
             listing,
             refusals,
-            linger,
             last,
             freezing,
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
-        let hello = if dialing == Dialing::Later {
-            json!({ "version": PROTOCOL_VERSION + 1 })
-        } else {
-            json!({ "version": PROTOCOL_VERSION, "grant": presented })
-        };
+        let hello = json!({ "version": PROTOCOL_VERSION, "grant": presented });
         let mode = gateway.mode();
         let record = self.state().record.clone();
         let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record)));
@@ -700,7 +684,6 @@ impl Sim {
         let sandbox = Sandbox {
             run: create.run.clone(),
             refusals,
-            linger,
             last,
             listing,
             shared,
@@ -920,7 +903,6 @@ struct Faults {
     dialing: Dialing,
     listing: Listing,
     refusals: u32,
-    linger: Duration,
     last: bool,
     freezing: Freezing,
 }
@@ -935,7 +917,6 @@ enum Made {
 #[derive(PartialEq, Eq)]
 enum Dialing {
     Hello,
-    Later,
     Mute,
     Hung,
 }
@@ -943,7 +924,7 @@ enum Dialing {
 impl Dialing {
     fn silent(&self) -> (bool, bool) {
         match self {
-            Self::Hello | Self::Later => (false, false),
+            Self::Hello => (false, false),
             Self::Mute => (true, false),
             Self::Hung => (true, true),
         }
@@ -971,8 +952,6 @@ impl Faults {
             Dialing::Hung
         } else if lost || vanishing || names(MUTE) {
             Dialing::Mute
-        } else if names(LATER) {
-            Dialing::Later
         } else {
             Dialing::Hello
         };
@@ -986,11 +965,6 @@ impl Faults {
             dialing,
             listing,
             refusals,
-            linger: if names(DAWDLING) {
-                DAWDLE
-            } else {
-                Duration::ZERO
-            },
             last: names(LAST),
             freezing: if names(SCRIBBLED) {
                 Freezing::Scribbler
@@ -1007,13 +981,11 @@ fn stop(sandbox: Sandbox) {
     let Sandbox {
         run: _,
         refusals: _,
-        linger,
         last: _,
         listing: _,
         shared,
         thread,
     } = sandbox;
-    thread::sleep(linger);
     let mut status = status(&shared);
     status.deleted = true;
     if let Some(connection) = status.connection.take() {

@@ -10,10 +10,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use schema::ir::{self, AbsolutePath, Argv, Name};
-use schema::sandbox::{RESULT_MAX_BYTES, RESULT_MAX_DEPTH};
+use schema::sandbox::RESULT_MAX_BYTES;
 use serde_json::{Map, Value, json};
 
-use crate::execute::LEASING;
 use crate::sim;
 
 /// The tests' bodies, each by its `def`'s name: `check` puts the payload at `/work/payload`, runs
@@ -21,10 +20,10 @@ use crate::sim;
 /// there, runs `judge` on it, and returns its result's `raw_score`; `run` puts the payload at
 /// `/pumpkin/in/payload/raw` and runs its keyword `argv`; `slow` runs `slow`, which runs until it
 /// is killed. `again` runs a command of two seconds, then `print two`, and returns what it printed;
-/// `late` runs the same command, then puts the payload and gets it back; `holds` and `waits` run
-/// `print one`, then get `/work/held`, which the simulated sandbox holds, or wait for the record to
-/// show the agent's sandbox deleted, then run `print two`; `missing` gets a missing file; what
-/// `deep` returns nests, its dict included, its keyword `depth` deep; `large` returns [`large()`].
+/// `holds` and `waits` run `print one`, then get `/work/held`, which the simulated sandbox holds,
+/// or wait for the record to show the agent's sandbox deleted, then run `print two`; `missing`
+/// gets a missing file; what `deep` returns nests, its dict included, its keyword `depth` deep;
+/// `large` returns [`large()`].
 pub(crate) struct Bodies<'r> {
     /// The run's record.
     pub(crate) record: &'r Path,
@@ -39,7 +38,6 @@ impl runtime::Bodies for Bodies<'_> {
         16 << 20
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per body")]
     fn job(
         &self,
         body: &ir::Body,
@@ -88,13 +86,6 @@ impl runtime::Bodies for Bodies<'_> {
                     target.get(&AbsolutePath::from_static("/pumpkin/log/1/command.stdout"))?;
                 Ok(vec![(Name::from_static("printed"), json!(printed))])
             }
-            "late" => {
-                target.run(&argv(&["ops", "sleep 2"]))?;
-                let payload = AbsolutePath::from_static("/work/payload");
-                target.put(&payload)?;
-                let got = target.get(&payload)?;
-                Ok(vec![(Name::from_static("got"), json!(got))])
-            }
             "holds" => {
                 target.run(&argv(&["print", "one"]))?;
                 target.get(&AbsolutePath::from_static("/work/held"))?;
@@ -127,9 +118,7 @@ impl runtime::Bodies for Bodies<'_> {
 
     /// `final_call` puts the payload at `/pumpkin/in/payload/raw`, runs `judge` on it, and returns
     /// its result's `raw_score` as `score`; `routed` runs its keyword `argv`, and returns the
-    /// `raw_score` of the result that it wrote as `score` and `raw`; `leasing` puts the payload as
-    /// `final_call` does, runs [`LEASING`], and returns its result's `raw_score` as `score`;
-    /// `large` returns [`large()`].
+    /// `raw_score` of the result that it wrote as `score` and `raw`; `large` returns [`large()`].
     fn final_call(
         &self,
         body: &ir::FinalBody,
@@ -154,20 +143,13 @@ impl runtime::Bodies for Bodies<'_> {
                     (Name::from_static("raw"), raw),
                 ])
             }
-            "leasing" => {
-                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"))?;
-                target.run(&argv(&LEASING))?;
-                let score = raw_score(target)?;
-                Ok(vec![(Name::from_static("score"), score)])
-            }
             "large" => Ok(large()),
             def => Err(format!("the tests have no body `{def}`")),
         }
     }
 
     /// `submit` selects the payload and, given `finalize`, ends the work, once it has taken
-    /// [`DEEP_BYTES`] of stack; what `deep` returns nests, its dict included, one deeper than
-    /// [`RESULT_MAX_DEPTH`]; `large` returns [`large()`].
+    /// [`DEEP_BYTES`] of stack.
     fn now(
         &self,
         body: &ir::Body,
@@ -186,11 +168,6 @@ impl runtime::Bodies for Bodies<'_> {
                 let state = if finalize { "accepted" } else { "stored" };
                 Ok(vec![(Name::from_static("state"), json!(state))])
             }
-            "deep" => {
-                let nested = (1..RESULT_MAX_DEPTH).fold(json!([]), |inner, _| json!([inner]));
-                Ok(vec![(Name::from_static("deep"), nested)])
-            }
-            "large" => Ok(large()),
             def => Err(format!("the tests have no body `{def}`")),
         }
     }
