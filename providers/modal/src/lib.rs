@@ -81,7 +81,7 @@ struct Images {
 /// "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 8589934592,
 /// startup_seconds = 1800 }`; without `gpu` and `gpu_model`, it has none. With `usd_per_hour`,
 /// such as `3.95`, it has the price that the operator says a sandbox costs.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClassTable {
     gpu: Option<Gpu>,
@@ -92,10 +92,11 @@ struct ClassTable {
     usd_per_hour: Option<UsdPerHour>,
 }
 
-/// A class of sandbox: what a run may rely on of it, and its GPU, if any.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "ClassTable")]
-struct SandboxClass {
+/// A class of sandbox: what a run may rely on of it, and its GPU, if any. It reads and writes as
+/// a table of the provider's settings' `classes`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "ClassTable", into = "ClassTable")]
+pub struct SandboxClass {
     class: Class,
     gpu: Option<Gpu>,
 }
@@ -175,6 +176,33 @@ impl TryFrom<ClassTable> for SandboxClass {
             usd_per_hour,
         };
         Ok(Self { class, gpu })
+    }
+}
+
+impl From<SandboxClass> for ClassTable {
+    fn from(sandbox: SandboxClass) -> Self {
+        let SandboxClass { class, gpu } = sandbox;
+        let Class {
+            offers,
+            startup_seconds,
+            usd_per_hour,
+        } = class;
+        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
+        let Offers {
+            cpu_millis,
+            memory_bytes,
+            gpu: offered,
+            cpu_features: _,
+            cpu_model: _,
+        } = offers;
+        Self {
+            gpu,
+            gpu_model: offered.map(|offered| offered.model),
+            cpu_millis,
+            memory_bytes,
+            startup_seconds,
+            usd_per_hour,
+        }
     }
 }
 

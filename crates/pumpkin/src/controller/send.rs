@@ -226,7 +226,9 @@ pub(super) fn send(
 ) -> Result<(), String> {
     let id = id.as_str();
     send_tree(reached, tree)?;
-    let (config, keys) = client.sent()?;
+    let (config, keys) = client.sent();
+    let config = toml::to_string(&config)
+        .map_err(|error| format!("writing what the job is sent: {error}"))?;
     let mut files = vec![(SENT_CONFIG.to_owned(), config.into_bytes())];
     for (file, key) in keys {
         let read = fs::read(&key).map_err(|error| {
