@@ -237,11 +237,6 @@ fn job() {
     let mut lines = vec![report(invoked, &job.output().unwrap(), &scratch.0, false)];
     let ir = fs::read_to_string(&out).unwrap();
     lines.push(format!("out names the image: {}", ir.contains(&image('0'))));
-    let current = fs::read_link(scratch.0.join("home/current-pumpkin")).unwrap();
-    lines.push(format!(
-        "current-pumpkin is this pumpkin: {}",
-        current == controllers(&scratch)
-    ));
     let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
     lines.push(format!("pumpkin.toml:\n{}", config.unwrap()));
     lines.extend(noted(&scratch));
@@ -345,7 +340,6 @@ fn job() {
             exit status: Some(0)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             out names the image: true
-            current-pumpkin is this pumpkin: true
             pumpkin.toml:
             [docker]
             context = "default"

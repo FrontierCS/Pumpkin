@@ -734,15 +734,16 @@ fn usage() {
               `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
               Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
               and Modal's configuration file, into a directory of its own in the
-              controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, and
-              `ssh`, `tar`, `ssh-keygen` and `git`, from PATH, and reach the controller at
-              its private address, to which deploy/aws's `ssh_from` must admit this
-              machine; the controller's settings are the module's, but for
-              [controller.modal]. This machine's key to it, which the first command makes
-              and enrols through EC2 Instance Connect, and the host key it pins, are in
-              $HOME/.config/pumpkin/ssh/.
+              controller's tmpfs, which its end removes. The client uses AWS CLI v2, ssh,
+              ssh-keygen and git from PATH. It sends the task's files and starts its job
+              over one SSH connection to the controller's private address. The machine
+              must have a route there and deploy/aws's `ssh_from` must admit it. The job
+              runs the client's install with the module's settings and [controller.modal].
+              The first command creates a key and enrols it through EC2 Instance Connect.
+              The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
                 name          The `name` that deploy/aws was applied with.
                 region        The region it was applied in.
+                address       `private` (the default) uses the instance's private address.
 
               [controller.modal], the Modal provider that the controller's runs may place
               roles on, if any: the settings of a provider of kind modal, but `images`, which

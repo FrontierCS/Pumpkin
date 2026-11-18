@@ -190,6 +190,7 @@ pub(crate) enum Boot {
     Failed {
         status: i32,
         at: Option<String>,
+        log: String,
     },
     /// `systemctl` gave no state.
     Unknown,
