@@ -60,8 +60,8 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
-    // Made by the first request for the view, and kept: it holds what it read of the live runs.
-    let mut view = None;
+    // Kept for the link's life: it holds what it read of the live runs.
+    let mut view = Answering::new(home.join(crate::job::runs()));
     let written = "writing to the standard output failed";
     frame::write(&mut output, &Hello::Serving, &[]).context(written)?;
     while arrives(&input)? {
@@ -172,16 +172,13 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-/// The answer to `ask`: [`Answer::Refused`] if what it asks for fails. `view` holds the view of
-/// the runs below `home` once a request has needed it.
-fn answered(home: &Path, ask: Ask, view: &mut Option<Answering>) -> Answer {
+/// The answer to `ask`, with `view` the view of the runs below `home`: [`Answer::Refused`] if what
+/// it asks for fails.
+fn answered(home: &Path, ask: Ask, view: &mut Answering) -> Answer {
     let answered = match ask {
         Ask::Health => health().map(Answer::Health),
         Ask::List { prefixes } => listed(home, &prefixes),
-        Ask::View { target, deflate } => {
-            let view = view.get_or_insert_with(|| Answering::new(home.join(crate::job::runs())));
-            Ok(view.answer(&target, deflate))
-        }
+        Ask::View { target, deflate } => Ok(view.answer(&target, deflate)),
     };
     answered.unwrap_or_else(|message| Answer::Refused { message })
 }
