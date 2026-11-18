@@ -1,13 +1,12 @@
 //! Finding a controller's EC2 instance by its tag, starting it, waiting until its `sshd` answers
 //! at its private address, and enrolling this machine's key with it through EC2 Instance Connect.
 
-use std::fs::{self, DirBuilder};
-use std::io::{self, Read as _};
+use std::fs::{self, DirBuilder, File};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::{env, thread};
+use std::{env, io, thread};
 
 use aws::{Bound, Cli, Region};
 use jiff::Timestamp;
@@ -15,21 +14,20 @@ use serde::{Deserialize, Serialize};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-use super::{Name, Reached, SHORT_TIMEOUT, USER, bounded, finished};
+use super::{Name, Reached, SHORT_TIMEOUT, USER, bounded, finished, locked};
 use crate::say;
 
 // The tag that `deploy/aws` puts on the controller's instance, valued with the controller's name.
 const TAG: &str = "pumpkin:controller";
 
-// How long a controller has, from its launch, to run and have its `sshd` answer and admit logins.
-// An instance that EC2 starts does all three within a few minutes; past this, something else is
-// wrong.
+// How long a controller has, from its launch, to run and have its `sshd` answer. An instance that
+// EC2 starts does both within a few minutes; past this, something else is wrong.
 const START_TIMEOUT: Duration = Duration::from_mins(10);
 
-pub(super) const START_POLL: Duration = Duration::from_secs(5);
+const START_POLL: Duration = Duration::from_secs(5);
 
-// How long a probe of `sshd` waits to connect, and then for its banner. Inside the controller's
-// VPC each takes milliseconds, so a longer wait would only delay the next probe. SkyPilot's:
+// How long a probe of `sshd` waits to connect. Inside the controller's VPC a connection takes
+// milliseconds, so a longer wait would only delay the next probe. SkyPilot's:
 // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L500-L501
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -113,9 +111,8 @@ pub(super) fn kept() -> Result<PathBuf, String> {
 }
 
 /// Finds controller `name` in `region` by its tag, starts it if it is stopped, and waits until its
-/// `sshd` answers; returns where it is, and the deadline by which it is to admit logins,
-/// `START_TIMEOUT` after its launch.
-pub(super) fn find(region: &Region, name: &Name) -> Result<(Located, Deadline), String> {
+/// `sshd` answers, and returns where it is.
+pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
     let cli = Cli::connect(region.clone())?;
     let tag = format!("Name=tag:{TAG},Values={name}");
     let live = |instance: &Instance| {
@@ -142,7 +139,7 @@ fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
         .collect())
 }
 
-fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(Located, Deadline), String> {
+fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
     let by = Deadline::after(START_TIMEOUT);
     let mut started = None;
     loop {
@@ -184,11 +181,7 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<(Located, Deadline), String
 
 /// Waits until the `sshd` of `instance`, which runs, answers at its private address, until
 /// `START_TIMEOUT` after its launch, and says how long that took if this command `started` it.
-fn answering(
-    name: &Name,
-    instance: Instance,
-    started: Option<Instant>,
-) -> Result<(Located, Deadline), String> {
+fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Result<Located, String> {
     let Instance {
         id,
         state: _,
@@ -218,11 +211,10 @@ fn answering(
                     started.elapsed().as_secs()
                 ));
             }
-            let located = Located {
+            return Ok(Located {
                 instance: id,
                 address,
-            };
-            return Ok((located, by));
+            });
         };
         if by.remaining().is_none() {
             let why = match error.kind() {
@@ -249,29 +241,29 @@ fn answering(
     }
 }
 
-/// Whether an `sshd` answers at `address` within `PROBE_TIMEOUT`, with a banner that begins
-/// `SSH-`, or why not.
-// A banner, which a booting controller's `sshd` sends before it admits logins, so that a login
-// still has to be tried, as SkyPilot tries one after the banner:
+/// Whether a connection to `sshd`'s port at `address` opens within `PROBE_TIMEOUT`, or why not.
+// A connection alone: a booting controller's `sshd` takes one before it admits logins, and one
+// past `MaxStartups` sends no banner, "Not allowed at this time" in its place, so a login still has
+// to be tried, as SkyPilot tries one after its probe:
 // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/provision/provisioner.py#L478-L515
+// https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshd.c#L589-L639
 pub(super) fn answers(address: IpAddr) -> io::Result<()> {
     // The port of `sshd`, which `deploy/aws` admits.
-    let at = SocketAddr::new(address, 22);
-    let mut stream = TcpStream::connect_timeout(&at, PROBE_TIMEOUT)?;
-    let mut banner = [0; 4];
-    let read = stream.set_read_timeout(Some(PROBE_TIMEOUT));
-    let read = read.and_then(|()| stream.read_exact(&mut banner));
-    read.map_err(|error| io::Error::new(error.kind(), format!("it sent no banner: {error}")))?;
-    if banner != *b"SSH-" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "what answers on port 22 isn't `sshd`",
-        ));
-    }
-    Ok(())
+    TcpStream::connect_timeout(&SocketAddr::new(address, 22), PROBE_TIMEOUT).map(drop)
 }
 
 impl Reached {
+    /// This machine's lock of enrolling its key, which one command holds at a time, so that
+    /// commands that find the key refused at once push it once and add it once.
+    // Beside the key, as one machine-wide lock guards SkyPilot's registration of its key:
+    // https://github.com/skypilot-org/skypilot/blob/052914aaccb29a9a2364dd73654f2e61f0af42a0/sky/authentication.py#L236-L243
+    pub(super) fn enrolling(&self) -> Result<File, String> {
+        let waiting = format_args!(
+            "waiting for another command, which is enrolling this machine's key with a controller"
+        );
+        locked(&self.kept.join("enrol"), waiting)
+    }
+
     pub(super) fn enrol(&self, master: usize) -> Result<(), String> {
         let public = self.kept.join("key.pub");
         let public = fs::read(&public).context(public.display())?;
