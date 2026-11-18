@@ -237,8 +237,8 @@ fn fetch_refusals() {
         Some("v1 0123456789012345678901234567890123456789\n"),
         None,
         &expect![[r#"
-            Some(1): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
-            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            Some(1): pumpkin: this first run fetches Rust and Zig and builds Pumpkin, about 300 MB and a few minutes;
+            pumpkin: all of it, about 2 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
             pumpkin: building Pumpkin v1 (0123456789012345678901234567890123456789) from file://<scratch>/source ...
             pumpkin: tag v1 of file://<scratch>/source is commit <commit>, not 0123456789012345678901234567890123456789: fix .pumpkinversion, or the tag if it moved
             left in the temporary directory: 0, and in .pumpkin/tmp: 0
@@ -249,8 +249,8 @@ fn fetch_refusals() {
         Some("v2 <commit>\n"),
         None,
         &expect![[r#"
-            Some(128): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
-            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            Some(128): pumpkin: this first run fetches Rust and Zig and builds Pumpkin, about 300 MB and a few minutes;
+            pumpkin: all of it, about 2 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
             pumpkin: building Pumpkin v2 (<commit>) from file://<scratch>/source ...
             warning: Could not find remote branch v2 to clone.
             fatal: Remote branch v2 not found in upstream origin
@@ -264,8 +264,8 @@ fn fetch_refusals() {
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
-            Some(1): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
-            pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            Some(1): pumpkin: this first run fetches Rust and Zig and builds Pumpkin, about 300 MB and a few minutes;
+            pumpkin: all of it, about 2 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
             pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/source ...
             pumpkin: downloading rustup-init 1.29.2 ...
             pumpkin: https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init does not have the SHA-256 checksum 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4: the download is not rustup-init 1.29.2
@@ -281,10 +281,10 @@ fn lacking() {
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
-        Some(1): pumpkin: building Pumpkin needs git, curl, sha256sum, cc (a C linker), which this machine lacks; on Debian or Ubuntu, run
-            sudo apt-get install git curl coreutils gcc libc6-dev
-        left in the temporary directory: 0, and in .pumpkin/tmp: 1
-        in .pumpkin: build.lock tmp"#]],
+            Some(1): pumpkin: building Pumpkin needs git, curl, sha256sum, tar, xz, cc (a C linker), which this machine lacks; on Debian or Ubuntu, run
+                sudo apt-get install git curl coreutils tar xz-utils gcc libc6-dev
+            left in the temporary directory: 0, and in .pumpkin/tmp: 1
+            in .pumpkin: build.lock tmp"#]],
     );
 }
 
@@ -295,18 +295,18 @@ fn unreachable() {
         Some("v1 <commit>\n"),
         None,
         &expect![[r#"
-        Some(128): pumpkin: this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;
-        pumpkin: all of it, about 1.5 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
-        pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/nonexistent ...
-        fatal: '<scratch>/nonexistent' does not appear to be a git repository
-        fatal: Could not read from remote repository.
+            Some(128): pumpkin: this first run fetches Rust and Zig and builds Pumpkin, about 300 MB and a few minutes;
+            pumpkin: all of it, about 2 GB, goes to <scratch>/consumer/.pumpkin, safe to delete, and later runs start at once
+            pumpkin: building Pumpkin v1 (<commit>) from file://<scratch>/nonexistent ...
+            fatal: '<scratch>/nonexistent' does not appear to be a git repository
+            fatal: Could not read from remote repository.
 
-        Please make sure you have the correct access rights
-        and the repository exists.
-        pumpkin: could not read the repository file://<scratch>/nonexistent: it needs the network, and access to it on GitHub; check both with
-            git ls-remote file://<scratch>/nonexistent
-        left in the temporary directory: 0, and in .pumpkin/tmp: 0
-        in .pumpkin: .gitignore tmp"#]],
+            Please make sure you have the correct access rights
+            and the repository exists.
+            pumpkin: could not read the repository file://<scratch>/nonexistent: it needs the network, and access to it on GitHub; check both with
+                git ls-remote file://<scratch>/nonexistent
+            left in the temporary directory: 0, and in .pumpkin/tmp: 0
+            in .pumpkin: .gitignore tmp"#]],
     );
 }
 
@@ -367,6 +367,10 @@ fn install_root() {
         <root>/bin/pumpkin-modal.py.lock
         "#]]
     .assert_eq(&printed);
+    let pumpkin = root.join("bin/pumpkin");
+    let headers = sh.cmd("readelf").arg("-lW").arg(&pumpkin).read().unwrap();
+    assert!(!headers.split_whitespace().any(|field| field == "INTERP"));
+    sh.cmd(pumpkin).arg("--version").run().unwrap();
 }
 
 /// The paths of the files below `dir`, relative to it, sorted.

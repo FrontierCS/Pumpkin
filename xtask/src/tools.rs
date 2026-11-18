@@ -4,13 +4,12 @@
 
 use std::fmt::Write as _;
 use std::fs::{self, Permissions};
-use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::{env, process};
 
 use sha2::{Digest as _, Sha256};
-use xshell::{Shell, cmd};
+use xshell::{Cmd, Shell, cmd};
 
 use crate::{Cargo, Result};
 
@@ -42,7 +41,7 @@ pub(crate) struct Release {
     version: &'static str,
     url: &'static str,
     sha256: &'static str,
-    /// The tool's path in the file, if the file is a gzipped tar that holds it.
+    /// The tool's path in the file, if the file is a tar archive.
     member: Option<&'static str>,
 }
 
@@ -64,7 +63,27 @@ pub(crate) const TSC: Release = Release {
     member: Some("package/lib/tsc"),
 };
 
-const RELEASES: [Release; 2] = [BUILDIFIER, TSC];
+const ZIG: Release = Release {
+    name: "zig",
+    version: "0.16.0",
+    url: "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+    sha256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
+    member: Some("zig-x86_64-linux-0.16.0/zig"),
+};
+
+const RELEASES: [Release; 3] = [BUILDIFIER, TSC, ZIG];
+
+/// Sets the musl C compiler for a build of `pumpkin`. The host compiler still links the binary.
+pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
+    let zig = fetched(cargo, ZIG)?;
+    Ok(build
+        .env("ZIG_LIB_DIR", zig.with_file_name("lib"))
+        .env("ZIG_GLOBAL_CACHE_DIR", zig.with_file_name("cache"))
+        .env(
+            "CC_x86_64_unknown_linux_musl",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("zig-cc"),
+        ))
+}
 
 /// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root,
 /// and fetches each of [`RELEASES`] that isn't fetched yet.
@@ -214,7 +233,7 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
         .map_err(|error| format!("making {} executable failed: {error}", to.display()).into())
 }
 
-/// Unpacks the gzipped tar `archive` into `dir`, through a directory of this process's own, so
+/// Unpacks the tar `archive` into `dir`, through a directory of this process's own, so
 /// that `member`'s first directory appears whole or not at all.
 fn unpack(sh: &Shell, archive: &Path, dir: &Path, member: &str) -> Result<()> {
     let Some(top) = Path::new(member).components().next() else {
@@ -223,20 +242,15 @@ fn unpack(sh: &Shell, archive: &Path, dir: &Path, member: &str) -> Result<()> {
     let unpacking = dir.join(format!("unpacking.{}", process::id()));
     fs::create_dir_all(&unpacking)
         .map_err(|error| format!("making {} failed: {error}", unpacking.display()))?;
-    let tar = cmd!(
-        sh,
-        "tar --extract --gzip --file {archive} --directory {unpacking}"
-    );
+    let tar = cmd!(sh, "tar --extract --file {archive} --directory {unpacking}");
     let unpacked = tar.run().map_err(Into::into).and_then(|()| {
         let to = dir.join(top);
-        match fs::remove_dir_all(&to) {
-            Err(error) if error.kind() != ErrorKind::NotFound => {
-                return Err(format!("removing {} failed: {error}", to.display()).into());
-            }
-            Ok(()) | Err(_) => {}
+        match fs::rename(unpacking.join(top), &to) {
+            Ok(()) => Ok(()),
+            // A concurrent fetch installed the archive first. Its compiler may already be in use.
+            Err(_) if dir.join(member).is_file() => Ok(()),
+            Err(error) => Err(format!("renaming into {} failed: {error}", to.display()).into()),
         }
-        fs::rename(unpacking.join(top), &to)
-            .map_err(|error| format!("renaming into {} failed: {error}", to.display()).into())
     });
     let _ = fs::remove_dir_all(&unpacking);
     unpacked
