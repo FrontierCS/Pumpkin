@@ -30,6 +30,7 @@ mod viewing;
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::{self, BufRead as _, Write as _};
+use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
@@ -107,7 +108,7 @@ const AGAIN: [Duration; 6] = [
 // the 8 openings each connect and then wait out `ConnectTimeout`, 166 s in all. The count is this
 // module's: Ansible makes none again unless its `reconnection_retries` is set:
 // https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L209-L215
-const OPENINGS: u32 = 8;
+const OPENINGS: NonZeroU32 = NonZeroU32::new(8).expect("8 isn't 0");
 
 // The longest pause before an opening again; the pause after attempt n is 2^(n - 1) - 1 s up to
 // this, as Ansible's `ssh` plugin pauses before it connects again:
@@ -529,12 +530,18 @@ impl Reached {
     /// of those, opening a connection if none is open and waiting while every one is held. When
     /// no such connection can be had, it takes a session over any.
     fn slot_apart(&self, held: &BTreeSet<usize>) -> Result<Slot, String> {
-        self.slot_opening(held, OPENINGS)
+        // Made once if the held go on instead, rather than wait out the pauses.
+        let openings = if held.is_empty() {
+            OPENINGS
+        } else {
+            NonZeroU32::MIN
+        };
+        self.slot_opening(held, openings)
     }
 
     /// Takes a session as [`Reached::slot_apart`] does, making an opening that doesn't get
-    /// through up to `openings` times in all while `held` is empty.
-    fn slot_opening(&self, held: &BTreeSet<usize>, openings: u32) -> Result<Slot, String> {
+    /// through up to `openings` times in all.
+    fn slot_opening(&self, held: &BTreeSet<usize>, openings: NonZeroU32) -> Result<Slot, String> {
         let host = self.host();
         let mut waiting = None;
         loop {
@@ -545,9 +552,7 @@ impl Reached {
             match self.shared.scan(&host, held)? {
                 Found::Free(slot) => return Ok(self.waited(slot, waiting)),
                 Found::Closed(master) => {
-                    // Made once if the held go on instead, rather than wait out the pauses.
-                    let attempts = if held.is_empty() { openings } else { 1 };
-                    match self.open(&lock, master, attempts) {
+                    match self.open(&lock, master, openings) {
                         Ok(Opened::Open) => {}
                         Ok(Opened::Unreached(_) | Opened::HostKeyChanged(_)) | Err(_)
                             if !held.is_empty() =>
@@ -606,7 +611,7 @@ impl Reached {
     /// it, or says that the controller may no longer be where it was found. An opening that
     /// doesn't get through is made up to `attempts` times in all, as `OPENINGS` says. The `_lock`
     /// is the one that serialises this.
-    fn open(&self, _lock: &Lock, master: usize, attempts: u32) -> Result<Opened, String> {
+    fn open(&self, _lock: &Lock, master: usize, attempts: NonZeroU32) -> Result<Opened, String> {
         // Whether the key was pushed, and whether no opening has failed to get through since, so
         // that a refusal now is one of the key that the controller was sent.
         let (mut pushed, mut just_pushed) = (false, false);
@@ -639,7 +644,7 @@ impl Reached {
                 }
                 // Not opened again, as that would only wait out `ConnectTimeout` again.
                 Master::Unconnected(error) => return Ok(Opened::Unreached(error)),
-                Master::Unreached { error, said: _ } if attempt >= attempts => {
+                Master::Unreached { error, said: _ } if attempt >= attempts.get() => {
                     return Ok(Opened::Unreached(error));
                 }
                 // Pushed again if refused next, as a push lasts a minute, which a boot may outlast.

@@ -10,6 +10,8 @@
 //! [`Viewing::start`] is called. A request opens a link with one attempt, as the page asks again
 //! after a pause of its own, and the view answers no other request while one waits.
 
+use std::num::NonZeroU32;
+
 use ::aws::Cli;
 
 use super::aws::{self, answers, unanswered};
@@ -165,7 +167,7 @@ impl Viewing {
         let mut linked = match self.linked.take() {
             Some(linked) => linked,
             // Once, as the page asks again after a pause, which lets the view answer others.
-            None => match Linked::open(&self.reached, &self.build, 1) {
+            None => match Linked::open(&self.reached, &self.build, NonZeroU32::MIN) {
                 Ok(linked) => linked,
                 Err(unlinked) => return Over::Unopened(unlinked),
             },

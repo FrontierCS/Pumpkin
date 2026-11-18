@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use schema::ir::Sha256Digest;
@@ -55,7 +56,11 @@ impl Linked {
     /// Opens a link to the `serve` of `build` there, uploading `build`'s executable first if the
     /// controller has none; an opening of a connection that doesn't get through is made up to
     /// `openings` times in all.
-    pub(super) fn open(reached: &Reached, build: &Build, openings: u32) -> Result<Self, Unlinked> {
+    pub(super) fn open(
+        reached: &Reached,
+        build: &Build,
+        openings: NonZeroU32,
+    ) -> Result<Self, Unlinked> {
         if let Some(linked) = Self::connect(reached, build, openings)? {
             return Ok(linked);
         }
@@ -102,7 +107,11 @@ impl Linked {
     }
 
     /// `None` if the controller has no `serve` of `build`.
-    fn connect(reached: &Reached, build: &Build, openings: u32) -> Result<Option<Self>, Unlinked> {
+    fn connect(
+        reached: &Reached,
+        build: &Build,
+        openings: NonZeroU32,
+    ) -> Result<Option<Self>, Unlinked> {
         let slot = reached.slot_opening(&BTreeSet::new(), openings)?;
         let Session { command, slot } = reached.session(&link::command(&build.digest), slot);
         match Link::open(command) {
