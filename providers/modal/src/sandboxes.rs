@@ -27,7 +27,7 @@ use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
 
 use crate::helper::{ASK_TIMEOUT, Request, Sandboxd};
-use crate::{Gpu, MIB, Modal, Reached};
+use crate::{Gpu, Modal, Reached, memory_mib};
 
 /// How long a delete may run before it is killed: Modal stops a sandbox in seconds, and the
 /// helper waits for each of the delete's in turn.
@@ -154,14 +154,7 @@ impl Modal<'_> {
                 sandboxd.as_str()
             ));
         };
-        let memory_bytes = role.resources.memory_bytes.get();
-        if !memory_bytes.is_multiple_of(MIB) {
-            return Err(format!(
-                "role `{}` asks for {memory_bytes} bytes of memory, which Modal gives in whole \
-                 MiB: ask for a multiple of {MIB}",
-                role.name
-            ));
-        }
+        let memory_mib = memory_mib(role)?;
         Ok(Request::Create {
             run: run.as_str(),
             role: role.name.as_str(),
@@ -172,7 +165,7 @@ impl Modal<'_> {
             model: *model,
             grant,
             cpu_millis: role.resources.cpu_millis.get(),
-            memory_mib: memory_bytes / MIB,
+            memory_mib,
             gpu,
             hard_end: hard_end.since_epoch().as_secs(),
             by: by.since_epoch().as_secs(),
