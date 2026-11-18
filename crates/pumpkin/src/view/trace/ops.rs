@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
+use runtime::CallerName;
 use schema::ir::Name;
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 
 use super::nanos;
@@ -19,7 +21,7 @@ pub(in crate::view) struct Ops {
 }
 
 struct Op {
-    caller: String,
+    caller: CallerName,
     number: u64,
     kind: &'static str,
     /// Its grant or function, or its lease as `lease <n>`.
@@ -105,7 +107,7 @@ impl Ops {
         let request = &event["request"];
         let (Some(kind), Some(caller), Some(op)) = (
             KINDS.into_iter().find(|kind| request["kind"] == *kind),
-            event["caller"].as_str(),
+            CallerName::deserialize(&event["caller"]).ok(),
             event["op"].as_u64(),
         ) else {
             return;
@@ -150,7 +152,7 @@ impl Ops {
             self.by_work.insert(work, self.ops.len());
         }
         self.ops.push(Op {
-            caller: caller.to_owned(),
+            caller,
             number: op,
             kind,
             name,
@@ -161,8 +163,13 @@ impl Ops {
         });
     }
 
+    /// Whether any op is `caller`'s.
+    pub(super) fn names(&self, caller: CallerName) -> bool {
+        self.ops.iter().any(|op| op.caller == caller)
+    }
+
     /// `caller`'s ops, as columns of equal length, in the order they arrived.
-    pub(in crate::view) fn json(&self, caller: &str) -> Value {
+    pub(in crate::view) fn json(&self, caller: CallerName) -> Value {
         let ops: Vec<&Op> = self.ops.iter().filter(|op| op.caller == caller).collect();
         let time = |ns: Option<u64>| ns.map(|ns| ns.to_string());
         json!({

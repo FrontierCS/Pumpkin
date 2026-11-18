@@ -574,7 +574,7 @@ impl Reading {
             }
             logged::Event::ModelRequestStarted { caller, request } => {
                 self.model.in_flight.insert(*request, at);
-                if let logged::Caller::Job(job) = caller
+                if let logged::CallerName::Job(job) = caller
                     && let Some(call) = self.call(*job)
                 {
                     call.model.in_flight.insert(*request, at);
@@ -605,10 +605,10 @@ impl Reading {
                 self.model.take(at, &answered);
                 // The caller's own, which the run's count too.
                 match caller {
-                    Some(logged::Caller::Agent) => {
+                    Some(logged::CallerName::Agent) => {
                         self.agent.model.get_or_insert_default().take(at, &answered);
                     }
-                    Some(logged::Caller::Job(job)) => {
+                    Some(logged::CallerName::Job(job)) => {
                         if let Some(call) = self.call(*job) {
                             call.model.take(at, &answered);
                         }
@@ -724,13 +724,13 @@ impl Reading {
         &mut self,
         at: Duration,
         lease: u64,
-        holder: Option<logged::Caller>,
+        holder: Option<logged::CallerName>,
         grant: &str,
         roles: &Roles,
     ) {
         let holder = match holder {
-            Some(logged::Caller::Job(job)) => Some(job),
-            Some(logged::Caller::Agent) | None => None,
+            Some(logged::CallerName::Job(job)) => Some(job),
+            Some(logged::CallerName::Agent) | None => None,
         };
         let call = holder.and_then(|holder| self.calls.iter().find(|call| call.job == holder));
         let role = match call {

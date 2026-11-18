@@ -17,7 +17,8 @@ use std::time::Duration;
 use miniz_oxide::deflate::{CompressionLevel, compress_to_vec_zlib};
 use miniz_oxide::inflate::decompress_to_vec_zlib;
 use provider::RunTag;
-use runtime::Record;
+use runtime::{CallerName, Record};
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 use stdx::Context;
 
@@ -357,17 +358,15 @@ impl Out {
         for (key, window, _) in &windows {
             self.put_deflated(key, window)?;
         }
-        let callers: BTreeSet<&str> = (run["lanes"].as_array().into_iter().flatten())
-            .filter_map(|lane| lane["caller"].as_str())
-            .collect();
-        for caller in callers {
+        let lanes = run["lanes"].as_array().into_iter().flatten();
+        for caller in lanes.filter_map(|lane| CallerName::deserialize(&lane["caller"]).ok()) {
             self.trace(view, id, caller)?;
         }
         self.put_deflated(&format!("{base}/run.json"), &run_body)?;
         Ok(Ok(()))
     }
 
-    fn trace(&mut self, view: &mut View, id: &RunTag, caller: &str) -> Result<(), String> {
+    fn trace(&mut self, view: &mut View, id: &RunTag, caller: CallerName) -> Result<(), String> {
         let base = format!("runs/{}", id.as_str());
         let api = format!("/api/runs/{}", id.as_str());
         let (trace_base, trace_api) = (
@@ -441,15 +440,12 @@ impl Out {
         self.search(view, id, caller)
     }
 
-    fn search(&mut self, view: &mut View, id: &RunTag, caller: &str) -> Result<(), String> {
+    fn search(&mut self, view: &mut View, id: &RunTag, caller: CallerName) -> Result<(), String> {
         let trace_base = format!("runs/{}/trace/{caller}", id.as_str());
         let trace_api = format!("/api/runs/{}/trace/{caller}", id.as_str());
         let mut chunk = 0;
         loop {
-            let asked = trace::Asked::SearchChunk {
-                caller: caller.to_owned(),
-                chunk,
-            };
+            let asked = trace::Asked::SearchChunk { caller, chunk };
             let asked = Asked::Trace {
                 id: id.clone(),
                 asked,

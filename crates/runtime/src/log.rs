@@ -57,7 +57,7 @@ mod usage;
 pub use call::{CallEnd, CallOf, CallSpan, CallStart};
 pub use fold::{LogFold, StartedOver, TakenLine};
 pub(super) use fold::{final_call, lines, progress};
-pub use logged::Direction;
+pub use logged::{CallerName, Direction};
 pub(super) use progress::places;
 pub use progress::{
     AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
@@ -220,7 +220,7 @@ impl<'h, H: Host> Log<'h, H> {
         };
         let mut event = json!({
             "kind": "model_answered",
-            "caller": logged::Caller::from(caller),
+            "caller": logged::CallerName::from(caller),
             "request": request,
             "upstream_status": upstream_status,
             "answer": answer,
@@ -264,7 +264,7 @@ impl<'h, H: Host> Log<'h, H> {
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
-                    "caller": logged::Caller::from(caller),
+                    "caller": logged::CallerName::from(caller),
                     "request": request,
                 });
                 self.observed(started, event, &[])
@@ -462,7 +462,7 @@ fn event_json(event: &Event) -> Value {
         } => json!({
             "kind": "op_arrived",
             "op": op.0,
-            "caller": logged::Caller::from(*caller),
+            "caller": logged::CallerName::from(*caller),
             "request": request_json(request),
         }),
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
@@ -678,7 +678,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         } => json!({
             "kind": "start_lease",
             "lease": lease.0,
-            "holder": logged::Caller::from(*holder),
+            "holder": logged::CallerName::from(*holder),
             "grant": workflow.session(*grant).name.as_str(),
             "instance": instance,
             "start_by_ns": nanos(*start_by),
