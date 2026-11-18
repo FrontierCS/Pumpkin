@@ -11,8 +11,7 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox,
-    Unread, Writer,
+    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -81,11 +80,18 @@ pub(crate) enum Listed {
     /// A job on the controller that has ended, whose run has no record in the controller's runs
     /// directory.
     Unstarted,
-    /// A run whose record this `pumpkin` can't read, made by another build: what is known of its
-    /// writer.
-    Unread(String),
+    /// A run whose record this `pumpkin` can't read, made by another build.
+    Unread(Unread),
     /// A run whose record is begun.
     Run(Box<Run>),
+}
+
+/// The build that made a record that this `pumpkin` can't read.
+pub(crate) enum Unread {
+    /// A build shown as a [`runtime::Build`] is.
+    Build(String),
+    /// A build from before records named theirs.
+    Older,
 }
 
 pub(crate) struct Run {
@@ -110,8 +116,8 @@ impl Listed {
     /// is the one to read it; else `error`.
     pub(crate) fn unread(dir: &Path, error: String) -> Result<Self, String> {
         match runtime::writer(dir) {
-            Ok(Writer::Other(build)) => Ok(Self::Unread(format!("made by pumpkin {build}"))),
-            Ok(Writer::Older) => Ok(Self::Unread("made by an older pumpkin".to_owned())),
+            Ok(Writer::Other(build)) => Ok(Self::Unread(Unread::Build(build))),
+            Ok(Writer::Older) => Ok(Self::Unread(Unread::Older)),
             // Only a bug or a failure of the disk makes this build fail to read its own record.
             Ok(Writer::This) | Err(_) => Err(error),
         }
@@ -225,7 +231,7 @@ fn prefixes(ids: &[&str]) -> Vec<String> {
     vec![common.to_owned()]
 }
 
-pub(crate) fn unread(unread: &[Unread]) -> Option<String> {
+pub(crate) fn unread(unread: &[runtime::Unread]) -> Option<String> {
     let first = unread.first()?;
     Some(format!(
         "{} of its log can't be read by this pumpkin, the first at {}",
@@ -353,7 +359,13 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
             );
             return column(state, "-", "", "-", &why);
         }
-        Listed::Unread(writer) => return column(state, "-", "", "-", writer),
+        Listed::Unread(unread) => {
+            let made = match unread {
+                Unread::Build(build) => format!("made by pumpkin {build}"),
+                Unread::Older => "made by an older pumpkin".to_owned(),
+            };
+            return column(state, "-", "", "-", &made);
+        }
         Listed::Run(run) => run,
     };
     let task = run.task.as_deref().unwrap_or("-");
