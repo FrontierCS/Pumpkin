@@ -1652,6 +1652,9 @@ fn traces_a_caller() {
     for path in [
         "trace/someone/steps",
         "trace/job-01/steps",
+        "trace/job-99/steps",
+        "trace/job-99/ops",
+        "trace/agent/entries?from=0&to=5&kind=tool",
         "item/abc",
         "exchange/99",
         "trace/agent/entries?from=0",
@@ -1841,6 +1844,12 @@ fn traces_a_caller() {
             {"error":"`someone` is no caller: expected `agent` or `job-<n>`"}
             trace/job-01/steps: HTTP/1.1 400 Bad Request
             {"error":"`job-01` is no caller: expected `agent` or `job-<n>`"}
+            trace/job-99/steps: HTTP/1.1 404 Not Found
+            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
+            trace/job-99/ops: HTTP/1.1 404 Not Found
+            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
+            trace/agent/entries?from=0&to=5&kind=tool: HTTP/1.1 400 Bad Request
+            {"error":"`kind` is no entry's kind: unknown variant `tool`, expected one of `system`, `user`, `assistant`, `reasoning`, `call`, `output`, `other`, `unread`"}
             item/abc: HTTP/1.1 400 Bad Request
             {"error":"`abc` is no item: expected 64 lowercase hexadecimal digits"}
             exchange/99: HTTP/1.1 404 Not Found

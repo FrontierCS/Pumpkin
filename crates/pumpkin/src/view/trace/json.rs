@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use route::read::{self, Item};
 use runtime::{KeptPart, KeptRequest, Record};
 use schema::ir::Api;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::super::Failed;
@@ -282,7 +283,7 @@ impl Trace {
     fn searched<'s>(
         &'s self,
         step: &'s Step,
-    ) -> impl Iterator<Item = (usize, Address, &'static str, String)> + 's {
+    ) -> impl Iterator<Item = (usize, Address, EntryKind, String)> + 's {
         self.entries_of(step).map(|(at, address, item, _)| {
             let text = match item {
                 Ok(item) => item_json(item)["text"]
@@ -291,7 +292,7 @@ impl Trace {
                     .to_owned(),
                 Err(error) => error.clone(),
             };
-            (at, address, item.map_or("unread", kind_name), text)
+            (at, address, EntryKind::of(item), text)
         })
     }
 
@@ -300,7 +301,7 @@ impl Trace {
     pub(super) fn search_json(
         &self,
         query: &str,
-        kind: Option<&str>,
+        kind: Option<EntryKind>,
         thread: Option<u64>,
     ) -> Value {
         let query = searchable(query);
@@ -363,7 +364,7 @@ impl Trace {
         from: u64,
         to: u64,
         entry: usize,
-        kind: Option<&str>,
+        kind: Option<EntryKind>,
         thread: Option<u64>,
     ) -> Value {
         let mut entries = Vec::new();
@@ -376,7 +377,7 @@ impl Trace {
             let first = if request == from { entry } else { 0 };
             let entries_of = self.entries_of(step).filter(|(at, ..)| *at >= first);
             for (at, address, item, digest) in entries_of {
-                let kind_of = item.map_or("unread", kind_name);
+                let kind_of = EntryKind::of(item);
                 if kind.is_some_and(|kind| kind != kind_of) {
                     continue;
                 }
@@ -419,7 +420,7 @@ impl Trace {
         item: Result<&Item, &String>,
         digest: Option<&str>,
     ) -> Value {
-        let kind_of = item.map_or("unread", kind_name);
+        let kind_of = EntryKind::of(item);
         let address = address.of(request);
         let side = if matches!(address_side(&address), "out") {
             "answer"
@@ -459,15 +460,32 @@ fn address_side(address: &str) -> &str {
     address.split('/').nth(1).unwrap_or_default()
 }
 
-fn kind_name(item: &Item) -> &'static str {
-    match item {
-        Item::System { .. } => "system",
-        Item::User { .. } => "user",
-        Item::Assistant { .. } => "assistant",
-        Item::Reasoning { .. } => "reasoning",
-        Item::Call { .. } => "call",
-        Item::Output { .. } => "output",
-        Item::Other { .. } => "other",
+/// What an entry of a trace is: its item's kind, or `unread` for an item that can't be read.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::view) enum EntryKind {
+    System,
+    User,
+    Assistant,
+    Reasoning,
+    Call,
+    Output,
+    Other,
+    Unread,
+}
+
+impl EntryKind {
+    fn of(item: Result<&Item, &String>) -> Self {
+        match item {
+            Ok(Item::System { .. }) => Self::System,
+            Ok(Item::User { .. }) => Self::User,
+            Ok(Item::Assistant { .. }) => Self::Assistant,
+            Ok(Item::Reasoning { .. }) => Self::Reasoning,
+            Ok(Item::Call { .. }) => Self::Call,
+            Ok(Item::Output { .. }) => Self::Output,
+            Ok(Item::Other { .. }) => Self::Other,
+            Err(_) => Self::Unread,
+        }
     }
 }
 
