@@ -4,8 +4,8 @@
 //!
 //! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one
 //! [`Request`] at a time, and each gets its own [`Request::Answer`], whose body, if it has one,
-//! follows in frames of its own, or a refusal. A request only reads, so a client whose link ends
-//! before an answer is whole may ask again over another.
+//! follows in frames of its own, or a refusal. A start names the job it starts, so a client whose
+//! link ends before an answer is whole may ask again over another.
 //!
 //! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
 //! by a SHA-256 of the client's own build, its executable and the files beside it ([`key`]), so
@@ -14,7 +14,7 @@
 //! With none there, the command says [`Hello::Absent`], and the client uploads its build
 //! ([`installing`]) and links again.
 
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use schema::frame::{self, MAX_BODY_BYTES};
@@ -24,11 +24,14 @@ use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
 use crate::progress::Listing;
-use crate::{manifest, workspace};
+use crate::{config, manifest, workspace};
 
 // Well past the largest answer: a listing of a few thousand runs is a few MiB, and a body that a
 // record keeps is at most the 64 MiB that the gateway takes of a request.
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
+
+// Room for the keys and configuration that arrive with a job.
+const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
 
 /// What `serve` says first, in a frame with no body.
 #[derive(Serialize, Deserialize)]
@@ -57,7 +60,7 @@ pub(crate) trait Request {
     fn received(head: Self::Head, link: &mut Link) -> Result<Self::Answer, Unanswered>;
 }
 
-/// A request, in a frame with no body.
+/// A request's head, followed by its body in frames of their own.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
@@ -65,6 +68,52 @@ pub(crate) enum Ask {
     Jobs(JobsRequest),
     List(ListRequest),
     View(ViewRequest),
+    Start(Box<StartRequest>),
+}
+
+impl Ask {
+    fn body_bytes(&self) -> io::Result<usize> {
+        let bytes = match self {
+            Self::Start(start) => start
+                .key_bytes
+                .iter()
+                .try_fold(start.modal_bytes.unwrap_or(0), |sum, bytes| {
+                    sum.checked_add(*bytes)
+                }),
+            _ => Some(0),
+        };
+        bytes
+            .filter(|bytes| *bytes <= MAX_REQUEST_BODY_BYTES)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a request's body holds at most 16 MiB",
+                )
+            })
+    }
+
+    /// Reads the body of this request before any of it takes effect.
+    pub(crate) fn read_body(&self, input: &mut impl Read) -> io::Result<Vec<u8>> {
+        let bytes = self.body_bytes()?;
+        let mut body = Vec::new();
+        while body.len() < bytes {
+            let Some((Part, part)) = frame::read(input)? else {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            };
+            if part.is_empty() || part.len() > bytes - body.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "a part of the request's body holds {} bytes: expected 1 to {}",
+                        part.len(),
+                        bytes - body.len()
+                    ),
+                ));
+            }
+            body.extend(part);
+        }
+        Ok(body)
+    }
 }
 
 /// The head of an answer, or of a refusal.
@@ -228,6 +277,95 @@ impl Request for JobsRequest {
         let JobsHead::Jobs { body_bytes } = head;
         serde_json::from_slice(&link.body(body_bytes)?)
             .map_err(|error| Unanswered::Failed(format!("its jobs' ids don't read: {error}")))
+    }
+}
+
+/// The command that the job's unit runs, and thus where its log is kept.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JobKind {
+    Run,
+    Build,
+}
+
+/// Starts one job of this build. The body's bytes are one key per upstream, in name order,
+/// then the optional Modal file. A repeat of the same id leaves the first job alone.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct StartRequest {
+    pub(crate) id: String,
+    pub(crate) kind: JobKind,
+    pub(crate) repo: String,
+    pub(crate) tree: Sha256Digest,
+    pub(crate) words: Vec<String>,
+    pub(crate) region: aws::Region,
+    pub(crate) parameter: String,
+    pub(crate) sent: config::Sent,
+    pub(crate) key_bytes: Vec<usize>,
+    pub(crate) modal_bytes: Option<usize>,
+}
+
+pub(crate) enum StartAnswer {
+    Started,
+    AlreadyStarted,
+    Unconfirmed {
+        message: String,
+    },
+    Unadmitted {
+        changed: Vec<Sha256Digest>,
+        gone: Vec<Sha256Digest>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum StartHead {
+    Started,
+    AlreadyStarted,
+    Unconfirmed { message: String },
+    Unadmitted { body_bytes: u64 },
+}
+
+impl Request for StartRequest {
+    type Answer = StartAnswer;
+    type Head = StartHead;
+
+    fn ask(self) -> Ask {
+        Ask::Start(Box::new(self))
+    }
+
+    fn sent(answer: StartAnswer) -> (StartHead, Vec<u8>) {
+        match answer {
+            StartAnswer::Started => (StartHead::Started, Vec::new()),
+            StartAnswer::AlreadyStarted => (StartHead::AlreadyStarted, Vec::new()),
+            StartAnswer::Unconfirmed { message } => {
+                (StartHead::Unconfirmed { message }, Vec::new())
+            }
+            StartAnswer::Unadmitted { changed, gone } => {
+                let body = serde_json::to_vec(&(changed, gone))
+                    .unwrap_or_else(|error| unreachable!("lists of digests are JSON: {error}"));
+                (
+                    StartHead::Unadmitted {
+                        body_bytes: body.len() as u64,
+                    },
+                    body,
+                )
+            }
+        }
+    }
+
+    fn received(head: StartHead, link: &mut Link) -> Result<StartAnswer, Unanswered> {
+        match head {
+            StartHead::Started => Ok(StartAnswer::Started),
+            StartHead::AlreadyStarted => Ok(StartAnswer::AlreadyStarted),
+            StartHead::Unconfirmed { message } => Ok(StartAnswer::Unconfirmed { message }),
+            StartHead::Unadmitted { body_bytes } => {
+                let (changed, gone) =
+                    serde_json::from_slice(&link.body(body_bytes)?).map_err(|error| {
+                        Unanswered::Failed(format!("its unadmitted blobs don't read: {error}"))
+                    })?;
+                Ok(StartAnswer::Unadmitted { changed, gone })
+            }
+        }
     }
 }
 
@@ -405,7 +543,7 @@ mv --no-target-directory "$made" {hex} 2>/dev/null || [ -x {hex}/pumpkin ] || {{
 /// Why a link gave no answer.
 pub(crate) enum Unanswered {
     /// The frames ended before what was asked for was whole, as when the connection is cut: how.
-    /// What only reads may be asked again, over another link.
+    /// A repeatable request may be asked again over another link.
     Unreached(String),
     /// `ssh` didn't run, or what arrived is no frame that `serve` sends, which asking again would
     /// meet again: why.
@@ -443,19 +581,36 @@ impl Link {
         }
     }
 
+    /// Sends one request and its body.
+    pub(crate) fn send(&mut self, ask: &Ask, body: &[u8]) -> Result<(), Unanswered> {
+        let mut write = || -> io::Result<()> {
+            if ask.body_bytes()? != body.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the request gives a different length for its body",
+                ));
+            }
+            frame::write(&mut self.stdin, ask, &[])?;
+            for part in body.chunks(MAX_BODY_BYTES) {
+                frame::write(&mut self.stdin, &Part, part)?;
+            }
+            Ok(())
+        };
+        write().map_err(|error| match error.kind() {
+            io::ErrorKind::BrokenPipe => {
+                Unanswered::Unreached("ended before the request".to_owned())
+            }
+            _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
+        })
+    }
+
     /// The answer to `request`, or the message of its refusal.
     pub(crate) fn ask<R: Request>(
         &mut self,
         request: R,
+        body: &[u8],
     ) -> Result<Result<R::Answer, String>, Unanswered> {
-        if let Err(error) = frame::write(&mut self.stdin, &request.ask(), &[]) {
-            return Err(match error.kind() {
-                io::ErrorKind::BrokenPipe => {
-                    Unanswered::Unreached("ended before the request".to_owned())
-                }
-                _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
-            });
-        }
+        self.send(&request.ask(), body)?;
         match self.received("the answer")? {
             Head::Refused { message } => Ok(Err(message)),
             Head::Answered(head) => R::received(head, self).map(Ok),

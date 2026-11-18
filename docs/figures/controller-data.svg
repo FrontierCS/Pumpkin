@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 700" width="880" height="700" role="img" aria-labelledby="title desc">
 <title id="title">The data between a machine and its controller</title>
-<desc id="desc">Between the operator's machine and the controller, over ssh, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. The rows that ls lists, and the ids of the jobs that wait and cancel find a run among, come back from serve, made where the records are, and an ended run's record into the runs directory. The view's requests for the runs' data go to serve on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
+<desc id="desc">Between the operator's machine and the controller, over ssh, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; a start request to serve sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. The rows that ls lists, and the ids of the jobs that wait and cancel find a run among, come back from serve, made where the records are, and an ended run's record into the runs directory. The view's requests for the runs' data go to serve on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -63,8 +63,8 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note" x="290" y="197">those pieces, over several</text>
 <text class="note" x="290" y="212">connections at once · <tspan class="code">deal</tspan></text>
 <path class="arrow" d="M262 270H618" marker-end="url(#head)"/>
-<text class="note" x="290" y="249">the job's start: the configuration and</text>
-<text class="note" x="290" y="264">its keys, on standard input · <tspan class="code">send</tspan></text>
+<text class="note" x="290" y="249">start the job with its configuration and</text>
+<text class="note" x="290" y="264">keys · <tspan class="code">StartRequest</tspan></text>
 <path class="arrow" d="M618 350H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="329">what the run says, as it is followed</text>
 <text class="note" x="290" y="344"><tspan class="code">wait</tspan></text>

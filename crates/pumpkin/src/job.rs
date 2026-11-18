@@ -6,7 +6,7 @@
 //! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each build's
 //! in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and its unit's
 //! standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that every tree's
-//! `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs' records, the build
+//! `.pumpkin` links to, which keeps the installed builds, the runs' records, the build
 //! slots and `serve`'s installs; and `current-pumpkin`, the `pumpkin` that the last job ran.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
@@ -43,6 +43,10 @@ use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, publish, say, star};
 
+mod start;
+
+pub(crate) use start::start;
+
 pub(crate) const JOBS: &str = "jobs";
 
 pub(crate) const BUILDS: &str = "builds";
@@ -51,17 +55,12 @@ pub(crate) const TREES: &str = "trees";
 
 pub(crate) const STORE: &str = "store";
 
-// The files of a job's tree that its start links there, as its unit runs them rather than the
-// job: `pumpkin`, the consumer entry that builds the job's Pumpkin, and `.pumpkinversion`, which
-// it reads. `materialize` links the others.
-pub(crate) const STARTED: [&str; 2] = ["pumpkin", ".pumpkinversion"];
-
 // The link in the home to the `pumpkin` of the last job started, which the controller's boot and
 // the commands that act on runs there run.
 pub(crate) const CURRENT: &str = "current-pumpkin";
 
 /// The runs directory of the controller's one workspace, relative to the user's home: that of
-/// every job's `pumpkin`, as each is built in that workspace.
+/// every job's `pumpkin`, as each runs from that workspace.
 pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
@@ -196,7 +195,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
 }
 
 /// Makes the tree named `tree` in `dir`, job `id`'s tree below `home`, of links into the store
-/// there, as its manifest names each file, but those that the start linked (`STARTED`): a file to
+/// there, as its manifest names each file: a file to
 /// its blob, one that its owner may execute to the blob's copy at 0555, made if need be, and a
 /// symbolic link to its blob's text.
 ///
@@ -211,13 +210,11 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
     let path = store.join(MANIFESTS).join(tree.hex());
     let manifest = fs::read(&path).context(path.display())?;
     let manifest = Manifest::parse(&manifest).context(path.display())?;
-    let made =
-        |entry: &&Entry| entry.kind != Kind::Bundle && !STARTED.contains(&entry.path.as_str());
     let trees = home.join(TREES);
     let above = dir.parent().and_then(Path::parent).map(fs::canonicalize);
     let own = dir.file_name() == Some(OsStr::new(id.as_str()))
         && matches!((fs::canonicalize(&trees), above), (Ok(trees), Some(Ok(above))) if trees == above);
-    if !own && manifest.entries().iter().any(|entry| made(&entry)) {
+    if !own && !manifest.entries().is_empty() {
         return Err(format!(
             "the job's working directory, {}, isn't its tree, {}/<repository>/{id}, which its \
              start makes: run the job there, as its unit does",
@@ -226,7 +223,7 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
             id = id.as_str()
         ));
     }
-    for entry in manifest.entries().iter().filter(made) {
+    for entry in manifest.entries() {
         let Entry {
             kind,
             digest,
@@ -245,7 +242,6 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
                 let target = fs::read(&blob).context(blob.display())?;
                 symlink(OsStr::from_bytes(&target), &to)
             }
-            Kind::Bundle => unreachable!("the bundle is passed over just above"),
         };
         linked.context(to.display())?;
     }

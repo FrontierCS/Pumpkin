@@ -146,9 +146,7 @@ build() {
         say "all of it, about 1.5 GB, goes to $state, safe to delete, and later runs start at once"
     fi
     say "building Pumpkin $tag ($commit) from $repository ..."
-    # The tag's whole history, a few MB, as a git bundle of a shallow clone lacks the parents that
-    # its commit names.
-    fetch -c advice.detachedHead=false clone --quiet --single-branch --branch "$tag" -- \
+    fetch -c advice.detachedHead=false clone --quiet --depth 1 --single-branch --branch "$tag" -- \
         "$repository" "$scratch/source" >> "$log" 2>&1 || {
         status=$?
         cat "$log" >&2
@@ -165,10 +163,6 @@ build() {
     fetched=$(clean git rev-parse 'HEAD^{commit}')
     [ "$fetched" = "$commit" ] ||
         fail "tag $tag of $repository is commit $fetched, not $commit: fix .pumpkinversion, or the tag if it moved"
-    # Beside the build, so that a controller this sends runs to builds the same commit from it,
-    # with no credentials of its own: `--pumpkin-repository=<path of the bundle>`.
-    step clean git bundle create --quiet "$scratch/pumpkin.bundle" "$tag"
-
     if [ ! -x "$state/cargo/bin/rustup" ]; then
         printf 'pumpkin: downloading rustup-init %s ...\n' "$RUSTUP_VERSION" >&2
         curl --location --silent --show-error --fail --proto '=https' --tlsv1.2 \
@@ -191,7 +185,6 @@ build() {
     # The root is renamed into place whole, so a run never sees a half-installed entry. The
     # target directory, in `.pumpkin/`, keeps the next build incremental.
     step clean "CARGO_TARGET_DIR=$state/target" cargo xtask install --root "$stage"
-    mv "$scratch/pumpkin.bundle" "$stage/pumpkin.bundle"
     # What is there has no `pumpkin` to run, and `mv` would move the stage into it.
     rm --recursive --force "$entry"
     mv "$stage" "$entry"
