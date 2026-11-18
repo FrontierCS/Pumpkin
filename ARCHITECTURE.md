@@ -398,8 +398,8 @@ connections that a workspace's commands share (`Reached`); over them its `send` 
 build's job, its `copy` receives an ended record file by file, with `record.json` last, its
 `listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`, lists the jobs
-that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
+client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
+lists the jobs that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
 and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
@@ -629,7 +629,8 @@ A run whose driver died is lost: its record has no `outcome.json` and no lock he
 provider that the record names, every sandbox tagged with the run that the provider lists, and
 every one that the record holds undeleted, listed or not, as one that has ended may still hold
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
-`pumpkin reap` reaps every ended or lost run, and a controller reaps at its boot, leaving to the
+`pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
+those left to other builds. At boot it reaps its own, leaving to the
 hard end what it can't reach, such as Modal's sandboxes, whose credentials reach the controller
 only with a job.
 

@@ -2,7 +2,7 @@
 //! `wait`, `cancel` and `reap`.
 //!
 //! A run or build follows its job over a link. An ended run's record is copied into this
-//! machine's runs directory, where its ending is said. A reap runs over a shell session.
+//! machine's runs directory, where its ending is said.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -196,10 +196,6 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
     Ok(words)
 }
 
-fn exit(code: i32) -> ExitCode {
-    u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
-}
-
 /// Sends the task to the controller as a build job and prints its IR once the images are built.
 /// If the connection ends first, the build goes on there.
 pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCode, String> {
@@ -226,25 +222,6 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
             id.as_str()
         )),
     }
-}
-
-/// The script that `body` makes, and the Modal configuration of the client, if it has one, to feed
-/// it. The script takes the file into a directory of its own in tmpfs, which its end removes, so
-/// that the command reaches the Modal providers of runs whose jobs, which held the file, have
-/// ended. `body` is given the flag that names the file there, or an empty one.
-fn with_modal(
-    client: &config::Client,
-    body: impl FnOnce(&str) -> String,
-) -> Result<(String, Option<Vec<u8>>), String> {
-    let Some(file) = client.modal_file()? else {
-        return Ok((body(""), None));
-    };
-    let script = format!(
-        "umask 077\nmodal=$(mktemp --directory \"$XDG_RUNTIME_DIR/pumpkin-modal.XXXXXX\")\n\
-         trap 'rm --recursive --force \"$modal\"' EXIT\ncat > \"$modal/modal.toml\"\n{}",
-        body(" --modal-config \"$modal/modal.toml\"")
-    );
-    Ok((script, Some(file)))
 }
 
 /// Stops the run that `run` names on the controller and copies its record once it has ended.
@@ -298,17 +275,13 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
 /// Removes on the controller what runs left, as `pumpkin reap` does there.
 pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
-    let current = crate::job::CURRENT;
-    // Before its first job, the controller has no `pumpkin`, and no run to reap.
-    let (script, modal) = with_modal(client, |flag| {
-        format!(
-            "cd\n[ -x {current} ] && [ -d {runs} ] || exit 0\n./{current} reap{flag}\n",
-            runs = crate::job::runs()
-        )
-    })?;
-    let again = "reap again: pumpkin reap";
-    Ok(exit(reached.ended(
-        reached.attached(&script, modal.as_deref())?,
-        again,
-    )?))
+    let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
+    let modal = client.modal_file()?;
+    let request = crate::link::ReapRequest {
+        modal_bytes: modal.as_ref().map(Vec::len),
+    };
+    let report = reached.asked(&build, "reaping the runs", |linked| {
+        linked.ask_with_body(&reached, request, modal.as_deref().unwrap_or_default())
+    })??;
+    report.report(None, crate::Reaper::Controller)
 }

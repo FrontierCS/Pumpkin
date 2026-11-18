@@ -106,3 +106,18 @@ fn modal(body: Option<&[u8]>) -> Result<Option<NamedTempFile>, String> {
     file.write_all(body).context(file.path().display())?;
     Ok(Some(file))
 }
+
+pub(super) fn reap(
+    home: &Path,
+    request: crate::link::ReapRequest,
+    body: &[u8],
+) -> Result<crate::reaping::ReapedRuns, String> {
+    let modal = modal(request.modal_bytes.map(|_| body))?;
+    let config = modal.as_ref().map(|file| file.path().to_owned());
+    crate::reaping::sweep(
+        &home.join(job::runs()),
+        config,
+        None,
+        crate::Reaper::Controller,
+    )
+}

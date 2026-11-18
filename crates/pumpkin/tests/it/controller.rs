@@ -1035,7 +1035,7 @@ fn boot() {
         let args = ["--config".to_owned(), path.display().to_string()];
         scratch.write(
             &format!("{record}/record.json"),
-            &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+            &json!({ "record_version": "pumpkin.record/v0", "pumpkin": super::this_build(), "args": args }),
         );
         scratch.write(&format!("{record}/driver.pid"), "4242\n");
         let ir = json!({ "roles": [{ "name": "agent", "image": image('a') }] });
@@ -1058,6 +1058,11 @@ fn boot() {
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
+    let foreign = format!("home/.pumpkin/runs/{}/record.json", id_ago(1, "0e000001"));
+    scratch.write(
+        &foreign,
+        &json!({"record_version":"future", "pumpkin":{"version":"9.9.9"}}),
+    );
     // The image of a job that a client started as the controller came up, which no IR names yet.
     scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
     send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
@@ -2499,6 +2504,72 @@ rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"
     );
 }
 
+#[test]
+fn reap_by_writer() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let made = "home/.pumpkin/runs";
+    let own = id_ago(0, "0e000001");
+    let other = id_ago(0, "0e000002");
+    let old = id_ago(0, "0e000003");
+    let record =
+        json!({"record_version":"pumpkin.record/v0","pumpkin":super::this_build(),"args":[]});
+    scratch.write(&format!("{made}/{own}/record.json"), &record);
+    scratch.write(&format!("{made}/{own}/driver.pid"), "4242\n");
+    scratch.write(
+        &format!("{made}/{own}/provider.json"),
+        &json!({"providers":{}}),
+    );
+    scratch.write(
+        &format!("{made}/{other}/record.json"),
+        &json!({"pumpkin":{"version":"1.2.3"},"record_version":"future"}),
+    );
+    scratch.write(
+        &format!("{made}/{old}/record.json"),
+        &json!({"record_version":"old"}),
+    );
+    let mut lines = Vec::new();
+    for _ in 0..2 {
+        let mut reap = on_client(&scratch, &client, &["reap"]);
+        let invoked = invocation(&reap);
+        let reaped = reap.output().unwrap();
+        lines.push(report(invoked, &reaped, &scratch.0, false));
+    }
+    for foreign in [&other, &old] {
+        assert!(
+            !scratch
+                .0
+                .join(format!("{made}/{foreign}/outcome.json"))
+                .exists()
+        );
+    }
+    assert!(
+        scratch
+            .0
+            .join(format!("{made}/{own}/outcome.json"))
+            .is_file()
+    );
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&own, "<own>"), (&other, "<other>"), (&old, "<old>")],
+        &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
+            exit status: Some(0)
+            pumpkin: run <own> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: to reap runs made by an older pumpkin, use that build: <old>
+            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>
+            printed:
+              <own>
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
+            exit status: Some(0)
+            pumpkin: to reap runs made by an older pumpkin, use that build: <old>
+            pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>"#]],
+    );
+}
+
 fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
     let mut frame = Vec::new();
     schema::frame::write(&mut frame, message, body).unwrap();
@@ -3317,7 +3388,7 @@ fn serve_refusals() {
     steps.push("a frame past the cap:".to_owned());
     steps.push(serve_fed(&scratch, &past));
     let mut other = Vec::new();
-    schema::frame::write(&mut other, &json!({ "type": "reap" }), &[]).unwrap();
+    schema::frame::write(&mut other, &json!({ "type": "absent_request" }), &[]).unwrap();
     steps.push("a message that is no request:".to_owned());
     steps.push(serve_fed(&scratch, &other));
     for (what, bytes) in [
@@ -3344,7 +3415,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `reap`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel` at line 1 column 14: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `absent_request`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes

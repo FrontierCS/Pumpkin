@@ -348,8 +348,8 @@ lists, as when the configuration now points to another region or profile, it
 says, and notes there as gone.
 
 With [controller] in the configuration, and no --runs, `reap` reaps the
-controller's runs there, as the controller does at each boot, but with this
-machine's Modal configuration file, which the boot lacks.";
+controller's runs made by this build and names the runs left to their own
+builds. It uses this machine's Modal configuration file, which the boot lacks.";
 
 pub(super) const CONTROLLER_NOTES: &str = "\
 Examples:

@@ -207,6 +207,9 @@ fn answer(
         Ask::Start(request) => link::answer(output, *request, |start| {
             crate::job::start(home, start, body)
         }),
+        Ask::Reap(request) => link::answer(output, request, |request| {
+            reaping::reap(home, request, body)
+        }),
         Ask::Cancel(request) => link::answer(output, request, |request| {
             reaping::cancel(home, request, body)
         }),

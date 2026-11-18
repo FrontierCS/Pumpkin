@@ -74,6 +74,7 @@ pub(crate) enum Ask {
     View(ViewRequest),
     Start(Box<StartRequest>),
     Cancel(CancelRequest),
+    Reap(ReapRequest),
 }
 
 impl Ask {
@@ -87,6 +88,7 @@ impl Ask {
                     sum.checked_add(*bytes)
                 }),
             Self::Cancel(request) => Some(request.modal_bytes.unwrap_or(0)),
+            Self::Reap(request) => Some(request.modal_bytes.unwrap_or(0)),
             _ => Some(0),
         };
         bytes
@@ -420,6 +422,43 @@ impl Request for CancelRequest {
 
     fn received(head: CancelAnswer, _: &mut Link) -> Result<CancelAnswer, Unanswered> {
         Ok(head)
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct ReapRequest {
+    pub(crate) modal_bytes: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ReapHead {
+    Reaped { body_bytes: u64 },
+}
+
+impl Request for ReapRequest {
+    type Answer = crate::reaping::ReapedRuns;
+    type Head = ReapHead;
+
+    fn ask(self) -> Ask {
+        Ask::Reap(self)
+    }
+
+    fn sent(answer: Self::Answer) -> (ReapHead, Vec<u8>) {
+        let body = serde_json::to_vec(&answer)
+            .unwrap_or_else(|error| unreachable!("run ids and counts are JSON: {error}"));
+        (
+            ReapHead::Reaped {
+                body_bytes: body.len() as u64,
+            },
+            body,
+        )
+    }
+
+    fn received(head: ReapHead, link: &mut Link) -> Result<Self::Answer, Unanswered> {
+        let ReapHead::Reaped { body_bytes } = head;
+        serde_json::from_slice(&link.body(body_bytes)?)
+            .map_err(|error| Unanswered::Failed(format!("its reaped runs don't read: {error}")))
     }
 }
 

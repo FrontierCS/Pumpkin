@@ -35,7 +35,7 @@ use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
@@ -368,13 +368,6 @@ impl DerefMut for Session {
     fn deref_mut(&mut self) -> &mut Command {
         &mut self.command
     }
-}
-
-/// How an `ssh` run with this process's own streams ended, and the connection it went over.
-#[derive(Clone, Copy)]
-struct Attached {
-    status: ExitStatus,
-    master: usize,
 }
 
 /// What opening a master connection came to.
@@ -863,49 +856,5 @@ impl Reached {
         let options = self.ssh_options(slot.master);
         command.args(options).arg(self.host()).arg(script);
         Session { command, slot }
-    }
-
-    /// Runs `script` with this process's standard output and error, and `input` on its standard
-    /// input if there is any, until it ends, however long that takes.
-    fn attached(&self, script: &str, input: Option<&[u8]>) -> Result<Attached, String> {
-        let mut ssh = self.ssh(script)?;
-        let Some(input) = input else {
-            let status = ssh.status().context("running `ssh` failed")?;
-            return Ok(Attached {
-                status,
-                master: ssh.slot.master,
-            });
-        };
-        let child = ssh.stdin(Stdio::piped()).spawn();
-        let mut child = child.context("running `ssh` failed")?;
-        let Some(mut stdin) = child.stdin.take() else {
-            unreachable!("the child's standard input is missing, though it is piped just above")
-        };
-        // Then dropped, so that the script reads its end.
-        let written = stdin.write_all(input);
-        drop(stdin);
-        let status = child.wait().context("running `ssh` failed")?;
-        written.context("writing to `ssh` failed")?;
-        Ok(Attached {
-            status,
-            master: ssh.slot.master,
-        })
-    }
-
-    /// The exit code of what `attached` ran. `ssh`'s own failure, or its end by a signal, is an
-    /// error that ends with `again`, which says how to go on, and says where the connection's log
-    /// is if it has ended: the command's own code never says that.
-    fn ended(&self, attached: Attached, again: &str) -> Result<i32, String> {
-        let Attached { status, master } = attached;
-        match status.code() {
-            Some(SSH_FAILED) | None => {
-                let ended = format!(
-                    "the connection to controller `{}` ended ({status}), as said above",
-                    self.name
-                );
-                Err(format!("{}: {again}", self.lost(master, ended)))
-            }
-            Some(code) => Ok(code),
-        }
     }
 }

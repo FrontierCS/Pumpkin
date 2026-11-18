@@ -10,9 +10,10 @@ use ec2::Ec2;
 use engine::ContextName;
 use modal::Modal;
 use provider::{SandboxId, Sweep};
-use runtime::{Reaped, Record};
+use runtime::{Reaped, Record, Writer};
 use rustix::process::{Pid, Signal};
 use schema::ir::Name;
+use serde::{Deserialize, Serialize};
 use stdx::Context;
 
 use crate::ending::{Printed, end};
@@ -117,6 +118,8 @@ pub(crate) enum Reaper {
     /// can't be reached makes the exit status [`UNREACHED`], and the reap says how to reap again
     /// once it can be.
     Command,
+    /// A client's request: the ended or lost runs this build wrote.
+    Controller,
     /// The controller's boot: only the runs that may have left something, not one that ended
     /// clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
     /// credentials reach the controller only with a job, it says leaves what the run left
@@ -130,58 +133,126 @@ pub(crate) enum Reaper {
 /// [`Reaper::Boot`] though a provider can't be reached.
 pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String> {
     let cli::Reap { runs, modal_config } = flags;
-    if runs.is_none()
+    if reaper == Reaper::Command
+        && runs.is_none()
         && let Some(client) = config::client(None)?
     {
         return controller::reap(&client);
     }
     let (runs, named) = runs_dir(runs)?;
     let named = named.as_deref();
+    let report = sweep(Path::new(&runs), modal_config, named, reaper)?;
+    report.report(named, reaper)
+}
+
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct ReapedRuns {
+    ids: Vec<String>,
+    unreaped: usize,
+    unreached: usize,
+    others: BTreeMap<String, Vec<String>>,
+}
+
+pub(crate) fn sweep(
+    runs: &Path,
+    modal_config: Option<PathBuf>,
+    named: Option<&str>,
+    reaper: Reaper,
+) -> Result<ReapedRuns, String> {
     let mut reaching = Reaching::new(modal_config);
-    let (mut unreaped, mut unreached) = (0, 0);
-    for record in Record::all(Path::new(&runs))?.into_values() {
-        let swept = record.map_err(String::from).and_then(|record| {
+    let mut report = ReapedRuns::default();
+    if reaper != Reaper::Command && !runs.try_exists().context(runs.display())? {
+        return Ok(report);
+    }
+    for id in Record::names(runs)? {
+        let dir = runs.join(&id);
+        let mut swept = || -> Result<Option<Swept>, String> {
+            let path = dir.join("record.json");
+            if !path.try_exists().context(path.display())? {
+                return Ok(None);
+            }
+            if reaper != Reaper::Command {
+                let other = match runtime::writer(&dir)? {
+                    Writer::This => None,
+                    Writer::Other(build) => Some(format!("pumpkin {build}")),
+                    Writer::Older => Some("an older pumpkin".to_owned()),
+                };
+                if let Some(build) = other {
+                    if reaper == Reaper::Controller {
+                        report.others.entry(build).or_default().push(id.clone());
+                    }
+                    return Ok(None);
+                }
+            }
+            let record = Record::open(&dir)?;
             if record.driver()?.is_some() || reaper == Reaper::Boot && record.ended_clean()? {
                 return Ok(None);
             }
-            let swept = reaped(&record, &mut reaching, named, reaper)?;
-            Ok(Some((record, swept)))
-        });
-        match swept {
-            Ok(Some((record, Swept { left, reached }))) => {
+            reaped(&record, &mut reaching, named, reaper).map(Some)
+        };
+        match swept() {
+            Ok(Some(Swept { left, reached })) => {
                 if left {
-                    print(format!("{}\n", record.id()).as_bytes())
-                        .context("printing a reaped run's id failed")?;
+                    if reaper == Reaper::Controller {
+                        report.ids.push(id);
+                    } else {
+                        printed_id(&id)?;
+                    }
                 }
                 if !reached {
-                    unreached += 1;
+                    report.unreached += 1;
                 }
             }
             Ok(None) => {}
             Err(error) => {
                 say(error);
-                unreaped += 1;
+                report.unreaped += 1;
             }
         }
     }
-    if unreaped > 0 {
-        let runs = counted(unreaped, "run");
-        say(format_args!(
-            "{runs} can't be reaped, as said above: fix what each says, and reap again"
-        ));
-        advise("reap again", &next::reap(named));
-        return Ok(ExitCode::FAILURE);
-    }
-    if unreached > 0 && reaper == Reaper::Command {
-        let runs = counted(unreached, "run");
-        say(format_args!(
-            "{runs} ran on a provider that can't be reached, as said above: what each left \
+    Ok(report)
+}
+
+fn printed_id(id: &str) -> Result<(), String> {
+    print(format!("{id}\n").as_bytes()).context("printing a reaped run's id failed")
+}
+
+impl ReapedRuns {
+    pub(crate) fn report(self, named: Option<&str>, reaper: Reaper) -> Result<ExitCode, String> {
+        let Self {
+            ids,
+            unreaped,
+            unreached,
+            others,
+        } = self;
+        for id in ids {
+            printed_id(&id)?;
+        }
+        for (writer, ids) in others {
+            say(format_args!(
+                "to reap runs made by {writer}, use that build: {}",
+                ids.join(", ")
+            ));
+        }
+        if unreaped > 0 {
+            let runs = counted(unreaped, "run");
+            say(format_args!(
+                "{runs} can't be reaped, as said above: fix what each says, and reap again"
+            ));
+            advise("reap again", &next::reap(named));
+            return Ok(ExitCode::FAILURE);
+        }
+        if unreached > 0 && reaper != Reaper::Boot {
+            let runs = counted(unreached, "run");
+            say(format_args!(
+                "{runs} ran on a provider that can't be reached, as said above: what each left \
              there may remain"
-        ));
-        advise("reap again once it can be reached", &next::reap(named));
-        return Ok(ExitCode::from(UNREACHED));
+            ));
+            advise("reap again once it can be reached", &next::reap(named));
+            return Ok(ExitCode::from(UNREACHED));
+        }
+        Ok(ExitCode::SUCCESS)
     }
-    Ok(ExitCode::SUCCESS)
 }
 
 /// The providers that a reap has reached, or failed to reach, so that each is reached once,
@@ -337,7 +408,7 @@ fn reaped(
             // Not the reap's to fail: a record's provider may be gone for good, as on a machine
             // set up again since, and a failure would fail every reap after it.
             Err(error) => match reaper {
-                Reaper::Command => say(format_args!(
+                Reaper::Command | Reaper::Controller => say(format_args!(
                     "run {id}'s sandboxes on provider `{name}`, if it left any, can't be \
                      removed, as it can't be reached: {error}; once it can be, `{}` removes \
                      them, and if it is gone for good, remove the record, {}, to stop reaping it",
