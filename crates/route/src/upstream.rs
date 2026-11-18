@@ -339,14 +339,13 @@ impl Upstream {
         forwarding: impl FnOnce(),
         answered: impl FnOnce(Answer),
     ) -> io::Result<()> {
-        client.keep.upstream(
-            closed.translated_to(),
-            closed
-                .conversion
-                .as_ref()
-                .and_then(|request| request.repair),
-            closed.dropped_headers(),
-        );
+        let repair = closed
+            .conversion
+            .as_ref()
+            .and_then(|request| request.repair);
+        client
+            .keep
+            .upstream(closed.translated_to(), repair, closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
         let call = self.agent.post(self.url(closed)).config();
         let call = call.timeout_global(bound(client.by)).build();
