@@ -3481,7 +3481,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
+            "asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             next: 309222, end: 309222"#]],
@@ -3532,13 +3532,13 @@ fn view_answers_502_for_a_reply_it_cant_read() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: a frame's message is 65537 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to"
+            "linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: a frame's message is 65537 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
+            "linking to controller `alice` failed: its answer's body is of 268435457 bytes: expected 256 MiB at most"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "if controller `alice` has stopped, stop this view and start it again, which starts it: pumpkin view. What failed: linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
+            "linking to controller `alice` failed: the answer is no frame that `pumpkin controller serve` sends: unknown variant `reap`, expected one of `health`, `listed`, `viewed`, `refused` at line 1 column 14: expected its frames alone on the standard output there, which a shell's startup file may write to""#]],
     );
 }
 
@@ -3574,6 +3574,41 @@ fn view_installs_its_serve_there() {
             end: 309222
             the calls: none
             the install: pumpkin 555"#]],
+    );
+}
+
+// Each is refused before EC2 is asked, which the stand-in `aws` doesn't answer.
+#[test]
+fn view_starts_the_controller_from_its_page_alone() {
+    let scratch = Scratch::new("controller-view-starts");
+    let (client, driver, _) = viewed(&scratch);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
+    let page = format!("http://127.0.0.1:{}", served.port);
+    let start = "/api/controller/start";
+    let mut steps = Vec::new();
+    for (method, headers) in [
+        ("GET", &[][..]),
+        ("POST", &[("Origin", "http://pumpkin.example")]),
+        ("POST", &[("Origin", &page), ("X-Pumpkin-Token", "")]),
+    ] {
+        let (status, body) = served.ask(method, start, headers);
+        steps.push(format!("{method} {start} {headers:?}\n{status}\n{body}"));
+    }
+    drop(driver);
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(&page, "<page>")],
+        &expect![[r#"
+            GET /api/controller/start []
+            HTTP/1.1 405 Method Not Allowed
+            {"error":"the controller's start is sent by `POST`, as the page sends it: start it from the page that `pumpkin view` serves, or run a command that reaches it, which starts it: pumpkin ls"}
+            POST /api/controller/start [("Origin", "http://pumpkin.example")]
+            HTTP/1.1 403 Forbidden
+            {"error":"the controller's start comes from `http://pumpkin.example`, a page of another site: start it from the page that `pumpkin view` serves, or run a command that reaches it, which starts it: pumpkin ls"}
+            POST /api/controller/start [("Origin", "<page>"), ("X-Pumpkin-Token", "")]
+            HTTP/1.1 401 Unauthorized
+            {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}"#]],
     );
 }
 

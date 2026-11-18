@@ -7,7 +7,10 @@ use super::http::{self, Method, Request, Response};
 use super::trace;
 use crate::next;
 
-/// What a request to `/api/runs` asks for.
+/// The path at which the page starts a stopped controller, by `POST`.
+pub(super) const START: &str = "/api/controller/start";
+
+/// What a request of the runs' data, or of the controller's start, asks for.
 pub(super) enum Asked {
     Runs {
         before: Option<String>,
@@ -31,6 +34,8 @@ pub(super) enum Asked {
     Cancelling {
         id: RunTag,
     },
+    /// The controller's start.
+    Start,
     Trace {
         id: RunTag,
         asked: trace::Asked,
@@ -47,6 +52,9 @@ pub(super) fn asked(request: &Request) -> Result<Asked, Response> {
         Response::refused("404 Not Found", &message)
     };
     let bad = |message: String| Response::refused("400 Bad Request", &message);
+    if path == START {
+        return Ok(Asked::Start);
+    }
     let Some(api) = path.strip_prefix("/api/runs") else {
         return Err(not_found());
     };
@@ -99,44 +107,56 @@ pub(super) fn allowed(
     named: Option<&str>,
 ) -> Result<(), Response> {
     let refused = |status, message: String| Err(Response::refused(status, &message));
-    match (asked, request.method) {
-        (Asked::Cancel { id }, Method::Post) => {
-            // A cancel changes a run, so only the view's own page may send it: a page of another
-            // site can make the browser send a `POST` here, but the browser names that site in
-            // `Origin`, which the page can't change.
+    // What changes something, and what else does it.
+    let (what, instead) = match asked {
+        Asked::Cancel { id } => (
+            format!("the cancel of run {}", id.as_str()),
+            format!(
+                "cancel it from the page that `pumpkin view` serves, or run: {}",
+                next::of_run("cancel", named, id.as_str())
+            ),
+        ),
+        Asked::Start => (
+            "the controller's start".to_owned(),
+            "start it from the page that `pumpkin view` serves, or run a command that reaches it, \
+             which starts it: pumpkin ls"
+                .to_owned(),
+        ),
+        Asked::Runs { .. }
+        | Asked::Run { .. }
+        | Asked::Since { .. }
+        | Asked::Log { .. }
+        | Asked::Cancelling { .. }
+        | Asked::Trace { .. } => {
+            return match request.method {
+                Method::Post => refused(
+                    "405 Method Not Allowed",
+                    format!(
+                        "`{}` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, and \
+                         the controller's start, `{START}`, take `POST`",
+                        request.path
+                    ),
+                ),
+                Method::Get => Ok(()),
+            };
+        }
+    };
+    match request.method {
+        Method::Post => {
+            // Only the view's own page may send it: a page of another site can make the browser
+            // send a `POST` here, but the browser names that site in `Origin`, which the page
+            // can't change.
             let page = http::HOSTS.map(|host| format!("http://{host}:{port}"));
             let from = match &request.origin {
                 Some(origin) if page.contains(origin) => return Ok(()),
                 Some(origin) => format!("comes from `{origin}`, a page of another site"),
                 None => "carries no `Origin`, which a browser sends".to_owned(),
             };
-            refused(
-                "403 Forbidden",
-                format!(
-                    "the cancel of run {} {from}: cancel it from the page that `pumpkin view` \
-                     serves, or run: {}",
-                    id.as_str(),
-                    next::of_run("cancel", named, id.as_str())
-                ),
-            )
+            refused("403 Forbidden", format!("{what} {from}: {instead}"))
         }
-        (Asked::Cancel { id }, Method::Get) => refused(
+        Method::Get => refused(
             "405 Method Not Allowed",
-            format!(
-                "run {} is cancelled by `POST`, which the page's cancel sends: cancel it there, \
-                 or run: {}",
-                id.as_str(),
-                next::of_run("cancel", named, id.as_str())
-            ),
+            format!("{what} is sent by `POST`, as the page sends it: {instead}"),
         ),
-        (_, Method::Post) => refused(
-            "405 Method Not Allowed",
-            format!(
-                "`{}` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, takes \
-                 `POST`",
-                request.path
-            ),
-        ),
-        (_, Method::Get) => Ok(()),
     }
 }

@@ -13,8 +13,9 @@
 //! path a request gives reaches the disk.
 //!
 //! A request is answered only if it names a loopback `Host` ([`http`]) and carries the token that
-//! `pumpkin view` printed, bar the page's own files; a cancel, the one request that changes
-//! anything, is also refused unless it comes from the page's own origin.
+//! `pumpkin view` printed, bar the page's own files; a run's cancel and the controller's start,
+//! the requests that change anything, are also refused unless they come from the page's own
+//! origin.
 
 mod asked;
 mod cancel;
@@ -42,13 +43,13 @@ use rustix::io::Errno;
 use serde_json::{Value, json};
 use stdx::Context;
 
-use self::asked::{Asked, allowed, asked};
+use self::asked::{Asked, START, allowed, asked};
 pub(crate) use self::export::{Exported, exported};
 use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
-use crate::controller::Viewing;
+use crate::controller::{Unviewed, Viewing};
 use crate::link::{Answer, Viewed};
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
@@ -460,10 +461,23 @@ fn route(request: &Request, local: &mut Local) -> Response {
     match (asked, &mut local.source) {
         (Asked::Cancel { id }, _) => local.cancel(&id),
         (Asked::Cancelling { id }, _) => local.cancels.said(&id),
+        (Asked::Start, Source::Here { runs_given, .. }) => Response::refused(
+            "404 Not Found",
+            &format!(
+                "this view serves the runs of a directory, `{runs_given}`, not a controller's: \
+                 start a controller by a command that reaches it, which starts it: pumpkin ls"
+            ),
+        ),
+        (Asked::Start, Source::Controller(viewing)) => match viewing.start() {
+            Ok(()) => {
+                let said = format!("controller `{}` is starting", viewing.name());
+                Response::json(&json!({ "said": said })).with_status("202 Accepted")
+            }
+            Err(error) => Response::refused("502 Bad Gateway", &error),
+        },
         (asked, Source::Here { view, .. }) => answered(asked, view),
-        (_, Source::Controller(viewing)) => {
-            let asked = viewing.ask(&request.target, request.deflate);
-            let asked = asked.map(|viewed| {
+        (_, Source::Controller(viewing)) => match viewing.ask(&request.target, request.deflate) {
+            Ok(viewed) => {
                 let Viewed {
                     status,
                     content_type,
@@ -471,9 +485,14 @@ fn route(request: &Request, local: &mut Local) -> Response {
                     body,
                 } = viewed;
                 Response::relayed(status, content_type, body, deflated)
-            });
-            asked.unwrap_or_else(|error| Response::refused("502 Bad Gateway", &error))
-        }
+            }
+            Err(Unviewed::Down { message, stopped }) => {
+                let start = stopped.then_some(START);
+                let down = json!({ "error": message, "start": start });
+                Response::json(&down).with_status("503 Service Unavailable")
+            }
+            Err(Unviewed::Failed(error)) => Response::refused("502 Bad Gateway", &error),
+        },
     }
 }
 
@@ -491,6 +510,14 @@ fn answered(asked: Asked, view: &mut View) -> Response {
         Asked::Run { id } => view.run_json(&id),
         Asked::Since { id, log, log_epoch } => view.since_json(&id, log, log_epoch),
         Asked::Log { id, at, log_epoch } => view.log_json(&id, at, log_epoch),
+        // Never asked of a view on a controller, as the view that asks answers these itself.
+        Asked::Start => {
+            return Response::refused(
+                "404 Not Found",
+                "the view on a controller starts nothing: start it from the page that `pumpkin \
+                 view` serves",
+            );
+        }
         Asked::Cancel { id } | Asked::Cancelling { id } => {
             return Response::refused(
                 "404 Not Found",

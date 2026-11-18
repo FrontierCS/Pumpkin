@@ -43,7 +43,7 @@ pub(crate) use listing::{ls, scratch};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
-pub(crate) use viewing::Viewing;
+pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, answers, find, kept};
 use crate::job::JOBS;

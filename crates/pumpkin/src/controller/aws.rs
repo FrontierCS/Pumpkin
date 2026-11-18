@@ -143,20 +143,11 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
     let by = Deadline::after(START_TIMEOUT);
     let mut started = None;
     loop {
-        let found = instances(cli, &format!("Name=instance-id,Values={id}"))?;
-        let Some(instance) = found.into_iter().next() else {
-            return Err(format!(
-                "controller `{name}`, {id}, is no longer there: run the command again"
-            ));
-        };
+        let instance = instance(cli, name, id)?;
         match instance.state.name.as_str() {
             "running" => return answering(name, instance, started),
             "stopped" if started.is_none() => {
-                say(format_args!(
-                    "starting controller `{name}`, {id}, which is stopped"
-                ));
-                let start = ["ec2", "start-instances", "--instance-ids", id];
-                cli.run(&start, Bound::Call)?;
+                start(cli, name, id)?;
                 started = Some(Instant::now());
                 continue;
             }
@@ -177,6 +168,28 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
         }
         thread::sleep(START_POLL);
     }
+}
+
+/// The state that EC2 gives instance `id` of controller `name`, as it names it, such as `running`
+/// or `stopped`.
+pub(super) fn state(cli: &Cli, name: &Name, id: &str) -> Result<String, String> {
+    instance(cli, name, id).map(|instance| instance.state.name)
+}
+
+/// Starts instance `id` of controller `name`, which is stopped, and says so.
+pub(super) fn start(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
+    say(format_args!(
+        "starting controller `{name}`, {id}, which is stopped"
+    ));
+    let start = ["ec2", "start-instances", "--instance-ids", id];
+    cli.run(&start, Bound::Call).map(drop)
+}
+
+fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
+    let found = instances(cli, &format!("Name=instance-id,Values={id}"))?;
+    found.into_iter().next().ok_or_else(|| {
+        format!("controller `{name}`, {id}, is no longer there: run the command again")
+    })
 }
 
 /// Waits until the `sshd` of `instance`, which runs, answers at its private address, until
