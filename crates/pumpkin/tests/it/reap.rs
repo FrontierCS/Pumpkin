@@ -49,7 +49,7 @@ const UNFIT: &str = "20261108-120600-0a000007";
     reason = "most of it is the records, the steps and their snapshot"
 )]
 fn reaps() {
-    let scratch = Scratch::new("reaps");
+    let scratch = Scratch::new();
     write_record(&scratch, TURN, true, None);
     let turn = scratch.0.join(format!("runs/{TURN}"));
     let held = File::open(&turn).unwrap();
@@ -164,7 +164,7 @@ fn reaps() {
 
 #[test]
 fn reaps_unfit() {
-    let scratch = Scratch::new("reaps_unfit");
+    let scratch = Scratch::new();
     let info = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
     let (calls, container) = (scratch.0.join("calls"), "c".repeat(64));
     let docker = format!(
@@ -231,7 +231,7 @@ const UNNAMED: &str = "20261108-121100-0a00000c";
     reason = "most of it is the records, the steps and their snapshot"
 )]
 fn reaps_providers() {
-    let scratch = Scratch::new("reaps_providers");
+    let scratch = Scratch::new();
     let (calls, container) = (scratch.0.join("docker-calls"), "c".repeat(64));
     let docker = format!(
         r#"#!/bin/sh

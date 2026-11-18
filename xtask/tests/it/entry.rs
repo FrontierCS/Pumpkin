@@ -10,6 +10,7 @@ use std::process::Output;
 use std::{env, fs};
 
 use expect_test::{Expect, expect};
+use test_support::TestDir;
 use xshell::{Cmd, Shell};
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/pumpkin");
@@ -40,10 +41,7 @@ enum Machine<'a> {
 /// installs; checks its exit code, output, the temporary files left behind, in the caller's
 /// temporary directory and in `.pumpkin/tmp`, and what `.pumpkin/` holds against `expect`.
 fn check(machine: Machine<'_>, version: Option<&str>, cargo: Option<&str>, expect: &Expect) {
-    let held = tempfile::Builder::new()
-        .prefix("pumpkin-entry-")
-        .tempdir()
-        .unwrap();
+    let held = TestDir::new();
     let scratch = held.path();
     let (source, consumer, bin, tmp) = (
         scratch.join("source"),
@@ -397,10 +395,7 @@ fn build_output() {
 #[test]
 #[ignore = "builds the static sandboxd: run cargo xtask live docker"]
 fn install_root() {
-    let held = tempfile::Builder::new()
-        .prefix("pumpkin-install-")
-        .tempdir()
-        .unwrap();
+    let held = TestDir::new();
     let root = held.path();
     let sh = Shell::new().unwrap();
     let printed = sh

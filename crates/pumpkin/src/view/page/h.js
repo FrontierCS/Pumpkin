@@ -106,12 +106,14 @@ export function setQuery(changes) {
 // carries.
 const TOKEN = new URLSearchParams(location.search).get("t") || "";
 
-// A refusal of the server's: its status, and its words.
+// A refusal of the server's: its status, its words, and, for a controller that is stopped, the
+// path that starts it.
 export class Refused extends Error {
-  /** @param {number} status @param {string} message */
-  constructor(status, message) {
+  /** @param {number} status @param {string} message @param {string | null} [start] */
+  constructor(status, message, start = null) {
     super(message);
     this.status = status;
+    this.start = start;
   }
 }
 
@@ -145,7 +147,7 @@ export async function get(path, signal) {
   });
   if (!response.ok) {
     const refusal = await response.json().catch(() => ({}));
-    throw new Refused(response.status, refusal.error || response.status + " " + response.statusText);
+    throw new Refused(response.status, refusal.error || response.status + " " + response.statusText, refusal.start);
   }
   // An answer cut short, whose JSON doesn't parse, didn't arrive whole.
   return response.json().catch((error) => {
@@ -283,14 +285,16 @@ if (STATIC) setInterval(drawHead, 1000);
 // ---- following
 
 // What the page says of `error`, a read's, if a later read may well arrive, which it then makes:
-// a reply that didn't arrive whole, or a 502, which the server answers alone for a controller that
-// it can't reach, and a host for a store behind it that it can't. Null for an answer, such as a
-// refusal of a run that doesn't exist, which the page shows.
+// a reply that didn't arrive whole; a 502, which the server answers alone for a controller that it
+// can't reach, and a host for a store behind it that it can't; or a 503, which the server answers
+// for a controller that doesn't run. Null for an answer, such as a refusal of a run that doesn't
+// exist, which the page shows.
 /** @param {unknown} error @returns {string | null} */
 function unreached(error) {
   if (STATIC) return error instanceof Unarrived || (error instanceof Refused && error.status === 502) ? "This page couldn't be reached, so it shows what it read last." : null;
   if (error instanceof Unarrived) return "A reply of this pumpkin view's was cut short or never came, so this page shows what it read last.";
   if (error instanceof Refused && error.status === 502) return "Can't reach the controller, so this page shows what it read last.";
+  if (error instanceof Refused && error.status === 503) return "The controller can't answer now, so this page shows what it read last.";
   return null;
 }
 
@@ -311,7 +315,34 @@ export function follow(read) {
   const current = () => following === mine;
   // The wait after the next read that fails to arrive.
   let againMs = AGAIN_FIRST_MS;
+  // The wait for the next read, while one is set.
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let timer = null;
+  // Starts the controller by a `POST` to `path` from `button`, which is disabled meanwhile, and
+  // then reads again after the first wait.
+  /** @param {string} path @param {HTMLElement} button */
+  const start = async (path, button) => {
+    const notice = byId("notice");
+    button.toggleAttribute("disabled", true);
+    const started = await post(path).catch((error) => ({ status: 0, body: { error: String(error) } }));
+    button.toggleAttribute("disabled", false);
+    if (!current()) return;
+    if (started.status !== 202) {
+      fill(notice, "Starting the controller failed: " + sentence(started.body.error || "it answered " + started.status) + ". ", button);
+      return;
+    }
+    notice.classList.remove("error");
+    notice.textContent = sentence(started.body.said) + ": this page reads again in " + AGAIN_FIRST_MS / 1000 + " s.";
+    // A read under way waits `againMs` once it fails; a wait that is set is cut to the first.
+    if (timer === null) againMs = AGAIN_FIRST_MS;
+    else {
+      clearTimeout(timer);
+      timer = setTimeout(again, AGAIN_FIRST_MS);
+      againMs = Math.min(2 * AGAIN_FIRST_MS, AGAIN_MOST_MS);
+    }
+  };
   const again = async () => {
+    timer = null;
     if (!current()) return;
     if (document.hidden) {
       document.addEventListener("visibilitychange", again, { once: true });
@@ -330,7 +361,11 @@ export function follow(read) {
       if (current() && said !== null) {
         wait = againMs;
         againMs = Math.min(2 * againMs, AGAIN_MOST_MS);
-        notice.textContent = said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error));
+        const stopped = error instanceof Refused ? error.start : null;
+        const button = stopped ? h("button", { title: "Start the controller's instance" }, "Start it") : null;
+        if (stopped && button) button.addEventListener("click", () => start(stopped, button));
+        notice.classList.add("error");
+        fill(notice, said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error)), button ? [" ", button] : null);
         notice.hidden = false;
       } else if (STATIC && error instanceof Refused && error.status === 404) {
         // A run not yet published, or a file that a newer file names and the cache doesn't hold
@@ -342,7 +377,7 @@ export function follow(read) {
         wait = POLL_MS;
       } else if (current()) show(error instanceof Refused && error.status === 401 ? unauthorized() : h("p", { class: "error" }, "Reading the record failed: " + (error instanceof Error ? error.message : String(error))));
     }
-    if (current() && wait !== null) setTimeout(again, wait);
+    if (current() && wait !== null) timer = setTimeout(again, wait);
   };
   again();
   return current;

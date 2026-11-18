@@ -41,15 +41,11 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {"features": {"containerd-snapshotter": true}}
-  # So that a session whose client has gone without a close ends, rather than holding off the idle
-  # stop: `sshd`'s peer is the SSM agent, which keeps the connection until Session Manager's idle
-  # timeout, so only a probe inside SSH sees the client gone. `sshd` probes after each 30 s in
-  # which it has nothing else to do, and ends the session once 3 probes have gone unanswered: about
-  # 2 minutes, a little past the 114 s that the agent takes to see its own link to the service dead
-  # (a 54 s ping, a 60 s read deadline), so a live session isn't cut while the agent rides out a
-  # stall. The first value read wins, so the name sorts before cloud-init's own file.
-  # https://github.com/aws/amazon-ssm-agent/blob/9c74eb2e6d5628a0e20e08d088375bb5d7a3d90b/agent/session/plugins/port/port_basic.go#L96-L103
-  # https://github.com/aws/amazon-ssm-agent/blob/9c74eb2e6d5628a0e20e08d088375bb5d7a3d90b/agent/session/config/config.go#L46-L47
+  # So that a session whose client has gone without a close, as a machine that slept or lost its
+  # network, ends within minutes rather than when TCP gives up, and stops holding off the idle
+  # stop. `sshd` probes after each 30 s in which it has nothing else to do, and ends the session
+  # once 3 probes have gone unanswered: about 2 minutes. The first value read wins, so the name
+  # sorts before cloud-init's own file.
   # https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/serverloop.c#L111-L141
   # https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/serverloop.c#L240-L251
   - path: /etc/ssh/sshd_config.d/00-pumpkin-keepalive.conf

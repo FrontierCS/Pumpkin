@@ -14,11 +14,15 @@ The rules for writing Pumpkin's tests and their snapshots.
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
   small one in the test; CHECK IN only data a third party wrote, such as a vendored suite
 - PREFER one integration test binary per crate; add modules, not files under `tests/`
+- RUN `cargo xtask install-tools` before running tests by any command, a plain `cargo test` or
+  `cargo nextest run` too: pumpkin's tests run the pinned formatter that it links at
+  `bin/buildifier`, which `.cargo/config.toml` names
 - ASSUME that each test runs alone, in a process of its own, as cargo-nextest runs it in
   `cargo xtask ci`: tests share no per-process state
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once
-- WRITE a test's scratch into a `tempfile::TempDir` in the system's temporary directory: no other
-  test shares it, and its paths fit a socket's, which holds 107 bytes at most
+- WRITE a test's scratch into its `test_support::TestDir`: no other test shares it, its paths fit
+  a socket's, which holds 107 bytes at most, and a test keeps only its last failure's; `stdx`'s
+  tests, whose manifest names no Pumpkin crate, write theirs into a `tempfile::TempDir`
 - RUN `cargo xtask mutants crates/decision crates/schema crates/route` on demand, when tests of
   the decision core, the schema's refusals or the route's request rules, which guard the
   operator's key, are deleted or rewritten, with `CARGO_MUTANTS_JOBS=2` at most, and read each

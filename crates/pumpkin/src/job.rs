@@ -277,11 +277,11 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
 /// may have left, with the configuration of its job; returns the reap's exit status, 0 though a
 /// provider can't be reached.
 pub(crate) fn boot() -> Result<ExitCode, String> {
-    // No prune, which each job's start makes: a client may start a job as soon as SSM sees the
-    // controller, before the boot is done, and the boot, a unit of the system's, can't see that
-    // it runs, as systemd names the user's runtime directory, which holds each job's directory,
-    // to the user's own units alone. A prune here would remove the images that the job has
-    // built, which no IR that the boot reads names yet.
+    // No prune, which each job's start makes: a client may start a job as soon as the
+    // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
+    // system's, can't see that it runs, as systemd names the user's runtime directory, which
+    // holds each job's directory, to the user's own units alone. A prune here would remove the
+    // images that the job has built, which no IR that the boot reads names yet.
     let reap = cli::Reap {
         runs: None,
         modal_config: None,

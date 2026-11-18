@@ -18,7 +18,7 @@ tls = { path = "../tls" }
 expect-test.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

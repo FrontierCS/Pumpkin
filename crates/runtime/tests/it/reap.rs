@@ -5,12 +5,13 @@ use std::cell::RefCell;
 use std::fs;
 
 use expect_test::expect;
-use provider::{Listed, RunTag, SandboxId, Sweep};
+use provider::{Listed, RunTag, SandboxId, Sweep, Undeleted};
 use runtime::{Reaped, Record};
 use schema::ir::Name;
 use serde_json::{Value, json};
+use test_support::TestDir;
 
-use crate::run::{PROVIDER, Runs, compact};
+use crate::run::{PROVIDER, compact};
 use crate::sim::Sim;
 
 /// A lost run, whose agent's sandbox and a lease's ended by themselves.
@@ -27,7 +28,7 @@ struct Noting {
 }
 
 impl Sweep for Noting {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         let named: Vec<&str> = ids.iter().map(SandboxId::as_str).collect();
         self.deletes.borrow_mut().push(named.join(", "));
         self.sim.delete(run, ids)
@@ -40,15 +41,19 @@ impl Sweep for Noting {
 
 // A sandbox that its provider lists no more may have left what only its delete removes.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the records and what each reap left of them"
+)]
 fn reaps_ended() {
-    let runs = Runs::new("reaps-ended");
+    let runs = TestDir::new();
     let older = json!({ "state": "finished", "verdict": { "kind": "graded" } });
     let records = [
         (ENDED, None, &[("agent", "a"), ("leases/0", "b")][..]),
         (OLDER_ENDED, Some(older), &[("agent", "d")]),
     ];
     for (id, outcome, sandboxes) in records {
-        let dir = runs.dir.join(id);
+        let dir = runs.path().join(id);
         fs::create_dir_all(&dir).unwrap();
         let record = json!({ "record_version": "pumpkin.record/v0", "args": [] });
         fs::write(dir.join("record.json"), record.to_string()).unwrap();
@@ -70,14 +75,17 @@ fn reaps_ended() {
     let mut lines = Vec::new();
     for reap in ["first", "second"] {
         for id in [ENDED, OLDER_ENDED] {
-            let record = Record::open(&runs.dir.join(id)).unwrap();
+            let record = Record::open(&runs.path().join(id)).unwrap();
             let Reaped {
                 sandboxes,
                 ended,
                 sockets,
                 lost,
+                failed,
             } = record.reap(&[(&name, &noting)]).unwrap();
-            assert!(sandboxes == [(name.clone(), Vec::new())] && sockets.is_none());
+            assert!(
+                sandboxes == [(name.clone(), Vec::new())] && sockets.is_none() && failed.is_none()
+            );
             let ended: Vec<&str> = ended.iter().map(|(_, id)| id.as_str()).collect();
             let deletes = noting.deletes.take();
             lines.push(format!(
@@ -86,7 +94,7 @@ fn reaps_ended() {
         }
     }
     for id in [ENDED, OLDER_ENDED] {
-        let dir = runs.dir.join(id);
+        let dir = runs.path().join(id);
         let reaps = fs::read_to_string(dir.join("reaps.jsonl")).unwrap();
         let reaps = reaps.lines().map(|line| {
             let mut line: Value = serde_json::from_str(line).unwrap();

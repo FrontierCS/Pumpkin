@@ -227,7 +227,8 @@ machine reaches it, and answers a request only if it names this machine as its
 host, and, for the runs' data, carries the token after `?t=`, which the page
 sends: another user of this machine can't read the runs, nor can a page of
 another site that the browser has open. It reads the records as `ls` and `wait`
-do, and asks nothing of a provider.
+do, and of the providers asks only EC2, for a controller's state and its start,
+as below.
 
 A run's page links to the trace of each caller that used a model, the agent or
 a call: its model requests as threads of steps, each with the entries it
@@ -249,8 +250,12 @@ on the controller, a copy of this `pumpkin` that it installs there if the
 controller has none. It reaches the controller as it starts, starting it if it
 is stopped; once the connection has ended, the next request opens it again, and
 while that fails the page says so and asks again after 5 s, then after twice
-the wait before, up to a minute. --runs serves a directory here, such as the
-copies of the controller's runs that `wait` makes.";
+the wait before, up to a minute. When it fails as the controller has stopped
+since, as an idle controller stops itself, the page says so beside a button,
+\"Start it\", which starts it (`aws ec2 start-instances`); until the
+controller answers, each request asks EC2 whether it runs (`aws ec2
+describe-instances`) in place of connecting. --runs serves a directory here,
+such as the copies of the controller's runs that `wait` makes.";
 
 pub(super) const LOCK_NOTES: &str = "\
 Examples:
@@ -535,9 +540,10 @@ without it, nothing is published:
 `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
-controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-Session Manager plugin, and `ssh`, `tar`, `ssh-keygen`
-and `git`, from PATH; the controller's settings are the module's, but for
+controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, and
+`ssh`, `tar`, `ssh-keygen` and `git`, from PATH, and reach the controller at
+its private address, to which deploy/aws's `ssh_from` must admit this
+machine; the controller's settings are the module's, but for
 [controller.modal]. This machine's key to it, which the first command makes
 and enrols through EC2 Instance Connect, and the host key it pins, are in
 $HOME/.config/pumpkin/ssh/.

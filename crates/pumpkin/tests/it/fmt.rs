@@ -10,7 +10,7 @@ use super::{Scratch, Step, check, ran};
 
 #[test]
 fn files() {
-    let scratch = Scratch::new("fmt-files");
+    let scratch = Scratch::new();
     let untidy = "load(\"//lib/x.star\",\"x\")\nY=[1,\n2]\ndef f( a ):\n  return a\n";
     scratch.write("lib/untidy.star", untidy);
     scratch.write("lib/tidy.star", "Y = [1, 2]\n");

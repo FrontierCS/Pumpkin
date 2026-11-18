@@ -25,8 +25,8 @@ use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox};
 use serde_json::{Value, json};
 use stdx::Deadline;
-use test_support::HUNG;
 use test_support::http::read_request;
+use test_support::{HUNG, TestDir};
 
 mod kept;
 mod read;
@@ -119,12 +119,8 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
 fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Expect) {
-    // Kept if the test fails.
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("route-{}-", thread::current().name().unwrap()))
-        .tempdir()
-        .unwrap()
-        .keep();
+    let scratch = TestDir::new();
+    let dir = scratch.path();
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let (receipts, received) = mpsc::channel();
@@ -152,7 +148,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     };
     let entries: Vec<(Route, Upstream)> = entries.iter().map(entry).collect();
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(&dir);
+    let (_sockets, registration, socket) = meeting(dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
@@ -205,7 +201,6 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .collect();
     expect.assert_eq(&lines.join("\n").replace(&address, "<stand-in>"));
     drop(session);
-    fs::remove_dir_all(dir).unwrap();
 }
 
 /// Keeps of an exchange only the names of the headers that the route left behind.
