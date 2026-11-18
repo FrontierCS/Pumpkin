@@ -1,5 +1,5 @@
-//! The engine, against a real Docker daemon, but for its prunes' choice and its publish slots,
-//! which need none. The tests that need Docker are ignored.
+//! The engine, against a real Docker daemon, but for its prunes' choice, which needs none. The
+//! tests that need Docker are ignored.
 
 #![expect(
     clippy::unwrap_used,
@@ -26,7 +26,6 @@ use stdx::process::Environment;
 use test_support::{BUSYBOX, TestDir, docker};
 
 mod prune;
-mod publish;
 
 struct Fixture {
     dir: TestDir,
