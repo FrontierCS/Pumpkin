@@ -1,6 +1,6 @@
 # The person's controller, which builds the tasks' images and runs the drivers, and runs no role.
-# The person reaches it through SSM alone, and it stops itself when idle (controller.yaml), so it
-# costs only its volume between runs.
+# The person reaches it through SSM, or over ssh from `ssh_from`, and it stops itself when idle
+# (controller.yaml), so it costs only its volume between runs.
 
 resource "aws_iam_role" "controller" {
   name        = "${local.prefix}-controller"
