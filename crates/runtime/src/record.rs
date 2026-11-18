@@ -36,7 +36,7 @@ use decision::PayloadRef;
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::Offset;
-use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
+use provider::{Provider, Ready, RunTag, SandboxId, Sweep, Undeleted, UnixTime};
 use route::Serving;
 use schema::ir::{self, Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{log_dir, out_dir};
@@ -596,8 +596,8 @@ impl Record {
                 .filter(|(on, _)| on == name)
                 .map(|(_, id)| id.clone())
                 .collect();
-            // A lost run's sandboxes' records keep what its own deletes said.
-            let after = |_: &[SandboxId], _: &Result<(), String>| Ok(());
+            // The sandboxes' records keep what the run's deletes said; `reaps.jsonl`, the reap's.
+            let after = |ids: &[SandboxId], deleted: &_| self.note_reaped(name, ids, deleted);
             sweep(name, provider, &run, &held, after).map(|ids| (name.clone(), ids))
         });
         let sandboxes: Vec<(Name, Vec<SandboxId>)> = swept.collect::<Result<_, _>>()?;
@@ -607,7 +607,6 @@ impl Record {
                 swept.is_some_and(|(_, ids)| !ids.contains(id))
             })
             .collect();
-        self.note_reaped(&sandboxes, &ended)?;
         let sockets = sockets(&self.dir);
         let sockets = match fs::remove_dir_all(&sockets) {
             Ok(()) => Some(sockets),
@@ -696,15 +695,16 @@ impl Record {
 
     fn note_reaped(
         &self,
-        listed: &[(Name, Vec<SandboxId>)],
-        ended: &[(Name, SandboxId)],
+        provider: &Name,
+        ids: &[SandboxId],
+        deleted: &Result<(), Undeleted>,
     ) -> Result<(), String> {
         let at = log::nanos(UnixTime::of(SystemTime::now())?.since_epoch());
-        let listed = (listed.iter()).flat_map(|(name, ids)| ids.iter().map(move |id| (name, id)));
-        let lines = (listed.chain(ended.iter().map(|(name, id)| (name, id)))).map(|(name, id)| {
+        let lines = ids.iter().filter_map(|id| {
+            let failed = deleted.as_ref().is_err_and(|undeleted| undeleted.why(id).is_some());
             let line =
-                json!({ "at_ns": at, "provider": name, "id": id.as_str(), "reaped": "removed" });
-            format!("{line}\n")
+                json!({ "at_ns": at, "provider": provider, "id": id.as_str(), "reaped": "removed" });
+            (!failed).then(|| format!("{line}\n"))
         });
         let lines: String = lines.collect();
         if lines.is_empty() {
@@ -1067,7 +1067,7 @@ pub(super) fn write_sandbox(
     provider: &Name,
     id: &SandboxId,
     gpus: Option<&[GpuModel]>,
-    deleted: Option<&Result<(), String>>,
+    deleted: Option<Result<(), &str>>,
 ) -> Result<(), String> {
     let mut sandbox = json!({ "provider": provider, "id": id.as_str() });
     if let Some(gpus) = gpus {

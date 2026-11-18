@@ -19,7 +19,7 @@ use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
 use provider::{
     Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
-    SandboxdRef, Sweep, UnixTime,
+    SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
@@ -532,7 +532,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     fn write_sandbox(
         &self,
         made: &Made<'_>,
-        deleted: Option<&Result<(), String>>,
+        deleted: Option<Result<(), &str>>,
     ) -> Result<(), String> {
         let Made {
             on,
@@ -544,34 +544,37 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         record::write_sandbox(self.host, &dir, on, id, gpus.as_deref(), deleted)
     }
 
-    // Writes `deleted` into the record of each of `ids` that this run created. Returns the log
-    // entries of the delete, none if it failed, one per id, named by its sandbox if this run
+    // Writes how `deleted` went for each of `ids` into its record, if this run created it. Returns
+    // the log entries of the delete, one per id it deleted, named by its sandbox if this run
     // created it, and the failure of the writes, if any.
     fn record_deletes(
         &self,
         on: &Name,
         ids: &[SandboxId],
-        deleted: &Result<(), String>,
+        deleted: &Result<(), Undeleted>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
         let created = stdx::unpoisoned(self.created.lock());
         let made = (created.iter()).filter(|made| made.on == on && ids.contains(&made.id));
         // Written once the lock is let go, so that no other thread waits on the record's syncs.
         let made: Vec<Made<'_>> = made.map(Made::clone).collect();
         drop(created);
+        let undeleted = deleted.as_ref().err();
+        let failed = |id: &SandboxId| undeleted.and_then(|undeleted| undeleted.why(id));
         let mut logged = Vec::new();
-        if deleted.is_ok() {
-            for id in ids {
-                let made = made.iter().find(|made| made.id == *id);
-                let deleted = Deleted {
-                    sandbox: made.map(|made| made.which.name()),
-                    provider: on.clone(),
-                    id: id.clone(),
-                };
-                logged.push(log::Entry::Deleted(deleted));
-            }
+        for id in ids.iter().filter(|id| failed(id).is_none()) {
+            let made = made.iter().find(|made| made.id == *id);
+            let deleted = Deleted {
+                sandbox: made.map(|made| made.which.name()),
+                provider: on.clone(),
+                id: id.clone(),
+            };
+            logged.push(log::Entry::Deleted(deleted));
         }
         let failures: Vec<String> = (made.iter())
-            .filter_map(|made| self.write_sandbox(made, Some(deleted)).err())
+            .filter_map(|made| {
+                let deleted = failed(&made.id).map_or(Ok(()), Err);
+                self.write_sandbox(made, Some(deleted)).err()
+            })
             .collect();
         let recorded = if failures.is_empty() {
             Ok(())
@@ -592,7 +595,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     /// sandboxes left, and records each delete.
     pub(super) fn sweep(&self) -> Result<(), String> {
         let swept = (self.providers.iter()).map(|(name, hosting)| {
-            let record = |ids: &[SandboxId], deleted: &Result<(), String>| {
+            let record = |ids: &[SandboxId], deleted: &Result<(), Undeleted>| {
                 let (logged, recorded) = self.record_deletes(name, ids, deleted);
                 self.send(logged);
                 recorded
@@ -623,7 +626,7 @@ pub(super) fn sweep(
     provider: &dyn Sweep,
     run: &RunTag,
     also: &[SandboxId],
-    after: impl FnOnce(&[SandboxId], &Result<(), String>) -> Result<(), String>,
+    after: impl FnOnce(&[SandboxId], &Result<(), Undeleted>) -> Result<(), String>,
 ) -> Result<Vec<SandboxId>, String> {
     let listed = provider.list(run).context(format_args!(
         "listing the run's sandboxes on provider `{name}` failed"
