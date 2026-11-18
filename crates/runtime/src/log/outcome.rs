@@ -1,4 +1,4 @@
-//! What `outcome.json` says of a finished run, in the one form that the run writes and a reader
+//! What `outcome.json` says of how a run ended, in the one form that the run writes and a reader
 //! reads back.
 
 use decision::{CallResult, Outcome, PayloadRef};
@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::logged::Shown;
+use crate::{Signal, Stopped};
+
+/// How a run ended: it finished, or it stopped without an outcome, as [`Stopped`] says.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum Ended {
+    Finished(Finished),
+    Failed { reason: String },
+    Interrupted { signal: Signal },
+}
 
 /// How a finished run ended: how its work phase did, and the verdict on its selection.
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +80,18 @@ impl Returned {
 pub(crate) enum Failure {
     Timeout,
     Error { reason: String },
+}
+
+impl From<&Result<Outcome, Stopped>> for Ended {
+    fn from(ended: &Result<Outcome, Stopped>) -> Self {
+        match ended {
+            Ok(outcome) => Self::Finished(outcome.into()),
+            Err(Stopped::Failed(reason)) => Self::Failed {
+                reason: reason.clone(),
+            },
+            Err(Stopped::Interrupted(signal)) => Self::Interrupted { signal: *signal },
+        }
+    }
 }
 
 impl From<&Outcome> for Finished {

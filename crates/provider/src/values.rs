@@ -1,6 +1,7 @@
 //! The values that a run and its providers exchange through [`Provider`](crate::Provider).
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -186,6 +187,41 @@ impl SandboxId {
 impl From<String> for SandboxId {
     fn from(id: String) -> Self {
         Self(id)
+    }
+}
+
+/// The sandboxes that a delete failed to delete ([`Sweep::delete`](crate::Sweep::delete)), at
+/// least one, each with why.
+#[derive(Debug)]
+pub struct Undeleted(Vec<(SandboxId, String)>);
+
+impl Undeleted {
+    /// What a delete that failed each of `failed` returns: `Ok` if it failed none.
+    pub fn of(failed: Vec<(SandboxId, String)>) -> Result<(), Self> {
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(Self(failed))
+        }
+    }
+
+    /// Why the delete failed `id`, if it did.
+    pub fn why(&self, id: &SandboxId) -> Option<&str> {
+        let failed = self.0.iter().find(|(failed, _)| failed == id);
+        failed.map(|(_, why)| why.as_str())
+    }
+}
+
+/// Each why once, as a failure of several ids at once is the why of each.
+impl fmt::Display for Undeleted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut said: Vec<&str> = Vec::new();
+        for (_, why) in &self.0 {
+            if !said.contains(&why.as_str()) {
+                said.push(why);
+            }
+        }
+        f.write_str(&said.join("; "))
     }
 }
 

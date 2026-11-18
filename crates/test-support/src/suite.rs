@@ -539,8 +539,8 @@ impl<'a> Suite<'a> {
         let after = held();
         let mut shown = match deleted {
             Ok(()) => "done".to_owned(),
-            Err(error) => {
-                let named = ids.iter().filter(|id| error.contains(id.as_str()));
+            Err(undeleted) => {
+                let named = ids.iter().filter(|id| undeleted.why(id).is_some());
                 format!("failed, naming {:?}", self.named(named.cloned().collect()))
             }
         };
@@ -687,7 +687,9 @@ impl Drop for Suite<'_> {
             // panics.
             let deleted = self.subject.connect().and_then(|provider| {
                 let listed = provider.list(run)?;
-                provider.delete(run, &ids(listed))
+                provider
+                    .delete(run, &ids(listed))
+                    .map_err(|error| error.to_string())
             });
             if let Err(error) = deleted {
                 eprintln!("run {} can't be cleaned up: {error}", run.as_str());
