@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use docker::CpuList;
 use engine::ContextName;
 use gateway::GatewayAddress;
-use route::{Headers, Key, Serving, UpstreamUrl};
+use route::{Headers, Key, Serving, UpstreamModel, UpstreamUrl};
 use runtime::TokenPrices;
 use schema::ir::{Api, ApiRoute, ModelName, ModelRoute, Name};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -139,6 +139,8 @@ struct Upstream {
 struct Model {
     name: ModelName,
     upstream_name: ModelName,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    responses_via_chat: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     usd_per_mtok: Option<TokenPrices>,
 }
@@ -259,9 +261,15 @@ impl Upstreams {
             key_file,
             models,
         } = upstream;
-        let models = models
-            .iter()
-            .map(|model| (model.name.clone(), model.upstream_name.clone()));
+        let models = models.iter().map(|model| {
+            (
+                model.name.clone(),
+                UpstreamModel {
+                    name: model.upstream_name.clone(),
+                    responses_via_chat: model.responses_via_chat && *api == Api::Responses,
+                },
+            )
+        });
         Ok(Serving {
             name: name.clone(),
             api: *api,

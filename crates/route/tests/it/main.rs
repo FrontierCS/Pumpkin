@@ -36,11 +36,19 @@ mod upstream;
 type Request = (&'static str, String, Vec<(String, String)>, Vec<u8>);
 
 /// Each of `names`, which goes upstream under its own name.
-fn models(names: &[&str]) -> BTreeMap<ModelName, ModelName> {
+fn models(names: &[&str]) -> BTreeMap<ModelName, route::UpstreamModel> {
     let model = |name: &str| ModelName::try_from(name.to_owned()).unwrap();
     names
         .iter()
-        .map(|&name| (model(name), model(name)))
+        .map(|&name| {
+            (
+                model(name),
+                route::UpstreamModel {
+                    name: model(name),
+                    responses_via_chat: false,
+                },
+            )
+        })
         .collect()
 }
 
@@ -208,7 +216,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
 struct Dropped(RefCell<Vec<String>>);
 
 impl Keep for Dropped {
-    fn dropped_headers(&self, names: &[String]) {
+    fn upstream(&self, _: Option<Api>, names: &[String]) {
         *self.0.borrow_mut() = names.to_vec();
     }
 

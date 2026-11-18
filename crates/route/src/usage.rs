@@ -5,7 +5,7 @@ use serde_json::Value;
 
 /// The most that a response is held for its usage: one server-sent event's line, or a response's
 /// whole body when it is not a stream. What is longer reports no usage.
-const MAX_HELD_BYTES: usize = 16 << 20;
+pub(crate) const MAX_HELD_BYTES: usize = 16 << 20;
 
 /// The most bytes of a failure's code that [`Failure::code`] gives.
 // Twice the longest that the Responses API lists for a failed response, 30 bytes, which leaves
@@ -163,6 +163,12 @@ pub struct Failure {
 }
 
 impl Failure {
+    pub(crate) fn new(code: &'static str) -> Self {
+        Self {
+            code: Some(code.to_owned()),
+        }
+    }
+
     /// The code that the response gave for its failure: the first of its failures' codes that is
     /// an identifier, of at most `MAX_CODE_BYTES` ASCII letters, digits, `_`, `-` and `.`, if one
     /// is.
@@ -242,18 +248,19 @@ impl Scan {
         !began && self.began
     }
 
-    pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>) {
-        match self.framing {
-            Some(Framing::Stream) | None => self.line(),
-            Some(Framing::Whole) => {
-                if let Some(held) = &self.held {
-                    self.usage = serde_json::from_slice(held)
-                        .ok()
-                        .and_then(|body| (self.usage_of)(None, &body));
-                }
-            }
+    /// Also returns the parsed body for a response that was one bounded JSON value.
+    pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>, Option<Value>) {
+        let body = if self.framing == Some(Framing::Whole) {
+            self.held
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        } else {
+            self.line();
+            None
+        };
+        if let Some(value) = &body {
+            self.usage = (self.usage_of)(None, value);
         }
-        (self.usage, self.failed)
+        (self.usage, self.failed, body)
     }
 
     fn hold(&mut self, bytes: &[u8]) {

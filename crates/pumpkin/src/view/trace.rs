@@ -105,7 +105,7 @@ impl Exchanges {
 }
 
 fn api_of(event: &Value) -> Option<Api> {
-    match &event["api"] {
+    match event["kept"].get("upstream_api").unwrap_or(&event["api"]) {
         // A log that names no API is of a build that served only the Responses and Chat
         // Completions APIs, whose conversations are their `input` and `messages`.
         Value::Null => match event["kept"]["request"]["items"]["field"].as_str() {

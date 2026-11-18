@@ -101,6 +101,10 @@ that every request of a conversation repeats, such as its list of tools or an ea
 kept once, by its digest, in `model/items/`. No key is in the record: the route keeps the names of
 the headers it left behind, never their values.
 
+A translated exchange names its upstream API in `kept.upstream_api` on its `model_answered`
+line. Read the archived bodies as that API. The line's `api` and `model` identify the caller's
+route for accounting. With no translation, the caller and upstream speak the same API.
+
 ## The page
 
 `pumpkin view` serves the runs of a runs directory, or a controller's, to this machine's browser,

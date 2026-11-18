@@ -58,3 +58,25 @@ kind. `pumpkin help config` says every key of the table, with an example.
 The key stays in the driver: it reads the key file itself, and the route adds the key to each
 request it admits. The record keeps each model exchange as it passed, and the prices the run
 started with; [records](record.md) says where.
+
+### A Responses caller of a Chat model
+
+Set `responses_via_chat = true` on the model in `[[upstreams.<name>.models]]` to send its
+Responses requests to Chat Completions at the same base URL. Other models in the same entry can
+serve Responses directly. Admission, the budget and prices use the workflow's entry and model.
+
+Send `store: false`, text instructions and either a text input or a list of messages,
+function calls and matching results. A message with just `role` and `content` can omit its type.
+Text parts and string function arguments pass through.
+All pending calls need results before the next turn. Declare ordinary function tools with an
+explicit boolean `strict`: Responses and Chat default an omitted value differently. Text,
+function calls, refusals and length-limited answers can be returned whole or as a stream. A
+stream requests token usage from Chat; a provider that omits it leaves spend unknown.
+
+The bridge accepts `tool_choice`, `parallel_tool_calls`, `temperature`, `top_p`,
+`max_output_tokens`, `prompt_cache_key`, `metadata`, `reasoning.effort`, `text.verbosity` and
+plain text output format. The `reasoning.encrypted_content` include selects a field on reasoning
+items; a text or function answer has none. Codex's function-tool requests can carry its session
+and turn telemetry, which stays local. Reasoning items, reasoning summaries, encrypted inputs,
+custom or hosted tools and media require a native Responses route. Unsupported requests receive
+a 400 before the upstream receives them.

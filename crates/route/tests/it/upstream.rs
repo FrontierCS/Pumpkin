@@ -2,6 +2,9 @@
 //! request as its case says. The test is the session's owner: it serves the harness's request
 //! from the fake sandbox, and shows what the stand-in received and what the sandbox heard.
 
+mod bridge;
+mod bridge_stream;
+
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
@@ -11,6 +14,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::{fs, iter, slice, thread};
 
+use bridge::bridge_exchange;
 use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest};
 use route::{Admission, Answer as Told, Apart, Keep, Key, Route, Upstream, UpstreamUrl};
@@ -348,6 +352,7 @@ fn serve_one(
 
 #[derive(Default)]
 struct Kept {
+    translated_to: Cell<Option<Api>>,
     request: RefCell<Vec<u8>>,
     response: RefCell<Vec<u8>>,
     first_output: Cell<Option<usize>>,
@@ -365,7 +370,9 @@ impl Kept {
 }
 
 impl Keep for Kept {
-    fn dropped_headers(&self, _: &[String]) {}
+    fn upstream(&self, api: Option<Api>, _: &[String]) {
+        self.translated_to.set(api);
+    }
 
     fn request(&self, body: &[u8], _: Option<Apart>) {
         self.request.borrow_mut().extend_from_slice(body);

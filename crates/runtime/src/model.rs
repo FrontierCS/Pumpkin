@@ -273,6 +273,7 @@ pub(super) struct Exchange<C> {
     request: Part,
     response: Part,
     body: RefCell<Option<Body>>,
+    translated_to: Cell<Option<Api>>,
     dropped_headers: RefCell<Vec<String>>,
     items: RefCell<Vec<File>>,
     failed: RefCell<Option<String>>,
@@ -321,6 +322,7 @@ impl<C: Clock> Exchange<C> {
             request: part("request"),
             response: part("response"),
             body: RefCell::new(None),
+            translated_to: Cell::new(None),
             dropped_headers: RefCell::new(Vec::new()),
             items: RefCell::new(Vec::new()),
             failed: RefCell::new(None),
@@ -334,6 +336,9 @@ impl<C: Clock> Exchange<C> {
     /// API's order; and `dropped_headers`.
     pub(super) fn kept(&self) -> Value {
         let mut kept = json!({});
+        if let Some(api) = self.translated_to.get() {
+            kept["upstream_api"] = json!(api);
+        }
         for part in [&self.request, &self.response] {
             if part.file.borrow().is_some() {
                 kept[part.name] = json!({ "bytes": part.bytes.get() });
@@ -628,7 +633,8 @@ pub(super) fn kept_item(record: &Path, digest: &Sha256Digest) -> Result<Vec<u8>,
 }
 
 impl<C: Clock> Keep for Exchange<C> {
-    fn dropped_headers(&self, names: &[String]) {
+    fn upstream(&self, translated_to: Option<Api>, names: &[String]) {
+        self.translated_to.set(translated_to);
         *self.dropped_headers.borrow_mut() = names.to_vec();
     }
 

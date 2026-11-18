@@ -715,7 +715,9 @@ fn usage() {
                               it. Reasoning is output. A model without `usd_per_mtok` has no
                               cost, and nor has one whose responses report a kind of token
                               that its prices lack. No model is listed twice, under one
-                              upstream or two.
+                              upstream or two. With `responses_via_chat = true`, a Responses
+                              caller of this model reaches /chat/completions using text and
+                              function tools. Otherwise each caller reaches its own API.
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
@@ -1561,7 +1563,7 @@ fn configurations() {
               |
             7 | models = [{ name = "gpt-6-astra", upstream_name = "vendor/gpt-6-astra", price = 1 }]
               |                                                                         ^^^^^
-            unknown field `price`, expected one of `name`, `upstream_name`, `usd_per_mtok`
+            unknown field `price`, expected one of `name`, `upstream_name`, `responses_via_chat`, `usd_per_mtok`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/priced.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config keyless.toml
             exit status: Some(1)
@@ -1775,7 +1777,10 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
             "conf/served",
             format!(
                 "{gateway}\n{}",
-                direct.replace(" }", ", usd_per_mtok = { input = 0.3, output = 2.5 } }")
+                direct.replace(
+                    " }",
+                    ", responses_via_chat = true, usd_per_mtok = { input = 0.3, output = 2.5 } }"
+                )
             ),
         ),
         ("docked", String::new()),

@@ -881,10 +881,12 @@ impl StandIn {
             ir::Api::Messages => "messages",
         };
         let url = format!("http://{}/v1/{path}", self.address);
-        Serving {
-            api: entry.api,
-            ..serving(dir, &url, &models)
+        let mut serving = serving(dir, &url, &models);
+        serving.api = entry.api;
+        for (name, model) in &mut serving.models {
+            model.responses_via_chat = name.as_str() == "m-translated";
         }
+        serving
     }
 
     fn stop(self) -> (Vec<Vec<u8>>, Vec<u64>) {
@@ -902,6 +904,12 @@ fn answer(mut connection: TcpStream) -> (Vec<u8>, Option<u64>) {
     let input: Value = serde_json::from_slice(&body).unwrap();
     let conversation = input.get("input").unwrap_or(&input["messages"]);
     let said = (conversation.as_str()).or_else(|| conversation[1]["content"].as_str());
+    if input["model"] == "vendor/m-translated" {
+        assert!(line.starts_with("POST /v1/chat/completions "));
+        let answer = r#"{"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#;
+        write!(connection,"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",answer.len()).unwrap();
+        return (received, None);
+    }
     let refused = match said {
         Some("silent") => return (received, None),
         Some("expired") => Some(("401 Unauthorized", "")),
@@ -2607,6 +2615,38 @@ fn syncs() {
               fsync <record>/.outcome.json.partial
               fsync <record>"#]],
     );
+}
+
+#[test]
+fn translated_model_exchange() {
+    let argv = [
+        "ops",
+        "model m-translated count",
+        "call submit 6 finalize=true",
+    ];
+    let mut ir = routed(ops_workflow(&argv, 30));
+    ir["roles"][0]["runtime"]["agent"]["egress"]["model"][0]["models"] = json!(["m-translated"]);
+    let shown = executed(
+        &System,
+        "translated-model",
+        &[(PROVIDER, &Sim::new())],
+        &ir,
+        SANDBOXD,
+        &[Also::Usage, Also::Exchanges],
+    );
+    let exchange = shown.lines().filter(|line| {
+        line.starts_with("provider.json routes:")
+            || line.starts_with("outcome.json's usage:")
+            || line.contains(r#""kind":"model_answered""#)
+            || line.starts_with("model request 0:")
+            || line.starts_with("model exchange 0 kept:")
+    });
+    expect![[r#"
+        provider.json routes: {"agent":[{"api":"responses","models":{"m-translated":{"upstream_api":"chat","upstream_name":"vendor/m-translated"}},"upstream":"stand-in"}]}
+        outcome.json's usage: {"model_requests":1,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":2,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":10,"output":1,"responses":1}}
+        {"actions":[],"at_ns":"<ns>","event":{"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":147,"body_sha256":"fed2710eed841b4afdd6270de0fb0f6278f780cba05bf347520d81e9c2be87de","bytes":206,"dropped_headers":["user-agent"],"items":{"count":2,"field":"messages"}},"response":{"bytes":246},"upstream_api":"chat"},"kind":"model_answered","model":"m-translated","request":0,"upstream":"stand-in","upstream_status":200,"usage":{"input_tokens":10,"output_tokens":1}},"observed_ns":"<ns>","seq":3}
+        model request 0: 200 [("content-type", "application/json")] {"created_at":123,"error":null,"id":"c","incomplete_details":null,"model":"m-translated","object":"response","output":[{"content":[{"annotations":[],"text":"three","type":"output_text"}],"id":"msg_c","role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"status":"completed","store":false,"tool_choice":"auto","tools":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}
+        model exchange 0 kept: request {"messages":["sha256:1c095c4d80e8e5c574bef753e03c99cc07a0488cc6018d44118a7580b4dd52cd","sha256:268fb0caed75fc0dcdf556c49e034940780f13fd8a9b661b3c1e3b4cce11ece6"],"model":"vendor/m-translated","store":false}; response {"object":"chat.completion","id":"c","created":123,"model":"vendor/m-translated","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"three"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#]].assert_eq(&exchange.collect::<Vec<_>>().join("\n"));
 }
 
 // The route stays open through the grace after the finalize, until the agent's exit ends the
