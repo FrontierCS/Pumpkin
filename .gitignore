@@ -1,3 +1,4 @@
 /.pumpkin/
+/bin/
 target/
 /mutants.out*

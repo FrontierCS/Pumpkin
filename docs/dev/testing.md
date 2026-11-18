@@ -14,6 +14,9 @@ The rules for writing Pumpkin's tests and their snapshots.
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
   small one in the test; CHECK IN only data a third party wrote, such as a vendored suite
 - PREFER one integration test binary per crate; add modules, not files under `tests/`
+- RUN `cargo xtask install-tools` before running tests by any command, a plain `cargo test` or
+  `cargo nextest run` too: pumpkin's tests run the pinned formatter that it links at
+  `bin/buildifier`, which `.cargo/config.toml` names
 - ASSUME that each test runs alone, in a process of its own, as cargo-nextest runs it in
   `cargo xtask ci`: tests share no per-process state
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once
