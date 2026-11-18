@@ -48,8 +48,8 @@ fn check(folder: Folder, expect: &Expect) {
 }
 
 /// What the file at `path`, in `folder`, shows, under its path: how many of its prefixes
-/// evaluate, as the entry `text.star` loads `X` from it unless it is an entry itself; and then,
-/// if it is, its evaluation, as `Case::evaluate` gives it.
+/// evaluate, as the entry `text.star` loads `X` from it unless it is an entry itself, but for a
+/// library's; and then, if it is an entry, its evaluation, as `Case::evaluate` gives it.
 fn show(folder: Folder, path: &str, files: &BTreeMap<String, String>, args: &Args) -> String {
     let is_entry = path.ends_with("/task.star");
     let loads = format!("load(\"//{path}\", \"X\")");
@@ -67,9 +67,12 @@ fn show(folder: Folder, path: &str, files: &BTreeMap<String, String>, args: &Arg
     // of the tests' time.
     let swept = (path != "bad/stack/lib.star").then(|| {
         // Every eighth character, as a cut at each took 5 s of the tests' time.
-        let (evaluated, cuts) = case.prefixes(path, args, 8);
-        format!(": {evaluated} of {cuts} prefixes evaluate")
+        case.prefixes(path, args, 8)
     });
+    // No prefix of a library evaluates, as `text.star` calls no `workflow()`: the count shows only
+    // a change in the file's length.
+    let swept = (swept.filter(|_| folder != Folder::Lib))
+        .map(|(evaluated, cuts)| format!(": {evaluated} of {cuts} prefixes evaluate"));
     let evaluated = is_entry.then(|| case.evaluate(args));
     match (folder, &evaluated) {
         (Folder::Tasks, Some(Err(problems))) => {
@@ -578,16 +581,16 @@ fn lib() {
     check(
         Folder::Lib,
         &expect![[r#"
-            == lib/deep.star: 0 of 58 prefixes evaluate
+            == lib/deep.star
 
-            == lib/images.star: 0 of 630 prefixes evaluate
+            == lib/images.star
 
-            == lib/neutral.star: 0 of 734 prefixes evaluate
+            == lib/neutral.star
 
-            == lib/parts.star: 0 of 237 prefixes evaluate
+            == lib/parts.star
 
-            == lib/submit.star: 0 of 56 prefixes evaluate
+            == lib/submit.star
 
-            == lib/verify.star: 0 of 91 prefixes evaluate"#]],
+            == lib/verify.star"#]],
     );
 }

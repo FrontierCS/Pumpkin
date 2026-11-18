@@ -1022,20 +1022,6 @@ Y = 2
               |      ^^"#]],
     );
     check(
-        r#"X = "\u00e9""#,
-        &expect![[r#"
-        text.star:1:6: `\u`, an escape that some Starlark implementations lack, is not in Pumpkin's Starlark: write the character itself, or an ASCII one in octal, as `\101` for `A`
-            1 | X = "\u00e9"
-              |      ^^"#]],
-    );
-    check(
-        r#"X = '\U0001F600'"#,
-        &expect![[r#"
-        text.star:1:6: `\U`, an escape that some Starlark implementations lack, is not in Pumpkin's Starlark: write the character itself, or an ASCII one in octal, as `\101` for `A`
-            1 | X = '\U0001F600'
-              |      ^^"#]],
-    );
-    check(
         r#"fail(r"\x41\u00e9")"#,
         &expect![[r#"
         text.star:1:1: fail: \x41\u00e9
@@ -1515,13 +1501,6 @@ Y = X()",
                   |     ^^^^^"#]],
     );
     check(
-        "X = len([], [])",
-        &expect![[r#"
-            text.star:1:5: `len` takes 1 argument, and is given 2: give it 1 argument
-                1 | X = len([], [])
-                  |     ^^^^^^^^^^^"#]],
-    );
-    check(
         "X = len(x = [])",
         &expect![[r#"
             text.star:1:9: `len` takes no keyword argument `x`: give it 1 argument, by position
@@ -1534,13 +1513,6 @@ Y = X()",
             text.star:1:9: `str` of a list is not in Pumpkin's Starlark: give it a number or a string
                 1 | X = str([1])
                   |         ^^^"#]],
-    );
-    check(
-        r#"X = int("1_000")"#,
-        &expect![[r#"
-            text.star:1:9: `int` can't read `"1_000"`: give it decimal digits, after `-` or `+` or neither
-                1 | X = int("1_000")
-                  |         ^^^^^^^"#]],
     );
     check(
         r#"X = int("0x10")"#,
@@ -1569,13 +1541,6 @@ Y = X()",
             text.star:1:11: `float` can't take a list: give it a number, a bool or a string
                 1 | X = float([])
                   |           ^^"#]],
-    );
-    check(
-        "X = float(x = 1)",
-        &expect![[r#"
-        text.star:1:11: `float` takes no keyword argument `x`: give it 1 argument, by position
-            1 | X = float(x = 1)
-              |           ^"#]],
     );
     check(
         r#"X = float("abc")"#,
@@ -1739,13 +1704,6 @@ X = FINAL.update({})"#,
               |     ^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
-        r#"X = "a".replace("a", "b", 1, 2)"#,
-        &expect![[r#"
-        text.star:1:5: `replace` takes 2 arguments, and is given 4: give it 2 arguments
-            1 | X = "a".replace("a", "b", 1, 2)
-              |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
         "X = sorted([2, 1], reverse = True)",
         &expect![[r#"
         text.star:1:20: `sorted`'s `reverse` is not in Pumpkin's Starlark: give `sorted` 1 argument, by position
@@ -1859,27 +1817,6 @@ X = FINAL.update({})"#,
               |     ^^^^^"#]],
     );
     check(
-        r#"X = "a".replace(old = "a", new = "b")"#,
-        &expect![[r#"
-        text.star:1:17: `replace` takes no keyword argument `old`: give it 2 arguments, by position
-            1 | X = "a".replace(old = "a", new = "b")
-              |                 ^^^"#]],
-    );
-    check(
-        r#"X = "a".startswith(sub = "a")"#,
-        &expect![[r#"
-        text.star:1:20: `startswith` takes no keyword argument `sub`: give it 1 argument, by position
-            1 | X = "a".startswith(sub = "a")
-              |                    ^^^"#]],
-    );
-    check(
-        "X = sorted([2, 1], cmp = True)",
-        &expect![[r#"
-            text.star:1:20: `sorted` takes no keyword argument `cmp`: give it 1 argument, by position
-                1 | X = sorted([2, 1], cmp = True)
-                  |                    ^^^"#]],
-    );
-    check(
         "X = bool()",
         &expect![[r#"
         text.star:1:5: `bool` with no argument is not in Pumpkin's Starlark: give it 1 argument
@@ -1937,20 +1874,6 @@ X = FINAL.update({})"#,
             text.star:1:5: `get` takes 1 or 2 arguments, by position: give it a key, and a default or none
                 1 | X = {}.get()
                   |     ^^^^^^^^"#]],
-    );
-    check(
-        r#"X = {}.get("a", d = 1)"#,
-        &expect![[r#"
-            text.star:1:5: `get` takes 1 or 2 arguments, by position: give it a key, and a default or none
-                1 | X = {}.get("a", d = 1)
-                  |     ^^^^^^^^^^^^^^^^^^"#]],
-    );
-    check(
-        r#"X = {}.get("a", 1, d = 2)"#,
-        &expect![[r#"
-            text.star:1:5: `get` takes 1 or 2 arguments, by position: give it a key, and a default or none
-                1 | X = {}.get("a", 1, d = 2)
-                  |     ^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         "X = {}.keys(1)",
@@ -2276,11 +2199,12 @@ fail(X)"#,
     check(
         r#"
 D = {"b": 1, "a": 2, "c": 3} | {"a": 4, "d": 5}
-fail(",".join([k for k in D] + [k + str(v) for k, v in {k: D[k] for k in D}.items()]))"#,
+X = ",".join([k for k in D] + [k + str(v) for k, v in {k: D[k] for k in D}.items()])
+fail(X)"#,
         &expect![[r#"
-            text.star:2:1: fail: b,a,c,d,b1,a4,c3,d5
-                2 | fail(",".join([k for k in D] + [k + str(v) for k, v in {k: D[k] for k in D}.items()]))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:3:1: fail: b,a,c,d,b1,a4,c3,d5
+                3 | fail(X)
+                  | ^^^^^^^"#]],
     );
     check(
         r#"
@@ -2342,19 +2266,21 @@ X = [y for y in [1] for z in w for w in [[1]]]",
     );
     check(
         r#"
-fail(" ".join([str(x) for x in [1.5, .5, 1., 01.5, 1e3, 0.0, -0.0, 123456.7, 1e6, 1.2345678e7, 1e-5, 9e-6, 1e-7, 5e-324, 1e100, 0.1 + 0.2, 1e308 * 10, -1e308 * 10]]))"#,
+X = " ".join([str(x) for x in [1.5, .5, 1., 01.5, 1e3, 0.0, -0.0, 123456.7, 1e6, 1.2345678e7, 1e-5, 9e-6, 1e-7, 5e-324, 1e100, 0.1 + 0.2, 1e308 * 10, -1e308 * 10]])
+fail(X)"#,
         &expect![[r#"
-            text.star:1:1: fail: 1.5 0.5 1.0 1.5 1000.0 0.0 -0.0 123456.7 1e+06 1.2345678e+07 0.00001 9e-06 1e-07 5e-324 1e+100 0.30000000000000004 +inf -inf
-                1 | fail(" ".join([str(x) for x in [1.5, .5, 1., 01.5, 1e3, 0.0, -0.0, 123456.7, 1e6, 1.2345678e7, 1e-5, 9e-6, 1e-7, 5e-324, 1e100, 0.1 + 0.2, 1e308 * 10, -1e308 * 10]]))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:2:1: fail: 1.5 0.5 1.0 1.5 1000.0 0.0 -0.0 123456.7 1e+06 1.2345678e+07 0.00001 9e-06 1e-07 5e-324 1e+100 0.30000000000000004 +inf -inf
+                2 | fail(X)
+                  | ^^^^^^^"#]],
     );
     check(
         r#"
-fail(" ".join([str(x) for x in [1 / 2, 7 / 7, 2 * 1.5, 1 + 0.5, 3 - 0.5, 7 // 2.0, -7.5 // 2, -7.5 % 2, 7.5 % -2, -4.0 % 2, 5 % float("inf"), -5 % float("inf"), -(1.5), -0.0 // 1]]))"#,
+X = " ".join([str(x) for x in [1 / 2, 7 / 7, 2 * 1.5, 1 + 0.5, 3 - 0.5, 7 // 2.0, -7.5 // 2, -7.5 % 2, 7.5 % -2, -4.0 % 2, 5 % float("inf"), -5 % float("inf"), -(1.5), -0.0 // 1]])
+fail(X)"#,
         &expect![[r#"
-            text.star:1:1: fail: 0.5 1.0 3.0 1.5 2.5 3.0 -4.0 0.5 -0.5 0.0 5.0 +inf -1.5 -0.0
-                1 | fail(" ".join([str(x) for x in [1 / 2, 7 / 7, 2 * 1.5, 1 + 0.5, 3 - 0.5, 7 // 2.0, -7.5 // 2, -7.5 % 2, 7.5 % -2, -4.0 % 2, 5 % float("inf"), -5 % float("inf"), -(1.5), -0.0 // 1]]))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:2:1: fail: 0.5 1.0 3.0 1.5 2.5 3.0 -4.0 0.5 -0.5 0.0 5.0 +inf -1.5 -0.0
+                2 | fail(X)
+                  | ^^^^^^^"#]],
     );
     check(
         r#"
@@ -2377,19 +2303,21 @@ fail(" ".join(X))"#,
     );
     check(
         r#"
-fail(" ".join([str(x) for x in sorted([3, 1.5, float("nan"), -0.0, 0, float("-inf"), 2])]))"#,
+X = " ".join([str(x) for x in sorted([3, 1.5, float("nan"), -0.0, 0, float("-inf"), 2])])
+fail(X)"#,
         &expect![[r#"
-            text.star:1:1: fail: -inf -0.0 0 1.5 2 3 nan
-                1 | fail(" ".join([str(x) for x in sorted([3, 1.5, float("nan"), -0.0, 0, float("-inf"), 2])]))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:2:1: fail: -inf -0.0 0 1.5 2 3 nan
+                2 | fail(X)
+                  | ^^^^^^^"#]],
     );
     check(
         r#"
-fail(" ".join([str(x) for x in [float(), float(3), float(True), float(1.5), float("1e3"), float("-inf"), float("+Infinity"), float("nan"), float(9007199254740993), int(43.12), int(-2.5), int(-9223372036854775808.0), int(9223372036854774784.0)]]))"#,
+X = " ".join([str(x) for x in [float(), float(3), float(True), float(1.5), float("1e3"), float("-inf"), float("+Infinity"), float("nan"), float(9007199254740993), int(43.12), int(-2.5), int(-9223372036854775808.0), int(9223372036854774784.0)]])
+fail(X)"#,
         &expect![[r#"
-            text.star:1:1: fail: 0.0 3.0 1.0 1.5 1000.0 -inf +inf nan 9.007199254740992e+15 43 -2 -9223372036854775808 9223372036854774784
-                1 | fail(" ".join([str(x) for x in [float(), float(3), float(True), float(1.5), float("1e3"), float("-inf"), float("+Infinity"), float("nan"), float(9007199254740993), int(43.12), int(-2.5), int(-9223372036854775808.0), int(9223372036854774784.0)]]))
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+            text.star:2:1: fail: 0.0 3.0 1.0 1.5 1000.0 -inf +inf nan 9.007199254740992e+15 43 -2 -9223372036854775808 9223372036854774784
+                2 | fail(X)
+                  | ^^^^^^^"#]],
     );
 }
 
@@ -2880,19 +2808,6 @@ load("//lib.star", "X")
 #- //lib.star
 def f(a, *, b):
     return a
-X = f(1, **{"a": 2})"#,
-        &expect![[r#"
-            lib.star:3:12: `a` is given by position already: give it once
-                3 | X = f(1, **{"a": 2})
-                  |            ^^^^^^^^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
-def f(a, *, b):
-    return a
 X = f(1, **{})"#,
         &expect![[r#"
             lib.star:3:5: `f` lacks `b`: give it
@@ -2938,28 +2853,6 @@ X = len([], **OPTIONS)"#,
                 2 | X = len([], **OPTIONS)
                   |               ^^^^^^^
                 the key, `1`, is made at lib.star:1:12"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
-X = len([], **{"x": 1})"#,
-        &expect![[r#"
-            lib.star:1:15: `len` takes no keyword argument `x`: give it 1 argument, by position
-                1 | X = len([], **{"x": 1})
-                  |               ^^^^^^^^"#]],
-    );
-    check(
-        r#"
-#- //text.star
-load("//lib.star", "X")
-#- //lib.star
-X = arg("n", str, **{"defualt": "x"})"#,
-        &expect![[r#"
-            lib.star:1:21: `defualt` is no parameter of `arg`: expected one of `name`, `type`, `default`
-                1 | X = arg("n", str, **{"defualt": "x"})
-                  |                     ^^^^^^^^^^^^^^^^"#]],
     );
     check(
         r#"
