@@ -64,6 +64,7 @@ pub(crate) trait Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
+    Follow { id: String, log_from_bytes: u64 },
     Health(HealthRequest),
     Jobs(JobsRequest),
     List(ListRequest),
@@ -114,6 +115,19 @@ impl Ask {
         }
         Ok(body)
     }
+}
+
+/// A job's log in frame bodies, milestones, then its ending. A built IR follows its head in
+/// body parts, so the client can print it whole even after a cut.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Followed {
+    Logged,
+    Said { body_bytes: u64 },
+    Ran { writer: Option<String> },
+    Unstarted,
+    Built { body_bytes: u64 },
+    Unbuilt,
 }
 
 /// The head of an answer, or of a refusal.
@@ -444,7 +458,7 @@ pub(crate) struct Viewed {
 
 /// The message of each frame of an answer's body: the frame's body is the next part of it.
 #[derive(Serialize, Deserialize)]
-struct Part;
+pub(crate) struct Part;
 
 /// Writes the answer to `request` that `answering` gives, or the refusal of the message it
 /// returns.
@@ -461,6 +475,10 @@ pub(crate) fn answer<R: Request>(
         Err(message) => (Head::Refused { message }, Vec::new()),
     };
     frame::write(output, &head, &[])?;
+    write_parts(output, &body)
+}
+
+pub(crate) fn write_parts(output: &mut impl Write, body: &[u8]) -> io::Result<()> {
     for part in body.chunks(MAX_BODY_BYTES) {
         frame::write(output, &Part, part)?;
     }
@@ -591,10 +609,7 @@ impl Link {
                 ));
             }
             frame::write(&mut self.stdin, ask, &[])?;
-            for part in body.chunks(MAX_BODY_BYTES) {
-                frame::write(&mut self.stdin, &Part, part)?;
-            }
-            Ok(())
+            write_parts(&mut self.stdin, body)
         };
         write().map_err(|error| match error.kind() {
             io::ErrorKind::BrokenPipe => {
@@ -617,8 +632,20 @@ impl Link {
         }
     }
 
+    /// The next frame of a streamed answer, or the peer's refusal at that point.
+    pub(crate) fn item<H: DeserializeOwned>(
+        &mut self,
+    ) -> Result<Result<(H, Vec<u8>), String>, Unanswered> {
+        let (head, body) = self.read("the answer")?;
+        match head {
+            Head::Answered(item) => Ok(Ok((item, body))),
+            Head::Refused { message } if body.is_empty() => Ok(Err(message)),
+            Head::Refused { .. } => Err(Unanswered::Failed("a refusal has a body".to_owned())),
+        }
+    }
+
     /// The body of an answer whose head gives it as of `body_bytes`.
-    fn body(&mut self, body_bytes: u64) -> Result<Vec<u8>, Unanswered> {
+    pub(crate) fn body(&mut self, body_bytes: u64) -> Result<Vec<u8>, Unanswered> {
         if body_bytes > MAX_ANSWER_BODY_BYTES {
             return Err(Unanswered::Failed(format!(
                 "its answer's body is of {body_bytes} bytes: expected {} MiB at most",

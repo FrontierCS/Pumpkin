@@ -73,7 +73,7 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
                 // Whether the run is still live by now depends on how fast it went, which tells
                 // the operator nothing: `run` follows the run it started however soon it ends.
                 following(&record, "run");
-                let ending = followed(&record, reader)?;
+                let ending = followed(&record)?;
                 return end(&record, &ending, printed, named, record.args());
             }
             if reader == Reader::Operator {

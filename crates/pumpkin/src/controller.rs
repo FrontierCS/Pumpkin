@@ -22,6 +22,7 @@
 mod aws;
 mod commands;
 mod copy;
+mod follow;
 mod linking;
 mod listing;
 mod send;
@@ -29,7 +30,7 @@ mod viewing;
 
 use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, TryLockError};
-use std::io::{self, BufRead as _, Write as _};
+use std::io::{self, Write as _};
 use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
@@ -905,36 +906,6 @@ impl Reached {
             status,
             master: ssh.slot.master,
         })
-    }
-
-    /// Runs `script` and hands `line` each complete line of its standard output as it arrives.
-    /// Returns how it ended, and what it wrote after its last newline.
-    fn relayed(
-        &self,
-        script: &str,
-        mut line: impl FnMut(&[u8]),
-    ) -> Result<(Attached, Vec<u8>), String> {
-        let mut ssh = self.ssh(script)?;
-        let child = ssh.stdout(Stdio::piped()).spawn();
-        let mut child = child.context("running `ssh` failed")?;
-        let Some(stdout) = child.stdout.take() else {
-            unreachable!("the child's standard output is missing, though it is piped just above")
-        };
-        let mut stdout = io::BufReader::new(stdout);
-        let mut read = Vec::new();
-        let relayed = loop {
-            read.clear();
-            match stdout.read_until(b'\n', &mut read) {
-                Ok(_) if read.ends_with(b"\n") => line(&read),
-                Ok(_) => break Ok(()),
-                Err(error) => break Err(error),
-            }
-        };
-        drop(stdout);
-        let status = child.wait().context("running `ssh` failed")?;
-        relayed.context("reading from `ssh` failed")?;
-        let master = ssh.slot.master;
-        Ok((Attached { status, master }, read))
     }
 
     /// The exit code of what `attached` ran. `ssh`'s own failure, or its end by a signal, is an
