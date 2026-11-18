@@ -503,11 +503,11 @@ def train_call(target, payload):
         r#"
 #- //lib/verify.star
 def train_call(target, payload):
-    return target.pt("/pumpkin/in/payload", payload)
+    return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
             lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
-                2 |     return target.pt("/pumpkin/in/payload", payload)
+                2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5
                 in `train_call()`, called at lib/verify.star:1:5"#]],
