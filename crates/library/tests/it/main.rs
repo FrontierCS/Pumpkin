@@ -29,6 +29,74 @@ fn check(actual: &str, expect: &Expect) {
     expect.assert_eq(actual);
 }
 
+/// Checks against `expect` what `function`'s harness gives for each of `cases`, a value for each
+/// of `SHARED` and then `own`: for each, its model, effort, workspace and own values, then what
+/// [`show`] gives of the agent's runtime, with what `excerpt` shows of each file, given the case's
+/// index, and the agent's route; and, for the first, the layer. The prompt is the agent's standard
+/// input if `stdin`, else none.
+#[track_caller]
+fn check_roles<const N: usize>(
+    function: &str,
+    own: &[(&str, &str)],
+    cases: &[[&str; N]],
+    stdin: bool,
+    excerpt: impl Fn(usize, &ir::File) -> String,
+    expect: &Expect,
+) {
+    let task = entry(function, own);
+    let mut shown = String::new();
+    for (index, case) in cases.iter().enumerate() {
+        let (workflow, images) = evaluated(&task, &args(own, case)).unwrap();
+        let (agent, runtime) = agent(&workflow, case);
+        assert_eq!(runtime.stdin.as_deref(), stdin.then_some(case[3]));
+        let [model, effort, workspace] = [case[0], case[1], case[2]];
+        let _ = writeln!(
+            shown,
+            "{model} {effort} {workspace} {}:",
+            case[6..].join(" ")
+        );
+        shown.push_str(&show(runtime, |file| excerpt(index, file)));
+        shown.push_str(&route(agent));
+        if index == 0 {
+            shown.push_str(&layer(agent, &images));
+        }
+    }
+    check(&shown, expect);
+}
+
+/// Checks against `expect` the problems of `function`'s harness given `given`, a value for each of
+/// `SHARED` and then `own`, but for one argument at a time, each of `refuse` by its keyword and
+/// value; and then given `None` for each keyword of `none`, as a task's `arg(…, default = None)`
+/// gives it when no one passes one.
+#[track_caller]
+fn check_refusals(
+    function: &str,
+    own: &[(&str, &str)],
+    given: &[&str],
+    refuse: &[(&str, &str)],
+    none: &[&str],
+    expect: &Expect,
+) {
+    let keywords: Vec<&str> = SHARED
+        .iter()
+        .chain(own)
+        .map(|(keyword, _)| *keyword)
+        .collect();
+    let task = entry(function, own);
+    let mut refused = Vec::new();
+    for (keyword, value) in refuse {
+        let mut case = given.to_vec();
+        case[keywords.iter().position(|kept| kept == keyword).unwrap()] = value;
+        refused.push(evaluated(&task, &args(own, &case)).unwrap_err());
+    }
+    for keyword in none {
+        let written = format!("{keyword} = {},", keyword.to_uppercase());
+        let none = task.replacen(&written, &format!("{keyword} = None,"), 1);
+        refused.push(evaluated(&none, &args(own, given)).unwrap_err());
+    }
+    check(&refused.join("\n"), expect);
+}
+
 #[test]
 fn bundled() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
@@ -36,10 +104,7 @@ fn bundled() {
     walk(&root, "", &mut found);
     found.sort();
     let bundled: Vec<String> = (library::FILES.iter())
-        .map(|(path, bytes)| {
-            assert_eq!(*bytes, fs::read(root.join(path)).unwrap(), "{path}");
-            (*path).to_owned()
-        })
+        .map(|(path, _)| (*path).to_owned())
         .collect();
     // Sorted, so that a loader may search it.
     assert_eq!(

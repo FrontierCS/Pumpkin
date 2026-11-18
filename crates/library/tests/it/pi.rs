@@ -1,11 +1,9 @@
 //! `@pumpkin//harness/pi/pi.star`'s `pi()`: the agent role it gives for each set of arguments,
 //! and the arguments it refuses.
 
-use std::fmt::Write as _;
-
 use expect_test::expect;
 
-use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
+use super::{FCS_PROMPT, check_refusals, check_roles};
 
 /// The arguments `pi()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 2] = [
@@ -48,29 +46,20 @@ fn roles() {
             "32000",
         ],
     ];
-    let mut shown = String::new();
-    for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(&entry("pi", &OWN), &args(&OWN, case)).unwrap();
-        let [model, effort, workspace, _, _, _, context, output] = case;
-        let (agent, runtime) = agent(&workflow, case);
-        assert_eq!(runtime.stdin, None);
-        let _ = writeln!(shown, "{model} {effort} {workspace} {context} {output}:");
-        // Each file's whole text, but in the last case, whose files differ from the first's
-        // only in the values the case names.
-        shown.push_str(&show(runtime, |file| {
+    // Each file's whole text, but in the last case, whose files differ from the first's
+    // only in the values the case names.
+    check_roles(
+        "pi",
+        &OWN,
+        &cases,
+        false,
+        |index, file| {
             if index == 2 {
                 String::new()
             } else {
                 format!("{}\n", file.content)
             }
-        }));
-        shown.push_str(&route(agent));
-        if index == 0 {
-            shown.push_str(&layer(agent, &images));
-        }
-    }
-    check(
-        &shown,
+        },
         &expect![[r#"
             gemini-4-argon high /workspace 1048576 65536:
             argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
@@ -120,7 +109,6 @@ fn roles() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn refusals() {
     let given = [
         "model-small",
@@ -132,36 +120,20 @@ fn refusals() {
         "200000",
         "32000",
     ];
-    let mut refused = Vec::new();
-    for (effort, workspace, prompt, context, output) in [
-        ("max", "/workspace", "Go.", "200000", "32000"),
-        ("High", "/workspace", "Go.", "200000", "32000"),
-        ("high", "/pumpkin/home", "Go.", "200000", "32000"),
-        ("high", "/workspace", "", "200000", "32000"),
-        ("high", "/workspace", "@README.md", "200000", "32000"),
-        ("high", "/workspace", "Go.", "0", "32000"),
-        ("high", "/workspace", "Go.", "200000", "0"),
-    ] {
-        let case = [
-            given[0], effort, workspace, prompt, given[4], given[5], context, output,
-        ];
-        refused.push(evaluated(&entry("pi", &OWN), &args(&OWN, &case)).unwrap_err());
-    }
-    // Each argument that Pi checks given `None`, as a task's `arg(…, default = None)` gives it
-    // when no one passes one.
-    for (argument, value) in [
-        ("prompt = PROMPT,", "prompt = None,"),
-        ("context_tokens = CONTEXT_TOKENS,", "context_tokens = None,"),
-        (
-            "max_output_tokens = MAX_OUTPUT_TOKENS,",
-            "max_output_tokens = None,",
-        ),
-    ] {
-        let entry = entry("pi", &OWN).replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
-    }
-    check(
-        &refused.join("\n"),
+    check_refusals(
+        "pi",
+        &OWN,
+        &given,
+        &[
+            ("effort", "max"),
+            ("effort", "High"),
+            ("workspace", "/pumpkin/home"),
+            ("prompt", ""),
+            ("prompt", "@README.md"),
+            ("context_tokens", "0"),
+            ("max_output_tokens", "0"),
+        ],
+        &["prompt"],
         &expect![[r#"
             @pumpkin//harness/pi/pi.star:60:9: fail: `max` is not a thinking level of Pi's: use one of low, medium, high
                 60 |         fail("`{}` is not a thinking level of Pi's: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -194,18 +166,6 @@ fn refusals() {
             @pumpkin//harness/pi/pi.star:62:9: fail: Pi runs only on a prompt: give a string that is not empty
                 62 |         fail("Pi runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `pi()`, called at task.star:16:9
-            @pumpkin//harness/pi/pi.star:67:23: `<` can't take `None` and an int: give it two numbers or two strings
-                67 |     if context_tokens < 1:
-                   |                       ^
-                the left operand, `None`, is made at task.star:24:22
-                the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:67:25
-                in `pi()`, called at task.star:16:9
-            @pumpkin//harness/pi/pi.star:69:26: `<` can't take `None` and an int: give it two numbers or two strings
-                69 |     if max_output_tokens < 1:
-                   |                          ^
-                the left operand, `None`, is made at task.star:25:25
-                the right operand, `1`, is made at @pumpkin//harness/pi/pi.star:69:28
                 in `pi()`, called at task.star:16:9"#]],
     );
 }

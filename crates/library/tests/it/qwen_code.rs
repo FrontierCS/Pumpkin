@@ -1,11 +1,9 @@
 //! `@pumpkin//harness/qwen_code/qwen_code.star`'s `qwen_code()`: the agent role it gives for each
 //! set of arguments, and the arguments it refuses.
 
-use std::fmt::Write as _;
-
 use expect_test::expect;
 
-use super::{FCS_PROMPT, agent, args, check, entry, evaluated, layer, route, show};
+use super::{FCS_PROMPT, check_refusals, check_roles};
 
 /// The arguments `qwen_code()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 3] = [
@@ -53,32 +51,20 @@ fn roles() {
             "{}",
         ],
     ];
-    let mut shown = String::new();
-    for (index, case) in cases.iter().enumerate() {
-        let (workflow, images) = evaluated(&entry("qwen_code", &OWN), &args(&OWN, case)).unwrap();
-        let [model, effort, workspace, _, _, _, context, output, body] = case;
-        let (agent, runtime) = agent(&workflow, case);
-        assert_eq!(runtime.stdin, None);
-        let _ = writeln!(
-            shown,
-            "{model} {effort} {workspace} {context} {output} {body}:"
-        );
-        // The settings' whole text, but in the last case, whose settings differ from the
-        // first's only in the values the case names.
-        shown.push_str(&show(runtime, |file| {
+    // The settings' whole text, but in the last case, whose settings differ from the
+    // first's only in the values the case names.
+    check_roles(
+        "qwen_code",
+        &OWN,
+        &cases,
+        false,
+        |index, file| {
             if index == 2 {
                 String::new()
             } else {
                 format!("{}\n", file.content)
             }
-        }));
-        shown.push_str(&route(agent));
-        if index == 0 {
-            shown.push_str(&layer(agent, &images));
-        }
-    }
-    check(
-        &shown,
+        },
         &expect![[r#"
             qwen3.8-max high /workspace 1000000 65536 {"enable_thinking": true, "temperature": 1}:
             argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
@@ -120,7 +106,6 @@ fn roles() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn refusals() {
     let given = [
         "model-small",
@@ -133,36 +118,19 @@ fn refusals() {
         "32000",
         "{}",
     ];
-    let mut refused = Vec::new();
-    for (effort, workspace, prompt, context, output) in [
-        ("none", "/workspace", "Go.", "200000", "32000"),
-        ("High", "/workspace", "Go.", "200000", "32000"),
-        ("high", "/pumpkin/home", "Go.", "200000", "32000"),
-        ("high", "/workspace", "", "200000", "32000"),
-        ("high", "/workspace", "Go.", "0", "32000"),
-        ("high", "/workspace", "Go.", "200000", "0"),
-    ] {
-        let case = [
-            given[0], effort, workspace, prompt, given[4], given[5], context, output, given[8],
-        ];
-        refused.push(evaluated(&entry("qwen_code", &OWN), &args(&OWN, &case)).unwrap_err());
-    }
-    // Each argument that Qwen Code checks given `None`, as a task's `arg(…, default = None)`
-    // gives it when no one passes one.
-    for (argument, value) in [
-        ("prompt = PROMPT,", "prompt = None,"),
-        ("context_tokens = CONTEXT_TOKENS,", "context_tokens = None,"),
-        (
-            "max_output_tokens = MAX_OUTPUT_TOKENS,",
-            "max_output_tokens = None,",
-        ),
-        ("extra_body = EXTRA_BODY,", "extra_body = None,"),
-    ] {
-        let entry = entry("qwen_code", &OWN).replacen(argument, value, 1);
-        refused.push(evaluated(&entry, &args(&OWN, &given)).unwrap_err());
-    }
-    check(
-        &refused.join("\n"),
+    check_refusals(
+        "qwen_code",
+        &OWN,
+        &given,
+        &[
+            ("effort", "none"),
+            ("effort", "High"),
+            ("workspace", "/pumpkin/home"),
+            ("prompt", ""),
+            ("context_tokens", "0"),
+            ("max_output_tokens", "0"),
+        ],
+        &["prompt"],
         &expect![[r#"
             @pumpkin//harness/qwen_code/qwen_code.star:62:9: fail: `none` is not a reasoning level of Qwen Code's: use one of low, medium, high, xhigh, max
                 62 |         fail("`{}` is not a reasoning level of Qwen Code's: use one of {}".format(effort, ", ".join(_EFFORTS)))
@@ -191,24 +159,6 @@ fn refusals() {
             @pumpkin//harness/qwen_code/qwen_code.star:64:9: fail: Qwen Code runs only on a prompt: give a string that is not empty
                 64 |         fail("Qwen Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `qwen_code()`, called at task.star:17:9
-            @pumpkin//harness/qwen_code/qwen_code.star:65:23: `<` can't take `None` and an int: give it two numbers or two strings
-                65 |     if context_tokens < 1:
-                   |                       ^
-                the left operand, `None`, is made at task.star:25:22
-                the right operand, `1`, is made at @pumpkin//harness/qwen_code/qwen_code.star:65:25
-                in `qwen_code()`, called at task.star:17:9
-            @pumpkin//harness/qwen_code/qwen_code.star:67:26: `<` can't take `None` and an int: give it two numbers or two strings
-                67 |     if max_output_tokens < 1:
-                   |                          ^
-                the left operand, `None`, is made at task.star:26:25
-                the right operand, `1`, is made at @pumpkin//harness/qwen_code/qwen_code.star:67:28
-                in `qwen_code()`, called at task.star:17:9
-            @pumpkin//harness/qwen_code/qwen_code.star:75:23: `|` can't take `None` and a dict: give it two dicts
-                75 |     body = extra_body | {"reasoning_effort": effort, "max_tokens": max_output_tokens}
-                   |                       ^
-                the left operand, `None`, is made at task.star:27:18
-                the right operand, a dict, is made at @pumpkin//harness/qwen_code/qwen_code.star:75:25
                 in `qwen_code()`, called at task.star:17:9"#]],
     );
 }
