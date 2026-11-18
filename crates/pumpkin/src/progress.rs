@@ -40,11 +40,10 @@ const PAST_BOUND_SLACK: Duration = Duration::from_mins(1);
 /// how the runs of the last day ended, are what a person asks it for.
 const LISTED_FOR: Duration = Duration::from_hours(24);
 
-/// The time since the epoch before which an ended run isn't listed: none, if `prefixes` name runs.
-pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<Duration> {
-    prefixes
-        .is_empty()
-        .then(|| now.since_epoch().saturating_sub(LISTED_FOR))
+/// The time before which an ended run isn't listed: none, if `prefixes` name runs.
+pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<UnixTime> {
+    let since = || UnixTime::after_epoch(now.since_epoch().saturating_sub(LISTED_FOR));
+    prefixes.is_empty().then(since)
 }
 
 /// The runs that `ls` lists, by id.

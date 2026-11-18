@@ -47,7 +47,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let _listing = reached.shared.listing(&reached.name)?;
     let (mut listing, mut unlisted) = listed_here(&kept, prefixes, since, now)?;
     let held = holding(&listing, &live)?;
-    let since = since.map_or(0, |since| since.as_secs());
+    let since = since.map_or(0, |since| since.since_epoch().as_secs());
     let printed = listed_there(&reached, prefixes, since, &held)?;
     let scratch = scratch()?;
     let sent = scratch.path().join("runs");
@@ -106,7 +106,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     // As of when the controller began the listing, which is when it read what each run does.
     let lines = crate::progress::lines(&listing, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
-    said_when(now.since_epoch());
+    said_when(now);
     if unlisted > 0 {
         return Err("a run can't be listed, as said above".to_owned());
     }
@@ -117,7 +117,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 fn listed_here(
     kept: &Path,
     prefixes: &[String],
-    since: Option<Duration>,
+    since: Option<UnixTime>,
     now: UnixTime,
 ) -> Result<(crate::progress::Listing, usize), String> {
     let runs = PathBuf::from(crate::default_runs()?);
@@ -129,12 +129,12 @@ fn listed_here(
     Ok((listing, unlisted + ended_unlisted))
 }
 
-fn said_when(began: Duration) {
-    let took = crate::unix_now().since_epoch().saturating_sub(began);
+fn said_when(began: UnixTime) {
+    let took = crate::unix_now().since(began);
     if took < STALE {
         return;
     }
-    let began_at = crate::utc(began).strftime("%H:%M:%S");
+    let began_at = crate::utc(began.since_epoch()).strftime("%H:%M:%S");
     say(format_args!(
         "the runs are listed as they were at {began_at} UTC, {} ago, as \
          the listing took that long to arrive",

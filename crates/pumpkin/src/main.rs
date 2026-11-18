@@ -212,8 +212,10 @@ fn utc(since_epoch: std::time::Duration) -> jiff::Timestamp {
     at.unwrap_or(jiff::Timestamp::MAX)
 }
 
+const EPOCH: UnixTime = UnixTime::after_epoch(std::time::Duration::ZERO);
+
 fn unix_now() -> UnixTime {
-    UnixTime::of(SystemTime::now()).unwrap_or(UnixTime::after_epoch(std::time::Duration::ZERO))
+    UnixTime::of(SystemTime::now()).unwrap_or(EPOCH)
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
@@ -223,7 +225,7 @@ fn unix_now() -> UnixTime {
 fn listed_in(
     runs: &Path,
     prefixes: &[String],
-    since: Option<std::time::Duration>,
+    since: Option<UnixTime>,
     now: UnixTime,
     named: Option<&str>,
 ) -> Result<(progress::Listing, usize), String> {
@@ -262,13 +264,11 @@ fn listed_in(
     Ok((listing, unlisted))
 }
 
-fn ended(dir: &Path) -> Result<Option<std::time::Duration>, String> {
+fn ended(dir: &Path) -> Result<Option<UnixTime>, String> {
     let outcome = dir.join("outcome.json");
     let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
     match modified {
-        Ok(modified) => Ok(Some(
-            (modified.duration_since(SystemTime::UNIX_EPOCH)).unwrap_or_default(),
-        )),
+        Ok(modified) => Ok(Some(UnixTime::of(modified).unwrap_or(EPOCH))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", outcome.display())),
     }
