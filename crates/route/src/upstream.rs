@@ -328,8 +328,7 @@ impl Upstream {
                 return Err(error);
             }
         };
-        let content_type = (response.headers().get("content-type")).and_then(|v| v.to_str().ok());
-        let mut scan = closed.scan(content_type);
+        let mut scan = closed.scan();
         let mut body = response.into_body().into_reader();
         let relayed = relay(&mut body, &mut client, &mut scan, keep);
         let (usage, failed) = scan.finish();
