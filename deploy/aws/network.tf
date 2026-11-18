@@ -49,10 +49,12 @@ resource "aws_vpc_security_group_ingress_rule" "controller_gateway" {
   referenced_security_group_id = aws_security_group.sandbox.id
 }
 
+# Its description has no apostrophe, which EC2 refuses in a rule's description and a plan doesn't
+# check.
 resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
   for_each          = toset(var.ssh_from)
   security_group_id = aws_security_group.controller.id
-  description       = "ssh from the person's machine"
+  description       = "ssh from the machines that ssh_from names"
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22
