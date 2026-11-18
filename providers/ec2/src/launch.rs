@@ -10,7 +10,9 @@ use std::{fmt, process, thread};
 use aws::Bound;
 use engine::confinement;
 use jiff::Timestamp;
-use provider::{Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, UnixTime};
+use provider::{
+    Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, Undeleted, UnixTime,
+};
 use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
 use schema::ir::Name;
 use schema::sandbox::TcpDial;
@@ -297,7 +299,7 @@ impl Sweep for Reached {
         Ok(listed.collect())
     }
 
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         // An id that isn't an instance's names none, and the filter takes only IDs.
         let asked = ids
             .iter()
@@ -311,7 +313,14 @@ impl Sweep for Reached {
             shown(&asked)
         );
         // By ID alone, so that another run's instance is found, and left, by its tag.
-        let found = (self.described(&[ids_filter(&asked)], Bound::Call)).context(unfound)?;
+        let found = (self.described(&[ids_filter(&asked)], Bound::Call)).context(unfound);
+        let found = match found {
+            Ok(found) => found,
+            Err(why) => {
+                let failed = asked.iter().map(|id| (id.sandbox(), why.clone()));
+                return Undeleted::of(failed.collect());
+            }
+        };
         let (mut ending, mut failures) = (BTreeSet::new(), Vec::new());
         // The instances whose timers are deleted: each terminated, and each that EC2 no longer
         // describes, which counts as deleted, as EC2 describes an instance only for a short while
@@ -330,10 +339,13 @@ impl Sweep for Reached {
                 State::Terminated => {
                     ended.insert(id);
                 }
-                _ if !found.is_of(run) => failures.push(format!(
-                    "instance `{id}` is no sandbox of run `{}`, so it was left: name only the \
-                     run's own, which its list finds",
-                    run.as_str()
+                _ if !found.is_of(run) => failures.push((
+                    id.sandbox(),
+                    format!(
+                        "instance `{id}` is no sandbox of run `{}`, so it was left: name only the \
+                         run's own, which its list finds",
+                        run.as_str()
+                    ),
                 )),
                 State::ShuttingDown => {
                     ending.insert(id);
@@ -346,22 +358,24 @@ impl Sweep for Reached {
                         Ok(()) => {
                             ending.insert(id);
                         }
-                        Err(left) => failures.push(left),
+                        Err(left) => failures.push((id.sandbox(), left)),
                     }
                 }
             }
         }
         match self.terminated(ending.clone()) {
             Ok(()) => ended.extend(ending),
-            Err(error) => failures.push(error),
+            Err((left, why)) => {
+                failures.extend(left.iter().map(|id| (id.sandbox(), why.clone())));
+                ended.extend(ending.difference(&left));
+            }
         }
-        let untimed = ended.into_iter().map(|id| self.unset_timer(run, id));
+        let untimed = ended.into_iter().map(|id| {
+            let unset = self.unset_timer(run, id);
+            unset.map_err(|why| (id.sandbox(), why))
+        });
         failures.extend(untimed.filter_map(Result::err));
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        Undeleted::of(failures)
     }
 }
 
@@ -383,12 +397,20 @@ impl Reached {
         ))
     }
 
-    fn terminated(&self, mut ids: BTreeSet<&InstanceId>) -> Result<(), String> {
+    // Fails with the ids it still waits on, each of which may still run.
+    fn terminated<'i>(
+        &self,
+        mut ids: BTreeSet<&'i InstanceId>,
+    ) -> Result<(), (BTreeSet<&'i InstanceId>, String)> {
         let by = Deadline::after(TERMINATED_TIMEOUT);
         while !ids.is_empty() {
             let waiting = format_args!("waiting for {} to be terminated failed", shown(&ids));
-            let found = (self.described(&[ids_filter(ids.iter().copied())], Bound::Call))
-                .context(waiting)?;
+            let found =
+                (self.described(&[ids_filter(ids.iter().copied())], Bound::Call)).context(waiting);
+            let found = match found {
+                Ok(found) => found,
+                Err(why) => return Err((ids, why)),
+            };
             let unterminated: BTreeSet<&InstanceId> = (found.iter())
                 .filter(|found| !matches!(found.state.name, State::Terminated))
                 .map(|found| &found.instance_id)
@@ -400,12 +422,13 @@ impl Reached {
                 break;
             }
             let Some(left) = by.remaining() else {
-                return Err(format!(
+                let why = format!(
                     "EC2 didn't describe {} as terminated within {} s of the delete's \
                      terminations: expected it to end each by then, and each may still run",
                     shown(&ids),
                     TERMINATED_TIMEOUT.as_secs()
-                ));
+                );
+                return Err((ids, why));
             };
             thread::sleep(left.min(DESCRIBE_EVERY));
         }
@@ -486,6 +509,12 @@ impl TryFrom<String> for InstanceId {
             ));
         }
         Ok(Self(id))
+    }
+}
+
+impl InstanceId {
+    fn sandbox(&self) -> SandboxId {
+        SandboxId::from(self.0.clone())
     }
 }
 
