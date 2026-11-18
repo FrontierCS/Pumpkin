@@ -3,11 +3,11 @@
 //!
 //! What they read and write lies below the controller user's home: the store of the files that
 //! clients sent, each named by its SHA-256, as `crate::manifest` lays it out; each job's tree,
-//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each
-//! build's in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and
-//! its unit's standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that
-//! every tree's `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs'
-//! records and the build slots; and `current-pumpkin`, the `pumpkin` that the last job ran.
+//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each build's
+//! in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and its unit's
+//! standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that every tree's
+//! `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs' records, the build
+//! slots and `serve`'s installs; and `current-pumpkin`, the `pumpkin` that the last job ran.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
@@ -107,7 +107,7 @@ const STORE_KEPT: Duration = Duration::from_hours(24);
 
 // The path on the controller's one volume, which holds the engine's images and build cache, the
 // store, the trees and the records, as `deploy/aws` makes it.
-const VOLUME: &str = "/";
+pub(crate) const VOLUME: &str = "/";
 
 // The bound of `df`, which reads only the volume's counters.
 const DF_TIMEOUT: Duration = Duration::from_secs(10);
@@ -324,7 +324,7 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.
-fn jobs() -> Result<PathBuf, String> {
+pub(crate) fn jobs() -> Result<PathBuf, String> {
     // The same for every job: the user's systemd gives each job's unit the user's runtime
     // directory, as `pam_systemd` gives the session that makes the job's directory there.
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty());
@@ -968,7 +968,7 @@ fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String
 
 /// The disk that holds `path`, as `df` says, in bytes: its size, and what an ordinary user may
 /// still write there.
-fn disk(path: &str) -> Result<Disk, String> {
+pub(crate) fn disk(path: &str) -> Result<Disk, String> {
     // Only `PATH`, so that no locale changes what it prints.
     let mut df = stdx::process::command("df", Environment::Only(&["PATH"]));
     df.args(["--block-size=1", "--output=size,avail", "--", path]);

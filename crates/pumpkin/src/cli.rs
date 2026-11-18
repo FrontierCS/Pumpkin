@@ -134,9 +134,10 @@ On the controller: `job` runs a job of the controller target, which `pumpkin
 run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
 runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
 and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
-ending from its copy of the record; `view` answers, on its standard input and
-output, `pumpkin view` on a client, which shows the controller's runs; and
-`publish` uploads the runs to the bucket of the public page.")]
+ending from its copy of the record; `serve` answers, on its standard input and
+output, `pumpkin ls` on a client, which lists the controller's runs, and `view`
+`pumpkin view`, which shows them; and `publish` uploads the runs to the bucket
+of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -188,6 +189,8 @@ writes.")]
         #[arg(help = "The run's id.")]
         id: RunTag,
     },
+    #[command(about = "Answer a client's link, on the standard input and output")]
+    Serve,
     #[command(about = "Answer a client's view of the runs, on the standard input and output")]
     View,
     #[command(about = "Upload the runs to the bucket of the public page")]
@@ -255,6 +258,7 @@ pub(crate) enum Command {
     Boot,
     Follow(RunTag),
     CancelFor(Cancel),
+    Serve,
     ViewFor,
     Publish(Publish),
     Print(String),
@@ -750,6 +754,9 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Cancel(cancel),
         } => Command::CancelFor(cancel),
         Parsed::Controller {
+            action: Action::Serve,
+        } => Command::Serve,
+        Parsed::Controller {
             action: Action::View,
         } => Command::ViewFor,
         Parsed::Controller {
@@ -792,6 +799,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Boot
         | Command::Follow(_)
         | Command::CancelFor(_)
+        | Command::Serve
         | Command::ViewFor
         | Command::Publish(_)
         | Command::Print(_) => {

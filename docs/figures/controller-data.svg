@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 700" width="880" height="700" role="img" aria-labelledby="title desc">
 <title id="title">The data between a machine and its controller</title>
-<desc id="desc">Between the operator's machine and the controller, over ssh through SSM, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. What ls reads of each run comes back into what ls keeps, and an ended run's record into the runs directory. The view's requests for the runs' data go to the view on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
+<desc id="desc">Between the operator's machine and the controller, over ssh through SSM, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. The rows that ls lists come back from serve, made where the records are, and an ended run's record into the runs directory. The view's requests for the runs' data go to the view on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -29,9 +29,9 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note mid" x="146" y="152">what the store lacks, starts</text>
 <text class="note mid" x="146" y="167">the job, and follows it</text>
 <rect class="box" x="32" y="396" width="228" height="76" rx="8"/>
-<text class="name mid" x="146" y="416">what <tspan class="code">ls</tspan> keeps</text>
-<text class="note mid" x="146" y="433">the files it reads of each run;</text>
-<text class="note mid" x="146" y="448">of a live one, a prefix of its log</text>
+<text class="name mid" x="146" y="416"><tspan class="code">pumpkin</tspan> <tspan class="code">ls</tspan></text>
+<text class="note mid" x="146" y="433">prints the rows, and those of</text>
+<text class="note mid" x="146" y="448">the copies here that they lack</text>
 <rect class="box" x="32" y="492" width="228" height="60" rx="8"/>
 <text class="name mid" x="146" y="512">the runs directory</text>
 <text class="note mid" x="146" y="529">the whole record of each ended run</text>
@@ -69,8 +69,8 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note" x="290" y="329">what the run says, as it is followed</text>
 <text class="note" x="290" y="344"><tspan class="code">wait</tspan></text>
 <path class="arrow" d="M618 440H264" marker-end="url(#head)"/>
-<text class="note" x="290" y="419"><tspan class="code">ls</tspan>: the files it reads of each run;</text>
-<text class="note" x="290" y="434">of a live one, its log's gain · <tspan class="code">listing</tspan></text>
+<text class="note" x="290" y="419"><tspan class="code">ls</tspan>: each run's row, made there by</text>
+<text class="note" x="290" y="434"><tspan class="code">serve</tspan> · <tspan class="code">Link</tspan></text>
 <path class="arrow" d="M618 500H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="479">an ended run's record: what differs from</text>
 <text class="note" x="290" y="494">the copy here, in one archive · <tspan class="code">copy</tspan></text>

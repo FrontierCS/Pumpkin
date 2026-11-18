@@ -13,20 +13,13 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read as _, Write};
 use std::os::fd::AsFd as _;
-use std::time::Duration;
 
-use rustix::event::{self, PollFd, PollFlags, Timespec};
-use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
 use super::View;
 use super::http::{self, Request, Response, Sent};
-
-/// How long to wait for a request before ending: a page that is open polls every few seconds, so
-/// a minute with none is a closed page or a lost connection, and ending lets the `ssh` session,
-/// and the master it goes over, end too.
-pub(super) const IDLE: Duration = Duration::from_mins(1);
+use crate::serve::arrives;
 
 // Well past the largest reply: a body that a record keeps, at most the 64 MiB that the gateway
 // takes of a request, or JSON of a few MiB.
@@ -51,7 +44,7 @@ struct Head {
 }
 
 /// Answers each request that comes on the standard input, of `view`, on the standard output,
-/// until the standard input ends, or brings no request for [`IDLE`].
+/// until the standard input ends, or brings no request for [`IDLE`](crate::serve::IDLE).
 ///
 /// # Errors
 ///
@@ -92,25 +85,6 @@ pub(super) fn answer(view: &mut View) -> Result<(), String> {
         reply(&mut output, response, deflate).context("writing to the standard output failed")?;
     }
     Ok(())
-}
-
-/// Whether `input` brings a request, or its end, within [`IDLE`].
-fn arrives(input: &BufReader<File>) -> Result<bool, String> {
-    if !input.buffer().is_empty() {
-        return Ok(true);
-    }
-    let Ok(timeout) = Timespec::try_from(IDLE) else {
-        unreachable!("{IDLE:?} fits a `timespec`")
-    };
-    loop {
-        let mut polled = [PollFd::new(input.get_ref(), PollFlags::IN)];
-        match event::poll(&mut polled, Some(&timeout)) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
-            Err(Errno::INTR) => {}
-            Err(error) => return Err(format!("polling the standard input failed: {error}")),
-        }
-    }
 }
 
 /// Writes `response` on `output` as a reply, deflated if `deflate`, as the request accepts it.

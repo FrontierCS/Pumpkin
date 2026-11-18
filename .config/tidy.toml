@@ -2,6 +2,5 @@
 # hold (`FILE_CAP` and `CEILINGS` in `xtask/src/tidy.rs`).
 [long_files]
 "crates/gateway/src/lib.rs" = 1289
-"crates/pumpkin/src/controller.rs" = 1024
 "crates/pumpkin/src/job.rs" = 1014
 "crates/runtime/src/record.rs" = 1242

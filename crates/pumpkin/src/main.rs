@@ -28,6 +28,7 @@ mod controller;
 mod driver;
 mod ending;
 mod job;
+mod link;
 mod lock;
 mod manifest;
 mod next;
@@ -36,6 +37,7 @@ mod publish;
 mod reaping;
 mod run;
 mod sandboxd;
+mod serve;
 mod star;
 mod style;
 mod view;
@@ -84,6 +86,7 @@ fn main() -> ExitCode {
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::Follow(id)) => job::follow(&id),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
+        Ok(cli::Command::Serve) => serve::serve(),
         Ok(cli::Command::ViewFor) => view::over_pipe(),
         Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())

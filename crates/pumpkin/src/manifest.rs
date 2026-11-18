@@ -330,16 +330,7 @@ pub(crate) fn hash(
 fn hashed(source: &Source) -> Result<(Sha256Digest, u64), String> {
     let (digest, size_bytes) = match source {
         Source::Text(text) => (sha256(text), text.len() as u64),
-        Source::File(path) => {
-            let mut hasher = Hasher(Sha256::new());
-            let file = File::open(path).context(path.display());
-            let copied = io::copy(&mut file?, &mut hasher).context(path.display())?;
-            let Hasher(sha256) = hasher;
-            (
-                Sha256Digest::from(<[u8; 32]>::from(sha256.finalize())),
-                copied,
-            )
-        }
+        Source::File(path) => file_sha256(path)?,
     };
     if size_bytes > BLOB_BYTES {
         return Err(format!(
@@ -349,6 +340,16 @@ fn hashed(source: &Source) -> Result<(Sha256Digest, u64), String> {
         ));
     }
     Ok((digest, size_bytes))
+}
+
+/// The SHA-256 of the file at `path`, and its length in bytes.
+pub(crate) fn file_sha256(path: &Path) -> Result<(Sha256Digest, u64), String> {
+    let mut hasher = Hasher(Sha256::new());
+    let file = File::open(path).context(path.display());
+    let copied = io::copy(&mut file?, &mut hasher).context(path.display())?;
+    let Hasher(sha256) = hasher;
+    let digest = Sha256Digest::from(<[u8; 32]>::from(sha256.finalize()));
+    Ok((digest, copied))
 }
 
 fn shown(source: &Source) -> String {
