@@ -399,8 +399,8 @@ build's job, its `copy` copies an ended run's record back, its `listing` lists t
 `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, and its `commands` follow, stop and reap them; `link` is the protocol of a
 client's `Link` to `serve`, the controller's end, which answers `ls` and `view`, lists the jobs
-that `wait` and `cancel` find a run among, and is of the client's own build, installed there by
-its executable's SHA-256;
+that `wait` and `cancel` find a run among, and is of the client's own build, installed there
+whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
 the controller's side, with the prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as

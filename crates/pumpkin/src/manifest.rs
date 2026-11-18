@@ -188,7 +188,7 @@ pub(crate) fn digest(hex: &str) -> Option<Sha256Digest> {
     Sha256Digest::try_from(format!("sha256:{hex}")).ok()
 }
 
-fn sha256(bytes: &[u8]) -> Sha256Digest {
+pub(crate) fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
 
@@ -786,11 +786,29 @@ fn part(
     }
 }
 
-pub(crate) const BLOCK: usize = 512;
+const BLOCK: usize = 512;
 
 fn padding(size_bytes: u64) -> usize {
     let size = usize::try_from(size_bytes % BLOCK as u64).unwrap_or(0);
     (BLOCK - size) % BLOCK
+}
+
+/// A ustar archive of `files`, each a name and what the file holds, each mode 0600: made in memory,
+/// so that nothing it holds is written on this machine but in the files that hold it.
+///
+/// # Panics
+///
+/// If a name is over 100 bytes, which a ustar header holds at most.
+pub(crate) fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    for (name, holds) in files {
+        archive.extend_from_slice(&header(name, 0o600, holds.len() as u64));
+        archive.extend_from_slice(holds);
+        archive.resize(archive.len().next_multiple_of(BLOCK), 0);
+    }
+    // Two blocks of zeros end it.
+    archive.resize(archive.len() + 2 * BLOCK, 0);
+    archive
 }
 
 /// The ustar header of a file `name` of `mode` and `size_bytes`, owned by user and group 0, last
@@ -799,7 +817,7 @@ fn padding(size_bytes: u64) -> usize {
 /// # Panics
 ///
 /// If `name` is over 100 bytes, which a ustar header holds at most.
-pub(crate) fn header(name: &str, mode: u32, size_bytes: u64) -> [u8; BLOCK] {
+fn header(name: &str, mode: u32, size_bytes: u64) -> [u8; BLOCK] {
     assert!(name.len() <= 100, "a ustar name holds 100 bytes at most");
     let mut header = [0; BLOCK];
     header[..name.len()].copy_from_slice(name.as_bytes());

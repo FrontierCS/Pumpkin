@@ -107,7 +107,7 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     }
 }
 
-/// The directory of this `serve`'s install, which holds its executable.
+/// The directory of this `serve`'s install, which holds its executable and the rest of its build.
 fn own_install() -> Result<PathBuf, String> {
     let exe = crate::workspace::exe("expected it to tell its install from the others")?;
     match exe.parent() {

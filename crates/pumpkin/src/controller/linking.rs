@@ -14,18 +14,43 @@ use super::{OPENINGS, Reached, SHORT_TIMEOUT, Session, Slot};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
-/// This build's executable, which the controller runs as `serve`, and its SHA-256.
+// What `cargo xtask install` lays out beside `pumpkin` in `bin/` (its `built`, in
+// `xtask/src/main.rs`, which this mirrors), of which a build may lack some.
+const BESIDE: [&str; 5] = [
+    "buildifier",
+    "ec2-boot",
+    "pumpkin-modal.py",
+    "pumpkin-modal.py.lock",
+    "sandboxd",
+];
+
+/// This build's files, which the controller installs whole and runs the `pumpkin` of as `serve`:
+/// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
+/// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
-    exe: PathBuf,
-    digest: Sha256Digest,
+    /// Each file's name in the install and where it is here.
+    files: Vec<(&'static str, PathBuf)>,
+    /// Each file's name in the install and its SHA-256.
+    hashed: Vec<(&'static str, Sha256Digest)>,
+    key: Sha256Digest,
 }
 
 impl Build {
-    /// Hashes this executable; `expected` ends the message of a failure to find it.
+    /// Hashes this build's files; `expected` ends the message of a failure to find its executable.
     pub(super) fn of_this(expected: &str) -> Result<Self, String> {
         let exe = workspace::exe(expected)?;
-        let (digest, _) = manifest::file_sha256(&exe)?;
-        Ok(Self { exe, digest })
+        let mut files = vec![("pumpkin", exe.clone())];
+        for name in BESIDE {
+            let path = exe.with_file_name(name);
+            if path.try_exists().context(path.display())? {
+                files.push((name, path));
+            }
+        }
+        let hashed = (files.iter())
+            .map(|(name, path)| Ok((*name, manifest::file_sha256(path)?.0)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let key = link::key(&hashed);
+        Ok(Self { files, hashed, key })
     }
 }
 
@@ -53,7 +78,7 @@ pub(super) struct Linked {
 }
 
 impl Linked {
-    /// Opens a link to the `serve` of `build` there, uploading `build`'s executable first if the
+    /// Opens a link to the `serve` of `build` there, uploading `build`'s files first if the
     /// controller has none; an opening of a connection that doesn't get through is made up to
     /// `openings` times in all.
     pub(super) fn open(
@@ -71,7 +96,7 @@ impl Linked {
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
                 reached.name,
                 link::installs(),
-                build.digest.hex()
+                build.key.hex()
             ))
         })
     }
@@ -94,7 +119,7 @@ impl Linked {
         openings: NonZeroU32,
     ) -> Result<Option<Self>, Unlinked> {
         let slot = reached.slot_opening(&BTreeSet::new(), openings)?;
-        let Session { command, slot } = reached.session(&link::command(&build.digest), slot);
+        let Session { command, slot } = reached.session(&link::command(&build.key), slot);
         match Link::open(command) {
             Ok(link) => Ok(link.map(|link| Self { link, slot })),
             Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),
@@ -149,15 +174,21 @@ fn unlinked(reached: &Reached, master: usize, unanswered: Unanswered) -> Unlinke
     }
 }
 
-/// Uploads `build`'s executable to the controller, as the `serve` that a link runs there.
+/// Uploads `build`'s files to the controller, as the install whose `serve` a link runs there.
 fn install(reached: &Reached, build: &Build) -> Result<(), String> {
     let name = &reached.name;
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
-    let bytes = fs::read(&build.exe).context(build.exe.display())?;
-    let mut session = reached.ssh(&link::installing(&build.digest))?;
-    let installed = reached.call(&mut session, Some(&bytes), "ssh", SHORT_TIMEOUT);
+    // The files are dropped once in the archive, so that the upload holds one copy of them.
+    let archive = {
+        let read = (build.files.iter())
+            .map(|(name, path)| Ok(((*name).to_owned(), fs::read(path).context(path.display())?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        manifest::archive(&read)
+    };
+    let mut session = reached.ssh(&link::installing(&build.hashed))?;
+    let installed = reached.call(&mut session, Some(&archive), "ssh", SHORT_TIMEOUT);
     let installed = installed.map_err(|error| format!("installing it failed: {error}"));
     installed.map(drop)
 }
