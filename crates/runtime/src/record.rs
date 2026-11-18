@@ -33,13 +33,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use decision::PayloadRef;
+use jiff::Timestamp;
+use jiff::civil::DateTime;
+use jiff::tz::Offset;
 use provider::{Provider, Ready, RunTag, SandboxId, Sweep, UnixTime};
 use route::Serving;
 use schema::ir::{self, Api, GpuModel, ModelName, Name, Sha256Digest};
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::{ByProvider, ByRole, Class, Placed, Placement, Workflow};
 use serde_json::{Map, Value, json};
-use stdx::{Context, Utc};
+use stdx::Context;
 
 use super::log::{self, LogFold, Place, Readout, Used};
 use super::model::{KeptPart, KeptRequest};
@@ -157,12 +160,17 @@ pub(super) struct Lock {
 ///
 /// Fails if `now` is before the Unix epoch or the system's randomness can't be read.
 pub fn new_id(now: SystemTime) -> Result<RunTag, String> {
-    let seconds = UnixTime::of(now)?.since_epoch().as_secs();
+    UnixTime::of(now)?;
+    let stamp = Timestamp::try_from(now).context("the clock reads past what ids can name")?;
     let mut random = [0; 4];
     File::open("/dev/urandom")
         .and_then(|mut urandom| urandom.read_exact(&mut random))
         .context("reading /dev/urandom for the run's id failed")?;
-    let id = format!("{}-{:08x}", utc_stamp(seconds), u32::from_be_bytes(random));
+    let id = format!(
+        "{}-{:08x}",
+        stamp.strftime(STAMP),
+        u32::from_be_bytes(random)
+    );
     match RunTag::try_from(id.clone()) {
         Ok(tag) => Ok(tag),
         Err(error) => unreachable!(
@@ -173,28 +181,19 @@ pub fn new_id(now: SystemTime) -> Result<RunTag, String> {
     }
 }
 
+/// The time in an id's first 15 characters.
+const STAMP: &str = "%Y%m%d-%H%M%S";
+
 /// When `id` was made, since the Unix epoch, to the second, as [`new_id`] wrote it into the id;
 /// `None` if `id` isn't of its form.
 pub fn minted(id: &str) -> Option<Duration> {
-    let digits = |range: std::ops::Range<usize>| -> Option<u64> {
-        let digits = id.get(range)?;
-        digits
-            .bytes()
-            .all(|byte| byte.is_ascii_digit())
-            .then(|| digits.parse().ok())?
-    };
-    if id.as_bytes().get(8) != Some(&b'-') {
-        return None;
-    }
-    let utc = Utc {
-        year: digits(0..4)?,
-        month: digits(4..6)?,
-        day: digits(6..8)?,
-        hour: digits(9..11)?,
-        minute: digits(11..13)?,
-        second: digits(13..15)?,
-    };
-    Some(Duration::from_secs(utc.to_unix()))
+    let stamp = id.get(..15)?;
+    let at = DateTime::strptime(STAMP, stamp).ok()?;
+    // `strptime` reads more than `new_id` writes (a sign, fewer digits, a leap second): only a
+    // time that writes back as the same characters is one `new_id` wrote.
+    (at.strftime(STAMP).to_string() == stamp).then_some(())?;
+    let seconds = Offset::UTC.to_timestamp(at).ok()?.as_second();
+    Some(Duration::from_secs(u64::try_from(seconds).ok()?))
 }
 
 /// The one of `names`, the ids of runs, that `run` names: a prefix of an id or of its random
@@ -1029,18 +1028,6 @@ fn entries(file: &str) -> impl Iterator<Item = (&str, u32, std::str::Split<'_, c
         let id = fields.nth(1)?.parse().ok()?;
         Some((name, id, fields))
     })
-}
-
-fn utc_stamp(seconds: u64) -> String {
-    let Utc {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-    } = Utc::from_unix(seconds);
-    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
 /// The content of `provider.json`: what each provider declared (`report`, `classes`), each role's

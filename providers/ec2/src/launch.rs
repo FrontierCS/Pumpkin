@@ -9,13 +9,14 @@ use std::{fmt, process, thread};
 
 use aws::Bound;
 use engine::confinement;
+use jiff::Timestamp;
 use provider::{Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, UnixTime};
 use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
 use schema::ir::Name;
 use schema::sandbox::TcpDial;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use stdx::{Context as _, Deadline, Utc};
+use stdx::{Context as _, Deadline};
 
 use crate::{Ec2, InstanceClass, Reached};
 
@@ -176,7 +177,11 @@ impl Ec2<'_> {
         let (group, role_arn) = (&self.reached.group, &self.timer_role);
         let name = timer_name(run, id);
         // In UTC, as `--schedule-expression-timezone` says.
-        let at = format!("at({})", Utc::from_unix(hard_end.timer()));
+        let timer = Timestamp::UNIX_EPOCH.saturating_add(Duration::from_secs(hard_end.timer()));
+        let at = timer
+            .unwrap_or(Timestamp::MAX)
+            .strftime("at(%Y-%m-%dT%H:%M:%S)")
+            .to_string();
         let target = json!({
             // EventBridge Scheduler's universal target, which makes the call that its ARN names,
             // with the input as its parameters:

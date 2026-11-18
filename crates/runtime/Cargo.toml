@@ -17,6 +17,7 @@ route = { path = "../route" }
 rustix = { workspace = true, features = ["process"] }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

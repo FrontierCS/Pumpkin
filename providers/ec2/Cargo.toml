@@ -15,6 +15,7 @@ engine = { path = "../../crates/engine" }
 provider = { path = "../../crates/provider" }
 schema = { path = "../../crates/schema" }
 stdx = { path = "../../crates/stdx" }
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

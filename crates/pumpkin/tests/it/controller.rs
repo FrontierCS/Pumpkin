@@ -10,7 +10,6 @@ use std::time::{Duration, SystemTime};
 use expect_test::{Expect, expect};
 use schema::ir::Sha256Digest;
 use serde_json::json;
-use stdx::Utc;
 use stdx::process::Environment;
 use test_support::BUSYBOX;
 
@@ -77,15 +76,8 @@ fn id_ago(days: u64, random: &str) -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
     let then = now.checked_sub(Duration::from_hours(days * 24)).unwrap();
-    let Utc {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-    } = Utc::from_unix(then.as_secs());
-    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}-{random}")
+    let stamp = jiff::Timestamp::from_second(i64::try_from(then.as_secs()).unwrap()).unwrap();
+    format!("{}-{random}", stamp.strftime("%Y%m%d-%H%M%S"))
 }
 
 fn image(digit: char) -> String {
