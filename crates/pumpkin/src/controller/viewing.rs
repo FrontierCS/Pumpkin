@@ -52,7 +52,7 @@ impl Viewing {
         // What it asks for only reads, so it is safe to ask again.
         let asked = match self.once(target, deflate) {
             Err(Unlinked::Cut { .. }) => self.once(target, deflate),
-            asked => asked,
+            asked @ (Ok(_) | Err(Unlinked::Failed(_))) => asked,
         };
         let name = self.name();
         let failed = match asked {
