@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::talk::Talk;
 use super::{Held, when};
-use crate::progress::{self, Listed};
+use crate::progress::{self, Listed, Row};
 use crate::{controller, next};
 
 /// The longest string a reply carries whole; a longer one is cut, and its entry is read apart.
@@ -64,7 +64,8 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     let progress = held.readout.progress.clone();
     let model = progress.as_ref().map(|progress| progress.model.clone());
     let listed = Listed::of(&held.record, held.task.clone(), None, progress);
-    let mut row = listed_json(held.record.id(), &listed, crate::unix_now(), named);
+    let id = held.record.id();
+    let mut row = listed_json(id, &Row::of(id, &listed, crate::unix_now(), named));
     row["requests"] = json!(model.as_ref().map(|model| model.requests));
     row["tokens"] = json!(
         model
@@ -74,27 +75,20 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
     row
 }
 
-/// The row of the run list for `id`, as `ls` shows it, at `now`.
-///
-/// `named` is the runs directory as commands name it, `None` for the default.
-pub(super) fn listed_json(
-    id: &str,
-    listed: &Listed,
-    now: provider::UnixTime,
-    named: Option<&str>,
-) -> Value {
+/// The row of the run list for run `id`, as `ls` shows `row`.
+pub(super) fn listed_json(id: &str, row: &Row) -> Value {
     let progress::Columns {
         state,
         time,
         bound,
         usd,
         rest,
-    } = progress::columns(id, listed, now, named);
+    } = &row.cells;
     json!({
         "id": id,
-        "live": listed.live(),
+        "live": row.live(),
         "state": state,
-        "has_result": listed.has_result(),
+        "has_result": row.has_result(),
         "time": time,
         "bound": bound,
         "usd": usd,
@@ -159,6 +153,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         held.ending.clone(),
         progress.clone(),
     );
+    let row = Row::of(id, &listed, now, named);
     let verdict = match (&held.ending, &progress) {
         (Some(ending), _) => format!("Run {id} {}", how(ending)),
         (None, None) => format!("Run {id} is publishing what its sandboxes run"),
@@ -169,7 +164,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
                 bound,
                 rest,
                 ..
-            } = progress::columns(id, &listed, now, named);
+            } = &row.cells;
             // A sentence, as the page's words are (`page/h.js`): its first word, the state, takes a
             // capital.
             let (first, others) = state.split_at(1);
@@ -181,7 +176,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     };
     let state = match (&held.ending, &progress) {
         (None, None) => "publishing",
-        (Some(_), _) | (None, Some(_)) => listed.state().name(),
+        (Some(_), _) | (None, Some(_)) => row.state().name(),
     };
     let times = progress.as_ref().map(|progress| {
         let live_at = (held.ending.is_none()).then(|| now.since(progress.started));
@@ -200,7 +195,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "task": held.task,
         "live": held.ending.is_none(),
         "state": state,
-        "has_result": listed.has_result(),
+        "has_result": row.has_result(),
         "verdict": verdict,
         "result": result_json(held.ending.as_ref()),
         "other_build": record.other_build(),

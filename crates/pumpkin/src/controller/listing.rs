@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use provider::RunTag;
+use provider::{RunTag, UnixTime};
 use stdx::{Context as _, Deadline};
 use tempfile::TempDir;
 
 use super::copy::untar;
 use super::{Name, Reached, SHORT_TIMEOUT, finished};
 use crate::job::{JOBS, WAITING};
+use crate::progress::Entry;
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
@@ -44,9 +45,9 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     let kept = reached.shared.ended();
     let live = reached.shared.live();
     let _listing = reached.shared.listing(&reached.name)?;
-    let (mut listing, mut unlisted) = listed_here(&kept, prefixes, since)?;
+    let (mut listing, mut unlisted) = listed_here(&kept, prefixes, since, now)?;
     let held = holding(&listing, &live)?;
-    let since = since.map_or(0, |since| since.as_secs());
+    let since = since.map_or(0, |since| since.since_epoch().as_secs());
     let printed = listed_there(&reached, prefixes, since, &held)?;
     let scratch = scratch()?;
     let sent = scratch.path().join("runs");
@@ -64,7 +65,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         };
         let run = match state {
             "old" => {
-                listing.older.insert(id.to_owned());
+                listing.runs.entry(id.to_owned()).or_insert(Entry::Older);
                 continue;
             }
             "building" => Ok(crate::progress::Listed::Building {
@@ -90,7 +91,8 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         };
         match run {
             Ok(run) => {
-                listing.runs.insert(id.to_owned(), run);
+                let row = crate::progress::Row::of(id, &run, now, None);
+                listing.runs.insert(id.to_owned(), Entry::Row(row));
             }
             Err(error) => {
                 say(error);
@@ -98,12 +100,13 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
             }
         }
     }
-    let jobs = listing.runs.values().filter(|run| run.live()).count();
+    let rows = listing.runs.values().filter_map(Entry::row);
+    let jobs = rows.filter(|row| row.live()).count();
     say(health.line(&reached.name, jobs));
     // As of when the controller began the listing, which is when it read what each run does.
-    let lines = crate::progress::lines(&listing, now, None);
+    let lines = crate::progress::lines(&listing, None);
     crate::print(lines.as_bytes()).context("printing the runs failed")?;
-    said_when(now.since_epoch());
+    said_when(now);
     if unlisted > 0 {
         return Err("a run can't be listed, as said above".to_owned());
     }
@@ -114,26 +117,24 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 fn listed_here(
     kept: &Path,
     prefixes: &[String],
-    since: Option<Duration>,
+    since: Option<UnixTime>,
+    now: UnixTime,
 ) -> Result<(crate::progress::Listing, usize), String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    let (mut listing, unlisted) = crate::listed_in(&runs, true, prefixes, since)?;
-    let (ended, ended_unlisted) = crate::listed_in(kept, true, prefixes, since)?;
-    for (id, run) in ended.runs {
-        listing.runs.entry(id).or_insert(run);
+    let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
+    let (ended, ended_unlisted) = crate::listed_in(kept, prefixes, since, now, None)?;
+    for (id, entry) in ended.runs {
+        listing.runs.entry(id).or_insert(entry);
     }
-    let older = ended.older.into_iter();
-    let older: Vec<String> = older.filter(|id| !listing.runs.contains_key(id)).collect();
-    listing.older.extend(older);
     Ok((listing, unlisted + ended_unlisted))
 }
 
-fn said_when(began: Duration) {
-    let took = crate::unix_now().since_epoch().saturating_sub(began);
+fn said_when(began: UnixTime) {
+    let took = crate::unix_now().since(began);
     if took < STALE {
         return;
     }
-    let began_at = crate::utc(began).strftime("%H:%M:%S");
+    let began_at = crate::utc(began.since_epoch()).strftime("%H:%M:%S");
     say(format_args!(
         "the runs are listed as they were at {began_at} UTC, {} ago, as \
          the listing took that long to arrive",
@@ -213,8 +214,11 @@ fn listed_there(
 /// each live copy, with the length of its log up to its last whole line (which it is cut to) and
 /// the other files it holds. A live copy of a run held as ended is removed.
 fn holding(listing: &crate::progress::Listing, live: &Path) -> Result<String, String> {
-    let ended = (listing.runs.iter()).filter_map(|(id, run)| run.ended().then_some(id));
-    let ended: BTreeSet<&String> = ended.chain(&listing.older).collect();
+    let ended = (listing.runs.iter()).filter(|(_, entry)| match entry {
+        Entry::Row(row) => row.ended(),
+        Entry::Older => true,
+    });
+    let ended: BTreeSet<&String> = ended.map(|(id, _)| id).collect();
     let mut held = String::new();
     for id in &ended {
         held.push_str(id);

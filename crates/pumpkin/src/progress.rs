@@ -13,6 +13,7 @@ use runtime::{
     CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Unread,
 };
 use schema::ir::Name;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::next;
@@ -20,12 +21,15 @@ use crate::next;
 mod child;
 pub(crate) mod cost;
 mod model;
+mod row;
 
 use child::{STOPPED, call_name, command, exited, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
 use model::{answered, failed_upstream, model};
+pub(crate) use row::Row;
+use row::{Spent, Stage};
 
 /// How long a phase may go on past its bound before `ls` says that it is a bug: the core acts at
 /// the bound, and its act is logged at once, but the run's log is read over a connection and
@@ -36,19 +40,32 @@ const PAST_BOUND_SLACK: Duration = Duration::from_mins(1);
 /// how the runs of the last day ended, are what a person asks it for.
 const LISTED_FOR: Duration = Duration::from_hours(24);
 
-/// The time since the epoch before which an ended run isn't listed: none, if `prefixes` name runs.
-pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<Duration> {
-    prefixes
-        .is_empty()
-        .then(|| now.since_epoch().saturating_sub(LISTED_FOR))
+/// The time before which an ended run isn't listed: none, if `prefixes` name runs.
+pub(crate) fn listed_since(prefixes: &[String], now: UnixTime) -> Option<UnixTime> {
+    let since = || UnixTime::after_epoch(now.since_epoch().saturating_sub(LISTED_FOR));
+    prefixes.is_empty().then(since)
 }
 
 /// The runs that `ls` lists, by id.
 #[derive(Default)]
 pub(crate) struct Listing {
-    pub(crate) runs: BTreeMap<String, Listed>,
-    /// The ids of the runs that ended before `listed_since`, which `ls` names in a line, not a row.
-    pub(crate) older: BTreeSet<String>,
+    pub(crate) runs: BTreeMap<String, Entry>,
+}
+
+/// A run in a listing.
+pub(crate) enum Entry {
+    Row(Row),
+    /// A run that ended before `listed_since`, which `ls` names in a line, not a row.
+    Older,
+}
+
+impl Entry {
+    pub(crate) fn row(&self) -> Option<&Row> {
+        match self {
+            Self::Row(row) => Some(row),
+            Self::Older => None,
+        }
+    }
 }
 
 /// A run as `ls` shows it: a job of a controller that has yet to start the run, or a run that
@@ -97,48 +114,9 @@ impl Listed {
             asked: runtime::minted(record.id()),
         }))
     }
-
-    /// Whether the run is live, or its job builds it.
-    pub(crate) fn live(&self) -> bool {
-        match self {
-            Self::Run(run) => run.ending.is_none(),
-            Self::Building { .. } | Self::Waiting { .. } => true,
-            Self::Unstarted => false,
-        }
-    }
-
-    /// Whether the run has ended with an `outcome.json`, which no later look changes: a lost run
-    /// has none, so it is neither live nor ended.
-    pub(crate) fn ended(&self) -> bool {
-        match self {
-            Self::Run(run) => !matches!(run.ending, None | Some(Ending::Lost)),
-            Self::Building { .. } | Self::Waiting { .. } | Self::Unstarted => false,
-        }
-    }
-
-    pub(crate) fn has_result(&self) -> bool {
-        match self {
-            Self::Run(run) => matches!(run.ending, Some(Ending::Returned { .. })),
-            Self::Building { .. } | Self::Waiting { .. } | Self::Unstarted => false,
-        }
-    }
-
-    pub(crate) fn state(&self) -> State {
-        match self {
-            Self::Waiting { .. } => State::Waiting,
-            Self::Building { .. } => State::Building,
-            Self::Unstarted => State::Unstarted,
-            Self::Run(run) => match &run.ending {
-                None => State::Running,
-                Some(Ending::Returned { .. } | Ending::NoResult(_)) => State::Finished,
-                Some(Ending::Failed(_)) => State::Failed,
-                Some(Ending::Interrupted(_)) => State::Interrupted,
-                Some(Ending::Lost) => State::Lost,
-            },
-        }
-    }
 }
 
+/// What a run is doing or how it ended, by name, and in the order that the totals list them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum State {
     Waiting,
@@ -171,31 +149,40 @@ impl State {
 /// each of its calls and leases that hasn't ended. The totals line ends with the command
 /// that lists the runs left out, unless there are none; `runs` is their runs directory, as
 /// commands name it.
-pub(crate) fn lines(listing: &Listing, now: UnixTime, runs: Option<&str>) -> String {
+pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
-    for (id, listed) in &listing.runs {
-        totals.add(listed);
-        lines.push_str(&line(id, listed, now, runs));
+    let mut older = Vec::new();
+    for (id, entry) in &listing.runs {
+        let row = match entry {
+            Entry::Row(row) => row,
+            Entry::Older => {
+                older.push(id.as_str());
+                continue;
+            }
+        };
+        totals.add(row);
+        lines.push_str(&line(id, &row.cells));
         lines.push('\n');
-        lines.push_str(&under(id, listed, now, runs));
+        lines.push_str(row.under());
     }
     let mut parts = Vec::new();
-    if !listing.runs.is_empty() {
+    let rows = !totals.states.is_empty();
+    if rows {
         parts.push(totals.line());
     }
-    if !listing.older.is_empty() {
-        if listing.runs.is_empty() {
+    if !older.is_empty() {
+        if !rows {
             parts.push("no run is live, or ended within a day".to_owned());
         }
-        let (are, them) = match listing.older.len() {
+        let (are, them) = match older.len() {
             1 => ("isn't", "it"),
             _ => ("aren't", "them"),
         };
         parts.push(format!(
             "{} that ended over a day ago {are} listed: to list {them}: {}",
-            crate::counted(listing.older.len(), "run"),
-            next::of_run("ls", runs, &prefixes(&listing.older).join(" "))
+            crate::counted(older.len(), "run"),
+            next::of_run("ls", runs, &prefixes(&older).join(" "))
         ));
     }
     if !parts.is_empty() {
@@ -207,7 +194,7 @@ pub(crate) fn lines(listing: &Listing, now: UnixTime, runs: Option<&str>) -> Str
 
 /// The prefixes that name `ids`: the characters of their days, the first eight of an id, that all
 /// share, or else each day.
-fn prefixes(ids: &BTreeSet<String>) -> Vec<String> {
+fn prefixes(ids: &[&str]) -> Vec<String> {
     let days: BTreeSet<&str> = ids.iter().map(|id| id.get(..8).unwrap_or(id)).collect();
     let mut common = days.first().copied().unwrap_or_default();
     for day in &days {
@@ -233,35 +220,47 @@ pub(crate) fn unread(unread: &[Unread]) -> Option<String> {
 struct Totals {
     states: BTreeMap<State, usize>,
     without_result: usize,
-    ends: Option<UnixTime>,
+    ends_unix_secs: Option<u64>,
     usd: Option<f64>,
     unpriced: bool,
     unreported: u64,
 }
 
 impl Totals {
-    fn add(&mut self, listed: &Listed) {
-        *self.states.entry(listed.state()).or_default() += 1;
-        let Listed::Run(run) = listed else {
-            return;
-        };
-        if let Some(Ending::NoResult(_)) = run.ending {
-            self.without_result += 1;
+    fn add(&mut self, row: &Row) {
+        let Row {
+            cells: _,
+            stage,
+            spent,
+        } = row;
+        *self.states.entry(stage.state()).or_default() += 1;
+        match stage {
+            Stage::Running {
+                ends_unix_secs,
+                under: _,
+            } => self.ends_unix_secs = self.ends_unix_secs.max(Some(*ends_unix_secs)),
+            Stage::Finished { result: false } => self.without_result += 1,
+            Stage::Finished { result: true }
+            | Stage::Waiting
+            | Stage::Building
+            | Stage::Unstarted
+            | Stage::Failed
+            | Stage::Interrupted
+            | Stage::Lost
+            | Stage::Publishing => {}
         }
-        let Some(progress) = &run.progress else {
-            return;
-        };
-        if run.ending.is_none() {
-            let ends = progress.started.saturating_add(progress.hard_end);
-            self.ends = self.ends.max(Some(ends));
-        }
-        match progress.cost() {
-            Some(cost) => {
-                *self.usd.get_or_insert(0.0) += cost.usd();
-                self.unpriced |= !cost.unpriced_models.is_empty() || cost.unpriced_classes;
-                self.unreported += cost.unreported;
+        match spent {
+            Spent::Unread => {}
+            Spent::Unpriced => self.unpriced = true,
+            Spent::Priced {
+                usd,
+                partly_unpriced,
+                unreported_responses,
+            } => {
+                *self.usd.get_or_insert(0.0) += usd;
+                self.unpriced |= partly_unpriced;
+                self.unreported += unreported_responses;
             }
-            None => self.unpriced = true,
         }
     }
 
@@ -283,26 +282,27 @@ impl Totals {
                 self.unreported,
             ));
         }
-        if let Some(ends) = self.ends {
-            let ends = crate::utc(ends.since_epoch()).strftime("%H:%M");
+        if let Some(ends) = self.ends_unix_secs {
+            let ends = crate::utc(Duration::from_secs(ends)).strftime("%H:%M");
             let _ = write!(line, "; every live run ends by {ends} UTC");
         }
         line
     }
 }
 
-fn line(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
+fn line(id: &str, cells: &Columns) -> String {
     let Columns {
         state,
         time,
         bound,
         usd,
         rest,
-    } = columns(id, listed, now, runs);
+    } = cells;
     format!("{id} {state:<11} {time:>7}  {bound:<9} {usd:>7}  {rest}")
 }
 
 /// The cells of a run's row in `ls`.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Columns {
     pub(crate) state: String,
     pub(crate) time: String,
@@ -311,7 +311,7 @@ pub(crate) struct Columns {
     pub(crate) rest: String,
 }
 
-pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> Columns {
+fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<&str>) -> Columns {
     let column = |state: &str, time: &str, bound: &str, usd: &str, rest: &str| Columns {
         state: state.to_owned(),
         time: time.to_owned(),
@@ -319,7 +319,7 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
         usd: usd.to_owned(),
         rest: rest.to_owned(),
     };
-    let state = listed.state().name();
+    let state = state.name();
     let since = |asked: &Option<Duration>| {
         asked.map(|asked| column_span(now.since_epoch().saturating_sub(asked)))
     };
@@ -371,14 +371,10 @@ pub(crate) fn columns(id: &str, listed: &Listed, now: UnixTime, runs: Option<&st
     column(state, ran.as_deref().unwrap_or("-"), "-", &usd, &rest)
 }
 
-fn under(id: &str, listed: &Listed, now: UnixTime, runs: Option<&str>) -> String {
+/// The lines under a live run that has begun its log, each ending in a newline: one for each of
+/// its calls and leases that hasn't ended.
+fn under(id: &str, progress: &Progress, now: UnixTime, runs: Option<&str>) -> String {
     let mut lines = String::new();
-    let Listed::Run(run) = listed else {
-        return lines;
-    };
-    let (None, Some(progress)) = (&run.ending, &run.progress) else {
-        return lines;
-    };
     let at = now.since(progress.started);
     let cancel = next::of_run("cancel", runs, id);
     for child in children(progress, at) {

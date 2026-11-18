@@ -196,8 +196,8 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     let (runs, named) = runs_dir(runs)?;
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
-    let (listing, unlisted) = listed_in(Path::new(&runs), named.is_none(), &prefixes, since)?;
-    let lines = progress::lines(&listing, now, named.as_deref());
+    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, named.as_deref())?;
+    let lines = progress::lines(&listing, named.as_deref());
     print(lines.as_bytes()).context("printing the runs failed")?;
     if unlisted > 0 {
         let runs = counted(unlisted, "run");
@@ -212,21 +212,25 @@ fn utc(since_epoch: std::time::Duration) -> jiff::Timestamp {
     at.unwrap_or(jiff::Timestamp::MAX)
 }
 
+const EPOCH: UnixTime = UnixTime::after_epoch(std::time::Duration::ZERO);
+
 fn unix_now() -> UnixTime {
-    UnixTime::of(SystemTime::now()).unwrap_or(UnixTime::after_epoch(std::time::Duration::ZERO))
+    UnixTime::of(SystemTime::now()).unwrap_or(EPOCH)
 }
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
-/// how many can't be listed, each said as it is found. A run that ended before `since` is named
-/// only in the listing's `older`. A `runs` that is missing is an empty listing if it is `default`.
+/// how many can't be listed, each said as it is found. A run that ended before `since` is listed
+/// as older. Each row is made at `now`, with its commands naming `named` as the runs directory. A
+/// `runs` that is missing is an empty listing unless `named` names it.
 fn listed_in(
     runs: &Path,
-    default: bool,
     prefixes: &[String],
-    since: Option<std::time::Duration>,
+    since: Option<UnixTime>,
+    now: UnixTime,
+    named: Option<&str>,
 ) -> Result<(progress::Listing, usize), String> {
     let mut listing = progress::Listing::default();
-    if default && !runs.try_exists().context(runs.display())? {
+    if named.is_none() && !runs.try_exists().context(runs.display())? {
         return Ok((listing, 0));
     }
     let mut unlisted = 0;
@@ -241,16 +245,15 @@ fn listed_in(
             if let Some(since) = since
                 && ended(record.dir())?.is_some_and(|ended| ended < since)
             {
-                return Ok((id, None));
+                return Ok((id, progress::Entry::Older));
             }
-            Ok((id, Some(progress::Listed::run(&record, record.ending()?)?)))
+            let listed = progress::Listed::run(&record, record.ending()?)?;
+            let row = progress::Row::of(&id, &listed, now, named);
+            Ok((id, progress::Entry::Row(row)))
         });
         match run {
-            Ok((id, Some(run))) => {
-                listing.runs.insert(id, run);
-            }
-            Ok((id, None)) => {
-                listing.older.insert(id);
+            Ok((id, entry)) => {
+                listing.runs.insert(id, entry);
             }
             Err(error) => {
                 say(error);
@@ -261,13 +264,11 @@ fn listed_in(
     Ok((listing, unlisted))
 }
 
-fn ended(dir: &Path) -> Result<Option<std::time::Duration>, String> {
+fn ended(dir: &Path) -> Result<Option<UnixTime>, String> {
     let outcome = dir.join("outcome.json");
     let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
     match modified {
-        Ok(modified) => Ok(Some(
-            (modified.duration_since(SystemTime::UNIX_EPOCH)).unwrap_or_default(),
-        )),
+        Ok(modified) => Ok(Some(UnixTime::of(modified).unwrap_or(EPOCH))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{}: {error}", outcome.display())),
     }
