@@ -3543,6 +3543,40 @@ fn view_answers_502_for_a_reply_it_cant_read() {
 }
 
 #[test]
+fn view_asks_ec2_once_no_link_opens() {
+    let scratch = Scratch::new();
+    let (client, driver, [ended, _]) = viewed(&scratch);
+    let hex = served(&scratch);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
+    // A `serve` that ends before its hello, so that no link opens; then EC2 is asked, which the
+    // stand-in `aws` refuses.
+    let exe = scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin"));
+    let aside = scratch.0.join("aside");
+    fs::rename(&exe, &aside).unwrap();
+    scratch.write_executable(
+        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
+        b"#!/bin/sh\n",
+    );
+    let window = format!("/api/runs/{ended}/log?at=0");
+    let mut steps = vec![got(&served, &window, &["end"])];
+    fs::rename(&aside, &exe).unwrap();
+    steps.push(got(&served, &window, &["end"]));
+    drop(driver);
+    check(
+        &scratch,
+        &steps.join("\n"),
+        &[(ended, "<ended>")],
+        &expect![[r#"
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 502 Bad Gateway
+            "linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why; asking EC2 whether it runs failed too: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports"
+            GET /api/runs/<ended>/log?at=0
+            HTTP/1.1 200 OK
+            end: 309222"#]],
+    );
+}
+
+#[test]
 fn view_installs_its_serve_there() {
     let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
@@ -3579,8 +3613,8 @@ fn view_installs_its_serve_there() {
 
 // Each is refused before EC2 is asked, which the stand-in `aws` doesn't answer.
 #[test]
-fn view_starts_the_controller_from_its_page_alone() {
-    let scratch = Scratch::new("controller-view-starts");
+fn view_refuses_a_start_but_from_its_page() {
+    let scratch = Scratch::new();
     let (client, driver, _) = viewed(&scratch);
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let page = format!("http://127.0.0.1:{}", served.port);

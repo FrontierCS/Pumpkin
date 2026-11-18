@@ -227,7 +227,8 @@ machine reaches it, and answers a request only if it names this machine as its
 host, and, for the runs' data, carries the token after `?t=`, which the page
 sends: another user of this machine can't read the runs, nor can a page of
 another site that the browser has open. It reads the records as `ls` and `wait`
-do, and asks nothing of a provider.
+do, and of the providers asks only EC2, for a controller's state and its start,
+as below.
 
 A run's page links to the trace of each caller that used a model, the agent or
 a call: its model requests as threads of steps, each with the entries it
@@ -251,10 +252,10 @@ is stopped; once the connection has ended, the next request opens it again, and
 while that fails the page says so and asks again after 5 s, then after twice
 the wait before, up to a minute. When it fails as the controller has stopped
 since, as an idle controller stops itself, the page says so beside a button,
-\"Start it\", which starts it, the page's one way to; until the controller
-answers, each request asks EC2 whether it runs in place of connecting. --runs
-serves a directory here, such as the copies of the controller's runs that `wait`
-makes.";
+\"Start it\", which starts it (`aws ec2 start-instances`); until the
+controller answers, each request asks EC2 whether it runs (`aws ec2
+describe-instances`) in place of connecting. --runs serves a directory here,
+such as the copies of the controller's runs that `wait` makes.";
 
 pub(super) const LOCK_NOTES: &str = "\
 Examples:

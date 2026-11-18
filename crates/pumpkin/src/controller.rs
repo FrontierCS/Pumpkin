@@ -529,6 +529,12 @@ impl Reached {
     /// of those, opening a connection if none is open and waiting while every one is held. When
     /// no such connection can be had, it takes a session over any.
     fn slot_apart(&self, held: &BTreeSet<usize>) -> Result<Slot, String> {
+        self.slot_opening(held, OPENINGS)
+    }
+
+    /// Takes a session as [`Reached::slot_apart`] does, making an opening that doesn't get
+    /// through up to `openings` times in all while `held` is empty.
+    fn slot_opening(&self, held: &BTreeSet<usize>, openings: u32) -> Result<Slot, String> {
         let host = self.host();
         let mut waiting = None;
         loop {
@@ -540,7 +546,7 @@ impl Reached {
                 Found::Free(slot) => return Ok(self.waited(slot, waiting)),
                 Found::Closed(master) => {
                     // Made once if the held go on instead, rather than wait out the pauses.
-                    let attempts = if held.is_empty() { OPENINGS } else { 1 };
+                    let attempts = if held.is_empty() { openings } else { 1 };
                     match self.open(&lock, master, attempts) {
                         Ok(Opened::Open) => {}
                         Ok(Opened::Unreached(_) | Opened::HostKeyChanged(_)) | Err(_)

@@ -4,25 +4,37 @@
 //!
 //! It never starts a stopped controller on its own, as the page asks every few seconds, which
 //! would otherwise start it again and again, and pay for it, with no one reading: once a link
-//! can't be opened, it asks EC2 whether the controller runs, and while it doesn't, or its `sshd`
-//! doesn't answer, each request asks EC2 and that `sshd` again in place of opening a link, and
-//! the controller starts only when [`Viewing::start`] is called.
+//! can't be opened, it asks EC2 whether the controller runs, and while it is stopped or on its
+//! way to running or to being stopped, or its `sshd` doesn't answer, each request asks EC2 and
+//! that `sshd` again in place of opening a link; the controller starts only when
+//! [`Viewing::start`] is called. A request opens a link with one attempt, as the page asks again
+//! after a pause of its own, and the view answers no other request while one waits.
 
 use ::aws::Cli;
 
-use super::aws::{self, answers};
+use super::aws::{self, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
-use crate::config;
 use crate::link::Viewed;
+use crate::{config, say};
 
 /// Why the view on the controller gave no reply.
 pub(crate) enum Unviewed {
-    /// The controller can't answer now, as EC2 or a probe of its `sshd` says, as `message` says,
-    /// and is `stopped`, so that a start would end that.
-    Down { message: String, stopped: bool },
+    /// The controller is stopped, as EC2 says, so that a start would end that.
+    Stopped,
+    /// The controller can't answer now, as EC2 or a probe of its `sshd` says: why.
+    Down(String),
     /// Why, with what was being done.
     Failed(String),
+}
+
+/// What one request over one link came to.
+enum Over {
+    Viewed(Viewed),
+    /// The link gave no reply.
+    Unanswered(Unlinked),
+    /// No link could be opened.
+    Unopened(Unlinked),
 }
 
 /// The channel to the view on a controller, opened when a request needs it.
@@ -67,51 +79,54 @@ impl Viewing {
     ///
     /// # Errors
     ///
-    /// [`Unviewed::Down`] while the controller doesn't run or its `sshd` doesn't answer, else
-    /// [`Unviewed::Failed`] if a link can't be opened, or the `serve` gives no reply but by the
-    /// link's end, or the link opened anew ends too.
+    /// [`Unviewed::Stopped`] or [`Unviewed::Down`] while the controller can't answer, as they
+    /// say; else [`Unviewed::Failed`] if a link can't be opened, or the `serve` gives no reply but
+    /// by the link's end, or the link opened anew ends too.
     pub(crate) fn ask(&mut self, target: &str, deflate: bool) -> Result<Viewed, Unviewed> {
         if self.down {
-            self.answerable()?;
-            self.down = false;
+            // An EC2 that can't be asked says nothing of the controller, which a link may reach.
+            match self.answerable() {
+                Err(down @ (Unviewed::Stopped | Unviewed::Down(_))) => return Err(down),
+                Ok(()) | Err(Unviewed::Failed(_)) => self.down = false,
+            }
         }
         // What it asks for only reads, so it is safe to ask again.
-        let asked = match self.once(target, deflate) {
-            Ok(Err(Unlinked::Cut { .. })) => self.once(target, deflate),
-            asked @ (Ok(Ok(_) | Err(Unlinked::Failed(_))) | Err(_)) => asked,
+        let over = match self.once(target, deflate) {
+            Over::Unanswered(Unlinked::Cut { .. }) => self.once(target, deflate),
+            over
+            @ (Over::Viewed(_) | Over::Unanswered(Unlinked::Failed(_)) | Over::Unopened(_)) => over,
         };
-        let failed = match asked {
-            Ok(Ok(viewed)) => return Ok(viewed),
-            Ok(Err(unlinked)) => self.failed(unlinked),
-            Err(unopened) => {
-                let failed = self.failed(unopened);
-                return Err(match self.answerable() {
-                    Ok(()) => Unviewed::Failed(failed),
-                    Err(Unviewed::Failed(error)) => Unviewed::Failed(format!(
-                        "{failed}; asking EC2 whether it runs failed too: {error}"
-                    )),
-                    Err(down @ Unviewed::Down { .. }) => {
-                        self.down = true;
-                        down
-                    }
-                });
+        let unopened = match over {
+            Over::Viewed(viewed) => return Ok(viewed),
+            Over::Unanswered(unlinked) => return Err(Unviewed::Failed(self.failed(unlinked))),
+            Over::Unopened(unlinked) => self.failed(unlinked),
+        };
+        Err(match self.answerable() {
+            Ok(()) => Unviewed::Failed(unopened),
+            Err(Unviewed::Failed(error)) => Unviewed::Failed(format!(
+                "{unopened}; asking EC2 whether it runs failed too: {error}"
+            )),
+            Err(down @ (Unviewed::Stopped | Unviewed::Down(_))) => {
+                self.down = true;
+                down
             }
-        };
-        Err(Unviewed::Failed(failed))
+        })
     }
 
-    /// Starts the controller's instance, which is stopped; a request then finds when it answers.
+    /// Starts the controller's instance, as `start-instances` does, and says so; a request then
+    /// finds when it answers.
     ///
     /// # Errors
     ///
     /// Fails if EC2 refuses, as when the instance is stopping.
     pub(crate) fn start(&mut self) -> Result<(), String> {
         let Self { reached, cli, .. } = self;
-        aws::start(
-            connected(cli, reached)?,
-            &reached.name,
-            &reached.located.instance,
-        )
+        let id = &reached.located.instance;
+        say(format_args!(
+            "starting controller `{}`, {id}, as the page asked",
+            reached.name
+        ));
+        aws::start(connected(cli, reached)?, id)
     }
 
     /// Whether the controller runs, as EC2 says, and its `sshd` answers where it was found.
@@ -120,54 +135,54 @@ impl Viewing {
         let Reached { name, located, .. } = &*reached;
         let state =
             connected(cli, reached).and_then(|cli| aws::state(cli, name, &located.instance));
-        let message = match state.map_err(Unviewed::Failed)?.as_str() {
-            "running" => match answers(located.address) {
+        let address = located.address;
+        let down = match state.map_err(Unviewed::Failed)?.as_str() {
+            "running" => match answers(address) {
                 Ok(()) => return Ok(()),
                 Err(error) => format!(
-                    "controller `{name}` runs, but its `sshd` doesn't answer at {}: {error}: \
-                     expected it to answer shortly after it starts",
-                    located.address
+                    "controller `{name}` runs, but its `sshd` doesn't answer at {address}: \
+                     {error}: one just started answers within a minute; past that, {}",
+                    unanswered(&error)
                 ),
             },
-            "stopped" => {
-                return Err(Unviewed::Down {
-                    message: format!(
-                        "controller `{name}` is stopped: start it, as the page's button does"
-                    ),
-                    stopped: true,
-                });
+            "stopped" => return Err(Unviewed::Stopped),
+            "pending" => format!("controller `{name}` is starting"),
+            "stopping" => format!("controller `{name}` is stopping: start it once it has stopped"),
+            // As when it was terminated, and another made in its place, which `reach` finds.
+            state => {
+                return Err(Unviewed::Failed(format!(
+                    "controller `{name}`, {}, is {state}: stop this view and start it again, \
+                     which finds the controller anew",
+                    located.instance
+                )));
             }
-            state => format!("controller `{name}` is {state}, as EC2 says: expected it to run"),
         };
-        Err(Unviewed::Down {
-            message,
-            stopped: false,
-        })
+        Err(Unviewed::Down(down))
     }
 
-    /// The reply over the link, but never again over another; the outer error is why no link
-    /// could be opened.
-    fn once(&mut self, target: &str, deflate: bool) -> Result<Result<Viewed, Unlinked>, Unlinked> {
+    /// The reply over the link, opened if need be, but never again over another.
+    fn once(&mut self, target: &str, deflate: bool) -> Over {
         let mut linked = match self.linked.take() {
             Some(linked) => linked,
-            None => Linked::open(&self.reached, &self.build)?,
+            // Once, as the page asks again after a pause, which lets the view answer others.
+            None => match Linked::open(&self.reached, &self.build, 1) {
+                Ok(linked) => linked,
+                Err(unlinked) => return Over::Unopened(unlinked),
+            },
         };
         // What is left of the exchange would be read as the next one's, so a link that fails is
         // dropped, which ends its `ssh`.
-        let viewed = match linked.view(&self.reached, target, deflate) {
-            Ok(viewed) => viewed,
-            Err(unlinked) => return Ok(Err(unlinked)),
-        };
-        Ok(match viewed {
-            Ok(viewed) => {
+        match linked.view(&self.reached, target, deflate) {
+            Ok(Ok(viewed)) => {
                 self.linked = Some(linked);
-                Ok(viewed)
+                Over::Viewed(viewed)
             }
-            Err(message) => Err(Unlinked::Failed(format!(
+            Ok(Err(message)) => Over::Unanswered(Unlinked::Failed(format!(
                 "controller `{}` refused: {message}",
                 self.name()
             ))),
-        })
+            Err(unlinked) => Over::Unanswered(unlinked),
+        }
     }
 
     /// What failed, as `unlinked` says, with where the log of its master is if that has ended.
@@ -187,9 +202,8 @@ impl Viewing {
 
 /// The connection to EC2 in the controller's region, made at its first use.
 fn connected<'a>(cli: &'a mut Option<Cli>, reached: &Reached) -> Result<&'a Cli, String> {
-    let made = match cli.take() {
-        Some(made) => made,
-        None => Cli::connect(reached.region.clone())?,
-    };
-    Ok(cli.insert(made))
+    match cli {
+        Some(made) => Ok(made),
+        None => Ok(cli.insert(Cli::connect(reached.region.clone())?)),
+    }
 }

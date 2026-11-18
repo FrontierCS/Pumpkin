@@ -318,22 +318,27 @@ export function follow(read) {
   // The wait for the next read, while one is set.
   /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null;
-  // Starts the controller by a `POST` to `path`, and then reads again after the first wait.
-  /** @param {string} path */
-  const start = async (path) => {
+  // Starts the controller by a `POST` to `path` from `button`, which is disabled meanwhile, and
+  // then reads again after the first wait.
+  /** @param {string} path @param {HTMLElement} button */
+  const start = async (path, button) => {
     const notice = byId("notice");
+    button.toggleAttribute("disabled", true);
     const started = await post(path).catch((error) => ({ status: 0, body: { error: String(error) } }));
+    button.toggleAttribute("disabled", false);
     if (!current()) return;
     if (started.status !== 202) {
-      notice.textContent = "Starting the controller failed: " + sentence(started.body.error || "it answered " + started.status) + ".";
+      fill(notice, "Starting the controller failed: " + sentence(started.body.error || "it answered " + started.status) + ". ", button);
       return;
     }
-    againMs = AGAIN_FIRST_MS;
-    notice.textContent = sentence(started.body.said) + ": this page reads again in " + againMs / 1000 + " s.";
-    // A read under way sets its own wait, from `againMs`.
-    if (timer !== null) {
+    notice.classList.remove("error");
+    notice.textContent = sentence(started.body.said) + ": this page reads again in " + AGAIN_FIRST_MS / 1000 + " s.";
+    // A read under way waits `againMs` once it fails; a wait that is set is cut to the first.
+    if (timer === null) againMs = AGAIN_FIRST_MS;
+    else {
       clearTimeout(timer);
-      timer = setTimeout(again, againMs);
+      timer = setTimeout(again, AGAIN_FIRST_MS);
+      againMs = Math.min(2 * AGAIN_FIRST_MS, AGAIN_MOST_MS);
     }
   };
   const again = async () => {
@@ -357,7 +362,10 @@ export function follow(read) {
         wait = againMs;
         againMs = Math.min(2 * againMs, AGAIN_MOST_MS);
         const stopped = error instanceof Refused ? error.start : null;
-        fill(notice, said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error)), stopped ? [" ", h("button", { title: "Start the controller's instance", onclick: () => start(stopped) }, "Start it")] : null);
+        const button = stopped ? h("button", { title: "Start the controller's instance" }, "Start it") : null;
+        if (stopped && button) button.addEventListener("click", () => start(stopped, button));
+        notice.classList.add("error");
+        fill(notice, said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error)), button ? [" ", button] : null);
         notice.hidden = false;
       } else if (STATIC && error instanceof Refused && error.status === 404) {
         // A run not yet published, or a file that a newer file names and the cache doesn't hold

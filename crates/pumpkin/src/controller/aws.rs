@@ -147,7 +147,10 @@ fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
         match instance.state.name.as_str() {
             "running" => return answering(name, instance, started),
             "stopped" if started.is_none() => {
-                start(cli, name, id)?;
+                say(format_args!(
+                    "starting controller `{name}`, {id}, which is stopped"
+                ));
+                start(cli, id)?;
                 started = Some(Instant::now());
                 continue;
             }
@@ -176,11 +179,8 @@ pub(super) fn state(cli: &Cli, name: &Name, id: &str) -> Result<String, String> 
     instance(cli, name, id).map(|instance| instance.state.name)
 }
 
-/// Starts instance `id` of controller `name`, which is stopped, and says so.
-pub(super) fn start(cli: &Cli, name: &Name, id: &str) -> Result<(), String> {
-    say(format_args!(
-        "starting controller `{name}`, {id}, which is stopped"
-    ));
+/// Starts instance `id`, as `start-instances` does: one that runs or is starting is left so.
+pub(super) fn start(cli: &Cli, id: &str) -> Result<(), String> {
     let start = ["ec2", "start-instances", "--instance-ids", id];
     cli.run(&start, Bound::Call).map(drop)
 }
@@ -230,27 +230,33 @@ fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Resul
             });
         };
         if by.remaining().is_none() {
-            let why = match error.kind() {
-                // A security group drops what it doesn't admit, so a refusal is the instance's.
-                io::ErrorKind::ConnectionRefused => {
-                    "nothing listens there, as when the controller is stopping though EC2 says it \
-                     runs, or its `sshd` is down: run the command again shortly"
-                }
-                io::ErrorKind::TimedOut
-                | io::ErrorKind::HostUnreachable
-                | io::ErrorKind::NetworkUnreachable => {
-                    "this machine doesn't reach the controller's VPC, or `deploy/aws`'s `ssh_from` \
-                     doesn't admit it: apply it with this machine's address among them"
-                }
-                _ => "run the command again",
-            };
             return Err(format!(
                 "controller `{name}`, {id}, didn't answer SSH at its private address, {address}, \
-                 in the {} s it was waited for: {error}: {why}",
-                waiting.elapsed().as_secs()
+                 in the {} s it was waited for: {error}: {}",
+                waiting.elapsed().as_secs(),
+                unanswered(&error)
             ));
         }
         thread::sleep(START_POLL);
+    }
+}
+
+/// Why `sshd` of a controller that runs didn't answer a probe ([`answers`]) that failed with
+/// `error`, and what to do.
+pub(super) fn unanswered(error: &io::Error) -> &'static str {
+    match error.kind() {
+        // A security group drops what it doesn't admit, so a refusal is the instance's.
+        io::ErrorKind::ConnectionRefused => {
+            "nothing listens there, as when the controller is stopping though EC2 says it runs, \
+             or its `sshd` is down: run the command again shortly"
+        }
+        io::ErrorKind::TimedOut
+        | io::ErrorKind::HostUnreachable
+        | io::ErrorKind::NetworkUnreachable => {
+            "this machine doesn't reach the controller's VPC, or `deploy/aws`'s `ssh_from` doesn't \
+             admit it: apply it with this machine's address among them"
+        }
+        _ => "run the command again",
     }
 }
 

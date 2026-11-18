@@ -476,23 +476,33 @@ fn route(request: &Request, local: &mut Local) -> Response {
             Err(error) => Response::refused("502 Bad Gateway", &error),
         },
         (asked, Source::Here { view, .. }) => answered(asked, view),
-        (_, Source::Controller(viewing)) => match viewing.ask(&request.target, request.deflate) {
-            Ok(viewed) => {
-                let Viewed {
-                    status,
-                    content_type,
-                    deflated,
-                    body,
-                } = viewed;
-                Response::relayed(status, content_type, body, deflated)
-            }
-            Err(Unviewed::Down { message, stopped }) => {
-                let start = stopped.then_some(START);
-                let down = json!({ "error": message, "start": start });
-                Response::json(&down).with_status("503 Service Unavailable")
-            }
-            Err(Unviewed::Failed(error)) => Response::refused("502 Bad Gateway", &error),
-        },
+        (_, Source::Controller(viewing)) => asked_there(viewing, request),
+    }
+}
+
+/// The view on the controller's reply to `request`, a `GET` of the runs' data.
+fn asked_there(viewing: &mut Viewing, request: &Request) -> Response {
+    match viewing.ask(&request.target, request.deflate) {
+        Ok(viewed) => {
+            let Viewed {
+                status,
+                content_type,
+                deflated,
+                body,
+            } = viewed;
+            Response::relayed(status, content_type, body, deflated)
+        }
+        Err(Unviewed::Stopped) => {
+            let stopped = format!(
+                "controller `{}` is stopped: start it by `POST {START}`, as the page's \
+                 \"Start it\" does, or run a command that reaches it, which starts it: pumpkin ls",
+                viewing.name()
+            );
+            let stopped = json!({ "error": stopped, "start": START });
+            Response::json(&stopped).with_status("503 Service Unavailable")
+        }
+        Err(Unviewed::Down(down)) => Response::refused("503 Service Unavailable", &down),
+        Err(Unviewed::Failed(error)) => Response::refused("502 Bad Gateway", &error),
     }
 }
 
