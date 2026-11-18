@@ -41,10 +41,8 @@ pub(crate) fn start(home: &Path, start: StartRequest, body: &[u8]) -> Result<Sta
     if start.key_bytes.len() != start.sent.upstreams.key_files().len() {
         return Err("the job must send one key for each upstream in its configuration".to_owned());
     }
-    if let Some(refused) = admit(&start.tree)? {
-        return Ok(refused);
-    }
-    let pumpkin = installed(home)?;
+    manifest::store::required(&home.join(super::STORE), &start.tree)?;
+    let pumpkin = installed(home, &start.install)?;
     let (kind, command) = match start.kind {
         JobKind::Run => (JOBS, "run"),
         JobKind::Build => (BUILDS, "build"),
@@ -215,70 +213,37 @@ fn write_sent(start: &StartRequest, sent: &Path, body: &[u8]) -> Result<(), Stri
 
 /// Keeps the build that a job runs at the same location as a locally built install, under its
 /// own digest. Older clients prune the serve installs after a day, even while its jobs still run.
-fn installed(home: &Path) -> Result<PathBuf, String> {
+fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
     let exe = workspace::exe("expected the build whose job is starting")?;
-    let source = exe
-        .parent()
-        .and_then(|dir| dir.file_name().map(|name| (dir, name)));
-    let Some((source, name)) =
-        source.filter(|(_, name)| name.to_str().and_then(manifest::digest).is_some())
-    else {
+    if exe.parent().and_then(Path::file_name) != Some(install.hex().as_ref()) {
         return Err(format!(
-            "{} is outside a serve install: start the job with the client's installed serve",
+            "{} is outside the install named by this start: link to the client's build",
             exe.display()
         ));
-    };
-    let root = home.join(workspace::DIR).join(name);
+    }
+    let root = home.join(workspace::DIR).join(install.hex());
     let bin = root.join("bin");
     let pumpkin = bin.join("pumpkin");
     if !pumpkin.try_exists().context(pumpkin.display())? {
+        let store = home.join(super::STORE);
+        let path = store.join(manifest::MANIFESTS).join(install.hex());
+        let manifest = manifest::Manifest::parse(&fs::read(&path).context(path.display())?)?;
         fs::create_dir_all(&root).context(root.display())?;
         let made = tempfile::tempdir_in(&root).context(root.display())?;
-        for file in fs::read_dir(source).context(source.display())? {
-            let file = file.context(source.display())?;
-            fs::hard_link(file.path(), made.path().join(file.file_name()))
-                .context(file.path().display())?;
+        for entry in manifest.entries() {
+            let source = match entry.kind {
+                manifest::Kind::Executable => super::executable(&store, &entry.digest)?,
+                manifest::Kind::File => store.join(entry.digest.hex()),
+                manifest::Kind::Link => {
+                    return Err(
+                        "an install contains a symbolic link: expected the build's files"
+                            .to_owned(),
+                    );
+                }
+            };
+            fs::hard_link(&source, made.path().join(&entry.path)).context(source.display())?;
         }
         fs::rename(made.path(), &bin).context(bin.display())?;
     }
     Ok(pumpkin)
-}
-
-fn admit(tree: &Sha256Digest) -> Result<Option<StartAnswer>, String> {
-    let mut shell = stdx::process::command("sh", Environment::Only(&["HOME", "PATH"]));
-    shell.args(["-ec", &manifest::admit(tree)]);
-    let output = stdx::process::output(&mut shell, Deadline::after(START_TIMEOUT))
-        .context("running the store's admission failed")?
-        .ok_or_else(|| {
-            format!(
-                "admitting the job's tree took over {} s: run it again",
-                START_TIMEOUT.as_secs()
-            )
-        })?;
-    if output.status.success() {
-        return Ok(None);
-    }
-    if output.status.code() != Some(manifest::UNADMITTED) {
-        return Err(format!(
-            "admitting the job's tree failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let (mut changed, mut gone) = (Vec::new(), Vec::new());
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let problem = line
-            .split_once(' ')
-            .and_then(|(kind, hex)| Some((kind, manifest::digest(hex)?)));
-        match problem {
-            Some(("changed", digest)) => changed.push(digest),
-            Some(("gone", digest)) => gone.push(digest),
-            _ => {
-                return Err(format!(
-                    "admitting the job's tree gave an unknown problem: {line}"
-                ));
-            }
-        }
-    }
-    Ok(Some(StartAnswer::Unadmitted { changed, gone }))
 }

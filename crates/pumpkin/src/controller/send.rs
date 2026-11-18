@@ -2,31 +2,28 @@
 //! the controller's store, and the command that starts the job from them.
 //!
 //! The controller says which blobs of the task's manifest its store lacks, and only those are
-//! sent, in streams over connections of their own. A connection that ends, or a stream that
-//! stalls, costs only the pieces not yet stored: the send asks again what the controller lacks.
+//! sent, each by its held offset, on the link that starts the job. A cut costs at most the last
+//! incomplete frame: the next link asks again what the controller lacks.
 //!
 //! The start request sends this machine's settings and keys on the link's standard input. The
 //! controller writes them to the job's directory in tmpfs and starts its systemd unit, which
 //! outlives the connection.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
-use std::{fs, io, panic, thread};
 
 use provider::RunTag;
-use rustix::event::{self, PollFd, PollFlags, Timespec};
-use rustix::io::Errno;
-use schema::ir::Sha256Digest;
 use schema::workflow::Workflow;
 use stdx::Context as _;
 use stdx::process::Environment;
 
-use super::linking::Build;
-use super::{AGAIN, Name, Reached, SHORT_TIMEOUT, SSH_FAILED, STALL_TIMEOUT, Session, bounded};
+use super::linking::{Build, Linked, Unlinked};
+use super::{Name, Reached, SHORT_TIMEOUT, bounded};
+use crate::link::store::{Lacks, Put};
 use crate::link::{JobKind, StartAnswer, StartRequest};
+use crate::manifest::store::{Missing, PutAnswer};
 use crate::{config, manifest, say};
 
 // How often a send says how much it has sent: often enough that a person sees a send move, and
@@ -175,7 +172,6 @@ pub(super) fn send(
     tree: &Tree,
     args: &lang::Args,
 ) -> Result<Build, String> {
-    send_tree(reached, tree)?;
     let build = Build::of_this("expected to send it to the controller to run the job")?;
     let (sent, keys) = client.sent();
     let mut body = Vec::new();
@@ -200,6 +196,7 @@ pub(super) fn send(
         kind,
         repo: tree.repo.clone(),
         tree: tree.hashed.manifest.name(),
+        install: build.hashed.manifest.name(),
         words: crate::arg_flags(args)
             .chain(["--".to_owned(), tree.entry.clone()])
             .collect(),
@@ -209,305 +206,147 @@ pub(super) fn send(
         key_bytes,
         modal_bytes,
     };
-    match reached.asked(&build, "starting the job", |linked| {
+    let (mut install_left, mut tree_left) = (None, None);
+    match reached.carrying_on(&build, "starting the job", |linked, advanced| {
+        upload(
+            linked,
+            reached,
+            &build.hashed,
+            true,
+            &mut install_left,
+            advanced,
+        )?;
+        upload(
+            linked,
+            reached,
+            &tree.hashed,
+            false,
+            &mut tree_left,
+            advanced,
+        )?;
         linked.ask_with_body(reached, start.clone(), &body)
     })?? {
         StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),
-        StartAnswer::Unadmitted { changed, gone } => {
-            Err(manifest::unadmitted(&tree.hashed, &changed, &gone))
-        }
     }
 }
 
-/// Sends the blobs of the tree that the controller lacks, saying what that is, until it lacks none.
-/// Sends of one workspace take turns, so that none sends what another is sending.
-fn send_tree(reached: &Reached, tree: &Tree) -> Result<(), String> {
-    let manifest::Hashed { manifest, sources } = &tree.hashed;
-    if manifest::pieces(&lacked(reached, manifest)?).is_empty() {
-        say(holds(&reached.name, manifest, &[]));
-        return Ok(());
-    }
-    let _upload = reached.shared.upload(&reached.name)?;
-    let mut attempt = 0;
-    let mut lacking = usize::MAX;
-    loop {
-        let pieces = manifest::pieces(&lacked(reached, manifest)?);
-        // A connection that delivered a piece moved the send on, as `pause` counts attempts.
-        if pieces.len() < lacking {
-            attempt = 0;
+fn upload(
+    linked: &mut Linked,
+    reached: &Reached,
+    hashed: &manifest::Hashed,
+    install: bool,
+    previous: &mut Option<u64>,
+    advanced: &mut dyn FnMut(),
+) -> Result<(), Unlinked> {
+    let text = hashed.manifest.text();
+    let request = || Lacks {
+        manifest: manifest::sha256(&text),
+        body_bytes: text.len(),
+        install,
+    };
+    'lacks: loop {
+        let missing = linked.ask_with_body(reached, request(), &text)??;
+        let bytes: u64 = missing
+            .iter()
+            .map(|blob| blob.size_bytes.saturating_sub(blob.held_bytes))
+            .sum();
+        if previous
+            .replace(bytes)
+            .is_some_and(|earlier| bytes < earlier)
+        {
+            advanced();
         }
-        lacking = pieces.len();
-        let streams = manifest::deal(pieces);
-        say(holds(&reached.name, manifest, &streams));
-        if streams.is_empty() {
-            return Ok(());
-        }
-        // Each stream's end is read once all have ended, so that one whose connection ended loses
-        // none of what the others sent; any other failure is the send's.
-        let mut cut = None;
-        for streamed in sent(reached, &streams, sources)? {
-            if streamed.cut {
-                cut = cut.or(Some(streamed.master));
-            } else {
-                streamed.ended(reached)?;
-            }
-        }
-        let Some(master) = cut else {
-            return Ok(());
-        };
-        if !reached.pause(attempt, master, "asking again what it lacks") {
-            return Err(format!(
-                "a connection to controller `{}` ended at {} attempts of the send in a row, the \
-                 last as its log says: {}: run it again",
-                reached.name,
-                AGAIN.len() + 1,
-                reached.shared.log(master).display()
+        if !install || !missing.is_empty() {
+            say(holds(
+                &reached.name,
+                &hashed.manifest,
+                &missing,
+                bytes,
+                install,
             ));
         }
-        attempt += 1;
-    }
-}
-
-/// How one stream of a send ended.
-struct Streamed {
-    master: usize,
-    status: ExitStatus,
-    /// Whether the stream's connection ended under it, not the command on the controller.
-    cut: bool,
-    /// What writing the stream came to: `Err` if a write failed, and `Ok(Err)` if a source changed
-    /// since it was hashed.
-    written: io::Result<Result<(), String>>,
-}
-
-impl Streamed {
-    /// Whether the stream, whose connection didn't end, sent all its pieces, else why not.
-    fn ended(self, reached: &Reached) -> Result<(), String> {
-        let Self {
-            master,
-            status,
-            cut: _,
-            written,
-        } = self;
-        match written {
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                let stalled = format!(
-                    "sending the task's files to controller `{}` stalled: {error}, so it was \
-                     stopped: run it again",
-                    reached.name
-                );
-                Err(reached.lost(master, stalled))
+        let mut count = counting(&reached.name, bytes);
+        for Missing {
+            digest,
+            held_bytes,
+            size_bytes,
+        } in missing
+        {
+            let Some(source) = hashed.sources.get(&digest) else {
+                return Err(format!(
+                    "the controller asked for an unknown blob {}: send the task again",
+                    digest.hex()
+                )
+                .into());
+            };
+            let input = source.at(held_bytes, size_bytes)?;
+            let put = Put {
+                digest: digest.clone(),
+                from: held_bytes,
+                size_bytes,
+            };
+            match linked.stream(reached, |link| link.put(put, input, &mut count))?? {
+                PutAnswer::Stored => advanced(),
+                PutAnswer::OffsetChanged => continue 'lacks,
+                PutAnswer::NotItsDigest => {
+                    return Err(format!(
+                        "{} changed since it was hashed: send the task again",
+                        hashed.shown(&digest)
+                    )
+                    .into());
+                }
             }
-            Ok(Err(changed)) => Err(changed),
-            _ if !status.success() => {
-                let failed = format!(
-                    "sending the task's files to controller `{}` failed ({status}), as said above",
-                    reached.name
-                );
-                Err(reached.lost(master, failed))
-            }
-            Ok(Ok(())) => Ok(()),
-            Err(error) => Err(format!("writing to `ssh` failed: {error}")),
         }
+        return Ok(());
     }
 }
 
-/// Sends each of `streams` at once, each a `manifest::receive` of its own over a session of a
-/// connection that no other of them holds, as long as one can be had, and each as its connection
-/// opens, while it says how far the send is. Returns how each stream ended, once all have.
-// Many connections at once, each with a list of its own, as Bazel's uploads go over up to
-// `--remote_max_connections` and Nix's downloads over up to `http-connections`:
-// https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/java/com/google/devtools/build/lib/remote/options/RemoteOptions.java#L65-L80
-// https://github.com/NixOS/nix/blob/d1ecb78bf7a1c5604726bd72651bd2169c14163d/src/libstore/include/nix/store/filetransfer.hh#L52-L61
-fn sent(
-    reached: &Reached,
-    streams: &[Vec<manifest::Piece>],
-    sources: &BTreeMap<Sha256Digest, manifest::Source>,
-) -> Result<Vec<Streamed>, String> {
+fn holds(
+    name: &Name,
+    manifest: &manifest::Manifest,
+    missing: &[Missing],
+    bytes: u64,
+    install: bool,
+) -> String {
+    let what = if install {
+        "the build's files"
+    } else {
+        "the task's files"
+    };
+    let files = manifest.entries().len();
+    if missing.is_empty() {
+        return format!("controller `{name}` holds all {files} of {what}");
+    }
+    let digests: BTreeSet<_> = missing.iter().map(|blob| &blob.digest).collect();
+    let count = manifest
+        .entries()
+        .iter()
+        .filter(|entry| digests.contains(&entry.digest))
+        .count();
+    let which = if count == files {
+        format!("all {files} of {what}")
+    } else {
+        format!(
+            "{count} of {} {files} files",
+            if install { "the build's" } else { "the task's" }
+        )
+    };
+    format!("controller `{name}` lacks {which}: sending {}", size(bytes))
+}
+
+fn counting(name: &Name, bytes: u64) -> impl FnMut(u64) + '_ {
     let began = Instant::now();
-    let size_bytes = streams.iter().flatten().map(|piece| piece.size_bytes).sum();
-    // Many streams write how many bytes they have sent, and this thread alone reads them; not
-    // bounded, so that no stream waits while this thread opens connections, as the reads of the
-    // pieces bound the counts.
-    let (counting, counts) = mpsc::channel();
-    thread::scope(|scope| {
-        let (mut held, mut apart) = (BTreeSet::new(), true);
-        let mut threads = Vec::new();
-        let mut unstarted = None;
-        for pieces in streams {
-            let slot = if apart {
-                reached.slot_apart(&held)
-            } else {
-                reached.slot()
-            };
-            let slot = match slot {
-                Ok(slot) => slot,
-                Err(error) => {
-                    unstarted = Some(error);
-                    break;
-                }
-            };
-            let master = slot.master;
-            // Once a stream shares a master, no other master is to be had.
-            apart &= held.insert(master);
-            let mut session = reached.session(&manifest::receive(), slot);
-            let counting = counting.clone();
-            let streaming = move || {
-                // Its receiver reads until every stream has ended.
-                let mut count = |bytes| counting.send(bytes).unwrap_or(());
-                let (status, written) = streamed(&mut session, |stdin| {
-                    manifest::stream(pieces, sources, stdin, &mut count)
-                })?;
-                drop(session);
-                // Asked as soon as it ends, before another command could open its master again.
-                let cut = reached.ended_connection(status, &[SSH_FAILED], master);
-                Ok::<_, String>(Streamed {
-                    master,
-                    status,
-                    cut,
-                    written,
-                })
-            };
-            let thread = (thread::Builder::new()).name(format!("stream over {master}"));
-            match thread.spawn_scoped(scope, streaming) {
-                Ok(thread) => threads.push(thread),
-                Err(error) => {
-                    unstarted = Some(format!(
-                        "a thread to send a stream on can't be started: {error}"
-                    ));
-                    break;
-                }
-            }
-        }
-        drop(counting);
-        said_progress(&reached.name, &counts, began, size_bytes);
-        let mut ended = Vec::new();
-        for thread in threads {
-            ended.push(
-                thread
-                    .join()
-                    .unwrap_or_else(|panic| panic::resume_unwind(panic))?,
-            );
-        }
-        unstarted.map_or(Ok(ended), Err)
-    })
-}
-
-fn said_progress(name: &Name, counts: &mpsc::Receiver<u64>, began: Instant, size_bytes: u64) {
-    let (mut sent_bytes, mut next) = (0, began + PROGRESS);
-    loop {
+    let mut next = began + PROGRESS;
+    let mut sent = 0;
+    move |count| {
+        sent += count;
         let now = Instant::now();
         if now >= next {
-            say(progress(name, sent_bytes, size_bytes, now - began));
+            say(progress(name, sent, bytes, now - began));
             next = now + PROGRESS;
         }
-        match counts.recv_timeout(next - now) {
-            Ok(bytes) => sent_bytes += bytes,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
-        }
     }
-}
-
-/// The blobs of `manifest` that the controller's store lacks.
-fn lacked(
-    reached: &Reached,
-    manifest: &manifest::Manifest,
-) -> Result<Vec<manifest::Missing>, String> {
-    let (query, text) = (manifest::query(&manifest.name()), manifest.text());
-    let asking = || reached.ssh(&query);
-    let again = "asking again what it lacks";
-    let answer = reached.again(
-        asking,
-        Some(&text),
-        "ssh",
-        &[SSH_FAILED],
-        SHORT_TIMEOUT,
-        again,
-    )?;
-    manifest::missing(&answer)
-}
-
-/// Runs `session` with a standard input that `write` fills, and returns how it ended with what
-/// `write` returned. A stalled write stops the `ssh`.
-fn streamed<T>(
-    session: &mut Session,
-    write: impl FnOnce(&mut Pipe) -> io::Result<T>,
-) -> Result<(ExitStatus, io::Result<T>), String> {
-    let child = session.stdin(Stdio::piped()).spawn();
-    let mut child = child.context("running `ssh` failed")?;
-    let Some(stdin) = child.stdin.take() else {
-        unreachable!("the child's standard input is missing, though it is piped just above")
-    };
-    let mut pipe = Pipe(stdin);
-    let written = write(&mut pipe);
-    // Then dropped, so that the script reads its end.
-    drop(pipe);
-    if matches!(&written, Err(error) if error.kind() == io::ErrorKind::TimedOut) {
-        child.kill().context("stopping `ssh` failed")?;
-    }
-    let status = child.wait().context("running `ssh` failed")?;
-    Ok((status, written))
-}
-
-/// The standard input of an `ssh`, written only when it takes bytes: a write that finds no room
-/// for `STALL_TIMEOUT` fails as `TimedOut`.
-struct Pipe(ChildStdin);
-
-impl io::Write for Pipe {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let Ok(timeout) = Timespec::try_from(STALL_TIMEOUT) else {
-            unreachable!("{STALL_TIMEOUT:?} fits a `timespec`")
-        };
-        loop {
-            let mut polled = [PollFd::new(&self.0, PollFlags::OUT)];
-            match event::poll(&mut polled, Some(&timeout)) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("it took no byte for {} s", STALL_TIMEOUT.as_secs()),
-                    ));
-                }
-                Ok(_) => break,
-                Err(Errno::INTR) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        // No more than a pipe that polls as writable takes at once, so that the write never waits.
-        self.0.write(&bytes[..bytes.len().min(libc::PIPE_BUF)])
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
-
-fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Piece>]) -> String {
-    let pieces = || streams.iter().flatten();
-    let lacked: BTreeSet<&Sha256Digest> = pieces().map(|piece| &piece.digest).collect();
-    let files = manifest.entries();
-    let files_count = files.len();
-    if lacked.is_empty() {
-        return format!("controller `{name}` holds all {files_count} of the task's files");
-    }
-    let lacked_count = files
-        .iter()
-        .filter(|file| lacked.contains(&file.digest))
-        .count();
-    let lacks = if lacked_count == files_count {
-        format!("all {files_count} of the task's files")
-    } else {
-        format!("{lacked_count} of the task's {files_count} files")
-    };
-    let size_bytes = pieces().map(|piece| piece.size_bytes).sum();
-    let over = match streams.len() {
-        1 => String::new(),
-        count => format!(" over {count} connections"),
-    };
-    format!(
-        "controller `{name}` lacks {lacks}: sending {}{over}",
-        size(size_bytes)
-    )
 }
 
 // A count of what is done against the whole, as Modal says of the files of a mount it uploads:

@@ -8,13 +8,14 @@
 //! link ends before an answer is whole may ask again over another.
 //!
 //! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
-//! by a SHA-256 of the client's own build, its executable and the files beside it ([`key`]), so
-//! that both ends are always one build, as Bazel keys its install by a digest of what it ships
+//! by the SHA-256 of the manifest of the client's executable and the files beside it, so that
+//! both ends are always one build, as Bazel keys its install by a digest of what it ships
 //! (<https://github.com/bazelbuild/bazel/blob/a765dc177f48efb4c9e1b980609b838c9ba27f42/src/main/cpp/startup_options.cc#L754-L762>).
 //! With none there, the command says [`Hello::Absent`], and the client uploads its build
 //! ([`installing`]) and links again.
 
 pub(crate) mod copy;
+pub(crate) mod store;
 
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -75,6 +76,8 @@ pub(crate) enum Ask {
     Start(Box<StartRequest>),
     Cancel(CancelRequest),
     Reap(ReapRequest),
+    Lacks(store::Lacks),
+    Put(store::Put),
 }
 
 impl Ask {
@@ -89,6 +92,7 @@ impl Ask {
                 }),
             Self::Cancel(request) => Some(request.modal_bytes.unwrap_or(0)),
             Self::Reap(request) => Some(request.modal_bytes.unwrap_or(0)),
+            Self::Lacks(request) => Some(request.body_bytes),
             _ => Some(0),
         };
         bytes
@@ -105,22 +109,7 @@ impl Ask {
     pub(crate) fn read_body(&self, input: &mut impl Read) -> io::Result<Vec<u8>> {
         let bytes = self.body_bytes()?;
         let mut body = Vec::new();
-        while body.len() < bytes {
-            let Some((Part, part)) = frame::read(input)? else {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            };
-            if part.is_empty() || part.len() > bytes - body.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "a part of the request's body holds {} bytes: expected 1 to {}",
-                        part.len(),
-                        bytes - body.len()
-                    ),
-                ));
-            }
-            body.extend(part);
-        }
+        store::Parts::new(input, bytes as u64).read_to_end(&mut body)?;
         Ok(body)
     }
 }
@@ -318,6 +307,7 @@ pub(crate) struct StartRequest {
     pub(crate) kind: JobKind,
     pub(crate) repo: String,
     pub(crate) tree: Sha256Digest,
+    pub(crate) install: Sha256Digest,
     pub(crate) words: Vec<String>,
     pub(crate) region: aws::Region,
     pub(crate) parameter: String,
@@ -329,13 +319,7 @@ pub(crate) struct StartRequest {
 pub(crate) enum StartAnswer {
     Started,
     AlreadyStarted,
-    Unconfirmed {
-        message: String,
-    },
-    Unadmitted {
-        changed: Vec<Sha256Digest>,
-        gone: Vec<Sha256Digest>,
-    },
+    Unconfirmed { message: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -344,7 +328,6 @@ pub(crate) enum StartHead {
     Started,
     AlreadyStarted,
     Unconfirmed { message: String },
-    Unadmitted { body_bytes: u64 },
 }
 
 impl Request for StartRequest {
@@ -362,31 +345,14 @@ impl Request for StartRequest {
             StartAnswer::Unconfirmed { message } => {
                 (StartHead::Unconfirmed { message }, Vec::new())
             }
-            StartAnswer::Unadmitted { changed, gone } => {
-                let body = serde_json::to_vec(&(changed, gone))
-                    .unwrap_or_else(|error| unreachable!("lists of digests are JSON: {error}"));
-                (
-                    StartHead::Unadmitted {
-                        body_bytes: body.len() as u64,
-                    },
-                    body,
-                )
-            }
         }
     }
 
-    fn received(head: StartHead, link: &mut Link) -> Result<StartAnswer, Unanswered> {
+    fn received(head: StartHead, _: &mut Link) -> Result<StartAnswer, Unanswered> {
         match head {
             StartHead::Started => Ok(StartAnswer::Started),
             StartHead::AlreadyStarted => Ok(StartAnswer::AlreadyStarted),
             StartHead::Unconfirmed { message } => Ok(StartAnswer::Unconfirmed { message }),
-            StartHead::Unadmitted { body_bytes } => {
-                let (changed, gone) =
-                    serde_json::from_slice(&link.body(body_bytes)?).map_err(|error| {
-                        Unanswered::Failed(format!("its unadmitted blobs don't read: {error}"))
-                    })?;
-                Ok(StartAnswer::Unadmitted { changed, gone })
-            }
         }
     }
 }
@@ -570,7 +536,7 @@ pub(crate) fn refuse(output: &mut impl Write, message: String) -> io::Result<()>
 }
 
 /// The directory of `serve`'s installs, relative to the controller user's home: each is
-/// `<sha256>/`, a build's files by their [`key`].
+/// `<sha256>/`, a build's files by their manifest digest.
 pub(crate) fn installs() -> String {
     format!("{}/serve", workspace::DIR)
 }
@@ -580,21 +546,9 @@ fn installed(digest: &Sha256Digest) -> String {
     format!("{}/{}/pumpkin", installs(), digest.hex())
 }
 
-/// The key of the install of `files`, each a file's name there and its SHA-256: the SHA-256 of
-/// what `sha256sum` lists of them, in their order.
-pub(crate) fn key(files: &[(&str, Sha256Digest)]) -> Sha256Digest {
-    manifest::sha256(listing(files).as_bytes())
-}
-
-fn listing(files: &[(&str, Sha256Digest)]) -> String {
-    (files.iter())
-        .map(|(name, digest)| [digest.hex(), "  ", name, "\n"].concat())
-        .collect()
-}
-
 /// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
-/// build whose [`key`] is `digest`, or, if there is none, one that prints the frame of
-/// [`Hello::Absent`].
+/// build whose manifest has the SHA-256 `digest`, or the frame of [`Hello::Absent`] if it is
+/// missing.
 pub(crate) fn command(digest: &Sha256Digest) -> String {
     let mut absent = Vec::new();
     if let Err(error) = frame::write(&mut absent, &Hello::Absent, &[]) {
@@ -609,14 +563,24 @@ pub(crate) fn command(digest: &Sha256Digest) -> String {
     )
 }
 
-/// The script that installs what its standard input brings, a `tar` archive of `files`, each a
-/// file's name and its SHA-256, as the `serve` that [`command`] runs: written into a directory of
+/// The script that installs the `tar` archive on standard input as the `serve` that [`command`]
+/// runs. Its files must match `manifest`. They are written into a directory of
 /// its own beside the installs, checked, made 0555 and renamed into place whole, so that no
 /// `serve` runs a part of one. An install that another client renamed there first is as good.
-pub(crate) fn installing(files: &[(&str, Sha256Digest)]) -> String {
-    let (installs, key, listing) = (installs(), key(files), listing(files));
+pub(crate) fn installing(manifest: &manifest::Manifest) -> String {
+    let installs = installs();
+    let key = manifest.name();
     let hex = key.hex();
-    let names: Vec<&str> = files.iter().map(|(name, _)| *name).collect();
+    let listing: String = manifest
+        .entries()
+        .iter()
+        .map(|entry| [entry.digest.hex(), "  ", &entry.path, "\n"].concat())
+        .collect();
+    let names: Vec<&str> = manifest
+        .entries()
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
     let names = names.join(" ");
     format!(
         r#"installs={installs}

@@ -402,9 +402,10 @@ client's `Link` to `serve`, the controller's end, which starts and cancels jobs,
 lists the jobs that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
 and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
-`manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
-the controller's side, whose `start` starts each id once under the jobs' lock and keeps the
-install its unit runs, with the prune and the slots that admit its builds and publishes
+`manifest` describes the task tree and the client install that `send` transfers by content, and
+its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
+`start` starts each id once under the jobs' lock and keeps the install its unit runs, with the
+prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
 their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
 the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
@@ -438,12 +439,12 @@ keep it there in name. `Root`, the one `Loader`, refuses a symbolic link on the 
 providers, so the class a role is placed in never turns on the machine's memory. A configuration
 that names a provider of kind `docker` names no other (`Providers::new`).
 
-**Architecture Invariant:** a file enters a controller's store only once its SHA-256 is its name,
-checked under a name that no send writes, so that sends of one file at once, from other
-workspaces or machines, can make a job's start refuse it, as part written, but never put it in the
-store so. A job's tree is links into the store, beside its `.pumpkin`, which links to the
-controller's one workspace and which no path of a manifest is below, so a tree's files are those
-its manifest names. A client sends only what the store lacks, and no secret of a job's goes there.
+**Architecture Invariant:** each file in the controller's store has the SHA-256 that names it.
+A sender holds the partial file's lock while appending and checking its digest. A blob from the
+running install is checked on a private copy. Both are admitted under the store lock, which the
+prune also takes. The prune leaves active partials alone. A job's tree links to the store and
+its `.pumpkin` links to the controller's workspace, which no manifest path is below. A client
+sends only what the store lacks, and no secret of a job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
 or that the IR of a running job's started run names. Each job names what it holds in its directory

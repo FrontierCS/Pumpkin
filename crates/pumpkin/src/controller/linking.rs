@@ -5,7 +5,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
@@ -28,10 +27,7 @@ const BESIDE: [&str; 5] = [
 /// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
 /// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
-    /// Each file's name in the install and where it is here.
-    files: Vec<(&'static str, PathBuf)>,
-    /// Each file's name in the install and its SHA-256.
-    hashed: Vec<(&'static str, Sha256Digest)>,
+    pub(super) hashed: manifest::Hashed,
     key: Sha256Digest,
 }
 
@@ -46,11 +42,26 @@ impl Build {
                 files.push((name, path));
             }
         }
-        let hashed = (files.iter())
-            .map(|(name, path)| Ok((*name, manifest::file_sha256(path)?.0)))
-            .collect::<Result<Vec<_>, String>>()?;
-        let key = link::key(&hashed);
-        Ok(Self { files, hashed, key })
+        let mut entries = Vec::new();
+        let mut sources = std::collections::BTreeMap::new();
+        for (name, path) in files {
+            let (digest, size_bytes) = manifest::file_sha256(&path)?;
+            let kind = match name {
+                "pumpkin-modal.py" | "pumpkin-modal.py.lock" => manifest::Kind::File,
+                _ => manifest::Kind::Executable,
+            };
+            entries.push(manifest::Entry {
+                kind,
+                digest: digest.clone(),
+                size_bytes,
+                path: name.to_owned(),
+            });
+            sources.insert(digest, manifest::Source::File(path));
+        }
+        let manifest = manifest::Manifest::new(entries);
+        let key = manifest.name();
+        let hashed = manifest::Hashed { manifest, sources };
+        Ok(Self { hashed, key })
     }
 }
 
@@ -210,12 +221,22 @@ fn install(reached: &Reached, build: &Build) -> Result<(), String> {
     ));
     // The files are dropped once in the archive, so that the upload holds one copy of them.
     let archive = {
-        let read = (build.files.iter())
-            .map(|(name, path)| Ok(((*name).to_owned(), fs::read(path).context(path.display())?)))
+        let read = build
+            .hashed
+            .manifest
+            .entries()
+            .iter()
+            .map(|entry| {
+                let Some(manifest::Source::File(path)) = build.hashed.sources.get(&entry.digest)
+                else {
+                    unreachable!("each install entry was hashed from a file")
+                };
+                Ok((entry.path.clone(), fs::read(path).context(path.display())?))
+            })
             .collect::<Result<Vec<_>, String>>()?;
         manifest::archive(&read)
     };
-    let mut session = reached.ssh(&link::installing(&build.hashed))?;
+    let mut session = reached.ssh(&link::installing(&build.hashed.manifest))?;
     let installed = reached.call(&mut session, Some(&archive), "ssh", SHORT_TIMEOUT);
     let installed = installed.map_err(|error| format!("installing it failed: {error}"));
     installed.map(drop)

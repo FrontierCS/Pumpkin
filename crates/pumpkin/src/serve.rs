@@ -42,7 +42,7 @@ use crate::view::Answering;
 /// and the master it goes over, end too.
 pub(crate) const IDLE: Duration = Duration::from_mins(1);
 
-// How long an install lasts that no `serve` uses: a day, as a store's unchecked pieces last, so
+// How long an install lasts that no `serve` uses: a day, as a store's partial blobs last, so
 // that a build used every day keeps its install, and one left behind is gone by the next.
 const INSTALL_KEPT: Duration = Duration::from_hours(24);
 
@@ -77,14 +77,29 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 if let Ok(install) = &install {
                     mark_install_used(install);
                 }
-                match ask.read_body(&mut input) {
-                    Ok(body) => {
-                        if !delivered(answer(&mut output, &home, ask, &body, &mut view))? {
+                if let Ask::Put(put) = ask {
+                    match receive_put(&home, &put, &mut input, &mut output) {
+                        Ok(()) => continue,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
+                            ) =>
+                        {
                             break;
                         }
-                        continue;
+                        Err(error) => error.to_string(),
                     }
-                    Err(error) => error.to_string(),
+                } else {
+                    match ask.read_body(&mut input) {
+                        Ok(body) => {
+                            if !delivered(answer(&mut output, &home, ask, &body, &mut view))? {
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(error) => error.to_string(),
+                    }
                 }
             }
             Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
@@ -96,6 +111,27 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn receive_put(
+    home: &Path,
+    put: &link::store::Put,
+    input: &mut impl io::Read,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut parts = link::store::Parts::new(input, put.body_bytes()?);
+    let stored = crate::manifest::store::put(
+        &home.join(crate::job::STORE),
+        &put.digest,
+        put.from,
+        put.size_bytes,
+        &mut parts,
+    );
+    parts.finish()?;
+    match stored {
+        Ok(answer) => frame::write(output, &answer, &[]),
+        Err(error) => link::refuse(output, error),
+    }
 }
 
 // The client may leave at any frame, including while an answer is still streaming.
@@ -204,6 +240,24 @@ fn answer(
 ) -> io::Result<()> {
     match ask {
         Ask::Copy(request) => copy::answer(output, home, request, body),
+        Ask::Lacks(request) => link::answer(output, request, |request| {
+            let manifest = crate::manifest::Manifest::parse(body)?;
+            if manifest.name() != request.manifest {
+                return Err(
+                    "the manifest that arrived differs from its digest: send the task again"
+                        .to_owned(),
+                );
+            }
+            let install = request.install.then(own_install).transpose()?;
+            crate::manifest::store::lacks(
+                &home.join(crate::job::STORE),
+                &manifest,
+                install.as_deref(),
+            )
+        }),
+        Ask::Put(_) => {
+            unreachable!("the upload's body is streamed before answering other requests")
+        }
         Ask::Start(request) => link::answer(output, *request, |start| {
             crate::job::start(home, start, body)
         }),
