@@ -9,7 +9,6 @@ use std::time::Duration;
 use decision::{Caller, Core, Outcome};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Bar};
-use schema::ir::{Api, Name};
 use schema::workflow::RoleId;
 
 use crate::budget::Budget;
@@ -76,9 +75,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     let started = Entry::ModelRequestStarted((caller, number), clock.now());
                     let _ = reports.send(Input::Logged(started));
                 };
-                let answered = |taken: Option<&(Name, Api)>, answer| {
+                let answered = |taken, answer| {
                     let answered = ModelAnswer {
-                        taken: taken.cloned(),
+                        taken,
                         answer,
                         kept: exchange.kept(),
                         first: exchange.timed(),
@@ -114,7 +113,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(crate) fn count(&mut self, entry: &Entry) {
         if let Entry::ModelAnswered((caller, _), answered) = entry {
             let role = self.role(*caller);
-            if let (Some(budget), Some((_, api))) = (self.budgets.get_mut(&role), &answered.taken) {
+            if let (Some(budget), Some((_, _, api))) =
+                (self.budgets.get_mut(&role), &answered.taken)
+            {
                 budget.add(*api, &answered.answer);
             }
             if let Caller::Job(job) = caller
