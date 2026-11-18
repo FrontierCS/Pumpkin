@@ -36,7 +36,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use provider::RunTag;
-use runtime::{Ending, LogFold, Readout, Record};
+use runtime::{Ending, LogFold, ReadError, Readout, Record};
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use serde_json::{Value, json};
@@ -192,7 +192,7 @@ struct Held {
 }
 
 impl Held {
-    fn new(record: Record, log_epoch: u64, made: u64) -> Result<Self, String> {
+    fn new(record: Record, log_epoch: u64, made: u64) -> Result<Self, ReadError> {
         let fold = record.fold();
         Ok(Self {
             readout: fold.readout()?,
@@ -211,7 +211,7 @@ impl Held {
         })
     }
 
-    fn look(&mut self) -> Result<(), String> {
+    fn look(&mut self) -> Result<(), ReadError> {
         let (ended, log_epoch) = (self.ending.is_some(), self.log_epoch);
         // How it ended first, so that the log taken after holds every record before the end.
         let ending = self.record.ending()?;
@@ -227,7 +227,7 @@ impl Held {
         Ok(())
     }
 
-    fn take(&mut self) -> Result<(), String> {
+    fn take(&mut self) -> Result<(), ReadError> {
         if self.talk.is_none() {
             // A run writes both before it creates its log, so a log without them has no line.
             let (Some(ir), Some(places)) = (self.record.ir()?, self.record.places()?) else {
@@ -408,6 +408,12 @@ enum Failed {
 impl From<String> for Failed {
     fn from(error: String) -> Self {
         Self::Unreadable(error)
+    }
+}
+
+impl From<ReadError> for Failed {
+    fn from(error: ReadError) -> Self {
+        Self::Unreadable(error.into())
     }
 }
 
@@ -650,7 +656,7 @@ impl View {
 
     /// The row of run `id`, whose record failed to read with `error`, as `ls` lists it when
     /// another build made the record; else `error`.
-    fn unread_row(&self, id: &str, error: String) -> Result<Value, String> {
+    fn unread_row(&self, id: &str, error: ReadError) -> Result<Value, String> {
         let listed = Listed::unread(&self.runs.join(id), error)?;
         let mut row = listed_json(
             id,
@@ -661,7 +667,7 @@ impl View {
         Ok(row)
     }
 
-    fn row(&mut self, id: &str) -> Result<Option<Value>, String> {
+    fn row(&mut self, id: &str) -> Result<Option<Value>, ReadError> {
         if let Some(row) = self.ended.get(id) {
             if !row.lost || row.record.ending()? == Some(Ending::Lost) {
                 return Ok(Some(row.json.clone()));
@@ -673,7 +679,8 @@ impl View {
         } else {
             let dir = self.runs.join(id);
             let has = dir.join("record.json").try_exists();
-            if !has.context(dir.display())? {
+            let has = has.map_err(|error| ReadError::Failed(format!("{}: {error}", dir.display())));
+            if !has? {
                 return Ok(None);
             }
             let record = Record::open(&dir)?;
@@ -694,7 +701,7 @@ impl View {
         }
     }
 
-    fn ended_row(&mut self, record: Record, ending: Ending) -> Result<Value, String> {
+    fn ended_row(&mut self, record: Record, ending: Ending) -> Result<Value, ReadError> {
         let named = self.named.as_deref();
         let now = crate::unix_now();
         let lost = ending == Ending::Lost;
@@ -762,12 +769,12 @@ impl View {
                  shows"
             )));
         }
-        Record::open(&dir).map_err(Failed::NotFound)
+        Record::open(&dir).map_err(|error| Failed::NotFound(error.into()))
     }
 
     /// Run `id`, held, or else of `record`, looked at again. Its fold is dropped if the look
     /// fails, as what a take that failed part-way leaves can't be trusted.
-    fn looked(&mut self, id: &str, record: Option<Record>) -> Result<&mut Held, String> {
+    fn looked(&mut self, id: &str, record: Option<Record>) -> Result<&mut Held, ReadError> {
         let log_epoch = self.log_epochs.get(id).copied().unwrap_or(0);
         let made = self.made + 1;
         let mut held = match (self.held.remove(id), record) {

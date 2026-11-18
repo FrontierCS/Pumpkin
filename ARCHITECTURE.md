@@ -574,7 +574,8 @@ model exchange's bodies and the outcome. A reader takes the log in typed parts,
 each whole or not at all: a part that this build can't read is listed as unread (`Readout`), so no
 content of the log fails a read. Many builds write records, so a listing shows a record that this
 build can't read, and another build or an older one wrote (`runtime::writer`), as one `unread` row
-naming that build, and fails only for a record of its own build that doesn't read.
+naming that build, and fails for a record of its own build that doesn't read, and for any record
+that can't be read at all, whoever wrote it (`ReadError`).
 
 The record is written as the run goes, and each file is synced through the `Host`. The run log
 only grows, a whole line at a time, and `ir.json`, `sources/` (the text of each file that the

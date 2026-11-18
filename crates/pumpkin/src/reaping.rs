@@ -140,7 +140,7 @@ pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String>
     let mut reaching = Reaching::new(modal_config);
     let (mut unreaped, mut unreached) = (0, 0);
     for record in Record::all(Path::new(&runs))?.into_values() {
-        let swept = record.and_then(|record| {
+        let swept = record.map_err(String::from).and_then(|record| {
             if record.driver()?.is_some() || reaper == Reaper::Boot && record.ended_clean()? {
                 return Ok(None);
             }

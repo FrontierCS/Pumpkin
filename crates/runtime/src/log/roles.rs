@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use super::Place;
 use super::progress::{Sandbox, places};
-use crate::{TokenPrices, record};
+use crate::TokenPrices;
+use crate::read_error::{ReadError, read_optional};
 
 /// What the IR and `provider.json` say of a run's roles: what the log's lines refer to by name.
 #[derive(Default)]
@@ -131,16 +132,16 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
 }
 
 /// The IR in record `dir`'s `ir.json`, or `None` if it isn't written.
-pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, String> {
+pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     let path = dir.join("ir.json");
-    let Some(bytes) = record::read_optional(&path)? else {
+    let Some(bytes) = read_optional(&path)? else {
         return Ok(None);
     };
     let ir = serde_json::from_slice(&bytes).map_err(|error| {
-        format!(
+        ReadError::Form(format!(
             "{} holds an IR that this build doesn't read: {error}",
             path.display()
-        )
+        ))
     })?;
     Ok(Some(ir))
 }

@@ -325,7 +325,7 @@ fn states() {
         &expect![[r#"
             $ pumpkin wait <no outcome, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<no outcome, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<no outcome, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <no outcome, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<no outcome, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -352,7 +352,7 @@ fn states() {
             pumpkin: runs/<no outcome, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <returned, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<returned, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<returned, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <returned, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<returned, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -381,7 +381,7 @@ fn states() {
             pumpkin: runs/<returned, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unsubmitted, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unsubmitted, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<unsubmitted, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <unsubmitted, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unsubmitted, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -410,7 +410,7 @@ fn states() {
             pumpkin: runs/<unsubmitted, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <failed, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<failed, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<failed, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <failed, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<failed, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -439,7 +439,7 @@ fn states() {
             pumpkin: runs/<failed, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <interrupted, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<interrupted, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<interrupted, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <interrupted, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<interrupted, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -468,7 +468,7 @@ fn states() {
             pumpkin: runs/<interrupted, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<unknown signal, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <unknown signal, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -495,7 +495,7 @@ fn states() {
             pumpkin: runs/<unknown signal, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<unknown state, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <unknown state, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -522,7 +522,7 @@ fn states() {
             pumpkin: runs/<unknown state, locked, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <not JSON, no driver.pid, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<not JSON, no driver.pid, v0>/driver.pid: No such file or directory (os error 2)
+            pumpkin: <scratch>/runs/<not JSON, no driver.pid, v0>/driver.pid isn't there: expected the record of a run to have it
             $ pumpkin wait <not JSON, no driver.pid, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<not JSON, no driver.pid, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads

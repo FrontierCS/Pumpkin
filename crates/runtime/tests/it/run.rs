@@ -765,7 +765,11 @@ fn reads_a_growing_log() {
         let started_over = match fold.take() {
             Ok(started_over) => started_over.map(|started_over| started_over.to_string()),
             Err(error) => {
-                read.push(error.replace(&dir.path().display().to_string(), "…"));
+                read.push(
+                    error
+                        .to_string()
+                        .replace(&dir.path().display().to_string(), "…"),
+                );
                 return;
             }
         };

@@ -15,7 +15,7 @@ use std::{env, fmt, fs};
 use driver::ARGV0;
 use engine::{ContextName, Engine};
 use provider::UnixTime;
-use runtime::Record;
+use runtime::{ReadError, Record};
 use rustix::fs::Mode;
 use rustix::process::umask;
 use stdx::Context;
@@ -274,13 +274,13 @@ fn listed_in(
     Ok((listing, unlisted))
 }
 
-fn ended(dir: &Path) -> Result<Option<UnixTime>, String> {
+fn ended(dir: &Path) -> Result<Option<UnixTime>, ReadError> {
     let outcome = dir.join("outcome.json");
     let modified = fs::metadata(&outcome).and_then(|metadata| metadata.modified());
     match modified {
         Ok(modified) => Ok(Some(UnixTime::of(modified).unwrap_or(EPOCH))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{}: {error}", outcome.display())),
+        Err(error) => Err(ReadError::Failed(format!("{}: {error}", outcome.display()))),
     }
 }
 

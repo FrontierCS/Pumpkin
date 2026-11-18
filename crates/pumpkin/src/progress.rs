@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, Readout, Record, Sandbox, Writer,
+    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
+    Sandbox, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -104,7 +105,7 @@ pub(crate) struct Run {
 impl Listed {
     /// The run of `record`, which says on the standard error what of its log this `pumpkin`
     /// can't read.
-    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, String> {
+    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, ReadError> {
         let Readout { progress, unread } = record.progress()?;
         if let Some(unread) = self::unread(&unread) {
             crate::say(format_args!("run {}: {unread}", record.id()));
@@ -112,14 +113,18 @@ impl Listed {
         Ok(Self::of(record, record.task()?, ending, progress))
     }
 
-    /// The run in `dir`, whose record failed to read with `error`, if another build made it, and
-    /// is the one to read it; else `error`.
-    pub(crate) fn unread(dir: &Path, error: String) -> Result<Self, String> {
-        match runtime::writer(dir) {
-            Ok(Writer::Other(build)) => Ok(Self::Unread(Unread::Build(build))),
-            Ok(Writer::Older) => Ok(Self::Unread(Unread::Older)),
-            // Only a bug or a failure of the disk makes this build fail to read its own record.
-            Ok(Writer::This) | Err(_) => Err(error),
+    /// The run in `dir`, whose record failed to read with `error`, if the record is in a form
+    /// that this build doesn't read and another build made it; else `error`.
+    pub(crate) fn unread(dir: &Path, error: ReadError) -> Result<Self, String> {
+        match error {
+            // A record that couldn't be read says nothing of its form, whoever made it.
+            ReadError::Failed(error) => Err(error),
+            ReadError::Form(error) => match runtime::writer(dir) {
+                Ok(Writer::Other(build)) => Ok(Self::Unread(Unread::Build(build))),
+                Ok(Writer::Older) => Ok(Self::Unread(Unread::Older)),
+                // Only a bug or a damaged file makes this build fail to read its own record.
+                Ok(Writer::This) | Err(_) => Err(error),
+            },
         }
     }
 
@@ -789,7 +794,7 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
             }
         }
         Err(error) => {
-            let error = crate::escaped(&error);
+            let error = crate::escaped(&error.to_string());
             let _ = writeln!(summary, "  its budgets can't be read: {error}");
         }
     }

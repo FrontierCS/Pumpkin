@@ -17,6 +17,7 @@ use stdx::Context;
 use super::logged::{self, Line};
 use super::progress::{Reading, Readout, Unread, json_file, readout};
 use super::roles::Roles;
+use crate::read_error::{ReadError, failed};
 
 fn records(dir: &Path, mut take: impl FnMut(Line)) -> Result<Option<Vec<Unread>>, String> {
     let path = dir.join("log.jsonl");
@@ -71,11 +72,11 @@ pub(crate) fn final_call(dir: &Path) -> Result<u64, String> {
     }
 }
 
-fn open(path: &Path) -> Result<Option<File>, String> {
+fn open(path: &Path) -> Result<Option<File>, ReadError> {
     match File::open(path) {
         Ok(log) => Ok(Some(log)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context(path.display()),
+        Err(error) => Err(failed(path.display())(error)),
     }
 }
 
@@ -91,14 +92,15 @@ fn take_lines(
     cursor: &mut Cursor,
     unread: &mut Vec<Unread>,
     mut take: impl FnMut(TakenLine<'_>, Option<Line>),
-) -> Result<(), String> {
+) -> Result<(), ReadError> {
     let mut log = BufReader::new(log);
     log.seek(SeekFrom::Start(cursor.size))
-        .context(path.display())?;
+        .map_err(failed(path.display()))?;
     let mut line = Vec::new();
     loop {
         line.clear();
-        log.read_until(b'\n', &mut line).context(path.display())?;
+        log.read_until(b'\n', &mut line)
+            .map_err(failed(path.display()))?;
         // A last line without its newline is one being written, or that a crash cut short: it is
         // left to a later read.
         let Some(whole) = line.strip_suffix(b"\n") else {
@@ -139,7 +141,7 @@ pub(crate) fn lines(dir: &Path, bytes: Range<u64>) -> Result<Vec<(u64, Vec<u8>)>
 
 /// What the whole log in `dir` says now. Fails if a file of the record can't be read, or, once the
 /// log exists, its `ir.json` or `provider.json` isn't JSON.
-pub(crate) fn progress(dir: &Path) -> Result<Readout, String> {
+pub(crate) fn progress(dir: &Path) -> Result<Readout, ReadError> {
     let mut fold = LogFold::new(dir);
     let None = fold.take()? else {
         unreachable!("a fold that has taken nothing never starts over");
@@ -243,7 +245,7 @@ impl LogFold {
     /// If the log is gone, shorter than what was read, or another file, the fold forgets everything
     /// it held and reads the log from its start, and says so. Fails if a file of the record can't
     /// be read, or, once the log exists, its `ir.json` or `provider.json` isn't JSON.
-    pub fn take(&mut self) -> Result<Option<StartedOver>, String> {
+    pub fn take(&mut self) -> Result<Option<StartedOver>, ReadError> {
         self.take_each(|_| {})
     }
 
@@ -253,12 +255,12 @@ impl LogFold {
     pub fn take_each(
         &mut self,
         mut each: impl FnMut(TakenLine<'_>),
-    ) -> Result<Option<StartedOver>, String> {
+    ) -> Result<Option<StartedOver>, ReadError> {
         let path = self.dir.join("log.jsonl");
         let log = open(&path)?;
         let found = match &log {
             Some(log) => {
-                let meta = log.metadata().context(path.display())?;
+                let meta = log.metadata().map_err(failed(path.display()))?;
                 Some(((meta.dev(), meta.ino()), meta.len()))
             }
             None => None,
@@ -315,7 +317,7 @@ impl LogFold {
     /// What the lines taken say, as reading the whole log would, with what the record says now of
     /// each sandbox that they name. Fails if a sandbox's `sandbox.json` can't be read, or isn't
     /// JSON.
-    pub fn readout(&self) -> Result<Readout, String> {
+    pub fn readout(&self) -> Result<Readout, ReadError> {
         readout(
             &self.dir,
             self.roles.as_ref(),

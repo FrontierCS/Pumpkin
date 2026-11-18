@@ -40,6 +40,7 @@ mod log;
 mod model;
 mod op;
 mod price;
+mod read_error;
 mod record;
 mod relay;
 mod routes;
@@ -65,6 +66,7 @@ use model::Served;
 pub use model::{KeptPart, KeptRequest};
 use op::{Unanswered, accepts, request};
 pub use price::TokenPrices;
+pub use read_error::ReadError;
 pub use record::{
     BUILD, Build, Ending, Reaped, Record, RouteEntry, Writer, ir_json, minted, named, new_id,
     writer,
@@ -184,7 +186,7 @@ impl<'r, H: Host> Run<'r, H> {
         // None if the run never began its log.
         let (outcome, usage) = match log::progress(&self.dir) {
             Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
-            Err(error) => (failed_also(outcome, Err(error)), None),
+            Err(error) => (failed_also(outcome, Err(error.into())), None),
         };
         let mut recorded = match &outcome {
             Ok(outcome) => {
