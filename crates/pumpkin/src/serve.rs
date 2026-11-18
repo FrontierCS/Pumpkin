@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
 use std::io::{self, BufReader};
 use std::os::fd::AsFd as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -49,7 +49,13 @@ const UPTIME: &str = "/proc/uptime";
 /// Answers a client's link on the standard input and output, as the module says.
 pub(crate) fn serve() -> Result<ExitCode, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
-    prune(&home.join(link::installs()));
+    let install = own_install();
+    match &install {
+        Ok(install) => prune(&home.join(link::installs()), install),
+        Err(error) => say(format_args!(
+            "{error}, so no install is removed, or marked as used"
+        )),
+    }
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
@@ -58,7 +64,9 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     while arrives(&input)? {
         let broken = match frame::read::<Ask>(&mut input) {
             Ok(Some((ask, body))) if body.is_empty() => {
-                mark_install_used();
+                if let Ok(install) = &install {
+                    mark_install_used(install);
+                }
                 link::send(&mut output, &answered(&home, ask)).context(written)?;
                 continue;
             }
@@ -94,14 +102,22 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     }
 }
 
-/// Marks this `serve`'s install in `installs` as used, and removes each other entry there that
+/// The directory of this `serve`'s install, which holds its executable.
+fn own_install() -> Result<PathBuf, String> {
+    let exe = crate::workspace::exe("expected it to tell its install from the others")?;
+    match exe.parent() {
+        Some(install) => Ok(install.to_owned()),
+        None => Err(format!(
+            "{} is in no directory, as an install is",
+            exe.display()
+        )),
+    }
+}
+
+/// Marks `install`, this `serve`'s, as used, and removes each other entry in `installs` that
 /// nothing changed for `INSTALL_KEPT`, saying, but going on past, what it can't do.
-fn prune(installs: &Path) {
-    let exe = match crate::workspace::exe("expected it to tell its install from the others") {
-        Ok(exe) => exe,
-        Err(error) => return say(format_args!("{error}, so none is removed")),
-    };
-    let own = exe.parent().and_then(Path::file_name);
+fn prune(installs: &Path, install: &Path) {
+    let own = install.file_name();
     let entries = match fs::read_dir(installs) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -119,18 +135,8 @@ fn prune(installs: &Path) {
     }
 }
 
-/// Marks this `serve`'s install as used now, saying, but going on past, what it can't do.
-fn mark_install_used() {
-    let exe = match crate::workspace::exe("expected it to mark its install as used") {
-        Ok(exe) => exe,
-        Err(error) => return say(error),
-    };
-    let Some(install) = exe.parent() else {
-        return say(format_args!(
-            "{} has no directory to mark as used",
-            exe.display()
-        ));
-    };
+/// Marks `install`, this `serve`'s, as used now, saying, but going on past, what it can't do.
+fn mark_install_used(install: &Path) {
     if let Err(error) = mark_used(install, SystemTime::now()) {
         say(error);
     }
