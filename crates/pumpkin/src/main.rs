@@ -196,14 +196,7 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
     let (runs, named) = runs_dir(runs)?;
     let now = unix_now();
     let since = progress::listed_since(&prefixes, now);
-    let (listing, unlisted) = listed_in(
-        Path::new(&runs),
-        named.is_none(),
-        &prefixes,
-        since,
-        now,
-        named.as_deref(),
-    )?;
+    let (listing, unlisted) = listed_in(Path::new(&runs), &prefixes, since, now, named.as_deref())?;
     let lines = progress::lines(&listing, named.as_deref());
     print(lines.as_bytes()).context("printing the runs failed")?;
     if unlisted > 0 {
@@ -225,18 +218,17 @@ fn unix_now() -> UnixTime {
 
 /// The runs of `runs` whose ids start with one of `prefixes`, or every run if there are none, and
 /// how many can't be listed, each said as it is found. A run that ended before `since` is listed
-/// as older. A `runs` that is missing is an empty listing if it is `default`.
-/// Each row is made at `now`, with its commands naming `named` as the runs directory.
+/// as older. Each row is made at `now`, with its commands naming `named` as the runs directory. A
+/// `runs` that is missing is an empty listing unless `named` names it.
 fn listed_in(
     runs: &Path,
-    default: bool,
     prefixes: &[String],
     since: Option<std::time::Duration>,
     now: UnixTime,
     named: Option<&str>,
 ) -> Result<(progress::Listing, usize), String> {
     let mut listing = progress::Listing::default();
-    if default && !runs.try_exists().context(runs.display())? {
+    if named.is_none() && !runs.try_exists().context(runs.display())? {
         return Ok((listing, 0));
     }
     let mut unlisted = 0;

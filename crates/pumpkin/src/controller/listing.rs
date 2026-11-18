@@ -121,8 +121,8 @@ fn listed_here(
     now: UnixTime,
 ) -> Result<(crate::progress::Listing, usize), String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    let (mut listing, unlisted) = crate::listed_in(&runs, true, prefixes, since, now, None)?;
-    let (ended, ended_unlisted) = crate::listed_in(kept, true, prefixes, since, now, None)?;
+    let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
+    let (ended, ended_unlisted) = crate::listed_in(kept, prefixes, since, now, None)?;
     for (id, entry) in ended.runs {
         listing.runs.entry(id).or_insert(entry);
     }
