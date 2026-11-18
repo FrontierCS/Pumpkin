@@ -6,12 +6,15 @@
 //! carrying up to `SESSIONS` sessions at once. A session is held by a lock on a file of the
 //! workspace, so the commands of separate `pumpkin` processes share the connections and none
 //! takes a session that another holds. With no connection to share, a command opens one, with
-//! this machine's key, at the address where the workspace last found the controller; when that
-//! doesn't get through, it finds the controller again, starts it if it is stopped, and waits until
-//! its `sshd` admits logins. It enrols the key through EC2 Instance Connect once the controller
-//! refuses it. What goes over the connections is the submodules': `send`, `copy`, `listing`,
-//! `viewing` and `commands`; `listing` and `viewing` go over a link to `serve`, which `linking`
-//! opens.
+//! this machine's key, at the address where the workspace last found the controller, and again
+//! after a pause while `ssh` connects but doesn't get through, as opening one runs nothing there.
+//! When nothing answers there, or it still doesn't get through, it finds the controller again,
+//! starts it if it is stopped, and waits until its `sshd` answers. Once the controller refuses the
+//! key, it opens again under this machine's lock of enrolling, as the key may have just been
+//! enrolled, and if that is refused too, pushes the key through EC2 Instance Connect, opens, and
+//! appends the key to the controller user's `authorized_keys`. What goes over the connections is
+//! the submodules': `send`, `copy`, `listing`, `viewing` and `commands`; `listing` and `viewing` go
+//! over a link to `serve`, which `linking` opens.
 //!
 //! A command on the controller is cut when its connection ends, and then says nothing of how far
 //! it got, so a command repeats only where its caller knows that running it again is safe.
@@ -42,7 +45,7 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 pub(crate) use viewing::Viewing;
 
-use self::aws::{Located, START_POLL, answers, find, kept};
+use self::aws::{Located, answers, find, kept};
 use crate::job::JOBS;
 use crate::workspace::Workspace;
 use crate::{config, manifest, next, say};
@@ -96,6 +99,20 @@ const AGAIN: [Duration; 6] = [
     Duration::from_mins(1),
     Duration::from_mins(2),
 ];
+
+// How many times an opening of a master that doesn't get through is made, so 86 s of pauses in all:
+// long enough for a burst of openings past `sshd`'s `MaxStartups`, which takes 10 at once, to get
+// in, and for a controller just started, whose `sshd` takes connections before it admits logins,
+// to admit them. An opening whose `ssh` doesn't connect to `sshd`'s port is the last, so at worst
+// the 8 openings each connect and then wait out `ConnectTimeout`, 166 s in all. The count is this
+// module's: Ansible makes none again unless its `reconnection_retries` is set:
+// https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L209-L215
+const OPENINGS: u32 = 8;
+
+// The longest pause before an opening again; the pause after attempt n is 2^(n - 1) - 1 s up to
+// this, as Ansible's `ssh` plugin pauses before it connects again:
+// https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L550-L610
+const REOPEN_PAUSE_MAX: Duration = Duration::from_secs(30);
 
 // The status with which `ssh` ends when it fails itself, not the command it ran.
 const SSH_FAILED: i32 = 255;
@@ -173,10 +190,10 @@ impl Shared {
         Ok(Self { dir })
     }
 
-    fn lock(&self) -> Result<Lock, String> {
-        let path = self.dir.join("lock");
-        let file = private(&path)?;
-        file.lock().context(path.display())?;
+    fn lock(&self, name: &Name) -> Result<Lock, String> {
+        let waiting =
+            format_args!("waiting for another command, which is reaching controller `{name}`");
+        let file = locked(&self.dir.join("lock"), waiting)?;
         Ok(Lock {
             _file: file,
             dir: self.dir.clone(),
@@ -194,19 +211,11 @@ impl Shared {
     // once, and a send holds a session for each of its streams, so the rest stay for the
     // workspace's other commands.
     fn upload(&self, name: &Name) -> Result<File, String> {
-        let path = self.dir.join("upload");
-        let file = private(&path)?;
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
-        }
-        say(format_args!(
+        let waiting = format_args!(
             "waiting for another command's send to controller `{name}`, which may send some of \
              what this one would"
-        ));
-        file.lock().context(path.display())?;
-        Ok(file)
+        );
+        locked(&self.dir.join("upload"), waiting)
     }
 
     fn command(&self, program: &str) -> Command {
@@ -266,6 +275,28 @@ impl Shared {
         }
         Ok(None)
     }
+}
+
+/// When a pause of `pause` ends, as a message says it: `now`, or `in <seconds> s`.
+fn when(pause: Duration) -> String {
+    match pause.as_secs() {
+        0 => "now".to_owned(),
+        seconds => format!("in {seconds} s"),
+    }
+}
+
+/// The file at `path`, made 0600 if it isn't there, once this process holds a lock of it; while
+/// another holds it, says `waiting` first.
+fn locked(path: &Path, waiting: fmt::Arguments<'_>) -> Result<File, String> {
+    let file = private(path)?;
+    match file.try_lock() {
+        Ok(()) => return Ok(file),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
+    }
+    say(waiting);
+    file.lock().context(path.display())?;
+    Ok(file)
 }
 
 fn private(path: &Path) -> Result<File, String> {
@@ -348,8 +379,14 @@ struct Attached {
 /// What opening a master connection came to.
 enum Master {
     Open,
-    /// `ssh` didn't get through to the controller's `sshd`, as the error says.
-    Unreached(String),
+    /// `ssh` didn't get through to the controller's `sshd`, as the error says, and what its log
+    /// `said`.
+    Unreached {
+        error: String,
+        said: String,
+    },
+    /// `ssh` didn't connect to `sshd`'s port, as when nothing listens there, as the error says.
+    Unconnected(String),
     /// The controller refused this machine's key, as the error says.
     Unenrolled(String),
     /// The controller's host key isn't the one pinned for it.
@@ -359,9 +396,10 @@ enum Master {
 /// What `Reached::open` came to, but a failure.
 enum Opened {
     Open,
-    /// The controller may no longer be where it was found: `ssh` didn't get through, or met a
-    /// host key other than the one pinned, as the error says.
+    /// The controller may no longer be where it was found, as `ssh` didn't get through: why.
     Unreached(String),
+    /// The controller showed a host key other than the one pinned: what to do.
+    HostKeyChanged(String),
 }
 
 /// A controller that this machine has found, and its connections.
@@ -394,12 +432,10 @@ impl Reached {
         let kept = kept()?;
         let alias = format!("{name}.{}", region.as_str());
         let shared = Shared::new(&Workspace::find()?, &alias)?;
-        let lock = shared.lock()?;
-        let (located, booting) = if let Some(located) = lock.found()? {
-            (located, None)
-        } else {
-            let (located, by) = find(region, name)?;
-            (lock.keep(located)?, Some(by))
+        let lock = shared.lock(name)?;
+        let (located, just_found) = match lock.found()? {
+            Some(located) => (located, false),
+            None => (lock.keep(find(region, name)?)?, true),
         };
         let mut reached = Self {
             region: region.clone(),
@@ -413,11 +449,9 @@ impl Reached {
             return Ok(reached);
         }
         // No master answers, so the first, master 0, is closed, and can be opened.
-        if let Some(by) = booting {
-            return match reached.open(&lock, 0, by)? {
-                Opened::Open => Ok(reached),
-                Opened::Unreached(error) => Err(error),
-            };
+        if just_found {
+            reached.open_first(&lock)?;
+            return Ok(reached);
         }
         let address = reached.located.address;
         let unreached = match answers(address) {
@@ -425,19 +459,25 @@ impl Reached {
                 "controller `{name}` didn't answer SSH at {address}, where it was last found: \
                  {error}"
             ),
-            Ok(()) => match reached.open(&lock, 0, Deadline::after(Duration::ZERO))? {
+            Ok(()) => match reached.open(&lock, 0, OPENINGS)? {
                 Opened::Open => return Ok(reached),
                 Opened::Unreached(error) => error,
+                // Found again all the same, so that `found` names the instance there now, as when
+                // the controller was made anew.
+                Opened::HostKeyChanged(error) => {
+                    let again = find(region, name).and_then(|located| lock.keep(located));
+                    return Err(match again {
+                        Ok(_) => error,
+                        Err(again) => format!("{error}; finding it again: {again}"),
+                    });
+                }
             },
         };
         // Stopped, or made anew: found again, so that a start, or a push of the key, goes to the
         // instance it is now.
-        let again = find(region, name).and_then(|(located, by)| {
+        let again = find(region, name).and_then(|located| {
             reached.located = lock.keep(located)?;
-            match reached.open(&lock, 0, by)? {
-                Opened::Open => Ok(()),
-                Opened::Unreached(error) => Err(error),
-            }
+            reached.open_first(&lock)
         });
         again.map_err(|error| format!("{unreached}; finding it again: {error}"))?;
         Ok(reached)
@@ -495,13 +535,17 @@ impl Reached {
             if let Found::Free(slot) = self.shared.scan(&host, held)? {
                 return Ok(self.waited(slot, waiting));
             }
-            let lock = self.shared.lock()?;
+            let lock = self.shared.lock(&self.name)?;
             match self.shared.scan(&host, held)? {
                 Found::Free(slot) => return Ok(self.waited(slot, waiting)),
                 Found::Closed(master) => {
-                    match self.open(&lock, master, Deadline::after(Duration::ZERO)) {
+                    // Made once if the held go on instead, rather than wait out the pauses.
+                    let attempts = if held.is_empty() { OPENINGS } else { 1 };
+                    match self.open(&lock, master, attempts) {
                         Ok(Opened::Open) => {}
-                        Ok(Opened::Unreached(_)) | Err(_) if !held.is_empty() => {
+                        Ok(Opened::Unreached(_) | Opened::HostKeyChanged(_)) | Err(_)
+                            if !held.is_empty() =>
+                        {
                             drop(lock);
                             say(format_args!(
                                 "connection {master} to controller `{}` can't be opened, as its \
@@ -511,7 +555,10 @@ impl Reached {
                             ));
                             return self.slot();
                         }
-                        Ok(Opened::Unreached(error)) | Err(error) => return Err(error),
+                        Ok(Opened::Unreached(error) | Opened::HostKeyChanged(error))
+                        | Err(error) => {
+                            return Err(error);
+                        }
                     }
                     // Held by commands over a master that has ended, which end with it.
                     if let Some(slot) = self.shared.free(master)? {
@@ -551,21 +598,28 @@ impl Reached {
 
     /// Opens connection `master`, enrolling this machine's key with the controller if it refuses
     /// it, or says that the controller may no longer be where it was found. An opening that
-    /// doesn't get through is tried again every `START_POLL` until `booting` passes, as a
-    /// controller that boots answers before it admits logins. The `_lock` is the one that
-    /// serialises this.
-    fn open(&self, _lock: &Lock, master: usize, booting: Deadline) -> Result<Opened, String> {
+    /// doesn't get through is made up to `attempts` times in all, as `OPENINGS` says. The `_lock`
+    /// is the one that serialises this.
+    fn open(&self, _lock: &Lock, master: usize, attempts: u32) -> Result<Opened, String> {
         // Whether the key was pushed, and whether no opening has failed to get through since, so
         // that a refusal now is one of the key that the controller was sent.
         let (mut pushed, mut just_pushed) = (false, false);
+        // This machine's lock of enrolling, held from the first refusal until this returns.
+        let (mut enrolling, mut attempt) = (None, 1);
         loop {
             match self.master(master)? {
                 Master::Open if pushed => return self.enrol(master).map(|()| Opened::Open),
                 Master::Open => return Ok(Opened::Open),
                 Master::HostKeyChanged => {
-                    return Ok(Opened::Unreached(self.host_key_changed(master)));
+                    return Ok(Opened::HostKeyChanged(self.host_key_changed(master)));
                 }
                 Master::Unenrolled(error) if just_pushed => return Err(error),
+                // Opened again first under the lock, as the key may have just been enrolled, as
+                // `ssh-copy-id` tries a key before it installs it:
+                // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/contrib/ssh-copy-id#L231-L247
+                Master::Unenrolled(_) if enrolling.is_none() => {
+                    enrolling = Some(self.enrolling()?);
+                }
                 Master::Unenrolled(_) => {
                     if !pushed {
                         say(format_args!(
@@ -577,15 +631,34 @@ impl Reached {
                     self.push()?;
                     (pushed, just_pushed) = (true, true);
                 }
-                Master::Unreached(error) if booting.remaining().is_none() => {
+                // Not opened again, as that would only wait out `ConnectTimeout` again.
+                Master::Unconnected(error) => return Ok(Opened::Unreached(error)),
+                Master::Unreached { error, said: _ } if attempt >= attempts => {
                     return Ok(Opened::Unreached(error));
                 }
                 // Pushed again if refused next, as a push lasts a minute, which a boot may outlast.
-                Master::Unreached(_) => {
+                Master::Unreached { error: _, said } => {
                     just_pushed = false;
-                    thread::sleep(START_POLL);
+                    let pause = Duration::from_secs(2_u64.pow(attempt - 1) - 1);
+                    let pause = pause.min(REOPEN_PAUSE_MAX);
+                    attempt += 1;
+                    say(format_args!(
+                        "connection {master} to controller `{}` didn't get through, as `ssh` \
+                         said: {said}: opening it again {}, attempt {attempt} of {attempts}",
+                        self.name,
+                        when(pause)
+                    ));
+                    thread::sleep(pause);
                 }
             }
+        }
+    }
+
+    /// Opens connection 0 as [`Reached::open`] does, or fails.
+    fn open_first(&self, lock: &Lock) -> Result<(), String> {
+        match self.open(lock, 0, OPENINGS)? {
+            Opened::Open => Ok(()),
+            Opened::Unreached(error) | Opened::HostKeyChanged(error) => Err(error),
         }
     }
 
@@ -607,8 +680,8 @@ impl Reached {
 
     /// Starts connection `master`, which `ssh` leaves in the background once it has authenticated,
     /// until it has had no session for `PERSIST`. If it doesn't start, says whether the controller
-    /// refused the key or the host key, as its log says, or, if `ssh` failed itself, that it didn't
-    /// get through, and otherwise fails.
+    /// refused the key or the host key, as its log says, or, if `ssh` failed itself, whether it
+    /// connected at all, and otherwise fails.
     fn master(&self, master: usize) -> Result<Master, String> {
         // The last master's log goes as this one opens.
         let log = self.shared.log(master);
@@ -642,8 +715,12 @@ impl Reached {
         if said.contains("Permission denied (") {
             return Ok(Master::Unenrolled(error));
         }
+        if failed && said.contains("ssh: connect to host ") {
+            return Ok(Master::Unconnected(error));
+        }
         if failed {
-            return Ok(Master::Unreached(error));
+            let said = said.trim().to_owned();
+            return Ok(Master::Unreached { error, said });
         }
         Err(error)
     }
@@ -704,15 +781,12 @@ impl Reached {
         let Some(pause) = AGAIN.get(attempt) else {
             return false;
         };
-        let when = match pause.as_secs() {
-            0 => "now".to_owned(),
-            seconds => format!("in {seconds} s"),
-        };
         say(format_args!(
-            "the connection to controller `{}` ended, as its log says: {}: {what}, {when}, \
-             attempt {} of {}",
+            "the connection to controller `{}` ended, as its log says: {}: {what}, {}, attempt {} \
+             of {}",
             self.name,
             self.shared.log(master).display(),
+            when(*pause),
             attempt + 2,
             AGAIN.len() + 1
         ));

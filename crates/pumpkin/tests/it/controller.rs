@@ -1127,7 +1127,7 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 const KEY: &str = "sk-client-stand-in";
 
 // Stands in for `ssh` over shared masters that answer, and runs a command on this machine as the
-// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that opens
+// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that next opens
 // master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
 // command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
 // holds, `cut-out-M` ends any other command's output so, as a cut connection does, whatever the
@@ -1138,7 +1138,7 @@ dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -N) if [ -e "$dir/refused-$master" ]; then
+        -N) if rm "$dir/refused-$master" 2>/dev/null; then
                 echo 'Connection closed by UNKNOWN port 65535' >> "$master.log"; exit 255
             fi
             (umask 077 && : > "$master"); exit 0 ;;
@@ -2032,7 +2032,8 @@ fn send_over_the_connection_held() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     write_big(&scratch, "big.bin", 17 << 20, 251);
-    // Master 1 can't be opened, so both streams go over master 0.
+    // Master 1's opening is closed once, and the second stream, as the first holds master 0, opens
+    // it once, so both go over master 0.
     scratch.write("bin/refused-1", "");
     let (_, sent) = start(&scratch, &client);
     let mut lines = vec![sent, calls(&scratch)];
@@ -2552,6 +2553,49 @@ fn follow_cut_before_a_line() {
         &expect![[r#"
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, now, attempt 2 of 7
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following run <id> again from where it was, in 5 s, attempt 3 of 7"#]],
+    );
+}
+
+#[test]
+fn master_opened_again() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let _ = start(&scratch, &client);
+    let id = id_ago(0, "0f000004");
+    let _ = ended_job(&scratch, &id, "line 01 of 01\n");
+    let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap();
+    let calls = calls.lines().count();
+    // As the `wait` finds the run, its master ends, and the follow's opening of it is closed once.
+    let (socket, refused) = (
+        scratch.0.join(SHARED).join("0"),
+        scratch.0.join("bin/refused-0"),
+    );
+    scratch.write(
+        &format!("bin/before-{}", calls + 1),
+        &format!("rm '{}'\ntouch '{}'\n", socket.display(), refused.display()),
+    );
+    let waited = on_client(&scratch, &client, &["wait", &id])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(waited.stderr).unwrap();
+    let mut shown: Vec<&str> = stderr
+        .lines()
+        .take_while(|line| !line.starts_with("pumpkin: following run"))
+        .collect();
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let openings = format!(
+        "openings: {}",
+        argv.lines().filter(|arg| *arg == "-N").count()
+    );
+    shown.push(&openings);
+    check(
+        &scratch,
+        &shown.join("\n"),
+        &[(id.as_str(), "<id>")],
+        &expect![[r#"
+            pumpkin: connection 0 to controller `alice` didn't get through, as `ssh` said: Connection closed by UNKNOWN port 65535: opening it again now, attempt 2 of 8
+            line 01 of 01
+            openings: 2"#]],
     );
 }
 
