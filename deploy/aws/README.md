@@ -8,7 +8,7 @@ bucket of the account, so no laptop can lose it.
 | What | Why |
 | --- | --- |
 | the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
-| the controller's security group: in from the sandboxes on the ephemeral ports alone; out to HTTPS | the gateway, with no listener on the Internet |
+| the controller's security group: in from the sandboxes on the ephemeral ports, and from `ssh_from`, none by default, on port 22; out to HTTPS | the gateway, and `sshd` for the person's machine alone |
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
 | a launch template per class: the AMI, the type, IMDSv2 within one hop, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
