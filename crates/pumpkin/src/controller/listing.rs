@@ -77,7 +77,9 @@ fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
     loop {
         let Session { command, slot } = reached.ssh(&link::command(&digest))?;
         let master = slot.master;
-        let asked = Link::open(command, slot).and_then(|link| match link {
+        // The link, and so its `ssh`, is dropped as the closure ends, before the slot of the
+        // session that the `ssh` goes over.
+        let asked = Link::open(command).and_then(|link| match link {
             Some(mut link) => {
                 let health = link.health()?;
                 let asked = crate::unix_now();

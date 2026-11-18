@@ -233,7 +233,7 @@ struct Lock {
 }
 
 /// A session of connection `master`, held for as long as the slot lives.
-pub(crate) struct Slot {
+struct Slot {
     master: usize,
     _file: File,
 }

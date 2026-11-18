@@ -23,7 +23,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
-use crate::controller::Slot;
 use crate::progress::Listing;
 use crate::workspace;
 
@@ -206,19 +205,19 @@ pub(crate) enum Unanswered {
     Failed(String),
 }
 
-/// An `ssh` that runs [`command`], its standard input and output, and the session of the master
-/// that it goes over, held until the link is dropped, which ends the `ssh`.
+/// An `ssh` that runs [`command`], and its standard input and output, until the link is dropped,
+/// which ends the `ssh`.
 pub(crate) struct Link {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    _slot: Slot,
 }
 
 impl Link {
-    /// Runs `ssh`, an `ssh` that runs [`command`] over the session that `slot` holds, and reads
-    /// its hello: `None` if it is [`Hello::Absent`].
-    pub(crate) fn open(mut ssh: Command, slot: Slot) -> Result<Option<Self>, Unanswered> {
+    /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
+    /// [`Hello::Absent`]. A session that `ssh` goes over is the caller's to hold until the link is
+    /// dropped.
+    pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
         let child = ssh.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
         let mut child = (child.context("running `ssh` failed")).map_err(Unanswered::Failed)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -230,7 +229,6 @@ impl Link {
             child,
             stdin,
             stdout: BufReader::new(stdout),
-            _slot: slot,
         };
         match link.received("its hello")? {
             Hello::Serving => Ok(Some(link)),
