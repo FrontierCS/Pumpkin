@@ -123,7 +123,7 @@ pub(crate) fn end(
     let (exit, how) = match ending {
         Ending::Returned { values, after } => (ExitCode::SUCCESS, returned(values, after)),
         Ending::NoResult(why) => (ExitCode::from(3), why.clone()),
-        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how.clone()),
+        Ending::Stopped(stopped) => (ExitCode::FAILURE, stopped.to_string()),
         // It has no `outcome.json` to print.
         Ending::Lost => {
             let how = "is lost: its driver ended without writing outcome.json, so nothing says \

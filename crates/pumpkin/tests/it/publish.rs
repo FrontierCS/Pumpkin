@@ -56,7 +56,7 @@ fn publish(scratch: &Scratch, since: &str) -> String {
 
 #[test]
 fn uploads_what_changed() {
-    let scratch = Scratch::new("publish-uploads-what-changed");
+    let scratch = Scratch::new();
     scratch.write_executable("bin/aws", AWS.as_bytes());
     let outcome = Some(returned(49.36));
     let mut places = lease_places(Prices::Both);
@@ -135,7 +135,7 @@ fn uploads_what_changed() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the help's snapshot")]
 fn usage() {
-    let scratch = Scratch::new("publish-usage");
+    let scratch = Scratch::new();
     let publish = |bucket: &str, since: &str| {
         let args = [
             "controller",

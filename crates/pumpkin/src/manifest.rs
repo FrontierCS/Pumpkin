@@ -674,9 +674,11 @@ pub(crate) fn pieces(missing: &[Missing]) -> Vec<Piece> {
 
 /// The most streams that carry a send's pieces at once, each a [`receive`] over a connection of
 /// its own.
-// Each SSM session is bounded on its own, so sessions at once add up. The workspace's connections
-// are as many masters as `controller` asserts this is within, and a stream over a master that
-// another stream holds shares its session, so more streams would gain nothing.
+// A session's stream is bounded on its own by `ssh`'s channel window, 2 MiB a round trip, so
+// streams at once add up over a link of long round trips. The workspace's connections are as many
+// masters as `controller` asserts this is within, and a stream over a master that another stream
+// holds shares its connection, so more streams would gain nothing.
+// https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/channels.h#L223-L225
 pub(crate) const STREAMS: usize = 16;
 
 /// Deals `pieces` out to streams of about the same bytes: one for each `PIECE_BYTES` of them,

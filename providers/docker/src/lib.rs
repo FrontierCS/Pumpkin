@@ -26,7 +26,7 @@ use engine::{
 };
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -130,7 +130,7 @@ pub struct Reached {
 }
 
 impl Sweep for Reached {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         delete(&self.context, run, ids)
     }
 
@@ -140,7 +140,7 @@ impl Sweep for Reached {
 }
 
 impl Sweep for Docker<'_> {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         delete(self.context(), run, ids)
     }
 
@@ -344,7 +344,7 @@ fn remove(context: &ContextName, id: &str, bound: Bound) -> Result<(), Failure> 
     }
 }
 
-fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
     // With no id to filter by, the lookup would list every run's containers, for nothing.
     if ids.is_empty() {
         return Ok(());
@@ -358,15 +358,24 @@ fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), 
         "looking up {} failed, so no container was removed",
         shown.join(", ")
     );
-    let found = labelled(context, filters).context(unfound)?;
-    let failures = ids.iter().filter_map(|id| {
-        let id = id.as_str();
+    let found = match labelled(context, filters).context(unfound) {
+        Ok(found) => found,
+        Err(why) => {
+            let failed = ids.iter().map(|id| (id.clone(), why.clone()));
+            return Undeleted::of(failed.collect());
+        }
+    };
+    let failures = ids.iter().filter_map(|sandbox| {
+        let id = sandbox.as_str();
         let found = found.iter().find(|found| found.id == id)?;
         if found.run != run.as_str() {
-            return Some(format!(
-                "container {id} is another run's sandbox, not run {}'s, so it was left: name \
-                 only the run's own, which its list finds",
-                run.as_str()
+            return Some((
+                sandbox.clone(),
+                format!(
+                    "container {id} is another run's sandbox, not run {}'s, so it was left: name \
+                     only the run's own, which its list finds",
+                    run.as_str()
+                ),
             ));
         }
         // A forced removal stops the container, then removes it and its anonymous volumes,
@@ -376,14 +385,10 @@ fn delete(context: &ContextName, run: &RunTag, ids: &[SandboxId]) -> Result<(), 
         let removed = remove(context, id, Bound::Within(REMOVE_TIMEOUT))
             .map_err(|error| fix_reported(&error));
         let left = format_args!("container {id} is left, as removing it failed");
-        removed.context(left).err()
+        let left = removed.context(left).err();
+        left.map(|why| (sandbox.clone(), why))
     });
-    let failures: Vec<String> = failures.collect();
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
+    Undeleted::of(failures.collect())
 }
 
 /// Run `run`'s containers, running or not: those whose run label holds its tag. A container

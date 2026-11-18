@@ -12,7 +12,7 @@ use std::{env, thread};
 use stdx::process::Environment;
 
 use crate::settings::{Provider, Settings};
-use crate::{Cargo, Result, root, sandboxd, tested, tools, wait};
+use crate::{Cargo, Result, root, sandboxd, star, tools, wait};
 
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 5;
@@ -38,6 +38,7 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
+    star::link(cargo)?;
     let sandboxd = sandboxd(cargo)?;
     let test = cargo.cmd(&[
         "nextest",
@@ -49,7 +50,6 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "--run-ignored",
         "only",
     ]);
-    let test = tested(cargo, test)?;
     let test = test
         // These poison the variables the Docker provider must ignore: passed on to `docker`, they
         // would steer it to an engine that doesn't exist, or to TLS without certificates, so the
@@ -306,9 +306,13 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
     let shared = repo
         .join(".pumpkin/controller")
         .join(format!("{}.{}", settings.name, settings.region));
-    let instance = fs::read_to_string(shared.join("lock"))
-        .map_err(|error| format!("reading the controller's instance failed: {error}"))?;
-    let host = format!("pumpkin@{}", instance.trim());
+    let found = fs::read_to_string(shared.join("found"))
+        .map_err(|error| format!("reading where the controller was found failed: {error}"))?;
+    let found: serde_json::Value = serde_json::from_str(&found)?;
+    let Some(address) = found["address"].as_str() else {
+        return Err(format!("the controller's `found` names no address: {found}").into());
+    };
+    let host = format!("pumpkin@{address}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
     // `ControlPath=0` is the client's own ssh connection to the controller: a socket in `shared`,
     // which is why the command runs there.

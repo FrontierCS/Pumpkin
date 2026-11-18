@@ -21,7 +21,7 @@ use super::{Scratch, Step, check, engine, invocation, machine, ran, report};
     reason = "most of it is the cases and their snapshot"
 )]
 fn refusals() {
-    let scratch = Scratch::new("build-refusals");
+    let scratch = Scratch::new();
     write_repository(&scratch, "");
     scratch.write("tasks/broken/task.star", &task(0));
     // A `docker` that says whether it ran.
@@ -162,7 +162,7 @@ fn refusals() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn builds_on_docker() {
-    let scratch = Scratch::new("build-docker");
+    let scratch = Scratch::new();
     let label = format!("pumpkin.test=build-{}", std::process::id());
     let _images = Labelled(label.clone());
     write_repository(&scratch, "");
@@ -510,7 +510,7 @@ fn builds_on_docker() {
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn variants_on_docker() {
-    let scratch = Scratch::new("build-variants");
+    let scratch = Scratch::new();
     let label = format!("pumpkin.test=variants-{}", std::process::id());
     let _images = Labelled(label.clone());
     write_variants(&scratch, &label);

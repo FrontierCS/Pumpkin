@@ -137,8 +137,9 @@ mod flags {
             }
 
             /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
-            /// pinned version, and fetches each that its project releases as a file, such as
-            /// TypeScript's compiler, into the target directory.
+            /// pinned version, fetches each that its project releases as a file, such as
+            /// TypeScript's compiler, into the target directory, and links the pinned buildifier
+            /// where the tests find it, `bin/buildifier`.
             cmd install-tools {}
         }
     }
@@ -289,7 +290,10 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Refill(flags::Refill { package, filter }) => {
             refill(&cargo, &package, filter.as_deref())
         }
-        flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
+        flags::XtaskCmd::InstallTools(flags::InstallTools) => {
+            tools::install(&cargo)?;
+            star::link(&cargo).map(drop)
+        }
     }
 }
 
@@ -337,15 +341,8 @@ fn root() -> &'static Path {
     root
 }
 
-/// `tests`, a command that runs tests, with `PUMPKIN_BUILDIFIER`, the pinned formatter
-/// ([`star::buildifier`]), which pumpkin's tests put beside each `pumpkin` they run, where
-/// `pumpkin fmt` and `pumpkin check` find it.
-fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
-    Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
-}
-
 /// Runs the checks every change must pass, in order, and stops at the first that fails. The
-/// tests ([`tested`]) leave out those ignored, which [`live::docker`] runs.
+/// tests leave out those ignored, which [`live::docker`] runs.
 fn ci(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
@@ -356,14 +353,12 @@ fn ci(cargo: &Cargo) -> Result<()> {
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
     page::check(cargo)?;
-    let buildifier = star::buildifier(cargo)?;
+    let buildifier = star::link(cargo)?;
     let pumpkin = tests_pumpkin(cargo)?;
     star::place(&buildifier, &pumpkin)?;
     star::check(&cargo.sh, &pumpkin)?;
     let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
-    let test = tested(cargo, test)?;
     let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
-    let doctests = tested(cargo, doctests)?;
     // ci checks snapshots, never rewrites them.
     tests(
         test.env_remove("UPDATE_EXPECT"),
@@ -410,13 +405,14 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
     Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
 }
 
-/// Runs the tests of `package`, those whose names hold `filter` if it is given, with the
-/// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot
-/// that differs; then prints `git diff --stat`, also if a test failed.
+/// Runs the tests of `package`, those whose names hold `filter` if it is given, with
+/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs; then prints `git diff --stat`,
+/// also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
+    star::link(cargo)?;
     let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
-    let test = tested(cargo, test.args(filter))?.env("UPDATE_EXPECT", "1");
+    let test = test.args(filter).env("UPDATE_EXPECT", "1");
     let ran = test.run();
     cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
     Ok(ran?)
@@ -429,6 +425,7 @@ fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
 fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::MUTANTS)?;
     tools::require(cargo, tools::NEXTEST)?;
+    let buildifier = star::link(cargo)?;
     let mut again = "cargo xtask mutants".to_owned();
     for path in paths {
         again = format!("{again} {}", path.display());
@@ -457,7 +454,7 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
         cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path)
     };
     let report = root().join("mutants.out");
-    if !missed(cargo, run, &again)? {
+    if !missed(run, &again)? {
         return Ok(());
     }
     if !whole {
@@ -474,8 +471,11 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     cmd!(sh, "git archive --output {archive} {base}").run()?;
     let tree = sh.create_dir(scratch.path().join("base"))?;
     cmd!(sh, "tar --extract --file {archive} --directory {tree}").run()?;
+    // Its tests find the formatter by the link in their own tree, which the archive doesn't hold.
+    let bin = sh.create_dir(tree.join("bin"))?;
+    std::os::unix::fs::symlink(&buildifier, bin.join("buildifier"))?;
     let run = cargo.cmd(&["mutants", "--iterate", "--dir"]).arg(&tree);
-    missed(cargo, run.arg("--output").arg(root()).args(&files), &again)?;
+    missed(run.arg("--output").arg(root()).args(&files), &again)?;
     let brought = sh.read_file(report.join("caught.txt"))?;
     let brought = if brought.is_empty() {
         "none\n"
@@ -505,12 +505,11 @@ fn unchanged(cargo: &Cargo, base: &str, files: &[OsString]) -> Result<bool> {
     Ok(diff.output()?.status.success())
 }
 
-/// Runs `run`, a cargo-mutants command, in the environment of the tests ([`tested`]), and returns
-/// whether it missed a mutant or one timed out.
-fn missed(cargo: &Cargo, run: Cmd<'_>, again: &str) -> Result<bool> {
+/// Runs `run`, a cargo-mutants command, and returns whether it missed a mutant or one timed out.
+fn missed(run: Cmd<'_>, again: &str) -> Result<bool> {
     // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
     // cargo would take a mutant's artifacts as fresh for the unmutated tree.
-    let run = tested(cargo, run)?.env("CARGO_TARGET_DIR", "target");
+    let run = run.env("CARGO_TARGET_DIR", "target");
     let line = run.to_string();
     let status = Command::from(run).status();
     let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;

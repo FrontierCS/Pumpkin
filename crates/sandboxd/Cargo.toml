@@ -22,7 +22,6 @@ xflags.workspace = true
 gateway = { path = "../gateway" }
 test-support = { path = "../test-support" }
 expect-test.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

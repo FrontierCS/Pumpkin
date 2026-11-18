@@ -249,7 +249,7 @@ fn write_served(scratch: &Scratch) -> File {
     reason = "most of it is the requests and their snapshot"
 )]
 fn serves_runs() {
-    let scratch = Scratch::new("serves-runs");
+    let scratch = Scratch::new();
     let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
     let driver = write_served(&scratch);
     let others = [
@@ -487,7 +487,7 @@ impl Piped {
     reason = "most of it is the requests and their snapshot"
 )]
 fn answers_over_a_pipe() {
-    let scratch = Scratch::new("answers-over-a-pipe");
+    let scratch = Scratch::new();
     let (ended, live) = (SERVED_ENDED, SERVED_LIVE);
     let driver = write_served(&scratch);
     fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
@@ -589,7 +589,7 @@ fn answers_over_a_pipe() {
     reason = "most of it is the log that grows, and the polls that follow it"
 )]
 fn follows_a_live_run() {
-    let scratch = Scratch::new("follows-a-live-run");
+    let scratch = Scratch::new();
     let id = "20261110-150000-00000010";
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let dir = write_run(
@@ -680,7 +680,7 @@ fn follows_a_live_run() {
     );
     scratch.write(
         &format!("runs/{id}/outcome.json"),
-        &json!({ "state": "failed" }),
+        &json!({ "state": "failed", "reason": "stopped" }),
     );
     drop(driver);
     let ended = served.get(&format!("/api/runs/{id}/since?log={next}"));
@@ -743,7 +743,7 @@ fn follows_a_live_run() {
     reason = "most of it is the requests and their snapshot"
 )]
 fn cancels_a_run() {
-    let scratch = Scratch::new("cancels-a-run");
+    let scratch = Scratch::new();
     let id = "20261110-160000-00000011";
     write_record(&scratch, id, true, None);
     let pid_path = scratch.0.join(format!("runs/{id}/driver.pid"));
@@ -775,6 +775,7 @@ fn cancels_a_run() {
     );
     ask("GET", &cancel, &[]);
     ask("POST", "/api/runs", &[("Origin", &page)]);
+    ask("POST", "/api/controller/start", &[("Origin", &page)]);
     ask("GET", &cancelling, &[]);
     let unknown = "/api/runs/20261110-170000-00000012/cancel";
     ask("POST", unknown, &[("Origin", &page)]);
@@ -829,10 +830,13 @@ fn cancels_a_run() {
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
             GET /api/runs/<id>/cancel []
             HTTP/1.1 405 Method Not Allowed
-            {"error":"run <id> is cancelled by `POST`, which the page's cancel sends: cancel it there, or run: pumpkin cancel --runs <scratch>/runs <id>"}
+            {"error":"the cancel of run <id> is sent by `POST`, as the page sends it: cancel it from the page that `pumpkin view` serves, or run: pumpkin cancel --runs <scratch>/runs <id>"}
             POST /api/runs [("Origin", "<page>")]
             HTTP/1.1 405 Method Not Allowed
-            {"error":"`/api/runs` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, takes `POST`"}
+            {"error":"`/api/runs` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, and the controller's start, `/api/controller/start`, take `POST`"}
+            POST /api/controller/start [("Origin", "<page>")]
+            HTTP/1.1 404 Not Found
+            {"error":"this view serves the runs of a directory, `runs`, not a controller's: start a controller by a command that reaches it, which starts it: pumpkin ls"}
             GET /api/runs/<id>/cancelling []
             HTTP/1.1 404 Not Found
             {"error":"the page started no cancel of run <id>: cancel it from the page, by POST /api/runs/<id>/cancel"}
@@ -863,7 +867,7 @@ fn cancels_a_run() {
 
 #[test]
 fn starts_over_a_shortened_log() {
-    let scratch = Scratch::new("starts-over");
+    let scratch = Scratch::new();
     let id = "20261110-180000-00000013";
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let mut places = lease_places(Prices::Both);
@@ -938,7 +942,7 @@ fn starts_over_a_shortened_log() {
 
 #[test]
 fn windows_a_log_by_its_bytes() {
-    let scratch = Scratch::new("windows-a-log");
+    let scratch = Scratch::new();
     let id = "20261110-190000-00000014";
     let tick = logged(1, json!({ "kind": "tick" }), json!([]));
     // One record of a megabyte, which a window holds alone.
@@ -1003,7 +1007,7 @@ fn loaded(path: &str, body: &str) -> Vec<String> {
     reason = "its snapshot has a line for each file of the page"
 )]
 fn serves_the_page() {
-    let scratch = Scratch::new("serves-the-page");
+    let scratch = Scratch::new();
     fs::create_dir_all(scratch.0.join("runs")).unwrap();
     let served = Served::start(&scratch);
     // The page reads the token from its address, so its own files are served without it.
@@ -1123,7 +1127,7 @@ fn serves_the_page() {
 
 #[test]
 fn answers_past_a_connection_that_sends_nothing() {
-    let scratch = Scratch::new("answers-past-silence");
+    let scratch = Scratch::new();
     fs::create_dir_all(scratch.0.join("runs")).unwrap();
     let served = Served::start(&scratch);
     // A browser opens a spare connection, to use later or to close unused.
@@ -1153,7 +1157,7 @@ fn answers_past_a_connection_that_sends_nothing() {
 
 #[test]
 fn deflates_what_the_request_accepts() {
-    let scratch = Scratch::new("deflates");
+    let scratch = Scratch::new();
     let id = "20261110-200000-00000015";
     let outcome = Some(returned(49.36));
     let places = lease_places(Prices::Both);
@@ -1215,7 +1219,7 @@ fn deflates_what_the_request_accepts() {
 
 #[test]
 fn pages_the_list() {
-    let scratch = Scratch::new("pages-the-list");
+    let scratch = Scratch::new();
     let write = |runs: std::ops::Range<u64>| {
         for run in runs {
             let id = format!(
@@ -1436,7 +1440,7 @@ pub(super) fn said(text: &str) -> Value {
     reason = "most of it is the record's exchanges and the snapshot"
 )]
 fn traces_a_caller() {
-    let scratch = Scratch::new("traces-a-caller");
+    let scratch = Scratch::new();
     let id = "20261110-170000-00000012";
     let dir = scratch.0.join("runs").join(id);
     let mut model = Model::new(&dir);
@@ -1588,7 +1592,7 @@ fn traces_a_caller() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -1673,7 +1677,7 @@ fn traces_a_caller() {
     // while none holds it: the trace is read again from the log as it stands.
     for other in 0..9 {
         let other = format!("20261110-170100-{other:08x}");
-        let outcome = Some(json!({ "state": "failed" }));
+        let outcome = Some(json!({ "state": "failed", "reason": "stopped" }));
         write_run(
             &scratch,
             &other,
@@ -1903,7 +1907,7 @@ const MESSAGES_STREAM: &str = concat!(
     reason = "most of it is the record's exchanges and the snapshot"
 )]
 fn traces_a_messages_exchange() {
-    let scratch = Scratch::new("traces-a-messages-exchange");
+    let scratch = Scratch::new();
     let id = "20261110-190000-00000014";
     let dir = scratch.0.join("runs").join(id);
     let mut model = Model::new(&dir);
@@ -2007,7 +2011,7 @@ fn traces_a_messages_exchange() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -2091,7 +2095,7 @@ fn traces_a_messages_exchange() {
     reason = "most of it is the record's exchanges and the snapshot"
 )]
 fn follows_a_trace() {
-    let scratch = Scratch::new("follows-a-trace");
+    let scratch = Scratch::new();
     let id = "20261110-180000-00000013";
     let dir = scratch.0.join("runs").join(id);
     let mut model = Model::new(&dir);
@@ -2299,7 +2303,7 @@ fn follows_a_trace() {
     reason = "most of it is the requests' parts and the snapshot"
 )]
 fn diffs_two_requests() {
-    let scratch = Scratch::new("diffs-two-requests");
+    let scratch = Scratch::new();
     let id = "20261110-190000-00000014";
     let dir = scratch.0.join("runs").join(id);
     let mut model = Model::new(&dir);
@@ -2350,7 +2354,7 @@ fn diffs_two_requests() {
         id,
         since.checked_sub(Duration::from_secs(60)).unwrap(),
         &log,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &lease_places(Prices::Both),
     );
     let served = Served::start(&scratch);
@@ -2448,7 +2452,7 @@ fn thread_spans(reply: &Value) -> std::collections::BTreeMap<u64, Value> {
     reason = "most of it is the record's exchanges and the snapshot"
 )]
 fn places_steps_whatever_their_answers_order() {
-    let scratch = Scratch::new("places-steps");
+    let scratch = Scratch::new();
     let (live, done) = ("20261110-200000-00000015", "20261110-200000-00000016");
     let judge = user("judge it");
     let one = [judge.clone(), call("c1"), output("c1")];
@@ -2508,7 +2512,7 @@ fn places_steps_whatever_their_answers_order() {
         done,
         started_at,
         &lines,
-        Some(json!({ "state": "failed" })),
+        Some(json!({ "state": "failed", "reason": "stopped" })),
         &places,
     );
     let dir = write_run(&scratch, live, started_at, &lines, None, &places);
@@ -2615,13 +2619,18 @@ fn places_steps_whatever_their_answers_order() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the reads and their snapshot"
+)]
 fn holds_each_live_trace_and_the_last_three_ended() {
-    let scratch = Scratch::new("holds-traces");
+    let scratch = Scratch::new();
     let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
     let callers = ["agent", "job-0", "job-1", "job-2"];
     let response = json!({ "status": "completed", "output": [said("done")] }).to_string();
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    for (id, outcome) in [(ended, Some(json!({ "state": "failed" }))), (live, None)] {
+    let failed = json!({ "state": "failed", "reason": "stopped" });
+    for (id, outcome) in [(ended, Some(failed)), (live, None)] {
         let mut model = Model::new(&scratch.0.join("runs").join(id));
         let log: Vec<Value> = (0..)
             .zip(callers)
@@ -2692,7 +2701,7 @@ fn holds_each_live_trace_and_the_last_three_ended() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the log of the ops")]
 fn times_a_callers_ops() {
-    let scratch = Scratch::new("times-ops");
+    let scratch = Scratch::new();
     let id = "20261110-220000-00000018";
     let arrived = |seconds: u64, caller: &str, op: u64, request: Value, actions: Value| {
         let event = json!({ "kind": "op_arrived", "caller": caller, "op": op, "request": request });

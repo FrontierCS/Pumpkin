@@ -50,7 +50,11 @@ subnet_id       = "subnet-…"
 modal_workspace = "ac-…"
 client_roles    = ["alice-laptop"] # the IAM roles and users of the person's machine
 client_users    = []
+ssh_from        = ["10.0.1.23/32"] # the person's machine's private address
 ```
+
+`pumpkin` reaches the controller at its private address, so the person's machine is in the
+controller's VPC, or routed to it, and `ssh_from` admits it.
 
 Then:
 

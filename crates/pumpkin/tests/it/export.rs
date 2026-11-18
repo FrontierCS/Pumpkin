@@ -105,6 +105,11 @@ pub(super) fn write_exported(
         places["providers"][provider]["report"] = report.clone();
     }
     write_run(scratch, EXPORTED, started, &log, outcome, &places);
+    // No host path: the export scrubs `/home/<user>`, which the scratch directory may be under.
+    let record = scratch.0.join("runs").join(EXPORTED).join("record.json");
+    let mut made: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    made["args"] = json!(["--runs", "runs", "task.star"]);
+    fs::write(&record, made.to_string()).unwrap();
     let runs = scratch.0.join(".pumpkin/runs");
     fs::rename(scratch.0.join("runs"), &runs).unwrap();
     let driver = File::open(runs.join(EXPORTED).join("driver.pid")).unwrap();
@@ -231,7 +236,7 @@ fn chunks_found(files: &BTreeMap<String, Vec<u8>>, caller: &str, query: &str) ->
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn exports_what_the_view_answers() {
-    let scratch = Scratch::new("exports-what-the-view-answers");
+    let scratch = Scratch::new();
     write_exported(&scratch, true, "list the files", &reports());
     let mut said = vec![export(&scratch)];
     let files = exported(&scratch.0.join("public"));
@@ -416,7 +421,7 @@ fn exports_what_the_view_answers() {
     reason = "most of it is the fixture and the snapshot"
 )]
 fn rewrites_what_a_live_run_changed() {
-    let scratch = Scratch::new("rewrites-what-a-live-run-changed");
+    let scratch = Scratch::new();
     let mut unreadable = lease_places(Prices::Both);
     unreadable["routes"] =
         json!({ "solver": [{ "api": "realtime", "upstream": "zai", "models": {} }] });
@@ -507,7 +512,7 @@ fn rewrites_what_a_live_run_changed() {
     reason = "most of it is the record's values and the snapshot"
 )]
 fn replaces_what_names_the_machines() {
-    let scratch = Scratch::new("replaces-what-names-the-machines");
+    let scratch = Scratch::new();
     let (ec2, modal) = ("i-0aaaabbbbccccdddd", "sb-AbCdEfGhIjKlMnOpQrStUv");
     let asked = format!(
         "list the files of {ec2} and {modal}, dialled from 3.101.18.71 in account 311100000000, \
