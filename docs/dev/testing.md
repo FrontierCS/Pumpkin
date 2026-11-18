@@ -26,7 +26,9 @@ The rules for writing Pumpkin's tests and their snapshots.
 - RUN `cargo xtask mutants crates/decision crates/schema crates/route` on demand, when tests of
   the decision core, the schema's refusals or the route's request rules, which guard the
   operator's key, are deleted or rewritten, with `CARGO_MUTANTS_JOBS=2` at most, and read each
-  mutant it reports missed, as ci doesn't run it
+  mutant it reports missed, as ci doesn't run it; where the change leaves the source below those
+  paths as it is, it mutates that source whole, and names the mutants missed that
+  `origin/main`'s tests catch, which the change left uncaught
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
   files, Pumpkin's own processes and loopback sockets are fine. IGNORE each test that needs a Docker engine, the static `sandboxd` or
   a server elsewhere (`#[ignore = "…: run cargo xtask live docker"]`)
