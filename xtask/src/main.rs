@@ -406,16 +406,12 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
 
 /// Runs the tests of `package`, those whose names hold `filter` if it is given, with the
 /// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot
-/// that differs, below `CARGO_WORKSPACE_DIR`, this checkout's root, whatever the caller's
-/// environment names; then prints `git diff --stat`, also if a test failed.
+/// that differs; then prints `git diff --stat`, also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
     let test = tested(cargo, test.args(filter))?.env("UPDATE_EXPECT", "1");
-    // expect-test takes the variable as a directory that ends in `/`.
-    let ran = test
-        .env("CARGO_WORKSPACE_DIR", format!("{}/", root().display()))
-        .run();
+    let ran = test.run();
     cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
     Ok(ran?)
 }

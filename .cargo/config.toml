@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --bin xtask --locked --"
+
+[env]
+# expect-test writes updated snapshots below the outermost ancestor holding a `Cargo.toml` unless
+# this is set, and for a checkout nested in another that is the other one.
+# https://github.com/rust-lang/cargo/issues/3946
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
