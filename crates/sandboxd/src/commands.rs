@@ -221,17 +221,16 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();
         while !sys::has_children().context(HAS_CHILDREN_FAILED)? {
+            if !state.running.is_empty() {
+                return Err(
+                    "sandboxd has running commands but no child left to wait for".to_owned(),
+                );
+            }
             state = shared.wait(state);
         }
         // Commands may start while the reaper waits for a child.
         drop(state);
-        if !sys::wait_for_child().context("waiting for a child to exit failed")? {
-            unreachable!(
-                "the children found under the lock are gone, reaped by another, though nothing \
-                 else reaps them: starting a command reaps only a child that failed to start, \
-                 before it lets go of the lock"
-            )
-        }
+        sys::wait_for_child().context("waiting for a child to exit failed")?;
         let mut state = shared.lock();
         let Some((pid, raw)) = sys::reap().context("reaping a child failed")? else {
             continue;
