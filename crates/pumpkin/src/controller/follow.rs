@@ -18,7 +18,8 @@ pub(super) fn job(reached: &Reached, build: &Build, id: &str) -> Result<Finished
     let mut shown = Shown::default();
     let what = format!("following job {id}");
     reached
-        .carrying_on(build, &what, |linked, progress| {
+        .carrying_on(&what, |progress| {
+            let mut linked = reached.linked(build)?;
             let read = linked.stream(reached, |link| shown.read(link, id, progress));
             shown.end_line();
             read

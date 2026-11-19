@@ -32,7 +32,7 @@ use crate::{config, manifest, workspace};
 // record keeps is at most the 64 MiB that the gateway takes of a request.
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
-// Room for the keys and configuration that arrive with a job.
+// Room for a job's keys and configuration. Copy uses the same budget for its optional file stamps.
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
 
 /// What `serve` says first, in a frame with no body.

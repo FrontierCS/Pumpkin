@@ -3657,6 +3657,61 @@ fn record_copy() {
 }
 
 #[test]
+fn copy_with_unreadable_directories() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = served(&scratch);
+    let id = id_ago(0, "0d000003");
+    ended_job(&scratch, &id, "built\n");
+    symlink(
+        scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin")),
+        scratch.0.join(format!("home/jobs/{id}/pumpkin")),
+    )
+    .unwrap();
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let remote = record.join("private");
+    let local = copy.join("local");
+    fs::create_dir(&remote).unwrap();
+    fs::write(remote.join("output"), "whole").unwrap();
+    fs::create_dir_all(&local).unwrap();
+    fs::set_permissions(&local, Permissions::from_mode(0o000)).unwrap();
+    let mut lines = Vec::new();
+    for mode in [0o000, 0o700] {
+        fs::set_permissions(&remote, Permissions::from_mode(mode)).unwrap();
+        let output = on_client(&scratch, &client, &["cancel", &id])
+            .output()
+            .unwrap();
+        lines.push(output.status.to_string());
+        lines.extend(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.contains("Permission denied"))
+                .map(str::to_owned),
+        );
+        lines.push(format!(
+            "outcome.json: {}, private/output: {}, record.json: {}",
+            copy.join("outcome.json").exists(),
+            copy.join("private/output").exists(),
+            copy.join("record.json").exists()
+        ));
+    }
+    fs::set_permissions(&local, Permissions::from_mode(0o700)).unwrap();
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            exit status: 1
+            pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/private: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
+            outcome.json: true, private/output: false, record.json: false
+            exit status: 0
+            outcome.json: true, private/output: true, record.json: true"#]],
+    );
+}
+
+#[test]
 fn copy_refuses_a_live_run_or_linked_directory() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
