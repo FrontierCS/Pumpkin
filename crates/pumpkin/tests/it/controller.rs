@@ -2571,7 +2571,7 @@ fn silent_build_loses_its_follower() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let request = json!({ "type": "follow", "id": id, "log_from_bytes": 0 });
+    let request = json!({ "type": "follow", "id": id, "log_from_bytes": 0, "after_cut": false });
     schema::frame::write(&mut child.stdin.take().unwrap(), &request, &[]).unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut next = || {
@@ -2593,6 +2593,11 @@ fn silent_build_loses_its_follower() {
     );
 }
 
+fn said_bytes(message: &str) -> usize {
+    frame_bytes(&json!({ "type": "said", "body_bytes": message.len() }), &[])
+        + frame_bytes(&serde_json::Value::Null, message.as_bytes())
+}
+
 #[test]
 fn follow_repeats_no_milestone() {
     let scratch = Scratch::new();
@@ -2600,12 +2605,17 @@ fn follow_repeats_no_milestone() {
     connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000005");
-    let log = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
+    let start = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
+    let end = super::logged(
+        2,
+        json!({ "kind": "agent_exited", "status": { "code": 0 } }),
+        json!([{ "kind": "tear_down_agent" }]),
+    );
     let dir = write_run(
         &scratch,
         &id,
         asked(&id, 30),
-        &[log],
+        &[start, end],
         None,
         &lease_places(Prices::Nothing),
     );
@@ -2615,32 +2625,31 @@ fn follow_repeats_no_milestone() {
     scratch.write(&format!("home/jobs/{id}/out"), &id);
     let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
     let first = format!("following run {id}: ending this command does not stop it");
-    let said = frame_bytes(&json!({ "type": "said", "body_bytes": first.len() }), &[]);
-    let part = frame_bytes(&serde_json::Value::Null, first.as_bytes());
     let _ = calls(&scratch);
-    // Cut within the second milestone. The next link sees both milestones in the live record.
+    let started = "   0:01 the agent started on aws/judge";
+    let cut = hello + said_bytes(&first) + said_bytes(started) + 3;
+    let root = scratch.0.display();
+    // Cut in the next milestone. The run ends before the next link opens.
     scratch.write(
         "bin/before-2",
-        &format!(
-            "echo {} > '{}/bin/cut-out-0'",
-            hello + said + part + 3,
-            scratch.0.display()
-        ),
+        &format!("echo {cut} > '{root}/bin/cut-out-0'"),
     );
-    let mut child = on_client(&scratch, &client, &["wait", &id])
+    scratch.write("outcome", &returned(1.0));
+    scratch.write(
+        "bin/before-3",
+        &format!("cp '{root}/outcome' '{root}/home/.pumpkin/runs/{id}/outcome.json'"),
+    );
+    let child = on_client(&scratch, &client, &["wait", &id])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("the agent started") && stderr.read_line(&mut said).unwrap() > 0 {}
-    scratch.write(
-        &format!("home/.pumpkin/runs/{id}/outcome.json"),
-        &returned(1.0),
-    );
+    let outcome = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{id}/outcome.json"));
+    poll(|| outcome.exists().then_some(()));
     drop(driver);
-    let output = ended(child, stderr, said);
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let shown: Vec<_> = stderr
@@ -2648,6 +2657,7 @@ fn follow_repeats_no_milestone() {
         .filter(|line| {
             line.contains("ending this command")
                 || line.contains("the agent started on")
+                || line.contains("0:02 the work phase ended")
                 || line.contains("attempt 2 of 7")
         })
         .collect();
@@ -2657,8 +2667,9 @@ fn follow_repeats_no_milestone() {
         &[(&id, "<id>")],
         &expect![[r#"
             pumpkin: following run <id>: ending this command does not stop it
+            pumpkin:    0:01 the agent started on aws/judge
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
-            pumpkin:    0:01 the agent started on aws/judge"#]],
+            pumpkin:    0:02 the work phase ended"#]],
     );
 }
 

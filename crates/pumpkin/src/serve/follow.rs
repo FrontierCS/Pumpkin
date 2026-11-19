@@ -20,8 +20,9 @@ pub(super) fn answer(
     home: &Path,
     id: String,
     log_from_bytes: u64,
+    after_cut: bool,
 ) -> io::Result<()> {
-    match follow(output, home, id, log_from_bytes) {
+    match follow(output, home, id, log_from_bytes, after_cut) {
         Ok(()) => Ok(()),
         Err(message) => link::refuse(output, message),
     }
@@ -32,6 +33,7 @@ fn follow(
     home: &Path,
     id: String,
     mut log_from_bytes: u64,
+    after_cut: bool,
 ) -> Result<(), String> {
     let id = RunTag::try_from(id)?;
     let id = id.as_str();
@@ -65,7 +67,13 @@ fn follow(
     if !is_run {
         return built(output, &out);
     }
-    ran(output, &home.join(job::runs()).join(id), id, &active)
+    ran(
+        output,
+        &home.join(job::runs()).join(id),
+        id,
+        &active,
+        after_cut,
+    )
 }
 
 fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
@@ -80,7 +88,13 @@ fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(), String> {
+fn ran(
+    output: &mut impl Write,
+    dir: &Path,
+    id: &str,
+    active: &Path,
+    after_cut: bool,
+) -> Result<(), String> {
     let written = "writing the run's ending failed";
     if !exists(dir)? {
         return frame::write(output, &Followed::Unstarted, &[]).context(written);
@@ -96,9 +110,13 @@ fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(
         Ok(Writer::Other(_)) | Err(_) => None,
     };
     if let Some(record) = record {
-        if record.ending()?.is_none() {
+        let live = record.ending()?.is_none();
+        if live {
             let first = format!("following run {id}: ending this command does not stop it");
             say(output, &first)?;
+        }
+        // A cut may have cost the client a milestone just before the run ended.
+        if live || after_cut {
             milestones(&record, |message| say(output, &message.to_string()), wait)?;
         }
     } else {

@@ -64,7 +64,11 @@ pub(crate) trait Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
-    Follow { id: String, log_from_bytes: u64 },
+    Follow {
+        id: String,
+        log_from_bytes: u64,
+        after_cut: bool,
+    },
     Health(HealthRequest),
     Jobs(JobsRequest),
     List(ListRequest),

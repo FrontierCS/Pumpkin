@@ -208,7 +208,11 @@ fn answer(
             let (start, credentials) = request.decode(body)?;
             crate::job::start(home, start, credentials)
         }),
-        Ask::Follow { id, log_from_bytes } => follow::answer(output, home, id, log_from_bytes),
+        Ask::Follow {
+            id,
+            log_from_bytes,
+            after_cut,
+        } => follow::answer(output, home, id, log_from_bytes, after_cut),
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
         Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
             crate::job::ids(&home.join(JOBS))
