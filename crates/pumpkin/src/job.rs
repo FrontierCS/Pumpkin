@@ -68,7 +68,7 @@ pub(crate) fn runs() -> String {
 // The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
 
-// The exit status of `controller follow` and `cancel` once the run has ended, and the record is
+// The exit status of `controller cancel` once the run has ended, and the record is
 // the client's to copy.
 pub(crate) const ENDED: u8 = 102;
 
@@ -283,26 +283,6 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
         modal_config: None,
     };
     crate::reap(reap, crate::Reaper::Boot)
-}
-
-/// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends, but
-/// none of its ending; then exits `ENDED`. Fails at the first line that can't be written. Ending
-/// it doesn't stop the run.
-pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
-    let runs = crate::default_runs()?;
-    let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
-    if record.ending()?.is_none() {
-        crate::tell(format_args!(
-            "following run {}: ending this command does not stop it",
-            record.id()
-        ))
-        .context(format_args!(
-            "telling the client of run {} failed",
-            record.id()
-        ))?;
-        crate::followed(&record, crate::Reader::Follower)?;
-    }
-    Ok(ExitCode::from(ENDED))
 }
 
 /// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of its

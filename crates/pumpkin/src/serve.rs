@@ -9,10 +9,12 @@
 //! the protocol, which it refuses and exits 1. It marks its install as used again as each request
 //! arrives, so that a `serve` kept for days by an open page keeps its install.
 
+mod follow;
+
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
 use std::io::{self, BufReader, Write};
-use std::os::fd::AsFd as _;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -64,8 +66,9 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     let mut output = io::stdout().lock();
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home.join(crate::job::runs()));
-    let written = "writing to the standard output failed";
-    frame::write(&mut output, &Hello::Serving, &[]).context(written)?;
+    if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
+        return Ok(ExitCode::SUCCESS);
+    }
     while arrives(&input)? {
         let broken = match frame::read::<Ask>(&mut input) {
             Ok(Some((ask, body))) if body.is_empty() => {
@@ -74,7 +77,9 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 }
                 match ask.read_body(&mut input) {
                     Ok(body) => {
-                        answer(&mut output, &home, ask, &body, &mut view).context(written)?;
+                        if !delivered(answer(&mut output, &home, ask, &body, &mut view))? {
+                            break;
+                        }
                         continue;
                     }
                     Err(error) => error.to_string(),
@@ -85,10 +90,19 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
             Err(error) => error.to_string(),
         };
         let message = format!("{broken}: expected a request of this pumpkin");
-        link::refuse(&mut output, message).context(written)?;
+        delivered(link::refuse(&mut output, message))?;
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+// The client may leave at any frame, including while an answer is still streaming.
+fn delivered(written: io::Result<()>) -> Result<bool, String> {
+    match written {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("writing to the standard output failed"),
+    }
 }
 
 /// Whether `input` brings a request, or its end, within [`IDLE`].
@@ -96,16 +110,19 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     if !input.buffer().is_empty() {
         return Ok(true);
     }
-    let Ok(timeout) = Timespec::try_from(IDLE) else {
-        unreachable!("{IDLE:?} fits a `timespec`")
+    ready(input.get_ref(), PollFlags::IN, IDLE).context("polling the standard input failed")
+}
+
+fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<bool> {
+    let Ok(timeout) = Timespec::try_from(timeout) else {
+        unreachable!("{timeout:?} fits a timespec")
     };
+    let mut polled = [PollFd::new(fd, events)];
     loop {
-        let mut polled = [PollFd::new(input.get_ref(), PollFlags::IN)];
         match event::poll(&mut polled, Some(&timeout)) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
+            Ok(count) => return Ok(count != 0),
             Err(Errno::INTR) => {}
-            Err(error) => return Err(format!("polling the standard input failed: {error}")),
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -191,6 +208,11 @@ fn answer(
             let (start, credentials) = request.decode(body)?;
             crate::job::start(home, start, credentials)
         }),
+        Ask::Follow {
+            id,
+            log_from_bytes,
+            after_cut,
+        } => follow::answer(output, home, id, log_from_bytes, after_cut),
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
         Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
             crate::job::ids(&home.join(JOBS))

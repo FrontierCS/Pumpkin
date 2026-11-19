@@ -397,9 +397,10 @@ the controller, which its `aws` finds, starts and enrols this machine's key with
 connections that a workspace's commands share (`Reached`); over them its `send` sends a run's or a
 build's job, its `copy` copies an ended run's record back, its `listing` lists the runs there for
 `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
-`linking` opens, and its `commands` follow, stop and reap them; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which starts jobs, answers `ls` and `view`, lists
-the jobs that `wait` and `cancel` find a run among, and is of the client's own build, installed there
+`linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
+client's `Link` to `serve`, the controller's end, which starts jobs, answers `ls` and `view`, lists the jobs
+that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
+and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
 the controller's side, whose `start` starts each id once under the jobs' lock and keeps the

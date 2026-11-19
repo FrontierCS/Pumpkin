@@ -852,55 +852,6 @@ fn follows_milestones() {
     );
 }
 
-// A follower whose standard error has closed ends at the next line it says, though the run goes on.
-#[test]
-fn follower_without_its_client() {
-    let scratch = Scratch::new();
-    let id = "20261110-100000-0000000b";
-    let dir = write_run(
-        &scratch,
-        id,
-        asked(id, 30),
-        &[],
-        None,
-        &lease_places(Prices::Nothing),
-    );
-    fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
-    let dir = scratch
-        .0
-        .join(".pumpkin/runs")
-        .join(dir.file_name().unwrap());
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    let mut command = scratch.pumpkin(&["controller", "follow", id]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let invoked = invocation(&command);
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    stderr.read_line(&mut said).unwrap();
-    drop(stderr);
-    let mut started = logged(5, json!({ "kind": "agent_started" }), json!([]));
-    started["seq"] = json!(1);
-    let mut log = fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join("log.jsonl"))
-        .unwrap();
-    writeln!(log, "{started}").unwrap();
-    let mut output = child.wait_with_output().unwrap();
-    output.stderr = said.into_bytes();
-    check(
-        &scratch,
-        [Step::Ran(report(invoked, &output, &scratch.0, false))],
-        false,
-        &[],
-        &expect![[r#"
-            $ pumpkin controller follow 20261110-100000-0000000b
-            exit status: Some(1)
-            pumpkin: following run 20261110-100000-0000000b: ending this command does not stop it"#]],
-    );
-}
-
 // A run whose final call gave no result says where the call's commands' logs are, as its log
 // names the call's job; or why it can't.
 #[test]
