@@ -76,8 +76,15 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 if let Ok(install) = &install {
                     mark_install_used(install);
                 }
-                if let Ask::Put(put) = ask {
-                    match receive_put(&home, &put, &mut input, &mut output) {
+                let uploads = match &ask {
+                    Ask::Put(put) => Some(Ok(std::slice::from_ref(put))),
+                    Ask::Puts { blobs } => {
+                        Some(link::store::check_group(blobs).map(|()| blobs.as_slice()))
+                    }
+                    _ => None,
+                };
+                if let Some(puts) = uploads {
+                    match puts.and_then(|puts| receive_puts(&home, puts, &mut input, &mut output)) {
                         Ok(()) => continue,
                         Err(error)
                             if matches!(
@@ -112,25 +119,36 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn receive_put(
+fn receive_puts(
     home: &Path,
-    put: &link::store::Put,
+    puts: &[link::store::Put],
     input: &mut impl io::Read,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut parts = link::store::Parts::new(input, put.body_bytes()?);
-    let stored = crate::manifest::store::put(
-        &home.join(crate::job::STORE),
-        &put.digest,
-        put.from,
-        put.size_bytes,
-        &mut parts,
-    );
-    parts.finish()?;
-    match stored {
-        Ok(answer) => frame::write(output, &answer, &[]),
-        Err(error) => link::refuse(output, error),
+    let store = home.join(crate::job::STORE);
+    // A refusal can fill the return pipe while the client is still writing the group's bodies.
+    let mut answers = Vec::new();
+    let mut failed = false;
+    for put in puts {
+        let mut parts = link::store::Parts::new(input, put.body_bytes()?);
+        if !failed {
+            let stored = crate::manifest::store::put(
+                &store,
+                &put.digest,
+                put.from,
+                put.size_bytes,
+                &mut parts,
+            );
+            failed = !matches!(stored, Ok(crate::manifest::store::PutAnswer::Stored));
+            match stored {
+                Ok(answer) => frame::write(&mut answers, &answer, &[])?,
+                Err(error) => link::refuse(&mut answers, error)?,
+            }
+        }
+        parts.finish()?;
     }
+    output.write_all(&answers)?;
+    output.flush()
 }
 
 // The client may leave at any frame, including while an answer is still streaming.
@@ -254,7 +272,7 @@ fn answer(
                 install.as_deref(),
             )
         }),
-        Ask::Put(_) => {
+        Ask::Put(_) | Ask::Puts { .. } => {
             unreachable!("the upload's body is streamed before answering other requests")
         }
         Ask::Start(request) => link::answer(output, *request, |start| {

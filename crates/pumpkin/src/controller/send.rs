@@ -21,8 +21,8 @@ use stdx::process::Environment;
 
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached, SHORT_TIMEOUT, bounded};
-use crate::link::store::{Lacks, Put};
-use crate::link::{JobKind, StartAnswer, StartRequest};
+use crate::link::store::{self, Lacks};
+use crate::link::{JobKind, Link, StartAnswer, StartRequest};
 use crate::manifest::store::{Missing, PutAnswer};
 use crate::{config, manifest, say};
 
@@ -267,36 +267,34 @@ fn upload(
             ));
         }
         let mut count = counting(&reached.name, bytes);
-        for Missing {
-            digest,
-            held_bytes,
-            size_bytes,
-        } in missing
-        {
-            let Some(source) = hashed.sources.get(&digest) else {
-                return Err(format!(
-                    "the controller asked for an unknown blob {}: send the task again",
-                    digest.hex()
-                )
-                .into());
-            };
-            let input = source.at(held_bytes, size_bytes)?;
-            let put = Put {
-                digest: digest.clone(),
-                from: held_bytes,
-                size_bytes,
-            };
-            match linked.stream(reached, |link| link.put(put, input, &mut count))?? {
-                PutAnswer::Stored => advanced(),
-                PutAnswer::OffsetChanged => continue 'lacks,
-                PutAnswer::NotItsDigest => {
-                    return Err(format!(
-                        "{} changed since it was hashed: send the task again",
-                        hashed.shown(&digest)
+        for group in store::groups(&missing) {
+            let mut inputs = Vec::new();
+            let opened: Result<(), String> = group.iter().try_for_each(|blob| {
+                let source = hashed.sources.get(&blob.digest).ok_or_else(|| {
+                    format!(
+                        "the controller asked for an unknown blob {}: send the task again",
+                        blob.digest.hex()
                     )
-                    .into());
+                })?;
+                inputs.push((blob, source.at(blob.held_bytes, blob.size_bytes)?));
+                Ok(())
+            });
+            let sent = &group[..inputs.len()];
+            linked.stream(reached, |link| link.send_puts(inputs, &mut count))?;
+            for blob in sent {
+                match linked.stream(reached, Link::put_answer)?? {
+                    PutAnswer::Stored => advanced(),
+                    PutAnswer::OffsetChanged => continue 'lacks,
+                    PutAnswer::NotItsDigest => {
+                        return Err(format!(
+                            "{} changed since it was hashed: send the task again",
+                            hashed.shown(&blob.digest)
+                        )
+                        .into());
+                    }
                 }
             }
+            opened?;
         }
         return Ok(());
     }

@@ -1997,6 +1997,113 @@ fn send_carries_on() {
 }
 
 #[test]
+fn cut_during_group_answers() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let (_, warm) = start(&scratch, &client);
+    assert!(warm.contains("exit status: Some(0)"), "{warm}");
+    send_calls(&scratch);
+    let mut blobs = Vec::new();
+    for index in 0..9 {
+        let contents = format!("small file {index}");
+        scratch.write(&format!("repo/stand-in/new-{index}"), &contents);
+        blobs.push(json!({
+            "digest": format!("sha256:{}", sha256(contents.as_bytes())),
+            "size_bytes": contents.len(),
+            "held_bytes": 0,
+        }));
+    }
+    let missing = |body: &[u8]| {
+        frame_bytes(&json!({"type":"missing","body_bytes":body.len()}), &[])
+            + frame_bytes(&serde_json::Value::Null, body)
+    };
+    let install = frame_bytes(&json!({"type":"serving"}), &[]) + missing(b"[]");
+    // Cut inside the tree query, then inside the second Stored on the next connection.
+    let tree = missing(&serde_json::to_vec(&blobs).unwrap());
+    let stored = frame_bytes(&json!({"type":"stored"}), &[]);
+    scratch.write("bin/cut-out", &(install + 1));
+    scratch.write(
+        "bin/before-2",
+        &format!(
+            "echo {} > '{}/bin/cut-out'",
+            install + tree + stored + 1,
+            scratch.0.display()
+        ),
+    );
+    let (_, sent) = start(&scratch, &client);
+    check(
+        &scratch,
+        &[sent, send_calls(&scratch)].join("\n"),
+        &[],
+        &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` didn't answer: ended within the answer: starting the job again now, attempt 2 of 7
+            pumpkin: controller `alice` lacks 9 of the task's 15 files: sending 108 bytes
+            pumpkin: controller `alice` didn't answer: ended within the upload's answer: starting the job again now, attempt 2 of 7
+            pumpkin: controller `alice` lacks 1 of the task's 15 files: sending 12 bytes
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: serve, serve, serve"#]],
+    );
+}
+
+#[test]
+fn group_drains_after_a_discarded_partial() {
+    let scratch = Scratch::new();
+    let store = scratch.0.join("home/store");
+    fs::create_dir_all(store.join("incoming")).unwrap();
+    let bodies = [b"one", b"two", b"end"];
+    let blobs = bodies.map(|body| {
+        json!({
+            "digest": format!("sha256:{}", sha256(body)), "size_bytes":body.len(), "from":0,
+        })
+    });
+    let mut serve = serve_process(&scratch);
+    let mut input = serve.stdin.take().unwrap();
+    let puts = json!({"type":"puts","blobs":blobs});
+    schema::frame::write(&mut input, &puts, &[]).unwrap();
+    schema::frame::write(&mut input, &(), bodies[0]).unwrap();
+    let (prefix, rest) = bodies[1].split_at(1);
+    schema::frame::write(&mut input, &(), prefix).unwrap();
+    let partial = store.join(format!("incoming/{}.part", sha256(bodies[1])));
+    poll(|| (fs::metadata(&partial).ok()?.len() == 1).then_some(()));
+    fs::remove_file(&partial).unwrap();
+    fs::create_dir(partial).unwrap();
+    schema::frame::write(&mut input, &(), rest).unwrap();
+    schema::frame::write(&mut input, &(), bodies[2]).unwrap();
+    // Retrying the group reaches the directory in place of its partial, which the store refuses.
+    schema::frame::write(&mut input, &puts, &[]).unwrap();
+    for body in bodies {
+        schema::frame::write(&mut input, &(), body).unwrap();
+    }
+    schema::frame::write(&mut input, &json!({"type":"jobs"}), &[]).unwrap();
+    drop(input);
+    let done = serve.wait_with_output().unwrap();
+    assert!(done.status.success(), "{done:?}");
+    let mut frames = &done.stdout[..];
+    let mut kinds = Vec::new();
+    while let Some((head, _)) = schema::frame::read::<serde_json::Value>(&mut frames).unwrap() {
+        if let Some(kind) = head["type"].as_str() {
+            kinds.push(kind.to_owned());
+        }
+    }
+    let stored = bodies.map(|body| store.join(sha256(body)).exists());
+    check(
+        &scratch,
+        &format!("{kinds:?}\nstored: {stored:?}"),
+        &[],
+        &expect![[r#"
+            ["serving", "stored", "offset_changed", "stored", "refused", "jobs"]
+            stored: [true, false, false]"#]],
+    );
+}
+
+#[test]
 fn concurrent_uploads() {
     let scratch = Scratch::new();
     let contents = vec![42; 128 << 10];
@@ -3317,12 +3424,23 @@ fn serve_refusals() {
     schema::frame::write(&mut other, &json!({ "type": "absent_request" }), &[]).unwrap();
     steps.push("a message that is no request:".to_owned());
     steps.push(serve_fed(&scratch, &other));
-    for (what, bytes) in [
-        ("an incomplete request body:", 1),
-        ("a request body past the cap:", 16 * 1024 * 1024 + 1),
+    let puts = |count, from, size_bytes| {
+        let blob =
+            json!({"digest":format!("sha256:{EMPTY_TREE}"), "from":from, "size_bytes":size_bytes});
+        json!({"type":"puts", "blobs": vec![blob; count]})
+    };
+    for (what, request) in [
+        ("an incomplete request body:", start_head("once", 1)),
+        (
+            "a request body past the cap:",
+            start_head("once", 16 * 1024 * 1024 + 1),
+        ),
+        ("too many blobs in a group:", puts(9, 0, 0)),
+        ("a large blob in a group:", puts(2, 0, 32769)),
+        ("a resumed blob in a group:", puts(2, 1, 2)),
     ] {
         let mut head = Vec::new();
-        schema::frame::write(&mut head, &start_head("once", bytes), &[]).unwrap();
+        schema::frame::write(&mut head, &request, &[]).unwrap();
         steps.push(what.to_owned());
         steps.push(serve_fed(&scratch, &head));
     }
@@ -3341,7 +3459,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `absent_request`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `absent_request`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put`, `puts` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
@@ -3349,7 +3467,19 @@ fn serve_refusals() {
             a request body past the cap:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes"#]],
+              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+            too many blobs in a group:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"a group holds 2 to 8 whole blobs of at most 32768 bytes each: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+            a large blob in a group:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"a group holds 2 to 8 whole blobs of at most 32768 bytes each: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+            a resumed blob in a group:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"a group holds 2 to 8 whole blobs of at most 32768 bytes each: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 
