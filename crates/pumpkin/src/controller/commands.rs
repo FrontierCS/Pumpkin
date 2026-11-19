@@ -2,7 +2,7 @@
 //! `wait`, `cancel` and `reap`.
 //!
 //! A run or build follows its job over a link. An ended run's record is copied into this
-//! machine's runs directory, where its ending is said. Cancel and reap run over a shell session.
+//! machine's runs directory, where its ending is said. A reap runs over a shell session.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,16 +15,9 @@ use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
-use crate::job::JOBS;
-use crate::link::{JobKind, JobsRequest};
+use crate::link::{CancelAnswer, CancelRequest, JobKind, JobsRequest};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
-
-// The code of a script that finds no job of the run's id on the controller.
-const NO_JOB: i32 = 100;
-
-// The code of a script that finds the job there, but no run it started.
-const UNSTARTED: i32 = 101;
 
 /// Fails, naming each flag given, as each names something of this machine's that a run on the
 /// controller can't use.
@@ -254,55 +247,58 @@ fn with_modal(
     Ok((script, Some(file)))
 }
 
-/// Stops the run that `run` names on the controller, as `pumpkin cancel` does there, `force`
-/// included, and says its ending from the copy of its record here. A job whose run hasn't
-/// started is stopped and removed.
+/// Stops the run that `run` names on the controller and copies its record once it has ended.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
     let (build, id) = job_id(&reached, run)?;
-    let force = if force { " --force" } else { "" };
-    let (script, modal) = with_modal(client, |flag| {
-        format!(
-            "cd\n[ -d {JOBS}/{id} ] || exit {NO_JOB}\n\
-             if [ -d {runs}/{id} ]; then\n\
-             [ ! -x {JOBS}/{id}/{own} ] || {{ {JOBS}/{id}/{own} controller cancel{force}{flag} {id}; exit; }}\n\
-             ./{current} cancel{force}{flag} {id}; exit; fi\n\
-             systemctl --user stop pumpkin-job-{id}\n[ -d {runs}/{id} ] || rm --recursive --force {JOBS}/{id}\n\
-             exit {UNSTARTED}\n",
-            runs = crate::job::runs(),
-            own = crate::job::OWN,
-            current = crate::job::CURRENT
-        )
-    })?;
-    let again = format!("cancel it again: {}", next::of_run("cancel", None, &id));
+    let modal = client.modal_file()?;
+    let request = CancelRequest {
+        id: id.clone(),
+        force,
+        modal_bytes: modal.as_ref().map(Vec::len),
+    };
     let name = &reached.name;
-    match reached.ended(reached.attached(&script, modal.as_deref())?, &again)? {
-        NO_JOB => Err(format!("controller `{name}` has no run {id}")),
-        UNSTARTED => {
-            say(format_args!(
-                "run {id}'s job on controller `{name}` is stopped, before the run started"
-            ));
-            Ok(ExitCode::SUCCESS)
+    let answer = reached.asked(&build, "cancelling the run", |linked| {
+        linked.ask_with_body(
+            &reached,
+            request.clone(),
+            modal.as_deref().unwrap_or_default(),
+        )
+    })??;
+    match answer {
+        CancelAnswer::Unstarted => say(format_args!(
+            "run {id}'s job on controller `{name}` is stopped, before the run started"
+        )),
+        CancelAnswer::EndedUnreaped { message } => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
+            }
+            return Err(message);
         }
-        // `cancel`'s exit says only that the run has ended, however that was, and whether what it
-        // left on its provider is gone, as a local one's does.
-        code if code == i32::from(crate::job::ENDED) => {
-            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        code if code == i32::from(crate::job::ENDED_UNREACHED) => {
-            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
-            crate::advise(
-                "remove what it left once its provider can be reached",
-                &next::reap(None),
+        CancelAnswer::Stopped { writer } => {
+            let writer = reached.copy(&build, &id)?.or(writer);
+            let copy = PathBuf::from(crate::default_runs()?).join(&id);
+            let writer = writer.map_or_else(
+                || "the pumpkin that made it".to_owned(),
+                |build| format!("pumpkin {build}"),
             );
-            Ok(ExitCode::from(crate::UNREACHED))
+            say(format_args!(
+                "stopped job {id} on controller `{name}`; copied its record to {}: read it with {writer}",
+                copy.display()
+            ));
         }
-        code => {
-            reached.copy(&build, &id)?;
-            Ok(exit(code))
+        CancelAnswer::Ended | CancelAnswer::EndedUnreached => {
+            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
+            if matches!(answer, CancelAnswer::EndedUnreached) {
+                crate::advise(
+                    "remove what it left once its provider can be reached",
+                    &next::reap(None),
+                );
+                return Ok(ExitCode::from(crate::UNREACHED));
+            }
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Removes on the controller what runs left, as `pumpkin reap` does there.

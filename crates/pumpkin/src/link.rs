@@ -77,6 +77,7 @@ pub(crate) enum Ask {
     List(ListRequest),
     View(ViewRequest),
     Start(StartRequest),
+    Cancel(CancelRequest),
 }
 
 impl Ask {
@@ -84,6 +85,7 @@ impl Ask {
         let bytes = match self {
             Self::Copy(copy) => copy.held_bytes,
             Self::Start(start) => start.body_bytes,
+            Self::Cancel(request) => request.modal_bytes.unwrap_or(0),
             _ => 0,
         };
         if bytes > MAX_REQUEST_BODY_BYTES {
@@ -418,6 +420,41 @@ impl Request for StartRequest {
                 Ok(StartAnswer::Unadmitted { changed, gone })
             }
         }
+    }
+}
+
+/// Stops a job, with the optional Modal credentials needed to reap its run.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CancelRequest {
+    pub(crate) id: String,
+    pub(crate) force: bool,
+    pub(crate) modal_bytes: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum CancelAnswer {
+    Ended,
+    EndedUnreached,
+    EndedUnreaped { message: String },
+    Unstarted,
+    Stopped { writer: Option<String> },
+}
+
+impl Request for CancelRequest {
+    type Answer = CancelAnswer;
+    type Head = CancelAnswer;
+
+    fn ask(self) -> Ask {
+        Ask::Cancel(self)
+    }
+
+    fn sent(answer: CancelAnswer) -> (CancelAnswer, Vec<u8>) {
+        (answer, Vec::new())
+    }
+
+    fn received(head: CancelAnswer, _: &mut Link) -> Result<CancelAnswer, Unanswered> {
+        Ok(head)
     }
 }
 

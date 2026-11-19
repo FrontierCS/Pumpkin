@@ -65,16 +65,12 @@ pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+pub(crate) fn unit_name(id: &RunTag) -> String {
+    format!("pumpkin-job-{}", id.as_str())
+}
+
 // The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
-
-// The exit status of `controller cancel` once the run has ended, and the record is
-// the client's to copy.
-pub(crate) const ENDED: u8 = 102;
-
-// The exit status of `controller cancel` once the run ended but its provider couldn't be
-// reached, so that what it left isn't removed.
-pub(crate) const ENDED_UNREACHED: u8 = 103;
 
 pub(crate) const SENT_CONFIG: &str = "config.toml";
 
@@ -144,8 +140,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
-    // So that a client that follows the run has it followed by the `pumpkin` it sent the job with,
-    // as `current-pumpkin` may be another job's by then.
+    // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
@@ -285,22 +280,21 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     crate::reap(reap, crate::Reaper::Boot)
 }
 
-/// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of its
-/// ending; then exits `ENDED`, or `ENDED_UNREACHED` if its provider couldn't be reached. Fails as
-/// `pumpkin cancel` does before the run's ending.
+/// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
+/// the client to copy the ended record, 103 to also report that a provider couldn't be reached.
 pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
-    let (_, _, reached) = crate::cancelled(flags, crate::Reader::Follower)?;
-    Ok(ExitCode::from(if reached {
-        ENDED
-    } else {
-        ENDED_UNREACHED
-    }))
+    let reached = crate::cancelled(flags, crate::Reader::Follower)?.reached?;
+    Ok(ExitCode::from(if reached { 102 } else { 103 }))
 }
 
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.
 pub(crate) fn jobs() -> Result<PathBuf, String> {
+    Ok(runtime_dir()?.join("pumpkin"))
+}
+
+pub(crate) fn runtime_dir() -> Result<PathBuf, String> {
     // The same for every job: the user's systemd gives each job's unit the user's runtime
     // directory, as `pam_systemd` gives the session that makes the job's directory there.
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty());
@@ -311,7 +305,7 @@ pub(crate) fn jobs() -> Result<PathBuf, String> {
                 .to_owned(),
         );
     };
-    Ok(Path::new(&runtime).join("pumpkin"))
+    Ok(runtime.into())
 }
 
 /// What the jobs that run hold, of the directories of every job in `jobs`, and their runs'
