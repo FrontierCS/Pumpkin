@@ -1,11 +1,12 @@
 //! A job's log while it builds, then the run's milestones or the completed build's IR.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Seek as _, SeekFrom, Write};
 use std::path::Path;
 
 use provider::RunTag;
 use runtime::{ReadError, Record, Writer};
+use rustix::event::PollFlags;
 use schema::frame;
 use stdx::Context as _;
 
@@ -19,8 +20,9 @@ pub(super) fn answer(
     home: &Path,
     id: String,
     log_from_bytes: u64,
+    after_cut: bool,
 ) -> io::Result<()> {
-    match follow(output, home, id, log_from_bytes) {
+    match follow(output, home, id, log_from_bytes, after_cut) {
         Ok(()) => Ok(()),
         Err(message) => link::refuse(output, message),
     }
@@ -31,6 +33,7 @@ fn follow(
     home: &Path,
     id: String,
     mut log_from_bytes: u64,
+    after_cut: bool,
 ) -> Result<(), String> {
     let id = RunTag::try_from(id)?;
     let id = id.as_str();
@@ -59,12 +62,18 @@ fn follow(
         if ready {
             break;
         }
-        std::thread::sleep(FOLLOW_POLL);
+        wait()?;
     }
     if !is_run {
         return built(output, &out);
     }
-    ran(output, &home.join(job::runs()).join(id), id, &active)
+    ran(
+        output,
+        &home.join(job::runs()).join(id),
+        id,
+        &active,
+        after_cut,
+    )
 }
 
 fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
@@ -79,7 +88,13 @@ fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(), String> {
+fn ran(
+    output: &mut impl Write,
+    dir: &Path,
+    id: &str,
+    active: &Path,
+    after_cut: bool,
+) -> Result<(), String> {
     let written = "writing the run's ending failed";
     if !exists(dir)? {
         return frame::write(output, &Followed::Unstarted, &[]).context(written);
@@ -95,27 +110,48 @@ fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(
         Ok(Writer::Other(_)) | Err(_) => None,
     };
     if let Some(record) = record {
-        if record.ending()?.is_none() {
+        let live = record.ending()?.is_none();
+        if live {
             let first = format!("following run {id}: ending this command does not stop it");
             say(output, &first)?;
-            milestones(&record, |message| say(output, &message.to_string()))?;
+        }
+        // A cut may have cost the client a milestone just before the run ended.
+        if live || after_cut {
+            milestones(&record, |message| say(output, &message.to_string()), wait)?;
         }
     } else {
         while exists(active)? {
-            std::thread::sleep(FOLLOW_POLL);
+            wait()?;
         }
     }
     // Its outcome may already be written while its driver still holds the last write lock.
     // Wait for that lock before telling the client to copy, even for a record we can't read.
     let path = dir.join("driver.pid");
     if let Some(driver) = open(&path)? {
-        driver.lock_shared().context(path.display())?;
+        loop {
+            match driver.try_lock_shared() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => wait()?,
+                Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
+            }
+        }
     }
     let writer = match writer {
         Ok(Writer::Other(build)) => Some(build),
         Ok(Writer::This | Writer::Older) | Err(_) => None,
     };
     frame::write(output, &Followed::Ran { writer }, &[]).context(written)
+}
+
+// A quiet job can outlive its follower. Watch the reader of stdout as journalctl --follow does.
+// <https://github.com/systemd/systemd/blob/ca78951bd398e191ebc4550710e33ef34190514e/src/journal/journalctl-show.c#L468-L489>
+fn wait() -> Result<(), String> {
+    let closed = super::ready(&io::stdout(), PollFlags::ERR | PollFlags::HUP, FOLLOW_POLL)
+        .context("polling the standard output failed")?;
+    if closed {
+        return Err("the client closed its output".to_owned());
+    }
+    Ok(())
 }
 
 fn say(output: &mut impl Write, message: &str) -> Result<(), String> {

@@ -18,7 +18,7 @@ pub(super) fn job(reached: &mut Reached, build: &Build, id: &str) -> Result<Fini
     let mut shown = Shown::default();
     let what = format!("following job {id}");
     reached
-        .carrying_on(build, &what, |reached, linked, progress| {
+        .carrying_on(build, &what, |reached, linked, _, progress| {
             let read = linked.stream(reached, |link| shown.read(link, id, progress));
             shown.end_line();
             read
@@ -29,6 +29,7 @@ pub(super) fn job(reached: &mut Reached, build: &Build, id: &str) -> Result<Fini
 #[derive(Default)]
 struct Shown {
     log_bytes: u64,
+    asked: bool,
     mid_line: bool,
     said: BTreeSet<String>,
 }
@@ -44,9 +45,11 @@ impl Shown {
             &Ask::Follow {
                 id: id.to_owned(),
                 log_from_bytes: self.log_bytes,
+                after_cut: self.asked,
             },
             &[],
         )?;
+        self.asked = true;
         loop {
             let (item, body) = match link.item::<Followed>()? {
                 Ok(frame) => frame,

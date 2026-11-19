@@ -891,6 +891,46 @@ fn cancels_a_run() {
 }
 
 #[test]
+fn counts_a_jobs_answers_under_its_caller_name() {
+    let scratch = Scratch::new();
+    let id = "20261110-170000-00000012";
+    let call = json!({ "kind": "start_call", "job": 4, "grant": "train",
+        "payload": { "size": 0 }, "timeout_ns": "10000000000" });
+    let mut answer = answered(3, "job-04", 0, 429, json!({}), None);
+    answer["event"]["failed"] = json!({ "code": "rate_limit_exceeded" });
+    let log = [
+        logged(1, json!({ "kind": "tick" }), json!([call])),
+        started(2, "job-4", 0),
+        answer,
+    ];
+    write_run(
+        &scratch,
+        id,
+        asked(id, 0),
+        &log,
+        None,
+        &lease_places(Prices::Both),
+    );
+    let served = Served::start(&scratch);
+    let since = served.get(&format!("/api/runs/{id}/since?log=0"));
+    let lane = &since["run"]["lanes"][1];
+    let event = &since["records"].as_array().unwrap().last().unwrap()["event"];
+    let said = format!(
+        "logged {}, lane {}, caller {}, answered {}, failed {}",
+        event["caller"], lane["lane"], lane["caller"], lane["answered"], lane["failed"]
+    );
+    check(
+        &scratch,
+        [Step::Ran(said)],
+        false,
+        &[],
+        &expect![[
+            r#"logged "job-04", lane "job 4", caller "job-4", answered [3.0], failed [3.0]"#
+        ]],
+    );
+}
+
+#[test]
 fn starts_over_a_shortened_log() {
     let scratch = Scratch::new();
     let id = "20261110-180000-00000013";

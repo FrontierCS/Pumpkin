@@ -61,6 +61,13 @@ pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+pub(crate) fn unit_name(id: &RunTag) -> String {
+    format!("pumpkin-job-{}", id.as_str())
+}
+
+// The link in a job's directory to the `pumpkin` that runs it.
+pub(crate) const OWN: &str = "pumpkin";
+
 pub(crate) const SENT_CONFIG: &str = "config.toml";
 
 pub(crate) const SENT_MODAL: &str = "modal.toml";
@@ -128,6 +135,8 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
+    // Record that the unit ran even if its start receipt could not be written.
+    point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;
@@ -266,6 +275,13 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     crate::reap(reap, crate::Reaper::Boot)
 }
 
+/// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
+/// the client to copy the ended record, 103 to also report that a provider couldn't be reached.
+pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
+    let reached = crate::cancelled(flags, crate::Reader::Follower)?.reached?;
+    Ok(ExitCode::from(if reached { 102 } else { 103 }))
+}
+
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.
@@ -327,6 +343,14 @@ fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
 /// looks it up is removed while the job runs.
 fn open_jobs(jobs: &Path) -> Result<File, String> {
     File::open(jobs).context(jobs.display())
+}
+
+/// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a path
+/// beside it that no other job uses.
+fn point(link: &Path, staged: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().context("finding this `pumpkin`'s executable failed")?;
+    symlink(&exe, staged).context(staged.display())?;
+    fs::rename(staged, link).context(link.display())
 }
 
 #[derive(Deserialize)]
