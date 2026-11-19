@@ -407,13 +407,8 @@ impl Parser<'_> {
             }
             _ => {}
         }
-        if let (TokenKind::Name(name), Some(TokenKind::Punct(Punct::Eq))) =
-            (&self.peek().kind, self.peek_next())
-        {
-            let text = name.clone();
-            let span = self.advance();
-            self.advance();
-            return Ok(Argument::Keyword(Name { text, span }, self.test()?));
+        if let Some(name) = self.keyword_name() {
+            return Ok(Argument::Keyword(name, self.test()?));
         }
         self.test().map(Argument::Positional)
     }
@@ -421,7 +416,7 @@ impl Parser<'_> {
     fn operand(&mut self) -> Result<Expr, Fault> {
         let span = self.peek().span;
         let kind = match &self.peek().kind {
-            TokenKind::Name(name) => ExprKind::Name(name.clone()),
+            TokenKind::Name => ExprKind::Name(self.spelling().into()),
             TokenKind::Int(int) => ExprKind::Int(*int),
             TokenKind::Float(float) => ExprKind::Float(*float),
             TokenKind::Str(text) => ExprKind::Str(text.clone()),
