@@ -53,14 +53,19 @@ fn send(
         .map(|entry| entry.map(|(path, stamp)| (PathBuf::from(path), stamp)))
         .collect::<Result<BTreeMap<_, _>, _>>()
         .context("reading the list of files the copy holds failed")?;
-    let Entries { dirs, mut files } = Entries::at(&root)?;
+    let Entries {
+        dirs,
+        mut files,
+        mut unread,
+    } = Entries::at(&root)?;
     let record = PathBuf::from("record.json");
-    let last = files.remove_entry(&record).ok_or_else(|| {
-        format!(
+    let last = files.remove_entry(&record);
+    if last.is_none() && unread.is_none() {
+        return Err(format!(
             "{} has no record.json to copy: expected a run's record",
             root.display()
-        )
-    })?;
+        ));
+    }
     for path in dirs {
         wrote(
             output,
@@ -70,9 +75,8 @@ fn send(
             &[],
         )?;
     }
-    let mut unread = None;
     let mut buffer = vec![0; frame::MAX_BODY_BYTES];
-    for (name, stamp) in files.into_iter().chain([last]) {
+    for (name, stamp) in files.into_iter().chain(last) {
         if held.get(&name) == Some(&stamp) || name == record && unread.is_some() {
             continue;
         }
