@@ -2,7 +2,7 @@
 //! appends. Admission and collection take the store lock, so a digest names only checked bytes.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ pub(crate) struct Missing {
 pub(crate) enum PutAnswer {
     Stored,
     NotItsDigest,
-    /// A partial was collected or discarded after the client asked what was held.
+    /// The client must ask again which prefix is held before resuming.
     OffsetChanged,
 }
 
@@ -179,7 +179,7 @@ pub(crate) fn put(
 ) -> Result<PutAnswer, String> {
     let path = partial(store, digest);
     let blob = store.join(digest.hex());
-    let mut file = loop {
+    let mut file = {
         let held = lock(store)?;
         if blob.try_exists().context(blob.display())? {
             return Ok(PutAnswer::Stored);
@@ -195,13 +195,21 @@ pub(crate) fn put(
             .write(true)
             .open(&path)
             .context(path.display())?;
-        // An active writer needs the store lock again to admit its file.
-        drop(held);
-        file.lock().context(path.display())?;
-        let _held = lock(store)?;
-        // A previous writer may have moved or discarded this inode while we waited.
-        if still_named(&file, &path)? {
-            break file;
+        match file.try_lock() {
+            Ok(()) => file,
+            Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
+            Err(TryLockError::WouldBlock) => {
+                // Keep reading so the racing sender's pipe can advance while the owner uploads.
+                drop(held);
+                io::copy(body, &mut io::sink()).context(path.display())?;
+                file.lock().context(path.display())?;
+                let _held = lock(store)?;
+                return Ok(if blob.try_exists().context(blob.display())? {
+                    PutAnswer::Stored
+                } else {
+                    PutAnswer::OffsetChanged
+                });
+            }
         }
     };
     let held = file.seek(SeekFrom::End(0)).context(path.display())?;

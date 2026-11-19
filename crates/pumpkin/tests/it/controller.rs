@@ -2103,8 +2103,17 @@ fn send_carries_on() {
 
 #[test]
 fn concurrent_uploads() {
+    racing_upload(true);
+}
+
+#[test]
+fn concurrent_upload_resumes_after_cut() {
+    racing_upload(false);
+}
+
+fn racing_upload(first_finishes: bool) {
     let scratch = Scratch::new();
-    let contents = vec![42; 128 << 10];
+    let contents = vec![42; schema::frame::MAX_BODY_BYTES];
     let digest = sha256(&contents);
     let manifest = format!("pumpkin-tree/1\nf {digest} {} notes\n", contents.len());
     let mut query = Vec::new();
@@ -2113,7 +2122,7 @@ fn concurrent_uploads() {
     schema::frame::write(&mut query, &(), manifest.as_bytes()).unwrap();
     assert!(serve_fed(&scratch, &query).contains(r#""type":"missing""#));
 
-    let put = json!({"type":"put", "digest":format!("sha256:{digest}"), "size_bytes":contents.len(), "from":0});
+    let mut put = json!({"type":"put", "digest":format!("sha256:{digest}"), "size_bytes":contents.len(), "from":0});
     let mut first = serve_process(&scratch);
     let mut writing = first.stdin.take().unwrap();
     schema::frame::write(&mut writing, &put, &[]).unwrap();
@@ -2122,26 +2131,46 @@ fn concurrent_uploads() {
     let partial = scratch.0.join(format!("home/store/incoming/{digest}.part"));
     poll(|| (fs::metadata(&partial).ok()?.len() == prefix.len() as u64).then_some(()));
 
-    // The second writer has an older offset. Once the first admits the blob, all of the
-    // second request's bytes must still be consumed before the next request.
+    // This frame exceeds the pipe's capacity. Its writer can finish only if the second
+    // serve reads the body while the first still holds the partial.
     let mut second = serve_process(&scratch);
     let mut racing = second.stdin.take().unwrap();
     schema::frame::write(&mut racing, &put, &[]).unwrap();
-    schema::frame::write(&mut writing, &(), rest).unwrap();
+    schema::frame::write(&mut racing, &(), &contents).unwrap();
+    if first_finishes {
+        schema::frame::write(&mut writing, &(), rest).unwrap();
+    }
     drop(writing);
     let done = first.wait_with_output().unwrap();
     assert!(done.status.success());
-    schema::frame::write(&mut racing, &(), &contents).unwrap();
-    schema::frame::write(&mut racing, &json!({"type":"jobs"}), &[]).unwrap();
+    std::io::Write::write_all(&mut racing, &query).unwrap();
     drop(racing);
     let done = second.wait_with_output().unwrap();
     assert!(done.status.success());
     let mut frames = &done.stdout[..];
-    for kind in ["serving", "stored", "jobs"] {
+    let answer = if first_finishes {
+        "stored"
+    } else {
+        "offset_changed"
+    };
+    for kind in ["serving", answer, "missing"] {
         let (head, _) = schema::frame::read::<serde_json::Value>(&mut frames)
             .unwrap()
             .unwrap();
         assert_eq!(head["type"], kind);
+    }
+    let (_, body) = schema::frame::read::<()>(&mut frames).unwrap().unwrap();
+    let missing: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    if first_finishes {
+        assert!(missing.is_empty());
+    } else {
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0]["held_bytes"], prefix.len());
+        put["from"] = missing[0]["held_bytes"].clone();
+        let mut resume = Vec::new();
+        schema::frame::write(&mut resume, &put, &[]).unwrap();
+        schema::frame::write(&mut resume, &(), rest).unwrap();
+        assert!(serve_fed(&scratch, &resume).contains(r#""type":"stored""#));
     }
     assert_eq!(
         fs::read(scratch.0.join("home/store").join(digest)).unwrap(),
