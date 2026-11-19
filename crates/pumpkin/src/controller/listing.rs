@@ -127,13 +127,17 @@ fn said(name: &Name, health: &Health, jobs: usize) -> String {
     let used_percent = used.div_ceil((*disk_size_bytes).max(1)).min(100);
     let unit = "pumpkin-boot.service";
     let boot = match boot {
-        Boot::Failed { status, at } => {
+        Boot::Failed { status, at, log } => {
             let at = at
                 .as_ref()
                 .map_or_else(String::new, |at| format!(" at {at}"));
+            let tail = if log.is_empty() {
+                String::new()
+            } else {
+                format!("\n{log}")
+            };
             format!(
-                "; its boot, {unit}, failed with status {status}{at}: read why there, in \
-                 `journalctl --unit {unit}`"
+                "; its boot, {unit}, failed with status {status}{at}. See ~/boot.log on the controller{tail}"
             )
         }
         Boot::Running => format!("; its boot, {unit}, is still running"),

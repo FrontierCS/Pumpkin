@@ -15,9 +15,9 @@ bucket of the account, so no laptop can lose it.
 | the timer: a schedule group and a role that terminates run instances | a kill bound outside each guest |
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker and nftables | each sandbox's boot runs them, at the release's versions |
-| the controller's role and instance profile: SSM, its jobs' settings, and what the `ec2` provider's calls need | the runs' launches, timers, sweeps and pushes, from the controller |
+| the controller's role and instance profile: access to its jobs' settings parameter and the EC2 provider's resources | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
-| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` setting that ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that reaps at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
+| what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that runs each registered build's reap at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
 | with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
 
@@ -78,8 +78,8 @@ concurrent `plan` or `apply` of the same state waits on its lock.
 - `terraform output -raw client_policy_arn` is the managed IAM policy that the person's machine
   needs; an account whose roles live elsewhere attaches it by hand, as `aws iam attach-role-policy
   --role-name <role> --policy-arn <arn>` (or `attach-user-policy`). `outputs.tf` says what it
-  allows. A plain `aws ssm start-session` shell is no SSH session, so the idle stop doesn't count
-  it.
+  allows. The machine reaches port 22 at the controller's private address from a network in
+  `ssh_from`.
 - `terraform output -raw ec2` is the body of the EC2 provider's table in `pumpkin.toml`, under a
   header such as `[providers.aws.ec2]`, whose keys `pumpkin help config` says, with each class's
   template at the version its creates launch. The controller's settings hold it already; a machine
@@ -101,6 +101,14 @@ us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its 
 us-east-1's rates, more in other regions; beside ECR's storage. A new Ubuntu release or a new
 cloud-init reaches it only by `terraform apply -replace=aws_instance.controller`, once no run is
 live: its volume, and the records on it, go with it.
+
+To upgrade boot recovery on an existing instance while keeping its volume, let older jobs end
+and run `pumpkin reap` from their matching client builds. With administrator access, install
+this module's `pumpkin-boot` at `/usr/local/bin/pumpkin-boot` (0755), install the
+`pumpkin-boot.service` from `controller.yaml` at `/etc/systemd/system/pumpkin-boot.service`,
+and reload the units with `systemctl daemon-reload`. The next boot runs each job install
+that published a `bin/pumpkin-boot` link. Older installs need their matching client to reap
+subsequent jobs. Sandboxes that remain unreachable expire at the run's hard end.
 
 ## The public page
 

@@ -47,9 +47,10 @@ driver is the one to read first.
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
 there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
-there. On the controller, `controller job` runs each run or build in a systemd unit of its own,
-`controller boot` reaps what lost runs left, and `controller serve` starts jobs, answers `ls` and
-`view`, and lists the jobs that `wait` and `cancel` find a run among.
+there. The client's `controller serve` receives the files by content, starts jobs, streams
+their output, copies ended records and handles commands that inspect or stop runs. Each job runs
+in its own systemd unit. A job install publishes its `bin/pumpkin-boot` link with the build.
+On boot, systemd runs these entries so each build reaps the records it wrote.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -633,9 +634,9 @@ provider that the record names, every sandbox tagged with the run that the provi
 every one that the record holds undeleted, listed or not, as one that has ended may still hold
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
 `pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
-those left to other builds. At boot the last job's build reaps the runs whose records it can
-read, leaving to the hard end what it can't reach, such as Modal's sandboxes, whose credentials
-reach the controller only with a job.
+those left to other builds. The boot unit runs the registered builds and leaves to the hard end
+what it cannot reach, such as Modal's sandboxes, whose credentials reach the controller
+only with a job.
 
 ### Determinism and pinning
 

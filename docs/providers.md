@@ -57,8 +57,7 @@ machine finds, starts and enrols with it through EC2. The machine reaches it at 
 address alone, so it is in the controller's VPC, or routed to it (by peering or a VPN, say), and
 `deploy/aws`'s `ssh_from` admits it. A machine whose configuration names
 `[controller]` sends it each run, over ssh: `pumpkin run` sends the files of the task's
-repository that git lists and the
-task reaches, then starts the run's job, which builds the images and runs the driver there, in a
+repository that git lists and the task reaches, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
 with the same arguments, and `wait` copies an ended run's record back to the machine.
 
@@ -68,7 +67,9 @@ The controller starts when a command needs it and stops itself once it has been 
 with no job and no ssh session; at boot it reaps what lost runs left. A machine's keys go to it
 only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
 runs the same Pumpkin and helper programs as the machine, which uploads its install when
-the controller lacks it.
+the controller lacks it. At boot, each build with a `bin/pumpkin-boot` link reaps its own
+records and appends its output to `~/boot.log`. For older installs, run `pumpkin reap` from the
+client build that wrote their records.
 
 A controller can also publish its runs, live and ended, to a read-only page served from a private
 bucket behind CloudFront, for a team that knows its address. `deploy/aws`'s README says how to

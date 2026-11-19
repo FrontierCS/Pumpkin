@@ -7,7 +7,7 @@
 //! in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and its unit's
 //! standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that every tree's
 //! `.pumpkin` links to, which keeps the installed builds, the runs' records, the build
-//! slots and `serve`'s installs; and `current-pumpkin`, the `pumpkin` that the last job ran.
+//! slots and `serve`'s installs.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
@@ -54,10 +54,6 @@ pub(crate) const BUILDS: &str = "builds";
 pub(crate) const TREES: &str = "trees";
 
 pub(crate) const STORE: &str = "store";
-
-// The link in the home to the `pumpkin` of the last job started, which the controller's boot and
-// the commands that act on runs there run.
-pub(crate) const CURRENT: &str = "current-pumpkin";
 
 /// The runs directory of the controller's one workspace, relative to the user's home: that of
 /// every job's `pumpkin`, as each runs from that workspace.
@@ -115,8 +111,8 @@ const IMDS: &str = "http://169.254.169.254/latest";
 // own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs job `job`, in its tree and as its unit does: it points `CURRENT` at this `pumpkin`,
-/// assembles the job's configuration, prunes, builds the task's images under the controller's
+/// Runs job `job`, in its tree and as its unit does. It assembles the job's
+/// configuration, prunes, builds the task's images under the controller's
 /// build slots, and then runs the task, or builds it for a build job, as the job's command says,
 /// publishing the runs meanwhile if the settings have `[publish]`. Returns the command's exit
 /// status.
@@ -133,7 +129,6 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     materialize(&home, &id, &tree, &working)?;
     let jobs = jobs()?;
     let sent = jobs.join(id.as_str());
-    point_current(&home, &id)?;
     let (kind, entry, args) = match &command {
         cli::JobCommand::Run(run) => (JOBS, &run.entry, &run.args.0),
         cli::JobCommand::Build(build) => (BUILDS, &build.entry, &build.args.0),
@@ -264,9 +259,8 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
-/// The controller's boot: reaps what each run that has ended or is lost, but one that ended clean,
-/// may have left, with the configuration of its job; returns the reap's exit status, 0 though a
-/// provider can't be reached.
+/// Reaps what this build's ended or lost runs may have left, using each job's configuration.
+/// Returns the reap's exit status, 0 though a provider can't be reached.
 pub(crate) fn boot() -> Result<ExitCode, String> {
     // No prune, which each job's start makes: a client may start a job as soon as the
     // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
@@ -348,11 +342,6 @@ fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
 /// looks it up is removed while the job runs.
 fn open_jobs(jobs: &Path) -> Result<File, String> {
     File::open(jobs).context(jobs.display())
-}
-
-fn point_current(home: &Path, id: &RunTag) -> Result<(), String> {
-    let staged = home.join(format!(".{CURRENT}.{}", id.as_str()));
-    point(&home.join(CURRENT), &staged)
 }
 
 /// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a path

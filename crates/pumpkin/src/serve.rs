@@ -15,7 +15,7 @@ mod reaping;
 
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read as _, Seek as _, SeekFrom, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -127,7 +127,7 @@ fn requests(
                 log_from_bytes,
                 after_cut,
             } => follow::answer(output, home, id, log_from_bytes, after_cut),
-            Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
+            Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health(home)),
             Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
                 crate::job::ids(&home.join(JOBS))
             }),
@@ -282,7 +282,7 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-fn health() -> Result<Health, String> {
+fn health(home: &Path) -> Result<Health, String> {
     let uptime = fs::read_to_string(UPTIME).context(UPTIME)?;
     let seconds = uptime.split(['.', ' ']).next().unwrap_or_default();
     let up_seconds = seconds.parse().map_err(|_| {
@@ -300,11 +300,11 @@ fn health() -> Result<Health, String> {
         up_seconds,
         disk_size_bytes: size_bytes,
         disk_free_bytes: free_bytes,
-        boot: boot(),
+        boot: boot(home),
     })
 }
 
-fn boot() -> Boot {
+fn boot(home: &Path) -> Boot {
     let mut systemctl = stdx::process::command("systemctl", Environment::Only(&["PATH"]));
     systemctl.args([
         "show",
@@ -325,6 +325,7 @@ fn boot() -> Boot {
         Some("failed") => match property("ExecMainStatus").map(str::parse) {
             Some(Ok(status)) => Boot::Failed {
                 status,
+                log: boot_log(&home.join("boot.log")).unwrap_or_else(|error| error.to_string()),
                 at: property("ExecMainExitTimestamp")
                     .filter(|at| !at.is_empty())
                     .map(str::to_owned),
@@ -333,6 +334,25 @@ fn boot() -> Boot {
         },
         Some(_) => Boot::Done,
     }
+}
+
+/// The last lines of the boot unit's output, small enough to fit in the health frame even
+/// when the JSON encoding escapes every byte.
+fn boot_log(path: &Path) -> io::Result<String> {
+    const TAIL_BYTES: u64 = 4096;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error),
+    };
+    let size = file.metadata()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<_> = text.lines().rev().take(5).collect();
+    lines.reverse();
+    Ok(lines.join("\n"))
 }
 
 /// The listing of the runs below `home` whose ids start with one of `prefixes`, as

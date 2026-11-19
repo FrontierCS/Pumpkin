@@ -32,8 +32,6 @@ packages:
   - [docker-ce-cli, "${docker_version}"]
   - [containerd.io, "${containerd_version}"]
   - [docker-buildx-plugin, "${buildx_version}"]
-  - git
-  - gcc
   - unzip
 
 write_files:
@@ -52,6 +50,8 @@ write_files:
     content: |
       ClientAliveInterval 30
       ClientAliveCountMax 3
+      # Simultaneous commands each open a session, as on SkyPilot's nodes.
+      MaxStartups 150:30:200
   - path: /usr/local/sbin/pumpkin-idle
     permissions: "0755"
     content: |
@@ -89,19 +89,22 @@ write_files:
 
       [Install]
       WantedBy=timers.target
-  # `current-pumpkin` names the Pumpkin that the last job ran, which each job links there.
+  - path: /usr/local/bin/pumpkin-boot
+    permissions: "0755"
+    content: |
+      ${indent(6, boot_script)}
   - path: /etc/systemd/system/pumpkin-boot.service
     content: |
       [Unit]
       Description=Remove what lost Pumpkin runs left
-      ConditionPathExists=/home/pumpkin/current-pumpkin
+      ConditionPathExistsGlob=/home/pumpkin/.pumpkin/*/bin/pumpkin-boot
       Wants=network-online.target
       After=network-online.target docker.service
 
       [Service]
       Type=oneshot
       User=pumpkin
-      ExecStart=/home/pumpkin/current-pumpkin controller boot
+      ExecStart=/usr/local/bin/pumpkin-boot
 
       [Install]
       WantedBy=multi-user.target

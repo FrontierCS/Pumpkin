@@ -131,8 +131,8 @@ pub(crate) enum Reaper {
     Command,
     /// A client's request: the ended or lost runs this build wrote.
     Controller,
-    /// The controller's boot: only the runs that may have left something, not one that ended
-    /// clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
+    /// The controller's boot: runs this build wrote that may have left something, not one that
+    /// ended clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
     /// credentials reach the controller only with a job, it says leaves what the run left
     /// there to end by the run's hard end, and goes on.
     Boot,
@@ -172,7 +172,7 @@ pub(crate) fn sweep(
 ) -> Result<ReapedRuns, String> {
     let mut reaching = Reaching::new(modal_config);
     let mut report = ReapedRuns::default();
-    if reaper == Reaper::Controller && !runs.try_exists().context(runs.display())? {
+    if reaper != Reaper::Command && !runs.try_exists().context(runs.display())? {
         return Ok(report);
     }
     for id in Record::names(runs)? {
@@ -182,14 +182,16 @@ pub(crate) fn sweep(
             if !path.try_exists().context(path.display())? {
                 return Ok(None);
             }
-            if reaper == Reaper::Controller {
+            if reaper != Reaper::Command {
                 let other = match runtime::writer(&dir)? {
                     Writer::This => None,
                     Writer::Other(build) => Some(format!("pumpkin {build}")),
                     Writer::Older => Some("an older pumpkin".to_owned()),
                 };
                 if let Some(build) = other {
-                    report.others.entry(build).or_default().push(id.clone());
+                    if reaper == Reaper::Controller {
+                        report.others.entry(build).or_default().push(id.clone());
+                    }
                     return Ok(None);
                 }
             }
