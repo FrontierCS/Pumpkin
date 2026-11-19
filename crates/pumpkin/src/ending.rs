@@ -10,7 +10,7 @@ use schema::ir::Name;
 use serde_json::Value;
 use stdx::Context;
 
-use crate::{Reader, advise, next, print, progress, say, tell, to_stderr};
+use crate::{advise, next, print, progress, say, to_stderr};
 
 /// What a command that says how a run ended prints on the standard output.
 #[derive(Clone, Copy)]
@@ -48,34 +48,40 @@ pub(crate) fn follow(
         ending
     } else {
         following(record, command);
-        followed(record, Reader::Operator)?
+        followed(record)?
     };
     end(record, &ending, printed, runs, record.args())
 }
 
 // A milestone said within a second is timely, and each poll reads only what the log gained, and
 // each sandbox's `sandbox.json`.
-const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
 /// says each of its milestones meanwhile, once, and the parts of its log that can't be read, if
-/// any, to `reader`. Fails if a follower can't be told.
-pub(crate) fn followed(record: &Record, reader: Reader) -> Result<Ending, String> {
+/// any, to the operator.
+pub(crate) fn followed(record: &Record) -> Result<Ending, String> {
+    milestones(
+        record,
+        |message| {
+            say(message);
+            Ok(())
+        },
+        || {
+            std::thread::sleep(FOLLOW_POLL);
+            Ok(())
+        },
+    )
+}
+
+pub(crate) fn milestones(
+    record: &Record,
+    mut tell_reader: impl FnMut(&dyn fmt::Display) -> Result<(), String>,
+    mut wait: impl FnMut() -> Result<(), String>,
+) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
     let mut log = record.fold();
-    let tell_reader = |message: &dyn fmt::Display| match reader {
-        Reader::Operator => {
-            say(message);
-            Ok(())
-        }
-        // Its standard error is a connection's end, so a write that fails says that the other end
-        // has closed, and nothing else would end this loop before the run does.
-        Reader::Follower => tell(message).context(format_args!(
-            "telling the client of run {} failed",
-            record.id()
-        )),
-    };
     loop {
         // How it ended first, so that the log read after holds every milestone before the end.
         let ending = record.ending()?;
@@ -97,7 +103,7 @@ pub(crate) fn followed(record: &Record, reader: Reader) -> Result<Ending, String
         if let Some(ending) = ending {
             return Ok(ending);
         }
-        std::thread::sleep(FOLLOW_POLL);
+        wait()?;
     }
 }
 
@@ -123,7 +129,7 @@ pub(crate) fn end(
     let (exit, how) = match ending {
         Ending::Returned { values, after } => (ExitCode::SUCCESS, returned(values, after)),
         Ending::NoResult(why) => (ExitCode::from(3), why.clone()),
-        Ending::Failed(how) | Ending::Interrupted(how) => (ExitCode::FAILURE, how.clone()),
+        Ending::Stopped(stopped) => (ExitCode::FAILURE, stopped.to_string()),
         // It has no `outcome.json` to print.
         Ending::Lost => {
             let how = "is lost: its driver ended without writing outcome.json, so nothing says \

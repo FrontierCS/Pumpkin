@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use runtime::{Cost, Ending, ModelUse, Progress, Readout, Tokens};
+use runtime::{CallerName, Cost, Ending, ModelUse, Progress, Readout, Tokens};
 use serde_json::{Value, json};
 
 use super::talk::Talk;
@@ -131,7 +131,7 @@ fn how(ending: &Ending) -> String {
     match ending {
         Ending::Returned { values, after } => crate::ending::returned(values, after),
         Ending::NoResult(why) => why.clone(),
-        Ending::Failed(how) | Ending::Interrupted(how) => how.clone(),
+        Ending::Stopped(stopped) => stopped.to_string(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),
     }
 }
@@ -273,9 +273,9 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "deleted": sandbox.deleted,
         })
     };
-    let answered = |lane: &str, json: &mut Value| {
-        let answered = talk.and_then(|talk| talk.answered.get(lane));
-        let failed = talk.and_then(|talk| talk.failed.get(lane));
+    let answered = |caller: CallerName, json: &mut Value| {
+        let answered = talk.and_then(|talk| talk.answered.get(&caller));
+        let failed = talk.and_then(|talk| talk.failed.get(&caller));
         let (answered, failed) = (
             answered.map_or(&[][..], Vec::as_slice),
             failed.map_or(&[][..], Vec::as_slice),
@@ -287,17 +287,17 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     };
     let mut agent = json!({
         "lane": "agent",
-        "caller": "agent",
+        "caller": CallerName::Agent,
         "kind": "agent",
         "sandbox": sandbox(&progress.agent.sandbox),
         "said": progress::agent_line(progress),
     });
-    answered("agent", &mut agent);
+    answered(CallerName::Agent, &mut agent);
     let calls = (progress.calls.iter()).map(|call| {
-        let lane = format!("job {}", call.job);
+        let caller = CallerName::Job(call.job);
         let mut lane_json = json!({
-            "lane": lane,
-            "caller": format!("job-{}", call.job),
+            "lane": format!("job {}", call.job),
+            "caller": caller,
             "kind": "target",
             "role": call.role,
             "of": call.of,
@@ -305,7 +305,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "said": progress::called(call),
             "model": model_json(&call.model),
         });
-        answered(&lane, &mut lane_json);
+        answered(caller, &mut lane_json);
         ((call.sandbox.asked, call.sandbox.asked), lane_json)
     });
     let leases = (progress.leases.iter()).map(|lease| {

@@ -8,6 +8,7 @@ use schema::sandbox::ExitStatus;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::Stopped;
 use crate::log::{self, outcome};
 use crate::read_error::{ReadError, form, read_optional};
 
@@ -27,19 +28,11 @@ impl State {
     /// still gives its state.
     pub(super) fn read(dir: &Path) -> Result<Option<Self>, ReadError> {
         let path = dir.join("outcome.json");
-        let outcome = read_outcome(&path)?;
-        outcome.map(|outcome| Self::of(&outcome, &path)).transpose()
-    }
-
-    /// The state that `outcome`, the `outcome.json` at `path`, gives.
-    pub(super) fn of(outcome: &Value, path: &Path) -> Result<Self, ReadError> {
-        Self::deserialize(&outcome["state"]).map_err(|_| {
-            ReadError::Form(format!(
-                "{}'s state is not one pumpkin knows: expected `finished`, `failed` or \
-                 `interrupted`",
-                path.display()
-            ))
-        })
+        let Some(outcome) = read_outcome(&path)? else {
+            return Ok(None);
+        };
+        let state = Self::deserialize(&outcome["state"]).map_err(unread(&path))?;
+        Ok(Some(state))
     }
 }
 
@@ -57,10 +50,8 @@ pub enum Ending {
     /// It finished without a result, as the agent submitted nothing or its final call gave none:
     /// `finished without a result: <why>`.
     NoResult(String),
-    /// It stopped without an outcome, as `Stopped` says in words: `failed: <reason>`.
-    Failed(String),
-    /// A signal stopped it, as `Stopped` says in words: `was interrupted by <signal>`.
-    Interrupted(String),
+    /// It stopped without an outcome, as the `Stopped`'s words say.
+    Stopped(Stopped),
     /// Its driver ended without an outcome.
     Lost,
 }
@@ -74,11 +65,26 @@ pub(super) fn read_outcome(path: &Path) -> Result<Option<Value>, ReadError> {
     Ok(Some(outcome))
 }
 
-pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, ReadError> {
-    let read = outcome::Finished::deserialize(outcome).map_err(|error| {
-        let path = dir.join("outcome.json");
-        ReadError::Form(format!("{} doesn't read: {error}", path.display()))
-    })?;
+/// How the run whose record is `dir` ended, as its `outcome.json` says; `None` while it has none.
+pub(super) fn read(dir: &Path) -> Result<Option<Ending>, ReadError> {
+    let path = dir.join("outcome.json");
+    let Some(outcome) = read_outcome(&path)? else {
+        return Ok(None);
+    };
+    let ended = outcome::Ended::deserialize(&outcome).map_err(unread(&path))?;
+    let ending = match ended {
+        outcome::Ended::Finished(read) => finished(read, dir),
+        outcome::Ended::Failed { reason } => Ending::Stopped(Stopped::Failed(reason)),
+        outcome::Ended::Interrupted { signal } => Ending::Stopped(Stopped::Interrupted(signal)),
+    };
+    Ok(Some(ending))
+}
+
+fn unread(path: &Path) -> impl Fn(serde_json::Error) -> ReadError {
+    |error| ReadError::Form(format!("{} doesn't read: {error}", path.display()))
+}
+
+fn finished(read: outcome::Finished, dir: &Path) -> Ending {
     let outcome::Finished { work_end, verdict } = read;
     let ended = match work_end {
         outcome::WorkEnd::Deadline => "at its deadline".to_owned(),
@@ -90,7 +96,7 @@ pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, ReadError>
         outcome::WorkEnd::AgentFailed { reason } => format!("when the agent failed: {reason}"),
     };
     let without = |why: String| format!("finished without a result: {why}");
-    let ending = match verdict {
+    match verdict {
         outcome::Verdict::Returned {
             submission: _,
             result,
@@ -117,8 +123,7 @@ pub(super) fn finished(outcome: &Value, dir: &Path) -> Result<Ending, ReadError>
                 "the final call gave none ({failure}), after the work phase ended {ended}; {logs}"
             )))
         }
-    };
-    Ok(ending)
+    }
 }
 
 /// Where the final call's commands' logs are, `logs`, as its record has them: a call that ran no

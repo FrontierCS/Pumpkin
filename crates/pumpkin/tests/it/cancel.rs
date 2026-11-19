@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::{
     Scratch, StandIn, Step, check, ended, invocation, outcome_line, ran, record, report,
-    write_gone, write_record,
+    write_docker_record, write_record,
 };
 
 const LOST: &str = "20261108-120000-0b000001";
@@ -20,15 +20,14 @@ const FAILED: &str = "20261108-120100-0b000002";
 /// A record made before records were locked.
 const UNLOCKED: &str = "20261108-120200-0b000003";
 
-/// A lost run on a Docker context that is gone since.
-const GONE: &str = "20261108-120300-0c000004";
+/// A lost run whose Docker provider cannot be reached.
+const UNREACHED: &str = "20261108-120300-0c000004";
 
 /// What becomes of `pumpkin cancel`, with `force` if given, of a run that `run` started in a
-/// scratch directory of its own, `name`, while the stand-in held its driver at `create`: once
-/// `cancel` says that it is stopping the run, or killing its driver, the stand-in lets the
-/// driver go on.
-fn live(name: &str, force: &[&str]) -> String {
-    let scratch = Scratch::new(name);
+/// scratch directory of its own while the stand-in held its driver at `create`: once `cancel`
+/// says that it is stopping the run, or killing its driver, the stand-in lets the driver go on.
+fn live(force: &[&str]) -> String {
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     stand_in.hold("create");
     let mut run = stand_in.run("stand-in/task.star", &[]);
@@ -61,13 +60,16 @@ fn live(name: &str, force: &[&str]) -> String {
     reason = "most of it is the cases and their snapshot"
 )]
 fn cancels() {
-    let scratch = Scratch::new("cancels");
+    // Each makes a directory of its own first, as a test holds one at a time.
+    let [stopped, killed] = [live(&[]), live(&["--force"])];
+    let scratch = Scratch::new();
     write_record(&scratch, LOST, true, None);
     let failed = json!({ "state": "failed", "reason": "r" });
     write_record(&scratch, FAILED, true, Some(failed));
     write_record(&scratch, UNLOCKED, false, None);
-    let mut gone = scratch.pumpkin(&["cancel", GONE, "--runs", "runs"]);
-    gone.env("PATH", write_gone(&scratch, GONE, None));
+    write_docker_record(&scratch, UNREACHED, "recorded", None);
+    let mut unreached = scratch.pumpkin(&["cancel", UNREACHED, "--runs", "runs"]);
+    unreached.env("PATH", "");
     let cancel = |run| {
         ran(
             scratch.pumpkin(&["cancel", run, "--runs", "runs"]),
@@ -76,14 +78,14 @@ fn cancels() {
         )
     };
     let steps = [
-        live("cancels-live", &[]),
-        live("cancels-force", &["--force"]),
+        stopped,
+        killed,
         cancel(LOST),
         cancel(FAILED),
         cancel("0b0000"),
         cancel("nothing"),
         cancel(UNLOCKED),
-        ran(gone, &scratch.0, false),
+        ran(unreached, &scratch.0, false),
     ];
     check(
         &scratch,
@@ -132,9 +134,9 @@ fn cancels() {
             $ pumpkin cancel 20261108-120200-0b000003 --runs runs
             exit status: Some(1)
             pumpkin: <scratch>/runs/20261108-120200-0b000003/driver.pid isn't there: expected the record of a run to have it
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin cancel 20261108-120300-0c000004 --runs runs
+            $ PATH= pumpkin cancel 20261108-120300-0c000004 --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120300-0c000004's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120300-0c000004, to stop reaping it
+            pumpkin: run 20261108-120300-0c000004's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `recorded` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120300-0c000004, to stop reaping it
             pumpkin: run 20261108-120300-0c000004 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120300-0c000004 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120300-0c000004
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star

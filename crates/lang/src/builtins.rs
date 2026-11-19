@@ -33,7 +33,7 @@ use core::num::IntErrorKind;
 
 pub(crate) use call::{Call, Keyword};
 
-use crate::eval::{Purpose, body};
+use self::call::BoundMethod;
 use crate::problem::{self, Fault, list, refusal};
 use crate::syntax::{Def, Name, is_name};
 use crate::value::{
@@ -581,21 +581,18 @@ const STRING_LEFT_OUT: [&str; 26] = [
     "upper",
 ];
 
-// What calling the method `name` on the receiver gives. A method that the subset lacks is refused
-// with the receiver's methods, or, where it has none, with what to do instead, such as a function
-// to give the value to.
-pub(crate) fn method(
-    receiver: &(Span, Value),
+// Looks up the method before its arguments run (spec.md, "Function and method calls").
+// https://github.com/bazelbuild/starlark/blob/c0af0ea03dc90d3bbc021394b693e6957cc15030/spec.md#L2530-L2534
+pub(crate) fn method<'v>(
+    receiver: &'v (Span, Value),
     name: &Name,
-    call: &Call<'_>,
-    purpose: &mut Purpose<'_>,
-) -> Result<Value, Fault> {
+) -> Result<BoundMethod<'v>, Fault> {
     let method = name.text.as_str();
     let to_a_function = "give it to a function, as `len`";
     let (methods, left_out): (Result<Vec<&str>, &str>, &[&str]) = match &receiver.1.kind {
         Kind::Dict(dict) => {
             if let Some((_, run)) = DICT_METHODS.iter().find(|(has, _)| *has == method) {
-                return run(method, dict, call);
+                return Ok(BoundMethod::Dict(dict, *run));
             }
             if DICT_CHANGING.contains(&method) {
                 return Err(changes(name, "dict", "make a new dict with `|`"));
@@ -604,11 +601,7 @@ pub(crate) fn method(
         }
         Kind::Str(text) => {
             if let Some((_, run)) = STRING_METHODS.iter().find(|(has, _)| *has == method) {
-                let kind = run(method, text, receiver, call)?;
-                return Ok(Value {
-                    kind,
-                    span: call.at,
-                });
+                return Ok(BoundMethod::String(text, receiver, *run));
             }
             let methods = STRING_METHODS.iter().map(|(has, _)| *has).collect();
             (Ok(methods), &STRING_LEFT_OUT)
@@ -621,14 +614,19 @@ pub(crate) fn method(
         }
         Kind::Module(Module::Json) => {
             if let Some((_, run)) = JSON_METHODS.iter().find(|(has, _)| *has == method) {
-                return run(call);
+                return Ok(BoundMethod::Module(*run));
             }
             let methods = JSON_METHODS.iter().map(|(has, _)| *has).collect();
             (Ok(methods), &JSON_LEFT_OUT)
         }
-        Kind::Hosted(hosted) => match body::method(*hosted, purpose, name, call) {
-            Some(called) => return called,
-            None => (hosted.methods(), &[]),
+        Kind::Hosted(hosted) => match hosted.methods() {
+            Ok(methods) => {
+                if let Some((_, run)) = methods.iter().find(|(has, _)| *has == method) {
+                    return Ok(BoundMethod::Hosted(*run));
+                }
+                (Ok(methods.iter().map(|(has, _)| *has).collect()), &[])
+            }
+            Err(instead) => (Err(instead), &[]),
         },
         Kind::None
         | Kind::Bool(_)

@@ -379,10 +379,10 @@ impl Closed<'_> {
         self.route.rules.apart
     }
 
-    pub(crate) fn scan(&self, content_type: Option<&str>) -> usage::Scan {
+    pub(crate) fn scan(&self) -> usage::Scan {
         let rules = self.route.rules;
         let output = read::dialect(rules.api).output;
-        usage::Scan::new(content_type, rules.usage, rules.failure_code, output)
+        usage::Scan::new(rules.usage, rules.failure_code, output)
     }
 
     /// `answered`, the model that a response says answered the request, as the request named it,

@@ -30,7 +30,7 @@ use aws::{Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{self, GpuModel, Image, Name};
 use schema::sandbox::{Endpoint, Listening};
@@ -46,6 +46,19 @@ mod sandboxes;
 
 /// The bytes in a MiB, the unit in which Modal gives a sandbox memory.
 const MIB: u64 = 1024 * 1024;
+
+/// The memory that `role` asks for, in MiB, or why Modal can't give it.
+fn memory_mib(role: &Role) -> Result<u64, String> {
+    let memory_bytes = role.resources.memory_bytes.get();
+    if !memory_bytes.is_multiple_of(MIB) {
+        return Err(format!(
+            "role `{}` asks for {memory_bytes} bytes of memory, which Modal gives in whole MiB: \
+             ask for a multiple of {MIB}",
+            role.name
+        ));
+    }
+    Ok(memory_bytes / MIB)
+}
 
 /// The provider's settings, in a table such as [the crate's](crate#settings).
 ///
@@ -81,7 +94,7 @@ struct Images {
 /// "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 8589934592,
 /// startup_seconds = 1800 }`; without `gpu` and `gpu_model`, it has none. With `usd_per_hour`,
 /// such as `3.95`, it has the price that the operator says a sandbox costs.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClassTable {
     gpu: Option<Gpu>,
@@ -92,10 +105,11 @@ struct ClassTable {
     usd_per_hour: Option<UsdPerHour>,
 }
 
-/// A class of sandbox: what a run may rely on of it, and its GPU, if any.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "ClassTable")]
-struct SandboxClass {
+/// A class of sandbox: what a run may rely on of it, and its GPU, if any. It reads and writes as
+/// a table of the provider's settings' `classes`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "ClassTable", into = "ClassTable")]
+pub struct SandboxClass {
     class: Class,
     gpu: Option<Gpu>,
 }
@@ -175,6 +189,33 @@ impl TryFrom<ClassTable> for SandboxClass {
             usd_per_hour,
         };
         Ok(Self { class, gpu })
+    }
+}
+
+impl From<SandboxClass> for ClassTable {
+    fn from(sandbox: SandboxClass) -> Self {
+        let SandboxClass { class, gpu } = sandbox;
+        let Class {
+            offers,
+            startup_seconds,
+            usd_per_hour,
+        } = class;
+        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
+        let Offers {
+            cpu_millis,
+            memory_bytes,
+            gpu: offered,
+            cpu_features: _,
+            cpu_model: _,
+        } = offers;
+        Self {
+            gpu,
+            gpu_model: offered.map(|offered| offered.model),
+            cpu_millis,
+            memory_bytes,
+            startup_seconds,
+            usd_per_hour,
+        }
     }
 }
 
@@ -278,7 +319,7 @@ impl<'e> Modal<'e> {
 }
 
 impl Sweep for Modal<'_> {
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
         self.reached.delete(run, ids)
     }
 
@@ -300,8 +341,12 @@ impl Provider for Modal<'_> {
     }
 
     // Each sandbox has resources of its own, which no other run shares, so a run holds nothing
-    // beforehand.
-    fn reserve(&self, _run: &RunTag, _phases: &[Vec<Role>]) -> Result<Reservation, String> {
+    // beforehand. A role whose memory Modal can't give is refused here, before anything is
+    // published for it, not at each of its creates.
+    fn reserve(&self, _run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
+        for role in phases.iter().flatten() {
+            memory_mib(role)?;
+        }
         Ok(Reservation::new(()))
     }
 

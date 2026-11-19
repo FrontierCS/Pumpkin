@@ -3,7 +3,9 @@
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::fs::{self, File};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::num::NonZeroUsize;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
@@ -219,4 +221,43 @@ fn tcp_options() {
     ];
     expect!["nodelay true, keepalive true, idle 15s, interval 15s, probes 9"]
         .assert_eq(&read.join(", "));
+}
+
+// With each of 2 slots held, the second by a holder yet to name itself, a take waits for the
+// first let go; with each held again, a take whose `waiting` fails fails with its error.
+#[test]
+fn slots() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = NonZeroUsize::new(2).unwrap();
+    let free = |_: &[String]| Err("waited, though a slot was free".to_owned());
+    let first = stdx::slots::take(dir.path(), count, "first", free).unwrap();
+    let unnamed = File::create(dir.path().join("1")).unwrap();
+    unnamed.lock().unwrap();
+    let mut heard = Vec::new();
+    let _late = stdx::slots::take(dir.path(), count, "late", |holders| {
+        heard = holders.to_vec();
+        drop(first);
+        Ok(())
+    })
+    .unwrap();
+    let held = |_: &[String]| Err("given up".to_owned());
+    let refused = stdx::slots::take(dir.path(), count, "refused", held).map(drop);
+    let mut slots: Vec<String> = (fs::read_dir(dir.path()).unwrap())
+        .map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let holder = fs::read_to_string(dir.path().join(&name)).unwrap();
+            format!("{name}: {holder:?}")
+        })
+        .collect();
+    slots.sort();
+    let shown = [
+        format!("the late one, waiting, heard: {heard:?}"),
+        format!("the refused one: {refused:?}"),
+        format!("the slots, by their holders: {}", slots.join(", ")),
+    ];
+    expect![[r#"
+        the late one, waiting, heard: ["first", "1"]
+        the refused one: Err("given up")
+        the slots, by their holders: 0: "late", 1: """#]]
+    .assert_eq(&shown.join("\n"));
 }

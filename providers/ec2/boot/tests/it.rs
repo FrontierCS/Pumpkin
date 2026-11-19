@@ -17,7 +17,7 @@ use expect_test::{Expect, expect};
 use schema::ec2_boot::Start;
 use schema::sandbox::RegistrationGrant;
 use stdx::process::Environment;
-use tempfile::TempDir;
+use test_support::TestDir;
 
 /// A time far past every test, in seconds since the Unix epoch.
 const LATER: u64 = 4_102_444_800;
@@ -54,17 +54,14 @@ esac
 "#;
 
 /// A directory of one boot's own: `bin`, which holds links to the stand-in, each named as a
-/// command, and the files it writes, and `root`, which the boot runs in. Dropping it removes it.
+/// command, and the files it writes, and `root`, which the boot runs in.
 struct Instance {
-    dir: TempDir,
+    dir: TestDir,
 }
 
 impl Instance {
-    fn new(name: &str) -> Self {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("ec2-boot-{name}-"))
-            .tempdir()
-            .unwrap();
+    fn new() -> Self {
+        let dir = TestDir::new();
         fs::create_dir_all(dir.path().join("bin")).unwrap();
         // As the user data makes it, before `ec2-boot` runs.
         fs::create_dir_all(dir.path().join("root/run/pumpkin")).unwrap();
@@ -127,12 +124,6 @@ impl Instance {
     }
 }
 
-impl Drop for Instance {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.dir.path());
-    }
-}
-
 fn check(scenario: impl FnOnce() -> Vec<String>, expect: &Expect) {
     expect.assert_eq(&scenario().join("\n"));
 }
@@ -159,7 +150,7 @@ fn start() -> Start {
 fn boots() {
     check(
         || {
-            let instance = Instance::new("boots");
+            let instance = Instance::new();
             let mut lines = instance.boot(&serde_json::to_string(&start()).unwrap());
             lines.push("calls:".to_owned());
             lines.extend(instance.calls().iter().map(|call| format!("  {call}")));

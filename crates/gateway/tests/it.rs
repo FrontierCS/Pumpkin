@@ -40,7 +40,7 @@ use schema::sandbox::{
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
-use test_support::{HUNG, hung};
+use test_support::{HUNG, TestDir, hung};
 
 type Action = fn(&mut Session, &Receiver<Arrival>, &Path) -> String;
 
@@ -63,15 +63,9 @@ fn short() -> Deadline {
 }
 
 fn check(scenario: impl FnOnce(&Path) -> Vec<String>, expect: &Expect) {
-    let dir = tempfile::Builder::new()
-        .prefix("gateway-")
-        .tempdir()
-        .unwrap()
-        // Kept if the test fails.
-        .keep();
-    let lines = scenario(&dir);
+    let dir = TestDir::new();
+    let lines = scenario(dir.path());
     expect.assert_eq(&lines.join("\n"));
-    fs::remove_dir_all(dir).unwrap();
 }
 
 fn fakes(

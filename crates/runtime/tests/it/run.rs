@@ -5,16 +5,11 @@
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
-#![expect(
-    clippy::print_stderr,
-    reason = "a failed run shows where its record is"
-)]
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs::{self, File, TryLockError};
-use std::path::{Path, PathBuf};
-use std::thread;
+use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use expect_test::{Expect, expect};
@@ -25,37 +20,9 @@ use schema::ir::{self, Api, ModelName, Name};
 use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use serde_json::Value;
 use stdx::process::Environment;
-use tempfile::TempDir;
-use test_support::{WORKFLOW, files};
+use test_support::{TestDir, WORKFLOW, files};
 
 use crate::sim::Sim;
-
-/// The runs directory of test `name`. Dropping it removes it, unless the test failed, when it
-/// shows where the records are.
-pub(crate) struct Runs {
-    pub(crate) dir: PathBuf,
-    scratch: TempDir,
-}
-
-impl Runs {
-    pub(crate) fn new(name: &str) -> Self {
-        let scratch = tempfile::Builder::new()
-            .prefix(&format!("runtime-{name}-"))
-            .tempdir()
-            .unwrap();
-        let dir = scratch.path().to_owned();
-        Self { dir, scratch }
-    }
-}
-
-impl Drop for Runs {
-    fn drop(&mut self) {
-        if thread::panicking() {
-            self.scratch.disable_cleanup(true);
-            eprintln!("the runs' records are in {}", self.dir.display());
-        }
-    }
-}
 
 /// Prepares each IR at its time, in seconds from the Unix epoch, in a runs directory of its own,
 /// with an upstream that serves each model it names, if it names any, as started with the args
@@ -72,14 +39,14 @@ fn check(
     cases: impl IntoIterator<Item = (i64, Value, Option<&'static [&'static str]>)>,
     expect: &Expect,
 ) {
-    let runs = Runs::new("prepare");
+    let runs = TestDir::new();
     let args = ["--config".to_owned(), "/pumpkin.toml".to_owned()];
     let unpriced = BTreeMap::new();
     let sources = BTreeMap::from([(ir::Label::parse("//task.star").unwrap(), String::new())]);
     let mut lines = Vec::new();
     for (index, (seconds, value, served)) in cases.into_iter().enumerate() {
         let ir: ir::Workflow = serde_json::from_value(value).unwrap();
-        let dir = runs.dir.join(index.to_string());
+        let dir = runs.path().join(index.to_string());
         let from_epoch = Duration::from_secs(seconds.unsigned_abs());
         let now = if seconds < 0 {
             UNIX_EPOCH - from_epoch
@@ -90,7 +57,7 @@ fn check(
         let sim = Sim::new();
         let prepared = new_id(now).and_then(|id| {
             let placed = placed(&ir, sim.ready())?;
-            let servings = &agent_servings(placed.workflow(), &runs.dir, url, served);
+            let servings = &agent_servings(placed.workflow(), runs.path(), url, served);
             let on = providers_of(&placed, |_| &sim);
             let recorded = Recorded {
                 args: &args,
@@ -392,7 +359,7 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
     reason = "most of it is the log's answers and the snapshot"
 )]
 fn reads_model_answers() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
@@ -503,7 +470,7 @@ fn reads_model_answers() {
 // client's `instructions`, a digest's text, stay as sent.
 #[test]
 fn rebuilds_requests_kept_before_whole_fields() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir_all(record.join("model/items")).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
@@ -545,7 +512,7 @@ fn rebuilds_requests_kept_before_whole_fields() {
 // Each command is busy until its lease's charge ends, so that busy is never more than charged.
 #[test]
 fn reads_unended_commands() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
@@ -617,7 +584,7 @@ fn reads_unended_commands() {
 // that doesn't read is left out and given, and the rest of its line counts.
 #[test]
 fn reads_other_builds_lines() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
@@ -657,6 +624,47 @@ fn reads_other_builds_lines() {
         None [Unread { line: 1, part: Event, reason: "missing field `unix_ns`" }]"#]].assert_eq(&read.join("\n"));
 }
 
+// The agent's sandbox is gone once collected, as `agent_collected` says, or an older build's note,
+// and else once deleted.
+#[test]
+fn reads_agent_end() {
+    let dir = TestDir::new();
+    let record = dir.path().join("20261114-120000-00000001");
+    fs::create_dir(&record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+    let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
+    let noted = r#"{"seq":1,"at_ns":"30000000000","note":"collected from the agent's sandbox: out, nothing; log, nothing"}"#;
+    let reworded = r#"{"seq":1,"at_ns":"30000000000","note":"the agent's sandbox left nothing"}"#;
+    let collected =
+        r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected"},"actions":[]}"#;
+    let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent"},"actions":[]}"#;
+    let logs = [
+        ("this build's", &[started, noted, collected, deleted][..]),
+        (
+            "with its note worded otherwise",
+            &[started, reworded, collected, deleted],
+        ),
+        ("an older build's", &[started, noted, deleted]),
+        ("never collected", &[started, deleted]),
+    ];
+    let mut read = Vec::new();
+    for (name, lines) in logs {
+        let mut log = lines.join("\n");
+        log.push('\n');
+        fs::write(record.join("log.jsonl"), log).unwrap();
+        let progress = Record::open(&record).unwrap().progress().unwrap().progress;
+        let gone = progress.unwrap().agent.sandbox.gone;
+        read.push(format!("{name}: gone {gone:?}"));
+    }
+    expect![[r#"
+        this build's: gone Some(31s)
+        with its note worded otherwise: gone Some(31s)
+        an older build's: gone Some(30s)
+        never collected: gone Some(40s)"#]]
+    .assert_eq(&read.join("\n"));
+}
+
 // Each span runs between the core's times, its `observed_ns`, but where a record has none, as
 // lease 1's delete, its `at_ns`.
 /// [`WORKFLOW`] with its agent named `solver`, holding `grants`.
@@ -676,7 +684,7 @@ fn lease(name: &str) -> Value {
 
 #[test]
 fn reads_core_times() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
@@ -747,7 +755,7 @@ fn reads_core_times() {
 // file is read again from its start; a failed take leaves nothing that a later one takes twice.
 #[test]
 fn reads_a_growing_log() {
-    let dir = TempDir::new().unwrap();
+    let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
     let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;

@@ -10,9 +10,9 @@ use provider::UnixTime;
 use stdx::Context as _;
 use tempfile::TempDir;
 
-use super::linking::{Build, Linked, Unlinked};
+use super::linking::Build;
 use super::{Name, Reached};
-use crate::link::{Boot, Health, Listed};
+use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
 use crate::progress::{Entry, Listing};
 use crate::workspace::Workspace;
 use crate::{config, say};
@@ -32,7 +32,7 @@ pub(crate) fn scratch() -> Result<TempDir, String> {
 /// they have ended, with the copies here of the runs that the controller lacks. Fails, after
 /// listing the rest, if a run can't be listed.
 pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
+    let mut reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
     let since = crate::progress::listed_since(prefixes, now);
     let Answers {
@@ -40,7 +40,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         mut listing,
         unlisted,
         asked,
-    } = answered(&reached, prefixes)?;
+    } = answered(&mut reached, prefixes)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -65,32 +65,18 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the controller's `serve` answers, which this installs there first if there is none; asked
-/// again over another link, after each of `AGAIN`'s pauses, while one ends before it has answered,
-/// as asking only reads.
-fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
+/// What the controller's `serve` answers, as [`Reached::asked`] asks it.
+fn answered(reached: &mut Reached, prefixes: &[String]) -> Result<Answers, String> {
     let build = Build::of_this("expected to send it to the controller, to list the runs there")?;
-    let name = &reached.name;
-    let mut attempt = 0;
-    loop {
-        let asked = Linked::open(reached, &build).and_then(|mut linked| {
-            let health = linked.health(reached)?;
+    let (health, listed, asked) =
+        reached.asked(&build, "listing the runs", |reached, linked| {
+            let health = linked.ask(reached, HealthRequest {})?;
             let asked = crate::unix_now();
-            Ok((health, linked.list(reached, prefixes)?, asked))
-        });
-        let (master, said) = match asked {
-            Ok((health, listed, asked)) => {
-                return answers(name, health, listed, asked);
-            }
-            Err(Unlinked::Cut { master, said }) => (master, said),
-            Err(Unlinked::Failed(error)) => return Err(error),
-        };
-        let failed = format!("listing the runs on controller `{name}` failed, as `ssh` {said}");
-        if !reached.pause(attempt, master, "listing the runs again") {
-            return Err(reached.lost(master, failed));
-        }
-        attempt += 1;
-    }
+            let prefixes = prefixes.to_vec();
+            let listed = linked.ask(reached, ListRequest { prefixes })?;
+            Ok((health, listed, asked))
+        })?;
+    answers(&reached.name, health, listed, asked)
 }
 
 /// What `serve` answered to `Health` and to `List`.
@@ -141,13 +127,17 @@ fn said(name: &Name, health: &Health, jobs: usize) -> String {
     let used_percent = used.div_ceil((*disk_size_bytes).max(1)).min(100);
     let unit = "pumpkin-boot.service";
     let boot = match boot {
-        Boot::Failed { status, at } => {
+        Boot::Failed { status, at, log } => {
             let at = at
                 .as_ref()
                 .map_or_else(String::new, |at| format!(" at {at}"));
+            let tail = if log.is_empty() {
+                String::new()
+            } else {
+                format!("\n{log}")
+            };
             format!(
-                "; its boot, {unit}, failed with status {status}{at}: read why there, in \
-                 `journalctl --unit {unit}`"
+                "; its boot, {unit}, failed with status {status}{at}. See ~/boot.log on the controller{tail}"
             )
         }
         Boot::Running => format!("; its boot, {unit}, is still running"),

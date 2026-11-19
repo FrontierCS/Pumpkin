@@ -31,8 +31,9 @@ resource "aws_vpc_security_group_egress_rule" "sandbox_gateway" {
   referenced_security_group_id = aws_security_group.controller.id
 }
 
-# The controller listens on the Internet for nothing: it is reached through SSM, which its agent
-# dials out to, and only the sandboxes reach its gateway.
+# The controller's `sshd` is reached only from `ssh_from`, and its gateway only from the
+# sandboxes. The group's description stays as it is, since
+# the provider replaces a group whose description changes, with every rule in it.
 resource "aws_security_group" "controller" {
   name        = "${local.prefix}-controller"
   description = "Pumpkin controller: in from its sandboxes alone; out to HTTPS"
@@ -46,6 +47,18 @@ resource "aws_vpc_security_group_ingress_rule" "controller_gateway" {
   from_port                    = local.gateway_ports.from
   to_port                      = local.gateway_ports.to
   referenced_security_group_id = aws_security_group.sandbox.id
+}
+
+# Its description has no apostrophe, which EC2 refuses in a rule's description and a plan doesn't
+# check.
+resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
+  for_each          = toset(var.ssh_from)
+  security_group_id = aws_security_group.controller.id
+  description       = "ssh from the machines that ssh_from names"
+  ip_protocol       = "tcp"
+  from_port         = 22
+  to_port           = 22
+  cidr_ipv4         = each.value
 }
 
 resource "aws_vpc_security_group_egress_rule" "controller_https" {

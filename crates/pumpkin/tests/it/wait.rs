@@ -19,7 +19,7 @@ use super::{
     reason = "most of it is the cases and their snapshot"
 )]
 fn waits() {
-    let scratch = Scratch::new("waits");
+    let scratch = Scratch::new();
     let finished = |result: Value, status: Value| {
         let work_end = json!({ "kind": "agent_exited", "status": status });
         let verdict = json!({ "kind": "returned", "result": result, "submission": submission() });
@@ -218,7 +218,7 @@ fn end_run(scratch: &Scratch, id: &str, outcome: &Value) {
 
 #[test]
 fn follows() {
-    let scratch = Scratch::new("follows");
+    let scratch = Scratch::new();
     let id = "20261107-120000-1b8a6389";
     write_record(&scratch, id, true, None);
     let driver = File::open(scratch.0.join(format!("runs/{id}/driver.pid"))).unwrap();
@@ -258,7 +258,7 @@ fn follows() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn states() {
-    let scratch = Scratch::new("states");
+    let scratch = Scratch::new();
     let unsubmitted =
         r#"{"state":"finished","verdict":{"kind":"no_submission"},"work_end":{"kind":"deadline"}}"#;
     let returned = returned(7.0).to_string();
@@ -477,7 +477,7 @@ fn states() {
             pumpkin: runs/<unknown signal, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, free, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -486,7 +486,7 @@ fn states() {
             pumpkin: runs/<unknown signal, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown signal, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json's signal is not one pumpkin knows: expected `SIGINT`, `SIGTERM` or `SIGHUP`
+            pumpkin: <scratch>/runs/<unknown signal, locked, v0>/outcome.json doesn't read: unknown variant `SIGUSR1`, expected one of `SIGINT`, `SIGTERM`, `SIGHUP`
             $ pumpkin wait <unknown signal, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown signal, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -504,7 +504,7 @@ fn states() {
             pumpkin: runs/<unknown state, no driver.pid, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, free, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, free, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, free, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, free, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -513,7 +513,7 @@ fn states() {
             pumpkin: runs/<unknown state, free, no record.json> has no record.json, so it is no run's record: expected the directory of one that `pumpkin run` made
             $ pumpkin wait <unknown state, locked, v0> --runs runs
             exit status: Some(1)
-            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json's state is not one pumpkin knows: expected `finished`, `failed` or `interrupted`
+            pumpkin: <scratch>/runs/<unknown state, locked, v0>/outcome.json doesn't read: unknown variant `paused`, expected one of `finished`, `failed`, `interrupted`
             $ pumpkin wait <unknown state, locked, v9> --runs runs
             exit status: Some(1)
             pumpkin: runs/<unknown state, locked, v9>/record.json holds record_version "pumpkin.record/v9": expected "pumpkin.record/v0", which this `pumpkin` reads
@@ -556,7 +556,7 @@ fn states() {
     reason = "most of it is the steps and their snapshot"
 )]
 fn summarizes() {
-    let scratch = Scratch::new("summarizes");
+    let scratch = Scratch::new();
     // A run that went the whole way, priced but for its box's class, whose train call was stopped,
     // with model requests over budget.
     let whole = "20261110-100000-0000000a";
@@ -773,12 +773,89 @@ fn summarizes() {
     );
 }
 
+fn followed(scratch: &Scratch, id: &str, last: &str) -> Step {
+    let driver = File::open(scratch.0.join("runs").join(id).join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let invoked = invocation(&command);
+    let mut child = command.spawn().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains(last) {
+        if stderr.read_line(&mut said).unwrap() == 0 {
+            break;
+        }
+    }
+    let outcome = returned(49.36);
+    end_run(scratch, id, &outcome);
+    drop(driver);
+    stderr.read_to_string(&mut said).unwrap();
+    child.wait().unwrap();
+    // The summary, which follows, says the part too, on a line of its own.
+    let said: Vec<&str> = (said.lines())
+        .filter(|line| line.starts_with("pumpkin:  ") || line.contains("can't be read"))
+        .collect();
+    Step::Ran(format!("{invoked}\n{}", said.join("\n")))
+}
+
+#[test]
+fn follows_an_agent_that_asks_at_startup() {
+    let scratch = Scratch::new();
+    let id = "20261110-100000-0000000a";
+    let mut log = vec![logged(2, json!({ "kind": "agent_started" }), json!([]))];
+    let call = json!({
+        "kind": "start_call", "job": 0, "grant": "train", "payload": payload(), "timeout_ns": "600000000000",
+    });
+    let lease = json!({ "kind": "start_lease", "grant": "gpu", "holder": "agent", "lease": 0 });
+    // The reader stamps both arrivals just before the loop reports startup across a second's edge.
+    for (request, action, observed) in [
+        (
+            json!({ "kind": "call", "grant": "train" }),
+            call,
+            "1999950938",
+        ),
+        (
+            json!({ "kind": "lease_open", "grant": "gpu" }),
+            lease,
+            "1999999999",
+        ),
+    ] {
+        let mut line = logged(
+            2,
+            json!({ "kind": "op_arrived", "request": request }),
+            json!([action]),
+        );
+        line["observed_ns"] = json!(observed);
+        log.push(line);
+    }
+    write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &log,
+        None,
+        &lease_places(Prices::Nothing),
+    );
+    let step = followed(&scratch, id, "gpu lease 0 asked");
+    check(
+        &scratch,
+        [step],
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin wait 20261110-100000-0000000a --runs runs
+        pumpkin:    0:02 the agent started on aws/judge
+        pumpkin:    0:02 train job 0 asked on modal/a100_80
+        pumpkin:    0:02 gpu lease 0 asked on modal/a100_80"#]],
+    );
+}
+
 // `wait` of a live run says each milestone its log records, and once the part that doesn't read;
 // the test ends the run once it has said the last, so `wait` reads the log again a poll later.
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
 fn follows_milestones() {
-    let scratch = Scratch::new("follows-milestones");
+    let scratch = Scratch::new();
     let id = "20261110-100000-0000000a";
     let priced = lease_places(Prices::Both);
     let mut log = over_budget();
@@ -787,31 +864,9 @@ fn follows_milestones() {
         json!({ "kind": "tick" }),
         json!([{ "kind": "close_lease" }]),
     ));
-    let dir = write_run(&scratch, id, asked(id, 30), &log, None, &priced);
+    write_run(&scratch, id, asked(id, 30), &log, None, &priced);
     scratch.write(&format!("runs/{id}/ir.json"), &over_budget_task());
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let invoked = invocation(&command);
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("final call job 4 ended") {
-        if stderr.read_line(&mut said).unwrap() == 0 {
-            break;
-        }
-    }
-    let outcome = returned(49.36);
-    end_run(&scratch, id, &outcome);
-    drop(driver);
-    stderr.read_to_string(&mut said).unwrap();
-    child.wait().unwrap();
-    // The summary, which follows, says the part too, on a line of its own.
-    let said: Vec<&str> = (said.lines())
-        .filter(|line| line.starts_with("pumpkin:  ") || line.contains("can't be read"))
-        .collect();
-    let step = Step::Ran(format!("{invoked}\n{}", said.join("\n")));
+    let step = followed(&scratch, id, "final call job 4 ended");
     check(
         &scratch,
         [step],
@@ -852,61 +907,12 @@ fn follows_milestones() {
     );
 }
 
-// A follower whose standard error has closed ends at the next line it says, though the run goes on.
-#[test]
-fn follower_without_its_client() {
-    let scratch = Scratch::new("follower-without-its-client");
-    let id = "20261110-100000-0000000b";
-    let dir = write_run(
-        &scratch,
-        id,
-        asked(id, 30),
-        &[],
-        None,
-        &lease_places(Prices::Nothing),
-    );
-    fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
-    let dir = scratch
-        .0
-        .join(".pumpkin/runs")
-        .join(dir.file_name().unwrap());
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    let mut command = scratch.pumpkin(&["controller", "follow", id]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let invoked = invocation(&command);
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    stderr.read_line(&mut said).unwrap();
-    drop(stderr);
-    let mut started = logged(5, json!({ "kind": "agent_started" }), json!([]));
-    started["seq"] = json!(1);
-    let mut log = fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join("log.jsonl"))
-        .unwrap();
-    writeln!(log, "{started}").unwrap();
-    let mut output = child.wait_with_output().unwrap();
-    output.stderr = said.into_bytes();
-    check(
-        &scratch,
-        [Step::Ran(report(invoked, &output, &scratch.0, false))],
-        false,
-        &[],
-        &expect![[r#"
-            $ pumpkin controller follow 20261110-100000-0000000b
-            exit status: Some(1)
-            pumpkin: following run 20261110-100000-0000000b: ending this command does not stop it"#]],
-    );
-}
-
 // A run whose final call gave no result says where the call's commands' logs are, as its log
 // names the call's job; or why it can't.
 #[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn final_call_logs() {
-    let scratch = Scratch::new("final-call-logs");
+    let scratch = Scratch::new();
     let no_result = |failure: Value| {
         json!({
             "state": "finished",
@@ -992,7 +998,7 @@ fn final_call_logs() {
 
 #[test]
 fn reads_a_deep_result_and_a_log_cut_short() {
-    let scratch = Scratch::new("reads-a-deep-result");
+    let scratch = Scratch::new();
     let mut steps = Vec::new();
     // A final call's return of the most depth that a body's return may have, its dict included.
     let (id, depth) = ("20261113-123335-0000000a", RESULT_MAX_DEPTH);
@@ -1087,7 +1093,7 @@ fn deep_call(depth: usize) -> [Value; 3] {
 // the delete of each sandbox the core never ended, which the summary says.
 #[test]
 fn summarizes_an_interrupted_run() {
-    let scratch = Scratch::new("summarizes-an-interrupted-run");
+    let scratch = Scratch::new();
     let id = "20261113-123335-5ea1ea5f";
     let deleted = |seconds, sandbox: &str| {
         let event = json!({ "kind": "sandbox_deleted", "sandbox": sandbox });

@@ -16,7 +16,7 @@ mod responses;
 use schema::ir::Api;
 use serde_json::{Map, Value};
 
-use crate::usage;
+use crate::usage::{self, Framing};
 
 /// An item of a conversation, or of an answer, as one kind of entry, the same for every API.
 ///
@@ -155,14 +155,15 @@ pub fn items(api: Api, body: &Value) -> Vec<Item> {
 /// them as were kept: one JSON value, or a stream, whose last line is left out if it is torn.
 pub fn answer(api: Api, response: &[u8]) -> Reply {
     let dialect = dialect(api);
-    if let Ok(body) = serde_json::from_slice::<Value>(response) {
-        let (items, stop) = (dialect.body)(&body);
+    if Framing::of(response) == Some(Framing::Whole) {
+        let body = serde_json::from_slice::<Value>(response).ok();
+        let (items, stop) = body.as_ref().map(dialect.body).unwrap_or_default();
         return Reply {
             items,
             stop,
             events: Vec::new(),
             first_output: None,
-            whole: true,
+            whole: body.is_some(),
         };
     }
     let mut events = Vec::new();

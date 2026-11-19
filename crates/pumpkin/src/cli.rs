@@ -39,9 +39,8 @@ use crate::star::Entry;
     name = "pumpkin",
     about = "\
 Run workflows: in each run, an agent works in a sandbox, and a final call judges
-what it submits. It keeps what it writes in the .pumpkin directory that it is in,
-where a repository's ./pumpkin builds it: the runs' records, but where --runs
-names another directory, and what its builds and providers keep.",
+what it submits. The repository's .pumpkin directory holds build and provider
+state and the runs' records, unless --runs names another directory.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -121,8 +120,7 @@ workflow, which names each image by its ID.")]
     Build(Build),
     #[command(hide = true, about = "Remove what the runs that have ended left")]
     #[command(long_about = "\
-Remove what each run in --runs that has ended, or is lost, left, and print the
-id of each run that left something.")]
+Remove what ended or lost runs left and print the run ids reported as cleaned.")]
     #[command(after_help = REAP_NOTES)]
     Reap(Reap),
     #[command(
@@ -132,11 +130,9 @@ id of each run that left something.")]
     #[command(long_about = "\
 On the controller: `job` runs a job of the controller target, which `pumpkin
 run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
-runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
-and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
+runs left, at the controller's boot; `cancel` cancels a run for `pumpkin cancel`, on a client, which says the run's
 ending from its copy of the record; `serve` answers, on its standard input and
-output, `pumpkin ls` on a client, which lists the controller's runs, and
-`pumpkin view`, which shows them; and `publish` uploads the runs to the bucket
+output, the client that follows a job, lists the runs or views them; and `publish` uploads the runs to the bucket
 of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
@@ -183,12 +179,6 @@ writes.")]
     Boot,
     #[command(about = "Cancel a run for a client, which says its ending")]
     Cancel(Cancel),
-    #[command(about = "Follow a run for a client, saying its milestones until it ends")]
-    Follow {
-        #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
-        #[arg(help = "The run's id.")]
-        id: RunTag,
-    },
     #[command(about = "Answer a client's link, on the standard input and output")]
     Serve,
     #[command(about = "Upload the runs to the bucket of the public page")]
@@ -214,7 +204,7 @@ says (`pumpkin help config`).";
 pub(crate) struct Publish {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to publish.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "name", help = "The S3 bucket to upload to.")]
     #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
@@ -254,7 +244,6 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
-    Follow(RunTag),
     CancelFor(Cancel),
     Serve,
     Publish(Publish),
@@ -408,7 +397,7 @@ pub(crate) struct Run {
     pub(crate) args: TaskArgs,
     #[arg(long, value_name = "dir", value_parser = utf8(RECORDED), help = "\
 The directory runs are recorded in, each in <dir>/<id>.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = "\
 The machine's configuration; see `pumpkin help config`.
@@ -452,7 +441,7 @@ has a `/`.";
 
 const RUNS_HELP: &str = "\
 The directory that <run> is looked up in.
-Default: runs/ in the .pumpkin directory that this pumpkin is in";
+Default: runs/ in the repository's .pumpkin directory";
 
 /// Its paths are UTF-8, as those of `ls`, `cancel` and `reap` are, so that a command that names
 /// them names the same files.
@@ -471,7 +460,7 @@ pub(crate) struct Wait {
 pub(crate) struct View {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to serve.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(
         long,
@@ -507,7 +496,7 @@ Default: serve the runs"
 pub(crate) struct Ls {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to list.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     /// The prefixes of the ids of the runs to list, or none for every run.
     #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
@@ -541,7 +530,7 @@ ended, which `pumpkin reap` removes."
 pub(crate) struct Reap {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to reap.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
@@ -745,9 +734,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Boot,
         } => Command::Boot,
         Parsed::Controller {
-            action: Action::Follow { id },
-        } => Command::Follow(id),
-        Parsed::Controller {
             action: Action::Cancel(cancel),
         } => Command::CancelFor(cancel),
         Parsed::Controller {
@@ -791,7 +777,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::View(_)
         | Command::Job(_)
         | Command::Boot
-        | Command::Follow(_)
         | Command::CancelFor(_)
         | Command::Serve
         | Command::Publish(_)

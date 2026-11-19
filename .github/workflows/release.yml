@@ -1,53 +1,56 @@
-# Publishes a release when a tag is pushed: the archive that `deploy/pumpkin` downloads, built
-# static for musl, and its `.sha256`, which an operator writes in `.pumpkinversion`.
 name: release
 
 on:
   push:
-    tags: ["**"]
+    tags: ["*"]
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: github.event.created && !github.event.deleted
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.ref_name }}
       TARGET: x86_64-unknown-linux-musl
     steps:
-      # The whole history, which the bundle of the tag holds.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Install the toolchain
+      - name: Build and check the release
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools file
-          rustup toolchain install --no-self-update
+          case "$TAG" in
+            [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) echo "Unsupported release tag: $TAG" >&2; exit 1 ;;
+          esac
+          RUSTUP_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          export RUSTUP_TOOLCHAIN
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TARGET" --no-self-update
+          cargo xtask install --root dist
+          git rev-parse HEAD > dist/commit
 
-      - name: Build the archive
-        run: |
-          CC_x86_64_unknown_linux_musl=musl-gcc cargo xtask install --root dist --target "$TARGET"
-          git bundle create dist/pumpkin.bundle "$TAG"
-          archive="pumpkin-$TAG-$TARGET.tar.gz"
-          tar --create --gzip --owner=0 --group=0 --numeric-owner --file "$archive" \
-            --directory dist bin pumpkin.bundle
+          for program in pumpkin sandboxd ec2-boot buildifier; do
+            file --brief "dist/bin/$program" | grep --extended-regexp 'ELF 64-bit.*x86-64.*static(-pie|ally)? linked'
+          done
+          test -s dist/bin/pumpkin-modal.py
+          test -s dist/bin/pumpkin-modal.py.lock
+          # The upstream formatter includes compressed Go debug sections in its release binary.
+          strip --strip-debug dist/bin/buildifier
+          dist/bin/buildifier --version
+          archive="pumpkin-$TAG-$TARGET.tar.xz"
+          tar --create --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            --file - --directory dist bin commit | xz --threads=1 --stdout > "$archive"
           sha256sum "$archive" > "$archive.sha256"
-
-      - name: Check the archive
-        run: |
           mkdir unpacked
-          tar --extract --gzip --file "pumpkin-$TAG-$TARGET.tar.gz" --directory unpacked
-          file unpacked/bin/pumpkin
-          file unpacked/bin/pumpkin | grep --extended-regexp 'static(-pie)? linked'
-          unpacked/bin/pumpkin --version
-          unpacked/bin/pumpkin --version | grep --fixed-strings "$(git rev-parse "$TAG^{commit}" | cut --characters=1-9)"
+          tar --extract --xz --file "$archive" --directory unpacked
+          cmp dist/commit unpacked/commit
+          unpacked/bin/pumpkin --version | grep --fixed-strings "($(cut --characters=1-9 dist/commit) "
 
-      - name: Publish the release
+      - name: Publish the archive and checksum
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes \
-            "pumpkin-$TAG-$TARGET.tar.gz" "pumpkin-$TAG-$TARGET.tar.gz.sha256"
+          archive="pumpkin-$TAG-$TARGET.tar.xz"
+          gh release create "$TAG" "$archive" "$archive.sha256" --verify-tag --title "$TAG" --generate-notes

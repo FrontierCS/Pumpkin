@@ -85,6 +85,29 @@ pub(crate) fn messages(before: Option<Usage>, value: &Value) -> Option<Usage> {
 /// stream's first token.
 pub(crate) type Output = fn(&Value) -> bool;
 
+/// How a response's body is framed: as a stream of server-sent events, or as one JSON value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Framing {
+    Stream,
+    Whole,
+}
+
+impl Framing {
+    /// The framing of a body that begins with `start`, or `None` while `start` holds only
+    /// whitespace: any start of a body that holds more has the body's framing.
+    // By the body, not its `content-type`, which a proxy may give a stream as `application/json`:
+    // every API's answer that is one JSON value is an object, and a stream begins with a field's
+    // name, a comment's `:` or an empty line.
+    pub(crate) fn of(start: &[u8]) -> Option<Self> {
+        let first = start.iter().find(|byte| !byte.is_ascii_whitespace())?;
+        Some(if *first == b'{' {
+            Self::Whole
+        } else {
+            Self::Stream
+        })
+    }
+}
+
 /// The event that `line`, one line of a server-sent stream without its end, holds: the JSON of
 /// its `data:` field, if it holds one.
 pub(crate) fn event(line: &[u8]) -> Option<Value> {
@@ -166,15 +189,16 @@ impl Failure {
     }
 }
 
-/// Reads a response's usage from its body as the body goes by, from the last event of a stream
-/// that holds one, or from a response that is one JSON value, the failure that a stream states
-/// ([`Failure`]), and where a stream's output begins ([`Output`]).
+/// Reads a response's usage from its body as the body goes by, framed as [`Framing`] says: from
+/// the last event of a stream that holds one, or from a response that is one JSON value; the
+/// failure that a stream states ([`Failure`]), and where a stream's output begins ([`Output`]).
 pub(crate) struct Scan {
     usage_of: Reported,
     /// The field of a failure's error that gives its code.
     code: &'static str,
     output: Output,
-    stream: bool,
+    /// `None` while the body has held only whitespace, which is read as a stream's.
+    framing: Option<Framing>,
     /// Whether an event of the stream was output.
     began: bool,
     // A stream's current line, or a plain body; `None` once it passed its bound: a stream's line
@@ -185,18 +209,12 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
-    pub(crate) fn new(
-        content_type: Option<&str>,
-        usage_of: Reported,
-        code: &'static str,
-        output: Output,
-    ) -> Self {
-        let stream = content_type.is_some_and(|value| value.contains("text/event-stream"));
+    pub(crate) fn new(usage_of: Reported, code: &'static str, output: Output) -> Self {
         Self {
             usage_of,
             code,
             output,
-            stream,
+            framing: None,
             began: false,
             held: Some(Vec::new()),
             usage: None,
@@ -207,7 +225,10 @@ impl Scan {
     /// Reads `bytes`, the body's next, and returns whether the stream's output began in them:
     /// whether a line they end holds its first event of output.
     pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> bool {
-        if !self.stream {
+        if self.framing.is_none() {
+            self.framing = Framing::of(bytes);
+        }
+        if self.framing == Some(Framing::Whole) {
             self.hold(bytes);
             return false;
         }
@@ -222,12 +243,15 @@ impl Scan {
     }
 
     pub(crate) fn finish(mut self) -> (Option<Usage>, Option<Failure>) {
-        if self.stream {
-            self.line();
-        } else if let Some(held) = &self.held {
-            self.usage = serde_json::from_slice(held)
-                .ok()
-                .and_then(|body| (self.usage_of)(None, &body));
+        match self.framing {
+            Some(Framing::Stream) | None => self.line(),
+            Some(Framing::Whole) => {
+                if let Some(held) = &self.held {
+                    self.usage = serde_json::from_slice(held)
+                        .ok()
+                        .and_then(|body| (self.usage_of)(None, &body));
+                }
+            }
         }
         (self.usage, self.failed)
     }

@@ -17,7 +17,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use provider::{Console, Create, Created, Listed, RunTag, SandboxId, SandboxdRef, Sweep};
+use provider::{
+    Console, Create, Created, Listed, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+};
 use schema::ir::Sha256Digest;
 use schema::sandbox::{Endpoint, Listening};
 use serde::Deserialize;
@@ -25,7 +27,7 @@ use sha2::{Digest as _, Sha256};
 use stdx::Deadline;
 
 use crate::helper::{ASK_TIMEOUT, Request, Sandboxd};
-use crate::{Gpu, MIB, Modal, Reached};
+use crate::{Gpu, Modal, Reached, memory_mib};
 
 /// How long a delete may run before it is killed: Modal stops a sandbox in seconds, and the
 /// helper waits for each of the delete's in turn.
@@ -152,14 +154,7 @@ impl Modal<'_> {
                 sandboxd.as_str()
             ));
         };
-        let memory_bytes = role.resources.memory_bytes.get();
-        if !memory_bytes.is_multiple_of(MIB) {
-            return Err(format!(
-                "role `{}` asks for {memory_bytes} bytes of memory, which Modal gives in whole \
-                 MiB: ask for a multiple of {MIB}",
-                role.name
-            ));
-        }
+        let memory_mib = memory_mib(role)?;
         Ok(Request::Create {
             run: run.as_str(),
             role: role.name.as_str(),
@@ -170,7 +165,7 @@ impl Modal<'_> {
             model: *model,
             grant,
             cpu_millis: role.resources.cpu_millis.get(),
-            memory_mib: memory_bytes / MIB,
+            memory_mib,
             gpu,
             hard_end: hard_end.since_epoch().as_secs(),
             by: by.since_epoch().as_secs(),
@@ -217,30 +212,34 @@ impl Sweep for Reached {
     /// Deletes `ids` of `run`'s sandboxes, as [`Sweep::delete`] asks: Modal terminates each in
     /// turn, once its tag says it is the run's, and the helper waits until it has finished. An
     /// id that isn't one of Modal's names no sandbox, so it counts as deleted.
-    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), String> {
-        let ids: Vec<&str> = (ids.iter().map(SandboxId::as_str))
-            .filter(|id| id.starts_with(ID_PREFIX))
+    fn delete(&self, run: &RunTag, ids: &[SandboxId]) -> Result<(), Undeleted> {
+        let ids: Vec<&SandboxId> = (ids.iter())
+            .filter(|id| id.as_str().starts_with(ID_PREFIX))
             .collect();
         if ids.is_empty() {
             return Ok(());
         }
         let request = Request::Delete {
             run: run.as_str(),
-            ids,
+            ids: ids.iter().map(|id| id.as_str()).collect(),
         };
-        let Deleted { failed } = self
-            .helper
-            .call(&request, Deadline::after(DELETE_TIMEOUT))?;
-        if failed.is_empty() {
-            return Ok(());
+        let called = self.helper.call(&request, Deadline::after(DELETE_TIMEOUT));
+        let Deleted { failed } = match called {
+            Ok(deleted) => deleted,
+            Err(why) => {
+                let failed = ids.into_iter().map(|id| (id.clone(), why.clone()));
+                return Undeleted::of(failed.collect());
+            }
+        };
+        let failed = (failed.into_iter()).map(|(id, why)| {
+            let why = format!("Modal failed to delete sandbox {id}: {why}");
+            (SandboxId::from(id), why)
+        });
+        let mut failed: Vec<(SandboxId, String)> = failed.collect();
+        // The last why ends the message, so the advice is said once.
+        if let Some((_, why)) = failed.last_mut() {
+            why.push_str(": fix what Modal reports");
         }
-        let failed: Vec<String> = (failed.into_iter())
-            .map(|(id, why)| format!("sandbox {id}: {why}"))
-            .collect();
-        Err(format!(
-            "Modal failed to delete {} of the sandboxes: {}: fix what Modal reports",
-            failed.len(),
-            failed.join("; ")
-        ))
+        Undeleted::of(failed)
     }
 }

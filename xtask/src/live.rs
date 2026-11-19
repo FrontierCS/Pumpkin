@@ -1,18 +1,16 @@
 //! The checks of `cargo xtask live`, which reach a real environment: Docker, or a real provider
 //! through the controller that the configuration names.
 
-use std::fs::{self, Permissions};
 use std::io::{BufRead as _, BufReader};
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, thread};
+use std::{env, fs, thread};
 
 use stdx::process::Environment;
 
 use crate::settings::{Provider, Settings};
-use crate::{Cargo, Result, root, sandboxd, tested, tools, wait};
+use crate::{Cargo, Result, root, sandboxd, star, tools, wait};
 
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 5;
@@ -38,6 +36,7 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
+    star::link(cargo)?;
     let sandboxd = sandboxd(cargo)?;
     let test = cargo.cmd(&[
         "nextest",
@@ -49,7 +48,6 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "--run-ignored",
         "only",
     ]);
-    let test = tested(cargo, test)?;
     let test = test
         // These poison the variables the Docker provider must ignore: passed on to `docker`, they
         // would steer it to an engine that doesn't exist, or to TLS without certificates, so the
@@ -100,17 +98,12 @@ pub(crate) fn smoke(
     let settings = Settings::parse(&text, &config, provider, gpu_model)?;
     reached(cargo, &settings)?;
     let (branch, commit) = head(cargo)?;
-    let repo = task_repository(cargo, &branch, &commit)?;
+    let repo = task_repository(cargo)?;
     if lost {
         return self::lost(cargo, &settings, &repo, again);
     }
-    let mut run = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
-    for var in stdx::process::cargo_package_vars() {
-        run.env_remove(var);
-    }
-    run.current_dir(&repo)
-        .arg(format!("--pumpkin-repository=file://{}", root().display()))
-        .args(["run", "--wait"]);
+    let mut run = pumpkin(&repo);
+    run.args(["run", "--wait"]);
     if let Some(modal) = &settings.modal {
         run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
     }
@@ -128,8 +121,8 @@ pub(crate) fn smoke(
     let left = left(cargo, &settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
-        let mut cancel = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
-        cancel.current_dir(&repo).args(["cancel", &id]);
+        let mut cancel = pumpkin(&repo);
+        cancel.args(["cancel", &id]);
         let cancelled = cancel
             .status()
             .map_err(|error| format!("`pumpkin cancel` failed: {error}"))?;
@@ -162,13 +155,7 @@ const LOST_EVERY: Duration = Duration::from_mins(1);
 
 fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<()> {
     let pumpkin = |args: &[&str]| {
-        let mut command = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
-        for var in stdx::process::cargo_package_vars() {
-            command.env_remove(var);
-        }
-        command
-            .current_dir(repo)
-            .arg(format!("--pumpkin-repository=file://{}", root().display()));
+        let mut command = pumpkin(repo);
         command.args(args);
         command
     };
@@ -300,21 +287,44 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
     Ok(())
 }
 
-/// Kills the unit of job `id` on the controller that `settings` name, over the shared connection
-/// that `./pumpkin` in `repo` opened there, so that its run is lost.
+/// Kills the unit of job `id` on the controller to leave a lost run, with the client's key and
+/// pinned host key for that controller.
 fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result<()> {
     let shared = repo
         .join(".pumpkin/controller")
         .join(format!("{}.{}", settings.name, settings.region));
-    let instance = fs::read_to_string(shared.join("lock"))
-        .map_err(|error| format!("reading the controller's instance failed: {error}"))?;
-    let host = format!("pumpkin@{}", instance.trim());
+    let found = fs::read_to_string(shared.join("found"))
+        .map_err(|error| format!("reading where the controller was found failed: {error}"))?;
+    let found: serde_json::Value = serde_json::from_str(&found)?;
+    let Some(address) = found["address"].as_str() else {
+        return Err(format!("the controller's `found` names no address: {found}").into());
+    };
+    let host = format!("pumpkin@{address}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
-    // `ControlPath=0` is the client's own ssh connection to the controller: a socket in `shared`,
-    // which is why the command runs there.
-    let _dir = cargo.sh.push_dir(&shared);
-    let ssh = cargo.sh.cmd("ssh");
-    ssh.args(["-F", "/dev/null", "-o", "ControlPath=0", &host, &kill])
+    let home =
+        std::env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
+    let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
+    let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
+    let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
+    cargo
+        .sh
+        .cmd("ssh")
+        .args(["-F", "/dev/null", "-i"])
+        .arg(kept.join("key"))
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            &known_hosts,
+            "-o",
+            &alias,
+            &host,
+            &kill,
+        ])
         .run()?;
     Ok(())
 }
@@ -376,10 +386,9 @@ fn head(cargo: &Cargo) -> Result<(String, String)> {
 }
 
 /// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
-/// keeps its `.git` and `.pumpkin` from one live run to the next: `examples` whole, whose
-/// `PUMPKIN.star` roots the examples' `//` labels, and the `pumpkin` entry, with Pumpkin pinned at
-/// `commit` of `branch`.
-fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf> {
+/// keeps its `.git` and `.pumpkin` from one live run to the next. The executable is installed
+/// from this checkout so an unpublished change can be exercised.
+fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
     let metadata = cargo
         .cmd(&["metadata", "--format-version=1", "--no-deps"])
         .read()?;
@@ -415,13 +424,23 @@ fn task_repository(cargo: &Cargo, branch: &str, commit: &str) -> Result<PathBuf>
         removed.map_err(|error| format!("removing {} failed: {error}", path.display()))?;
     }
     copy_tree(&root().join("examples"), &repo)?;
+    let workspace = repo.join(".pumpkin");
+    crate::install(cargo, Some(workspace.clone()), crate::MUSL)?;
+    let ignore = workspace.join(".gitignore");
+    fs::write(&ignore, "*\n").map_err(|error| made(&ignore, error))?;
     let entry = repo.join("pumpkin");
-    fs::copy(root().join("deploy/pumpkin"), &entry).map_err(|error| made(&entry, error))?;
-    fs::set_permissions(&entry, Permissions::from_mode(0o755))
+    std::os::unix::fs::symlink(".pumpkin/bin/pumpkin", &entry)
         .map_err(|error| made(&entry, error))?;
-    let version = repo.join(".pumpkinversion");
-    fs::write(&version, format!("{branch} {commit}\n")).map_err(|error| made(&version, error))?;
     Ok(repo)
+}
+
+fn pumpkin(repo: &Path) -> Command {
+    let mut command = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
+    for var in stdx::process::cargo_package_vars() {
+        command.env_remove(var);
+    }
+    command.current_dir(repo).env_remove("PUMPKIN_WORKSPACE");
+    command
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {

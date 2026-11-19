@@ -16,11 +16,10 @@
 
 use std::fmt::Write as _;
 use std::num::NonZeroU32;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs, thread};
 
 use expect_test::expect;
 use gateway::{Arrival, Dialer, Put, Registration, Session, Sockets};
@@ -31,7 +30,8 @@ use provider::{
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
 use stdx::{Context, Deadline};
-use tempfile::TempDir;
+
+use crate::TestDir;
 
 /// A provider under the suite: the platform it reaches, how that platform makes a sandbox's
 /// `sandboxd` misbehave, and what the platform holds.
@@ -378,18 +378,13 @@ struct Suite<'a> {
     namesakes: Vec<(SandboxId, &'static str)>,
     slowest: (Name, Duration),
     _held: [Reservation; 2],
-    dir: TempDir,
+    dir: TestDir,
 }
 
 impl<'a> Suite<'a> {
     fn new(name: &str, subject: &'a dyn Subject) -> Self {
         let tag = format!("pk-{}-{name}", std::process::id());
-        // Private to this user, as the parent of every socket directory must be.
-        let dir = tempfile::Builder::new()
-            .prefix("suite-")
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
+        let dir = TestDir::new();
         let provider = subject.connect().unwrap();
         let classes = provider.ready().classes.iter();
         let (class, declared) = classes
@@ -544,8 +539,8 @@ impl<'a> Suite<'a> {
         let after = held();
         let mut shown = match deleted {
             Ok(()) => "done".to_owned(),
-            Err(error) => {
-                let named = ids.iter().filter(|id| error.contains(id.as_str()));
+            Err(undeleted) => {
+                let named = ids.iter().filter(|id| undeleted.why(id).is_some());
                 format!("failed, naming {:?}", self.named(named.cloned().collect()))
             }
         };
@@ -692,7 +687,9 @@ impl Drop for Suite<'_> {
             // panics.
             let deleted = self.subject.connect().and_then(|provider| {
                 let listed = provider.list(run)?;
-                provider.delete(run, &ids(listed))
+                provider
+                    .delete(run, &ids(listed))
+                    .map_err(|error| error.to_string())
             });
             if let Err(error) = deleted {
                 eprintln!("run {} can't be cleaned up: {error}", run.as_str());

@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, older_finished, poll, ran,
-    report, returned, write_gone, write_on, write_record,
+    EC2, INFO, LOCAL, POISON, Scratch, Step, check, docker_table, invocation, poll, ran, report,
+    returned, write_docker_record, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -34,8 +34,8 @@ const LIVE: &str = "20261108-120300-0a000004";
 /// A record made before records were locked.
 const UNLOCKED: &str = "20261108-120400-0a000005";
 
-/// A run that failed on a Docker context that is gone since.
-const GONE: &str = "20261108-120500-0a000006";
+/// A failed run whose Docker provider cannot be reached.
+const UNREACHED: &str = "20261108-120500-0a000006";
 
 /// A lost record whose name is no run tag.
 const BAD_NAME: &str = "lost name";
@@ -49,7 +49,7 @@ const UNFIT: &str = "20261108-120600-0a000007";
     reason = "most of it is the records, the steps and their snapshot"
 )]
 fn reaps() {
-    let scratch = Scratch::new("reaps");
+    let scratch = Scratch::new();
     write_record(&scratch, TURN, true, None);
     let turn = scratch.0.join(format!("runs/{TURN}"));
     let held = File::open(&turn).unwrap();
@@ -65,19 +65,19 @@ fn reaps() {
     live.lock().unwrap();
     write_record(&scratch, UNLOCKED, false, None);
     let failed = json!({ "state": "failed", "reason": "r" });
-    let path = write_gone(&scratch, GONE, Some(failed));
+    write_docker_record(&scratch, UNREACHED, "recorded", Some(failed));
     write_record(&scratch, BAD_NAME, true, None);
     scratch.write("runs/notes/todo", "");
     scratch.write(&format!("runs/{LOST}/sockets/agent/s"), "");
     let reap = |runs: &str| {
         let mut reap = scratch.pumpkin(&["reap", "--runs", runs]);
-        reap.env("PATH", &path);
+        reap.env("PATH", "");
         ran(reap, &scratch.0, false)
     };
     let lost = scratch.0.join(format!("runs/{LOST}/outcome.json"));
     let mut first = scratch.pumpkin(&["reap", "--runs", "runs"]);
     first
-        .env("PATH", &path)
+        .env("PATH", "")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let invoked = invocation(&first);
@@ -111,7 +111,7 @@ fn reaps() {
         fs::remove_dir_all(scratch.0.join(format!("runs/{unreaped}"))).unwrap();
     }
     steps.push(reap("runs"));
-    fs::remove_dir_all(scratch.0.join(format!("runs/{GONE}"))).unwrap();
+    fs::remove_dir_all(scratch.0.join(format!("runs/{UNREACHED}"))).unwrap();
     steps.push(reap("runs"));
     steps.push(reap("nowhere"));
     drop(live);
@@ -122,7 +122,7 @@ fn reaps() {
         &[],
         &expect![[r#"
             while the test holds 20261108-115900-0a000000's turn, reap waits for it, holding 0 locks on its driver.pid, and 20261108-120000-0a000001 has an outcome.json: false
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
+            $ PATH= pumpkin reap --runs runs
             exit status: Some(1)
             pumpkin: run 20261108-115900-0a000000 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120000-0a000001 left its socket directory, now removed: <scratch>/runs/20261108-120000-0a000001/sockets
@@ -130,7 +130,7 @@ fn reaps() {
             pumpkin: run 20261108-120100-0a000002 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120210-0a00000e can't be reaped: <scratch>/runs/20261108-120210-0a00000e/outcome.json: EOF while parsing an object at line 1 column 1
             pumpkin: <scratch>/runs/20261108-120400-0a000005/driver.pid isn't there: expected the record of a run to have it
-            pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
+            pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `recorded` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
             pumpkin: run lost name can't be reaped: the record <scratch>/runs/lost name is named by no run tag (the run tag `lost name` holds ` `: use only ASCII letters, digits, `_`, `.` and `-`): expected a record that `pumpkin run` made
             pumpkin: 3 runs can't be reaped, as said above: fix what each says, and reap again
             pumpkin: to reap again: pumpkin reap --runs <scratch>/runs
@@ -149,22 +149,27 @@ fn reaps() {
             exit status: Some(1)
             pumpkin: run 20261108-120000-0a000001 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120000-0a000001
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
+            $ PATH= pumpkin reap --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `gone` can't be read: `docker context inspect` failed with exit status: 1: context "gone": context not found: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
+            pumpkin: run 20261108-120500-0a000006's sandboxes on provider `local`, if it left any, can't be removed, as it can't be reached: the Docker context `recorded` can't be read: `docker` didn't run: No such file or directory (os error 2): install Docker's command line on `PATH`: name one that `docker context ls` lists; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120500-0a000006, to stop reaping it
             pumpkin: 1 run ran on a provider that can't be reached, as said above: what each left there may remain
             pumpkin: to reap again once it can be reached: pumpkin reap --runs <scratch>/runs
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
+            $ PATH= pumpkin reap --runs runs
             exit status: Some(0)
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs nowhere
+            $ PATH= pumpkin reap --runs nowhere
             exit status: Some(1)
             pumpkin: nowhere: No such file or directory (os error 2): expected the directory that runs are recorded in, as `--runs` names it"#]],
     );
 }
 
+fn write_docker(scratch: &Scratch, docker: &str) -> String {
+    scratch.write_executable("bin/docker", docker.as_bytes());
+    format!("{}:/usr/bin:/bin", scratch.0.join("bin").display())
+}
+
 #[test]
 fn reaps_unfit() {
-    let scratch = Scratch::new("reaps_unfit");
+    let scratch = Scratch::new();
     let info = INFO.replace(r#""SwapLimit":true"#, r#""SwapLimit":false"#);
     let (calls, container) = (scratch.0.join("calls"), "c".repeat(64));
     let docker = format!(
@@ -183,7 +188,8 @@ esac
         calls.display()
     );
     let failed = json!({ "state": "failed", "reason": "r" });
-    let path = write_on(&scratch, UNFIT, "default", Some(failed), &docker);
+    write_docker_record(&scratch, UNFIT, "default", Some(failed));
+    let path = write_docker(&scratch, &docker);
     let sandbox = json!({ "provider": "local", "id": container, "report": {} });
     scratch.write(&format!("runs/{UNFIT}/agent/sandbox.json"), &sandbox);
     let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
@@ -211,85 +217,6 @@ esac
     );
 }
 
-/// A lost run whose sandboxes, the agent's and a lease's, ended by themselves.
-const ENDED: &str = "20261108-121200-0a00000d";
-
-/// A run that finished, of a build whose verdicts this one doesn't read, whose agent's sandbox
-/// ended by itself.
-const OLDER_ENDED: &str = "20261108-121300-0a00000f";
-
-// A sandbox that its provider lists no more may have left what only its delete removes.
-#[test]
-fn reaps_ended() {
-    let scratch = Scratch::new("reaps_ended");
-    let calls = scratch.0.join("calls");
-    let docker = format!(
-        r#"#!/bin/sh
-# `--context=<name>` comes first.
-shift
-echo "$*" >> "{}"
-case $1 in
-    context) echo unix:///stand-in.sock ;;
-    info) echo '{INFO}' ;;
-    container) ;;
-    *) echo "the stand-in has no such command" >&2; exit 1 ;;
-esac
-"#,
-        calls.display()
-    );
-    let path = write_on(&scratch, ENDED, "default", None, &docker);
-    let older = Some(older_finished());
-    let _ = write_on(&scratch, OLDER_ENDED, "default", older, &docker);
-    let held = [
-        (ENDED, "agent", "a"),
-        (ENDED, "leases/0", "b"),
-        (OLDER_ENDED, "agent", "d"),
-    ];
-    for (run, dir, id) in held {
-        let sandbox = json!({ "provider": "local", "id": id.repeat(64), "report": {} });
-        scratch.write(&format!("runs/{run}/{dir}/sandbox.json"), &sandbox);
-    }
-    let mut steps = Vec::new();
-    for _ in 0..2 {
-        let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
-        reap.env("PATH", &path);
-        steps.push(ran(reap, &scratch.0, false));
-        let called = fs::read_to_string(&calls).unwrap();
-        fs::remove_file(&calls).unwrap();
-        steps.push(format!("docker was called with:\n{}", called.trim_end()));
-    }
-    check(
-        &scratch,
-        steps.into_iter().map(Step::Ran),
-        false,
-        &[],
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
-            exit status: Some(0)
-            pumpkin: run 20261108-121200-0a00000d's sandbox aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            pumpkin: run 20261108-121200-0a00000d's sandbox bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            pumpkin: run 20261108-121200-0a00000d was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run 20261108-121300-0a00000f's sandbox dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            printed:
-              20261108-121200-0a00000d
-              20261108-121300-0a00000f
-            docker was called with:
-            context inspect --format {{.Endpoints.docker.Host}} -- default
-            info --format {{json .}}
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --filter id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter id=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
-            exit status: Some(0)
-            docker was called with:
-            context inspect --format {{.Endpoints.docker.Host}} -- default
-            info --format {{json .}}
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121200-0a00000d
-            container ls --all --no-trunc --format {{.ID}} {{.State}} {{.Label "pumpkin.run"}} --filter label=pumpkin.run --filter label=pumpkin.run=20261108-121300-0a00000f"#]],
-    );
-}
-
 /// A lost run on `local`, of kind `docker`, and `aws`, of kind `ec2`, which left a sandbox on
 /// each.
 const SPREAD: &str = "20261108-120700-0a000008";
@@ -310,7 +237,7 @@ const UNNAMED: &str = "20261108-121100-0a00000c";
     reason = "most of it is the records, the steps and their snapshot"
 )]
 fn reaps_providers() {
-    let scratch = Scratch::new("reaps_providers");
+    let scratch = Scratch::new();
     let (calls, container) = (scratch.0.join("docker-calls"), "c".repeat(64));
     let docker = format!(
         r#"#!/bin/sh
@@ -329,9 +256,8 @@ esac
 "#,
         calls.display()
     );
-    let path = write_on(&scratch, SPREAD, "default", None, &docker);
-    let poison = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../xtask/poison/aws");
-    symlink(poison, scratch.0.join("bin/aws")).unwrap();
+    let path = write_docker(&scratch, &docker);
+    symlink(Path::new(POISON).join("aws"), scratch.0.join("bin/aws")).unwrap();
     let config = scratch.0.join("pumpkin.toml");
     scratch.write(
         "pumpkin.toml",

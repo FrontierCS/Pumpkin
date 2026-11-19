@@ -33,7 +33,7 @@ use super::{
     reason = "most of it is the cases and their snapshot"
 )]
 fn usage() {
-    let scratch = Scratch::new("usage");
+    let scratch = Scratch::new();
     let same = |args: &[&str], like: &[&str]| {
         let ran = |args| scratch.pumpkin(args).output().unwrap();
         let same = ran(args) == ran(like);
@@ -114,9 +114,8 @@ fn usage() {
             exit status: Some(0)
             printed:
               Run workflows: in each run, an agent works in a sandbox, and a final call judges
-              what it submits. It keeps what it writes in the .pumpkin directory that it is in,
-              where a repository's ./pumpkin builds it: the runs' records, but where --runs
-              names another directory, and what its builds and providers keep.
+              what it submits. The repository's .pumpkin directory holds build and provider
+              state and the runs' records, unless --runs names another directory.
 
               Usage: pumpkin <command>
 
@@ -166,7 +165,7 @@ fn usage() {
 
                     --runs <dir>
                         The directory runs are recorded in, each in <dir>/<id>.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                     --config <file>
                         The machine's configuration; see `pumpkin help config`.
@@ -261,7 +260,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory that <run> is looked up in.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                     --outcome
                         Also print the run's outcome.json on the standard output once it has
@@ -323,7 +322,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory of the runs to list.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                 -h, --help
                         Print this help.
@@ -370,7 +369,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory that <run> is looked up in.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                     --force
                         End the run's driver at once, by SIGKILL, rather than stop the run by
@@ -416,7 +415,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory of the runs to serve.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                     --port <port>
                         The port to serve at, on 127.0.0.1.
@@ -456,7 +455,8 @@ fn usage() {
               host, and, for the runs' data, carries the token after `?t=`, which the page
               sends: another user of this machine can't read the runs, nor can a page of
               another site that the browser has open. It reads the records as `ls` and `wait`
-              do, and asks nothing of a provider.
+              do, and of the providers asks only EC2, for a controller's state and its start,
+              as below.
 
               A run's page links to the trace of each caller that used a model, the agent or
               a call: its model requests as threads of steps, each with the entries it
@@ -478,20 +478,23 @@ fn usage() {
               controller has none. It reaches the controller as it starts, starting it if it
               is stopped; once the connection has ended, the next request opens it again, and
               while that fails the page says so and asks again after 5 s, then after twice
-              the wait before, up to a minute. --runs serves a directory here, such as the
-              copies of the controller's runs that `wait` makes.
+              the wait before, up to a minute. When it fails as the controller has stopped
+              since, as an idle controller stops itself, the page says so beside a button,
+              "Start it", which starts it (`aws ec2 start-instances`); until the
+              controller answers, each request asks EC2 whether it runs (`aws ec2
+              describe-instances`) in place of connecting. --runs serves a directory here,
+              such as the copies of the controller's runs that `wait` makes.
             $ pumpkin reap --help
             exit status: Some(0)
             printed:
-              Remove what each run in --runs that has ended, or is lost, left, and print the
-              id of each run that left something.
+              Remove what ended or lost runs left and print the run ids reported as cleaned.
 
               Usage: pumpkin reap [OPTIONS]
 
               Options:
                     --runs <dir>
                         The directory of the runs to reap.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                 -h, --help
                         Print this help.
@@ -501,7 +504,7 @@ fn usage() {
                 pumpkin reap --runs runs
 
               Exit status:
-                0  Nothing that a run which has ended left remains.
+                0  Nothing that the selected runs left remains.
                 1  A run can't be reaped, which `reap` says, or another error; it reaps the
                    others all the same.
                 2  A usage error.
@@ -526,8 +529,10 @@ fn usage() {
               says, and notes there as gone.
 
               With [controller] in the configuration, and no --runs, `reap` reaps the
-              controller's runs there, as the controller does at each boot, but with this
-              machine's Modal configuration file, which the boot lacks.
+              controller's runs made by this build and names the runs left to their own
+              builds. It uses this machine's Modal configuration file, which the boot lacks.
+              If the reply is cut, it reaps again. The printed ids may omit runs already
+              cleaned before the cut.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -729,14 +734,17 @@ fn usage() {
               `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
               Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
               and Modal's configuration file, into a directory of its own in the
-              controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, with the
-              Session Manager plugin, and `ssh`, `tar`, `ssh-keygen`
-              and `git`, from PATH; the controller's settings are the module's, but for
-              [controller.modal]. This machine's key to it, which the first command makes
-              and enrols through EC2 Instance Connect, and the host key it pins, are in
-              $HOME/.config/pumpkin/ssh/.
+              controller's tmpfs, which its end removes. The client uses AWS CLI v2, ssh,
+              ssh-keygen and git from PATH. It sends the task's files and starts its job
+              over SSH to the controller's private address, using up to four connections
+              for large task uploads. The machine must have a route there and deploy/aws's
+              `ssh_from` must admit it. The job runs the client's install with the module's
+              settings and [controller.modal].
+              The first command creates a key and enrols it through EC2 Instance Connect.
+              The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
                 name          The `name` that deploy/aws was applied with.
                 region        The region it was applied in.
+                address       `private` (the default) uses the instance's private address.
 
               [controller.modal], the Modal provider that the controller's runs may place
               roles on, if any: the settings of a provider of kind modal, but `images`, which
@@ -764,9 +772,8 @@ fn usage() {
             $ pumpkin
             exit status: Some(2)
             Run workflows: in each run, an agent works in a sandbox, and a final call judges
-            what it submits. It keeps what it writes in the .pumpkin directory that it is in,
-            where a repository's ./pumpkin builds it: the runs' records, but where --runs
-            names another directory, and what its builds and providers keep.
+            what it submits. The repository's .pumpkin directory holds build and provider
+            state and the runs' records, unless --runs names another directory.
 
             Usage: pumpkin <command>
 
@@ -910,7 +917,7 @@ fn usage() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn unrunnable() {
-    let scratch = Scratch::new("unrunnable");
+    let scratch = Scratch::new();
     scratch.write_task(
         "workflow",
         &serde_json::from_str::<Value>(WORKFLOW).unwrap(),
@@ -999,10 +1006,10 @@ fn unrunnable() {
             pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
             $ <scratch>/alone/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` builds, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
             $ <scratch>/alone/pumpkin wait 6a
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` builds, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
             $ <scratch>/�/.pumpkin/pinned/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
             pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`
@@ -1089,7 +1096,7 @@ fn modes() {
 /// What `pumpkin run` under `umask`, with a runs directory whose parent is missing too, shows:
 /// its invocation, then the modes of the directories it made.
 fn modes_under(umask: libc::mode_t) -> String {
-    let scratch = Scratch::new(&format!("modes-{umask:03o}"));
+    let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     let mut run = scratch.pumpkin(&["run", "lacking/task.star", "--sandboxd", "sandboxd"]);
     run.args(["--runs", "shared/runs", "--config", "pumpkin.toml"]);
@@ -1113,7 +1120,7 @@ fn modes_under(umask: libc::mode_t) -> String {
 
 #[test]
 fn ancestors() {
-    let scratch = Scratch::new("ancestors");
+    let scratch = Scratch::new();
     let dirs = [
         // Not writable by its group, which may or may not be the user's private group.
         ("shared", 0o757),
@@ -1167,7 +1174,7 @@ fn ancestors() {
 
 #[test]
 fn ancestors_writable_by_their_group() {
-    let scratch = Scratch::new("group");
+    let scratch = Scratch::new();
     let private = scratch.0.join("private");
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, Permissions::from_mode(0o775)).unwrap();
@@ -1275,7 +1282,7 @@ fn modes_below(dir: &Path) -> String {
     reason = "most of it is the cases and their snapshot"
 )]
 fn refusals() {
-    let scratch = Scratch::new("refusals");
+    let scratch = Scratch::new();
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     scratch.write_task("workflow", &ir);
     let mut budgeted = ir.clone();
@@ -1449,7 +1456,7 @@ fn refusals() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn configurations() {
-    let scratch = Scratch::new("configurations");
+    let scratch = Scratch::new();
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
     scratch.write_task("workflow", &ir);
     ir["roles"][0]["runtime"]["agent"]
@@ -1964,7 +1971,7 @@ impl Upstream {
     reason = "most of it is the cases and their snapshot"
 )]
 fn runs_on_docker() {
-    let scratch = Scratch::new("docker");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().into_os_string().into_string().unwrap();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2107,7 +2114,7 @@ fn runs_on_docker() {
     reason = "most of it is the steps and their snapshot"
 )]
 fn writes_only_in_its_workspace() {
-    let scratch = Scratch::new("workspace");
+    let scratch = Scratch::new();
     let label = format!("pumpkin.test=workspace-{}", std::process::id());
     let _images = Labelled(label.clone());
     write_hello(&scratch, &label);
@@ -2370,7 +2377,7 @@ const LEASING_AGENT: &str = r#"#!/bin/sh
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn leases_on_docker() {
-    let scratch = Scratch::new("leases");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2473,7 +2480,7 @@ const LEASING_FINAL: &str = r#"
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn final_call_leases_on_docker() {
-    let scratch = Scratch::new("isolation");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2549,7 +2556,7 @@ fn final_call_leases_on_docker() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(clippy::too_many_lines, reason = "most of it is the run's snapshot")]
 fn ops_on_docker() {
-    let scratch = Scratch::new("ops");
+    let scratch = Scratch::new();
     let sandboxd = sandboxd().to_str().unwrap().to_owned();
     let context = docker_context();
     let engine = engine(&scratch, &context);
@@ -2658,7 +2665,7 @@ fn cpus() {
         eprintln!("skipped: the machine has {cores} cores, and the test needs 5 at least");
         return;
     }
-    let scratch = Scratch::new("cpus");
+    let scratch = Scratch::new();
     let stand_in = StandIn::new(&scratch);
     let threads = machine_cpus() / cores;
     let sized = |name: &str, [agent, train, last]: [u64; 3]| {

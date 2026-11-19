@@ -19,8 +19,9 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use route::read::{self, Item};
-use runtime::{KeptPart, KeptRequest, Record};
+use runtime::{CallerName, KeptPart, KeptRequest, Record};
 use schema::ir::Api;
+use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -54,7 +55,7 @@ pub(super) struct Exchanges {
 }
 
 struct Said {
-    caller: String,
+    caller: CallerName,
     /// The byte of the start's log line, and the time it says, in nanoseconds.
     started: Option<(u64, Option<u64>)>,
     /// The same for the answer, with the answer's event as JSON text, which holds far less memory
@@ -80,15 +81,17 @@ impl Exchanges {
             Some("model_answered") => true,
             _ => return,
         };
-        let (Some(request), Some(caller)) = (event["request"].as_u64(), event["caller"].as_str())
-        else {
+        let (Some(request), Ok(caller)) = (
+            event["request"].as_u64(),
+            CallerName::deserialize(&event["caller"]),
+        ) else {
             return;
         };
         // When the request's thread observed it, else when the log took it, as a timeline orders
         // the log's records.
         let ns = nanos(&record["observed_ns"]).or_else(|| nanos(&record["at_ns"]));
         let said = self.by_request.entry(request).or_insert_with(|| Said {
-            caller: caller.to_owned(),
+            caller,
             started: None,
             answered: None,
         });
@@ -230,7 +233,7 @@ struct Tools {
 /// [`Exchanges`] and the record, and extended as the log grows.
 pub(super) struct Trace {
     run: String,
-    caller: String,
+    caller: CallerName,
     /// The log epoch and the fold's number that this was read from; a trace of another is made
     /// again.
     log_epoch: u64,
@@ -261,10 +264,10 @@ pub(super) struct Trace {
 }
 
 impl Trace {
-    fn new(run: &str, caller: &str, log_epoch: u64, made: u64) -> Self {
+    fn new(run: &str, caller: CallerName, log_epoch: u64, made: u64) -> Self {
         Self {
             run: run.to_owned(),
-            caller: caller.to_owned(),
+            caller,
             log_epoch,
             made,
             taken: 0,

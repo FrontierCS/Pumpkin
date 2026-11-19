@@ -13,8 +13,23 @@ use super::{
 };
 
 #[test]
+fn launcher_workspace() {
+    let scratch = Scratch::new();
+    let id = "20261107-120000-1b8a6389";
+    write_record(&scratch, id, true, Some(returned(7.0)));
+    let workspace = scratch.0.join("consumer/.pumpkin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::rename(scratch.0.join("runs"), workspace.join("runs")).unwrap();
+    let mut command = scratch.program(super::PUMPKIN, &["ls"]);
+    command.env("PUMPKIN_WORKSPACE", &workspace);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8(output.stdout).unwrap().contains(id));
+}
+
+#[test]
 fn lists() {
-    let scratch = Scratch::new("lists");
+    let scratch = Scratch::new();
     let task = |id: &str, name: &str| {
         scratch.write(&format!("runs/{id}/ir.json"), &json!({ "name": name }));
     };
@@ -82,7 +97,7 @@ fn lists() {
 
 #[test]
 fn lists_other_builds_unread() {
-    let scratch = Scratch::new("lists-other-builds-unread");
+    let scratch = Scratch::new();
     let made = |id: &str, build: Value| {
         let record = json!({ "record_version": "pumpkin.record/v0", "pumpkin": build, "args": [] });
         scratch.write(&format!("runs/{id}/record.json"), &record);
@@ -157,7 +172,7 @@ fn lists_other_builds_unread() {
 
 #[test]
 fn lists_the_last_day() {
-    let scratch = Scratch::new("lists-the-last-day");
+    let scratch = Scratch::new();
     let ended = |id: &str, days: u64| {
         write_record(
             &scratch,
@@ -227,7 +242,7 @@ fn lists_the_last_day() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn lists_phases() {
-    let scratch = Scratch::new("lists-phases");
+    let scratch = Scratch::new();
     let log = whole_log();
     // A run that went the whole way, priced but for its box's class, and one that ended at its
     // deadline with nothing submitted, unpriced.
@@ -385,7 +400,7 @@ fn lists_phases() {
 
 #[test]
 fn lists_leases() {
-    let scratch = Scratch::new("lists-leases");
+    let scratch = Scratch::new();
     let log = whole_log();
     // Live, cut at the second named, its last record written 2 seconds ago: as its train call's
     // box had a file put, ran a script, and was closed as its call ended; as the agent's runners
@@ -453,7 +468,7 @@ fn lists_leases() {
     reason = "most of it is the cases and their snapshot"
 )]
 fn says_unread_lines() {
-    let scratch = Scratch::new("says-unread-lines");
+    let scratch = Scratch::new();
     let id = "20261110-110000-0000000b";
     let log = [
         logged(5, json!({ "kind": "agent_started" }), json!([])),

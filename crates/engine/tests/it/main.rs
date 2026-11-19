@@ -1,5 +1,5 @@
-//! The engine, against a real Docker daemon, but for its prunes' choice and its publish slots,
-//! which need none. The tests that need Docker are ignored.
+//! The engine, against a real Docker daemon, but for its prunes' choice, which needs none. The
+//! tests that need Docker are ignored.
 
 #![expect(
     clippy::unwrap_used,
@@ -23,21 +23,16 @@ use recipe::Given;
 use schema::ir::Image;
 use schema::sandbox::RelativePath;
 use stdx::process::Environment;
-use tempfile::TempDir;
-use test_support::{BUSYBOX, docker};
+use test_support::{BUSYBOX, TestDir, docker};
 
 mod prune;
-mod publish;
 
 struct Fixture {
-    dir: TempDir,
+    dir: TestDir,
 }
 
-fn check(name: &str, scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Expect) {
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("engine-{name}-"))
-        .tempdir()
-        .unwrap();
+fn check(scenario: impl FnOnce(&Fixture) -> Vec<String>, expect: &Expect) {
+    let dir = TestDir::new();
     expect.assert_eq(&scenario(&Fixture { dir }).join("\n"));
 }
 
@@ -120,7 +115,6 @@ fn report() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn platforms() {
     check(
-        "platforms",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let platform = &engine().report().platform;
@@ -170,7 +164,6 @@ fn platforms() {
 )]
 fn builds() {
     check(
-        "builds",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let dir = fixture.dir.path().join("context");
@@ -276,7 +269,6 @@ fn builds() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn images() {
     check(
-        "images",
         |fixture| {
             let mut builds = Builds::new(fixture);
             // A content of this test's own, so that no other test's build makes the same image.
@@ -319,7 +311,6 @@ fn images() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn mounts() {
     check(
-        "mounts",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let shared = fixture.dir.path().join("shared");
@@ -362,7 +353,6 @@ fn mounts() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn bind_mounts() {
     check(
-        "bind-mounts",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let dir = fixture.dir.path().join("context");
@@ -414,7 +404,6 @@ fn bind_mounts() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn modes() {
     check(
-        "modes",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let dir = fixture.dir.path().join("context");
@@ -452,7 +441,6 @@ fn modes() {
 #[ignore = "needs Docker: run cargo xtask live docker"]
 fn reproducible() {
     check(
-        "reproducible",
         |fixture| {
             let mut builds = Builds::new(fixture);
             let dir = fixture.dir.path().join("context");

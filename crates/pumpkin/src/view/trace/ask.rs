@@ -5,13 +5,15 @@
 
 use std::collections::BTreeMap;
 
-use runtime::Record;
+use runtime::{CallerName, Record};
 use schema::ir::Sha256Digest;
+use serde::de::DeserializeOwned;
+use serde::de::value::{Error, StrDeserializer};
 use serde_json::{Value, json};
 
 use super::super::http::{Request, Response};
 use super::super::{Failed, Held, View, line_at};
-use super::json::{exchange_json, kept_json};
+use super::json::{EntryKind, exchange_json, kept_json};
 use super::{Address, Exchanges, TRACE_PASSES, Trace, diff, stats};
 
 /// The most bytes of a search's text: each search reads every entry of the trace.
@@ -20,26 +22,26 @@ const SEARCH_QUERY_BYTES: usize = 1024;
 /// What a request of a run's trace asks for, below `/api/runs/<id>/`.
 pub(in crate::view) enum Asked {
     Steps {
-        caller: String,
+        caller: CallerName,
         since: Option<u64>,
         log_epoch: Option<u64>,
     },
     Entries {
-        caller: String,
+        caller: CallerName,
         from: u64,
         to: u64,
         entry: usize,
-        kind: Option<String>,
+        kind: Option<EntryKind>,
         thread: Option<u64>,
     },
     Search {
-        caller: String,
+        caller: CallerName,
         query: String,
-        kind: Option<String>,
+        kind: Option<EntryKind>,
         thread: Option<u64>,
     },
     Entry {
-        caller: String,
+        caller: CallerName,
         request: u64,
         address: Address,
     },
@@ -54,15 +56,15 @@ pub(in crate::view) enum Asked {
         digest: Sha256Digest,
     },
     Stats {
-        caller: String,
+        caller: CallerName,
         by: stats::By,
     },
     Ops {
-        caller: String,
+        caller: CallerName,
     },
     /// A chunk of the trace's searchable text.
     SearchChunk {
-        caller: String,
+        caller: CallerName,
         chunk: usize,
     },
     Diff {
@@ -82,21 +84,28 @@ pub(in crate::view) enum Side {
 }
 
 /// What `parts`, the path's parts past the run's id, and `request` ask for; refused if nothing
-/// is there, or a number, caller or digest is none.
+/// is there, or a number, caller, kind or digest is none.
 #[expect(clippy::too_many_lines, reason = "an arm for each of its paths")]
 pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked, Response> {
     let bad = |message: String| Response::refused("400 Bad Request", &message);
     let caller = |caller: &str| {
-        // A job's caller is named by its number as the log writes it, so `job-01` is none.
-        let job = caller.strip_prefix("job-");
-        let canonical = |job: &str| job.parse::<u64>().is_ok_and(|n| n.to_string() == job);
-        if caller == "agent" || job.is_some_and(canonical) {
-            Ok(caller.to_owned())
-        } else {
-            Err(bad(format!(
+        // A caller has one name, as the log writes it, so `job-01` is none.
+        let parsed = named::<CallerName>(caller)
+            .ok()
+            .filter(|parsed| parsed.to_string() == caller);
+        parsed.ok_or_else(|| {
+            bad(format!(
                 "`{caller}` is no caller: expected `agent` or `job-<n>`"
-            )))
-        }
+            ))
+        })
+    };
+    let kind = || {
+        let Some(kind) = request.query("kind") else {
+            return Ok(None);
+        };
+        // serde's message lists the kinds there are.
+        let kind = named(kind).map_err(|error| bad(format!("`kind` is no entry's kind: {error}")));
+        kind.map(Some)
     };
     let number = |name: &str, value: &str| {
         value
@@ -128,7 +137,7 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
                 entry: (request.number("entry")?.unwrap_or(0))
                     .try_into()
                     .unwrap_or(usize::MAX),
-                kind: request.query("kind").map(str::to_owned),
+                kind: kind()?,
                 thread: request.number("thread")?,
             })
         }
@@ -143,7 +152,7 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
             Ok(Asked::Search {
                 caller: caller(who)?,
                 query: query.to_owned(),
-                kind: request.query("kind").map(str::to_owned),
+                kind: kind()?,
                 thread: request.number("thread")?,
             })
         }
@@ -231,6 +240,11 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
     }
 }
 
+/// `name` as a JSON string of it reads as a `T`, or why it names none.
+fn named<T: DeserializeOwned>(name: &str) -> Result<T, Error> {
+    T::deserialize(StrDeserializer::<Error>::new(name))
+}
+
 /// What a trace's request is answered with: JSON, or bytes as kept.
 pub(in crate::view) enum Answer {
     Json(Value),
@@ -275,12 +289,12 @@ impl View {
                 caller,
                 since,
                 log_epoch,
-            } => (caller.clone(), *since, *log_epoch),
+            } => (known(id, held, *caller)?, *since, *log_epoch),
             Asked::Entries { caller, .. }
             | Asked::Entry { caller, .. }
             | Asked::Search { caller, .. }
             | Asked::SearchChunk { caller, .. }
-            | Asked::Stats { caller, .. } => (caller.clone(), None, None),
+            | Asked::Stats { caller, .. } => (known(id, held, *caller)?, None, None),
             Asked::Diff { a, b, .. } => (caller_of(id, held, *a, *b)?, None, None),
             Asked::Exchange {
                 request,
@@ -292,7 +306,9 @@ impl View {
             } => {
                 return exchange_bytes(&held.record, &held.exchanges, *request, *part);
             }
-            Asked::Ops { caller } => return Ok(Answer::Json(held.ops.json(caller))),
+            Asked::Ops { caller } => {
+                return Ok(Answer::Json(held.ops.json(known(id, held, *caller)?)));
+            }
             Asked::Item { digest } => {
                 let bytes = held.record.kept_item(digest).map_err(Failed::NotFound)?;
                 return Ok(Answer::Bytes(Response::bytes(
@@ -323,7 +339,7 @@ impl View {
             trace = None;
         }
         let mut trace =
-            trace.unwrap_or_else(|| Trace::new(id.as_str(), &caller, held.log_epoch, held.made));
+            trace.unwrap_or_else(|| Trace::new(id.as_str(), caller, held.log_epoch, held.made));
         trace.extend(&held.record, &held.exchanges);
         let answer = trace.answer(held, asked);
         passes.push(trace);
@@ -353,7 +369,7 @@ impl Trace {
                 kind,
                 thread,
                 ..
-            } => Ok(self.entries_json(from, to, entry, kind.as_deref(), thread)),
+            } => Ok(self.entries_json(from, to, entry, kind, thread)),
             Asked::Entry {
                 request, address, ..
             } => self.entry_json(request, &address),
@@ -362,7 +378,7 @@ impl Trace {
                 kind,
                 thread,
                 ..
-            } => Ok(self.search_json(&query, kind.as_deref(), thread)),
+            } => Ok(self.search_json(&query, kind, thread)),
             Asked::SearchChunk { chunk, .. } => Ok(self.search_chunk_json(chunk)),
             Asked::Stats { by, .. } => Ok(self.stats_json(exchanges, prices, by)),
             Asked::Diff { a, b, part } => Ok(self.diff_json(&held.record, a, b, part)),
@@ -378,12 +394,37 @@ impl Trace {
     }
 }
 
+/// `caller`, refused unless it is the agent, or a job that run `id`'s log, held as `held`, names:
+/// as a call it started, or as the caller of a model request or an op.
+fn known(id: &provider::RunTag, held: &Held, caller: CallerName) -> Result<CallerName, Failed> {
+    let CallerName::Job(job) = caller else {
+        return Ok(caller);
+    };
+    let mut calls = (held.readout.progress.iter()).flat_map(|progress| &progress.calls);
+    // A log of a build that wrote no hard end has no progress, so no calls, but its requests
+    // and ops still name their callers.
+    let named = calls.any(|call| call.job == job)
+        || held
+            .exchanges
+            .by_request
+            .values()
+            .any(|said| said.caller == caller)
+        || held.ops.names(caller);
+    if !named {
+        return Err(Failed::NotFound(format!(
+            "run {}'s log names no job {job}: name `agent`, or a job of the run",
+            id.as_str()
+        )));
+    }
+    Ok(caller)
+}
+
 /// The caller of requests `a` and `b` of run `id`, held as `held`, or the refusal of two
 /// requests of different callers.
-fn caller_of(id: &provider::RunTag, held: &Held, a: u64, b: u64) -> Result<String, Failed> {
+fn caller_of(id: &provider::RunTag, held: &Held, a: u64, b: u64) -> Result<CallerName, Failed> {
     let caller_of = |request: u64| {
         let said = held.exchanges.by_request.get(&request);
-        said.map(|said| said.caller.clone()).ok_or_else(|| {
+        said.map(|said| said.caller).ok_or_else(|| {
             Failed::NotFound(format!(
                 "run {}'s log names no model request {request}",
                 id.as_str()

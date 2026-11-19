@@ -13,9 +13,11 @@
 //! path a request gives reaches the disk.
 //!
 //! A request is answered only if it names a loopback `Host` ([`http`]) and carries the token that
-//! `pumpkin view` printed, bar the page's own files; a cancel, the one request that changes
-//! anything, is also refused unless it comes from the page's own origin.
+//! `pumpkin view` printed, bar the page's own files; a run's cancel and the controller's start,
+//! the requests that change anything, are also refused unless they come from the page's own
+//! origin.
 
+mod asked;
 mod cancel;
 mod export;
 mod http;
@@ -28,10 +30,11 @@ mod trace;
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use provider::RunTag;
@@ -41,13 +44,14 @@ use rustix::io::Errno;
 use serde_json::{Value, json};
 use stdx::Context;
 
+use self::asked::{Asked, START, allowed, asked};
 pub(crate) use self::export::{Exported, exported};
 use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
-use crate::controller::Viewing;
-use crate::link::{Answer, Viewed};
+use crate::controller::{Unviewed, Viewing};
+use crate::link::Viewed;
 use crate::progress::{self, Listed};
 use crate::{cli, config, next, say};
 
@@ -81,7 +85,7 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     {
         let viewing = Viewing::reach(&client)?;
         let serving = format!("controller `{}`'s runs", viewing.name());
-        (Source::Controller(viewing), serving)
+        (Source::Controller(Box::new(viewing)), serving)
     } else {
         let (runs, named) = crate::runs_dir(runs)?;
         let serving = format!("the runs in {runs}");
@@ -125,7 +129,7 @@ impl Answering {
 
     /// The answer to a `GET` of `target`, as the page's requests are answered, with its body
     /// deflated if `deflate` and that is shorter.
-    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Answer {
+    pub(crate) fn answer(&mut self, target: &str, deflate: bool) -> Viewed {
         let response = match Request::get(target, deflate) {
             Ok(request) => api(&request, &mut self.0),
             Err(refused) => refused,
@@ -138,12 +142,12 @@ impl Answering {
             deflated,
             immutable: _,
         } = response.sent(deflate);
-        Answer::Viewed(Viewed {
+        Viewed {
             status: status.into_owned(),
             content_type: content_type.into_owned(),
             deflated,
             body,
-        })
+        }
     }
 }
 
@@ -161,7 +165,7 @@ enum Source {
     /// found by default.
     Here { view: View, runs_given: String },
     /// The controller's runs, which its `serve` answers requests for.
-    Controller(Viewing),
+    Controller(Box<Viewing>),
 }
 
 /// The runs of one directory, as the view reads them.
@@ -189,7 +193,17 @@ struct Row {
     record: Record,
     /// Whether the run ended as lost, which a record that later ends otherwise supersedes.
     lost: bool,
-    json: Value,
+    json: JsonRow,
+}
+
+/// A complete JSON value shared by the cache and the list page being assembled.
+#[derive(Clone)]
+struct JsonRow(Rc<str>);
+
+impl From<Value> for JsonRow {
+    fn from(row: Value) -> Self {
+        Self(row.to_string().into())
+    }
 }
 
 /// A run read so far: its record and the fold of its log, with what the replies are made from.
@@ -393,36 +407,6 @@ fn answer(stream: TcpStream, local: &mut Local) -> std::io::Result<()> {
     http::write(stream, response, deflate)
 }
 
-/// What a request to `/api/runs` asks for.
-enum Asked {
-    Runs {
-        before: Option<String>,
-    },
-    Run {
-        id: RunTag,
-    },
-    Since {
-        id: RunTag,
-        log: u64,
-        log_epoch: Option<u64>,
-    },
-    Log {
-        id: RunTag,
-        at: u64,
-        log_epoch: Option<u64>,
-    },
-    Cancel {
-        id: RunTag,
-    },
-    Cancelling {
-        id: RunTag,
-    },
-    Trace {
-        id: RunTag,
-        asked: trace::Asked,
-    },
-}
-
 /// Why a reply is not a `200`.
 enum Failed {
     NotFound(String),
@@ -488,20 +472,48 @@ fn route(request: &Request, local: &mut Local) -> Response {
     match (asked, &mut local.source) {
         (Asked::Cancel { id }, _) => local.cancel(&id),
         (Asked::Cancelling { id }, _) => local.cancels.said(&id),
+        (Asked::Start, Source::Here { runs_given, .. }) => Response::refused(
+            "404 Not Found",
+            &format!(
+                "this view serves the runs of a directory, `{runs_given}`, not a controller's: \
+                 start a controller by a command that reaches it, which starts it: pumpkin ls"
+            ),
+        ),
+        (Asked::Start, Source::Controller(viewing)) => match viewing.start() {
+            Ok(()) => {
+                let said = format!("controller `{}` is starting", viewing.name());
+                Response::json(&json!({ "said": said })).with_status("202 Accepted")
+            }
+            Err(error) => Response::refused("502 Bad Gateway", &error),
+        },
         (asked, Source::Here { view, .. }) => answered(asked, view),
-        (_, Source::Controller(viewing)) => {
-            let asked = viewing.ask(&request.target, request.deflate);
-            let asked = asked.map(|viewed| {
-                let Viewed {
-                    status,
-                    content_type,
-                    deflated,
-                    body,
-                } = viewed;
-                Response::relayed(status, content_type, body, deflated)
-            });
-            asked.unwrap_or_else(|error| Response::refused("502 Bad Gateway", &error))
+        (_, Source::Controller(viewing)) => asked_there(viewing, request),
+    }
+}
+
+/// The view on the controller's reply to `request`, a `GET` of the runs' data.
+fn asked_there(viewing: &mut Viewing, request: &Request) -> Response {
+    match viewing.ask(&request.target, request.deflate) {
+        Ok(viewed) => {
+            let Viewed {
+                status,
+                content_type,
+                deflated,
+                body,
+            } = viewed;
+            Response::relayed(status, content_type, body, deflated)
         }
+        Err(Unviewed::Stopped) => {
+            let stopped = format!(
+                "controller `{}` is stopped: start it by `POST {START}`, as the page's \
+                 \"Start it\" does, or run a command that reaches it, which starts it: pumpkin ls",
+                viewing.name()
+            );
+            let stopped = json!({ "error": stopped, "start": START });
+            Response::json(&stopped).with_status("503 Service Unavailable")
+        }
+        Err(Unviewed::Down(down)) => Response::refused("503 Service Unavailable", &down),
+        Err(Unviewed::Failed(error)) => Response::refused("502 Bad Gateway", &error),
     }
 }
 
@@ -515,10 +527,22 @@ fn api(request: &Request, view: &mut View) -> Response {
 
 fn answered(asked: Asked, view: &mut View) -> Response {
     let answered = match asked {
-        Asked::Runs { before } => view.runs_json(before.as_deref()),
+        Asked::Runs { before } => {
+            let reply = view.runs_json(before.as_deref());
+            view.drop_ended();
+            return reply.unwrap_or_else(Failed::response);
+        }
         Asked::Run { id } => view.run_json(&id),
         Asked::Since { id, log, log_epoch } => view.since_json(&id, log, log_epoch),
         Asked::Log { id, at, log_epoch } => view.log_json(&id, at, log_epoch),
+        // Never asked of a view on a controller, as the view that asks answers these itself.
+        Asked::Start => {
+            return Response::refused(
+                "404 Not Found",
+                "the view on a controller starts nothing: start it from the page that `pumpkin \
+                 view` serves",
+            );
+        }
         Asked::Cancel { id } | Asked::Cancelling { id } => {
             return Response::refused(
                 "404 Not Found",
@@ -543,110 +567,6 @@ fn answered(asked: Asked, view: &mut View) -> Response {
     }
 }
 
-fn asked(request: &Request) -> Result<Asked, Response> {
-    let path = request.path.as_str();
-    let not_found = || {
-        let message = format!(
-            "nothing is at `{path}`: expected the page at `/`, or the runs at `/api/runs` and \
-             below it"
-        );
-        Response::refused("404 Not Found", &message)
-    };
-    let bad = |message: String| Response::refused("400 Bad Request", &message);
-    let Some(api) = path.strip_prefix("/api/runs") else {
-        return Err(not_found());
-    };
-    let parts: Vec<&str> = api.split('/').collect();
-    let id = || match parts.get(1) {
-        Some(id) => RunTag::try_from((*id).to_owned()).map_err(bad),
-        None => Err(not_found()),
-    };
-    let byte = |name: &str| {
-        request.number(name)?.ok_or_else(|| {
-            bad(format!(
-                "give the byte of the log: `?{name}=<byte>`, 0 for its start"
-            ))
-        })
-    };
-    match parts[..] {
-        [""] => Ok(Asked::Runs {
-            before: request.query("before").map(str::to_owned),
-        }),
-        ["", _] => Ok(Asked::Run { id: id()? }),
-        ["", _, "since"] => Ok(Asked::Since {
-            id: id()?,
-            log: byte("log")?,
-            log_epoch: request.number("log_epoch")?,
-        }),
-        ["", _, "log"] => Ok(Asked::Log {
-            id: id()?,
-            at: byte("at")?,
-            log_epoch: request.number("log_epoch")?,
-        }),
-        ["", _, "cancel"] => Ok(Asked::Cancel { id: id()? }),
-        ["", _, "cancelling"] => Ok(Asked::Cancelling { id: id()? }),
-        [
-            "",
-            _,
-            "trace" | "exchange" | "item" | "payload" | "diff",
-            ..,
-        ] => Ok(Asked::Trace {
-            id: id()?,
-            asked: trace::asked(&parts[2..], request)?,
-        }),
-        _ => Err(not_found()),
-    }
-}
-
-fn allowed(
-    asked: &Asked,
-    request: &Request,
-    port: u16,
-    named: Option<&str>,
-) -> Result<(), Response> {
-    let refused = |status, message: String| Err(Response::refused(status, &message));
-    match (asked, request.method) {
-        (Asked::Cancel { id }, Method::Post) => {
-            // A cancel changes a run, so only the view's own page may send it: a page of another
-            // site can make the browser send a `POST` here, but the browser names that site in
-            // `Origin`, which the page can't change.
-            let page = http::HOSTS.map(|host| format!("http://{host}:{port}"));
-            let from = match &request.origin {
-                Some(origin) if page.contains(origin) => return Ok(()),
-                Some(origin) => format!("comes from `{origin}`, a page of another site"),
-                None => "carries no `Origin`, which a browser sends".to_owned(),
-            };
-            refused(
-                "403 Forbidden",
-                format!(
-                    "the cancel of run {} {from}: cancel it from the page that `pumpkin view` \
-                     serves, or run: {}",
-                    id.as_str(),
-                    next::of_run("cancel", named, id.as_str())
-                ),
-            )
-        }
-        (Asked::Cancel { id }, Method::Get) => refused(
-            "405 Method Not Allowed",
-            format!(
-                "run {} is cancelled by `POST`, which the page's cancel sends: cancel it there, \
-                 or run: {}",
-                id.as_str(),
-                next::of_run("cancel", named, id.as_str())
-            ),
-        ),
-        (_, Method::Post) => refused(
-            "405 Method Not Allowed",
-            format!(
-                "`{}` is read by `GET`: only a run's cancel, `/api/runs/<id>/cancel`, takes \
-                 `POST`",
-                request.path
-            ),
-        ),
-        (_, Method::Get) => Ok(()),
-    }
-}
-
 impl View {
     fn new(runs: PathBuf, named: Option<String>) -> Self {
         Self {
@@ -662,7 +582,7 @@ impl View {
         }
     }
 
-    fn runs_json(&mut self, before: Option<&str>) -> Result<Value, Failed> {
+    fn runs_json(&mut self, before: Option<&str>) -> Result<Response, Failed> {
         let names =
             if self.named.is_none() && !self.runs.try_exists().context(self.runs.display())? {
                 Vec::new()
@@ -678,19 +598,30 @@ impl View {
             let row = self
                 .row(name)
                 .or_else(|error| self.unread_row(name, error).map(Some))
-                .unwrap_or_else(|error| Some(json!({ "id": name, "error": error })));
+                .unwrap_or_else(|error| Some(json!({ "id": name, "error": error }).into()));
             rows.extend(row);
             if rows.len() == LIST_PAGE_RUNS {
                 break;
             }
         }
         let next = if page.next().is_some() { last } else { None };
-        Ok(json!({ "runs": rows, "next": next }))
+        // Append completed JSON values as Git's json_writer does. A cached row is already encoded.
+        // https://github.com/git/git/blob/5d826e972970a784bd7a7bdf587512510097b8c7/json-writer.c#L350-L355
+        let mut body = format!(r#"{{"next":{},"runs":["#, json!(next));
+        body.reserve(rows.iter().map(|row| row.0.len() + 1).sum::<usize>() + 2);
+        for (at, row) in rows.iter().enumerate() {
+            if at > 0 {
+                body.push(',');
+            }
+            body.push_str(&row.0);
+        }
+        body.push_str("]}");
+        Ok(Response::json_text(body))
     }
 
     /// The row of run `id`, whose record failed to read with `error`, as `ls` lists it when
     /// another build made the record; else `error`.
-    fn unread_row(&self, id: &str, error: ReadError) -> Result<Value, String> {
+    fn unread_row(&self, id: &str, error: ReadError) -> Result<JsonRow, String> {
         let listed = Listed::unread(&self.runs.join(id), error)?;
         let mut row = listed_json(
             id,
@@ -698,10 +629,10 @@ impl View {
         );
         row["requests"] = Value::Null;
         row["tokens"] = Value::Null;
-        Ok(row)
+        Ok(row.into())
     }
 
-    fn row(&mut self, id: &str) -> Result<Option<Value>, ReadError> {
+    fn row(&mut self, id: &str) -> Result<Option<JsonRow>, ReadError> {
         if let Some(row) = self.ended.get(id) {
             if !row.lost || row.record.ending()? == Some(Ending::Lost) {
                 return Ok(Some(row.json.clone()));
@@ -726,7 +657,7 @@ impl View {
         let named = self.named.clone();
         let held = self.looked(id, record)?;
         match &held.ending {
-            None => Ok(Some(live_row(held, named.as_deref()))),
+            None => Ok(Some(live_row(held, named.as_deref()).into())),
             Some(ending) => {
                 let ending = ending.clone();
                 let record = Record::open(held.record.dir())?;
@@ -735,7 +666,7 @@ impl View {
         }
     }
 
-    fn ended_row(&mut self, record: Record, ending: Ending) -> Result<Value, ReadError> {
+    fn ended_row(&mut self, record: Record, ending: Ending) -> Result<JsonRow, ReadError> {
         let named = self.named.as_deref();
         let now = crate::unix_now();
         let lost = ending == Ending::Lost;
@@ -771,6 +702,7 @@ impl View {
             row
         };
         let id = record.id().to_owned();
+        let json = JsonRow::from(json);
         let row = Row {
             record,
             lost,
@@ -796,14 +728,23 @@ impl View {
 
     fn record(&self, id: &str) -> Result<Record, Failed> {
         let dir = self.runs.join(id);
-        // Said without the runs directory, which is the server's, not the page's.
-        if !dir.try_exists().context(dir.display())? {
+        let path = dir.join("record.json");
+        let has = match path.try_exists() {
+            // A file is no run, as the list shows directories alone.
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+            has => has,
+        };
+        if !has.context(path.display())? {
+            // Said without the runs directory, which is the server's, not the page's.
             return Err(Failed::NotFound(format!(
                 "no run that this view serves matches `{id}`: name the id of one that its list \
                  shows"
             )));
         }
-        Record::open(&dir).map_err(|error| Failed::NotFound(error.into()))
+        Record::open(&dir).map_err(|error| match error {
+            ReadError::Form(error) => Failed::NotFound(error),
+            ReadError::Failed(error) => Failed::Unreadable(error),
+        })
     }
 
     /// Run `id`, held, or else of `record`, looked at again. Its fold is dropped if the look
@@ -847,33 +788,21 @@ impl View {
         if log == end && !live {
             return Ok(json!({ "end": end, "live": live }));
         }
-        if log == end {
+        let mut reply = if log == end {
             // A live run's clock goes on while its log is quiet, as on a long call.
-            return Ok(json!({
-                "end": end,
-                "live": live,
-                "run": run_json(held, named.as_deref(), again),
-            }));
-        }
-        let Window { records, past } = window(held, from)?;
-        Ok(json!({
-            "end": end,
-            "live": live,
-            "run": run_json(held, named.as_deref(), again),
-            "records": records,
-            "next": past,
-        }))
+            json!({ "end": end })
+        } else {
+            window_json(held, from)?
+        };
+        reply["live"] = json!(live);
+        reply["run"] = run_json(held, named.as_deref(), again);
+        Ok(reply)
     }
 
     fn log_json(&mut self, id: &RunTag, at: u64, log_epoch: Option<u64>) -> Result<Value, Failed> {
         let held = self.held(id)?;
         let at = line_at(held, at, log_epoch)?;
-        let Window { records, past } = window(held, at)?;
-        Ok(json!({
-            "records": records,
-            "next": past,
-            "end": held.fold.taken(),
-        }))
+        Ok(window_json(held, at)?)
     }
 
     /// Drops the folds of the runs that have ended, but the [`HELD_ENDED_RUNS`] read last.
@@ -934,28 +863,21 @@ fn line_at(held: &Held, byte: u64, log_epoch: Option<u64>) -> Result<usize, Fail
     })
 }
 
-/// Whole lines of a log, as records, and the byte at which the next window begins.
-struct Window {
-    records: Vec<Value>,
-    past: u64,
-}
-
-fn window(held: &Held, from: usize) -> Result<Window, String> {
+fn window_json(held: &Held, from: usize) -> Result<Value, String> {
+    let end = held.fold.taken();
     let starts = &held.lines[from..];
     let mut read = from..from;
     if let Some(&start) = starts.first() {
-        let ends = starts[1..].iter().copied().chain([held.fold.taken()]);
+        let ends = starts[1..].iter().copied().chain([end]);
         let within = ends.take_while(|end| end - start <= LOG_WINDOW_BYTES);
         read.end += within.count().max(1);
     }
-    Ok(Window {
-        past: held
-            .lines
-            .get(read.end)
-            .copied()
-            .unwrap_or(held.fold.taken()),
-        records: lines(held, read)?,
-    })
+    let next = held.lines.get(read.end).copied().unwrap_or(end);
+    let mut reply = json!({ "end": end, "next": next });
+    // Move the parsed records into the reply: `json!` would serialize each into a second tree.
+    // https://github.com/serde-rs/json/blob/44d9c53e2507636c0c2afee0c9c132095dddb7df/src/macros.rs#L277-L279
+    reply["records"] = Value::Array(lines(held, read)?);
+    Ok(reply)
 }
 
 fn lines(held: &Held, read: std::ops::Range<usize>) -> Result<Vec<Value>, String> {

@@ -25,7 +25,6 @@ use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
 use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
-use serde_json::json;
 use stdx::{Context, Deadline};
 
 mod agent;
@@ -57,9 +56,9 @@ use host::deadline;
 pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
 pub use interruption::{Signal, Stopped};
 pub use log::{
-    AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, Closed, Cost, Direction, LeaseSpan,
-    LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox, StartedOver,
-    TakenLine, Tokens, TokensCost, Unread, Used, Work, returned_values,
+    AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
+    LeaseSpan, LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox,
+    StartedOver, TakenLine, Tokens, TokensCost, Unread, Used, Work, returned_values,
 };
 use log::{Entry, Log, Targeted};
 use model::Served;
@@ -188,17 +187,7 @@ impl<'r, H: Host> Run<'r, H> {
             Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
             Err(error) => (failed_also(outcome, Err(error.into())), None),
         };
-        let mut recorded = match &outcome {
-            Ok(outcome) => {
-                let mut recorded = log::outcome_json(outcome);
-                recorded["state"] = "finished".into();
-                recorded
-            }
-            Err(Stopped::Failed(reason)) => json!({ "state": "failed", "reason": reason }),
-            Err(Stopped::Interrupted(signal)) => {
-                json!({ "state": "interrupted", "signal": signal.name() })
-            }
-        };
+        let mut recorded = log::outcome_json(&outcome);
         if let Some(usage) = usage {
             recorded["usage"] = usage;
         }
@@ -930,7 +919,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let mut notes = agent.freeze_and_collect(&dir, by);
         let collected = record::collected(&dir);
         notes.push(format!("collected from the agent's sandbox: {collected}"));
-        notes.iter().try_for_each(|note| self.log.note(note))
+        notes.iter().try_for_each(|note| self.log.note(note))?;
+        self.log.entry(Entry::AgentCollected)
     }
 
     fn sweep(&self) -> Result<(), String> {

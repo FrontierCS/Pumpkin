@@ -29,7 +29,6 @@ stdx = { path = "../stdx" }
 test-support = { path = "../test-support" }
 tls = { path = "../tls" }
 expect-test.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -46,19 +46,21 @@ driver is the one to read first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
-there over `ssh` through SSM, and follows, lists, stops, reaps and views the runs there. On the
-controller, `controller job` runs each run or build in a systemd unit of its own,
-`controller boot` reaps what lost runs left, and `controller serve` answers `ls` and `view`.
+there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
+there. The client's `controller serve` receives the files by content, starts jobs, streams
+their output, copies ended records and handles commands that inspect or stop runs. Each job runs
+in its own systemd unit. A job install publishes its `bin/pumpkin-boot` link with the build.
+On boot, systemd runs these entries so each build reaps the records it wrote.
 
-![The data between a machine and its controller, over ssh through SSM: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
+![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
 `sandboxd` (`crates/sandboxd`) is the supervisor in every sandbox, a static binary. Run under the
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
 (`providers/ec2/boot`) boots each instance of the EC2 provider.
 
 `cargo xtask` (`xtask`) holds the contributor tasks, which `cargo xtask --help` lists. A repository
-that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which downloads the release it pins,
-or builds Pumpkin from source, and runs it.
+that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which installs and runs the release
+it pins.
 
 The key types are `ir::Workflow`, a workflow as written; `workflow::Workflow`, parsed, and
 `Placed`, its roles placed in the classes of sandbox that providers offer; `Core`, a run's
@@ -390,16 +392,23 @@ sandboxes left, or fails.
 The command line and the controller's own side. `cli` parses the command line, `config` reads the
 machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
-starts the driver process. `run` starts a run and drives it in that process, `ending` follows a
-run and says how it ended, and `reaping` stops runs and removes what they left. `controller`
-reaches the controller over the connections that a workspace's commands share (`Reached`), over
-which its `send` sends a run's or a build's job, its `copy` copies an ended run's record back, its
-`listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there
-(`Viewing`), each over a `Link` that its `linking` opens, and its `commands` follow, stop and reap
-them; `link` is the protocol of a client's `Link` to `serve`, the controller's end, which answers
-`ls` and `view` and is of the client's own build, installed there by its executable's SHA-256;
-`manifest` is what `send` sends a task's tree as, by content, to the controller's store, `job` is
-the controller's side, with the prune and the slots that admit its builds and publishes
+starts the driver process. `run` starts a run and drives it in that process, `ending` follows a run
+and says how it ended, and `reaping` stops runs and removes what they left. `controller` reaches
+the controller, which its `aws` finds, starts and enrols this machine's key with, over a direct SSH
+connection a command keeps for its requests (`Reached`). The workspace saves its address and
+serialises repairs. Its `send` sends a run's or a build's job, sharing large task uploads by digest
+across up to four connections before starting the job on the first. Its `copy` receives an ended record
+file by file, with `record.json` last, its
+`listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
+`linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
+client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
+lists the jobs that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
+and is of the client's own build, installed there
+whole, its executable and the files beside it, by a SHA-256 of theirs;
+`manifest` describes the task tree and the client install that `send` transfers by content, and
+its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
+`start` starts each id once under the jobs' lock and keeps the install its unit runs, with the
+prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
 their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
 the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
@@ -433,12 +442,12 @@ keep it there in name. `Root`, the one `Loader`, refuses a symbolic link on the 
 providers, so the class a role is placed in never turns on the machine's memory. A configuration
 that names a provider of kind `docker` names no other (`Providers::new`).
 
-**Architecture Invariant:** a file enters a controller's store only once its SHA-256 is its name,
-checked under a name that no send writes, so that sends of one file at once, from other
-workspaces or machines, can make a job's start refuse it, as part written, but never put it in the
-store so. A job's tree is links into the store, beside its `.pumpkin`, which links to the
-controller's one workspace and which no path of a manifest is below, so a tree's files are those
-its manifest names. A client sends only what the store lacks, and no secret of a job's goes there.
+**Architecture Invariant:** each file in the controller's store has the SHA-256 that names it.
+A sender holds the partial file's lock while appending and checking its digest. A blob from the
+running install is checked on a private copy. Both are admitted under the store lock, which the
+prune also takes. The prune leaves active partials alone. A job's tree links to the store and
+its `.pumpkin` links to the controller's workspace, which no manifest path is below. A client
+sends only what the store lacks, and no secret of a job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
 or that the IR of a running job's started run names. Each job names what it holds in its directory
@@ -468,28 +477,13 @@ needs beside it; `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 
-The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. When the
-repository's `.pumpkinversion` pins a release by the checksum of its archive, it downloads the
-archive, checks it and unpacks it into the repository's `.pumpkin`; otherwise it fetches the
-commit that the file names, and a pinned toolchain, as its header says, and runs
-`cargo xtask install --root` into `.pumpkin`. A release's archive is kept as `<checksum>.tar.gz`
-in the user's cache, `pumpkin/` in `$XDG_CACHE_HOME` or `~/.cache`, so each release is downloaded
-once per user; a kept archive is checked again before it is unpacked. Then it runs the `pumpkin` it
-installed. Either way the install holds a git bundle of that commit, which the controller target
-sends, so a controller builds the same commit with no credentials of its own.
+The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. It verifies
+the release archive pinned by `.pumpkinversion` and unpacks it into a per-user cache keyed by
+checksum. It gives the binary the repository's `.pumpkin` as its workspace. A controller job
+runs the same install, uploaded by the client.
 
-**Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
-consumer builds what a checkout builds.
-
-### `.github/workflows`
-
-`release.yml` publishes a release when a tag is pushed. A runner builds `cargo xtask install` for
-`x86_64-unknown-linux-musl`, so `pumpkin` and `sandboxd` are static, adds the tag's git bundle, and
-publishes the result as `pumpkin-<tag>-x86_64-unknown-linux-musl.tar.gz` with its `.sha256`, which
-`deploy/pumpkin` downloads.
-
-**Architecture Invariant:** the archive is laid out as an install entry in `.pumpkin` is, `bin`
-and `pumpkin.bundle`, so `deploy/pumpkin` unpacks it in place.
+**Architecture Invariant:** `xtask` builds the binaries and lays out `bin` for releases and
+developer installs.
 
 ### `deploy/aws`
 
@@ -639,8 +633,9 @@ A run whose driver died is lost: its record has no `outcome.json` and no lock he
 provider that the record names, every sandbox tagged with the run that the provider lists, and
 every one that the record holds undeleted, listed or not, as one that has ended may still hold
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
-`pumpkin reap` reaps every ended or lost run, and a controller reaps at its boot, leaving to the
-hard end what it can't reach, such as Modal's sandboxes, whose credentials reach the controller
+`pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
+those left to other builds. The boot unit runs the registered builds and leaves to the hard end
+what it cannot reach, such as Modal's sandboxes, whose credentials reach the controller
 only with a job.
 
 ### Determinism and pinning
@@ -666,11 +661,11 @@ All that `pumpkin` writes on a machine is below its workspace's `.pumpkin` direc
 of its own that it is handed as it connects. Outside it are only the configuration and the tools'
 credentials, which it reads; the runs' records, where `--runs` names another directory; the files
 that `fmt` and `lock` rewrite, which their command lines name; the Docker engine's images and its
-ledger of CPUs, which every run on the engine shares; the cache of release archives that
-`deploy/pumpkin` keeps; and the machine's key to its controllers, with the host keys it pinned.
-On a controller, below the controller user's home, as the `job` module lays out, the jobs also
-keep the store of the files that clients sent, the trees of links into it and each job's own
-directory, and its `.pumpkin` keeps the installs of `serve` that the clients upload.
+ledger of CPUs, which every run on the engine shares; and the machine's key to its controllers,
+with the host keys it pinned. On a controller, below the controller user's home, as the `job`
+module lays out, the jobs also keep the store of the files that clients sent, the trees of links
+into it and each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the
+clients upload.
 
 ### Testing
 

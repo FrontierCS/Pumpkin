@@ -8,8 +8,7 @@
 )]
 #![expect(
     clippy::print_stderr,
-    reason = "a failed test shows where its scratch directory is, and one that can't remove its \
-              images says so"
+    reason = "a test says which image it can't remove, and why it skips"
 )]
 
 use std::borrow::Cow;
@@ -29,8 +28,7 @@ use engine::{ContextName, Engine};
 use expect_test::Expect;
 use serde_json::{Value, json};
 use stdx::process::Environment;
-use tempfile::TempDir;
-use test_support::{BUSYBOX, WORKFLOW, files};
+use test_support::{BUSYBOX, TestDir, WORKFLOW, files};
 
 mod build;
 mod cancel;
@@ -48,6 +46,10 @@ mod view;
 mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
+
+/// The directory of an `aws` that fails each call, which [`Scratch::program`] puts first on the
+/// `PATH` of each command.
+const POISON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/poison");
 
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
@@ -80,10 +82,11 @@ def final_call(target: Target, payload: Payload):
 
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
-/// Field `0` is its canonical path. A test that panics leaves the directory and prints where it
-/// is; one that ends and can't remove it fails, as a leftover would otherwise stay unseen:
-/// `TempDir` ignores what its removal fails with.
-struct Scratch(PathBuf, TempDir);
+/// Field `0` is its canonical path.
+struct Scratch(
+    PathBuf,
+    #[expect(dead_code, reason = "held for its drop, which removes it")] TestDir,
+);
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
@@ -100,11 +103,8 @@ const SUBMIT_BODY: &str = "<the body of submit.star>";
 const FINAL_BODY: &str = "<the body of final.star>";
 
 impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("pumpkin-{name}-"))
-            .tempdir()
-            .unwrap();
+    fn new() -> Self {
+        let dir = TestDir::new();
         // `run` refuses a runs directory below one that its group may write, which the umask, or a
         // setgid temporary directory, could make this one.
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
@@ -206,22 +206,12 @@ impl Scratch {
         let home = self.0.join("home");
         fs::create_dir_all(&home).unwrap();
         command.env("HOME", home);
+        // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
+        // own first on the `PATH` it gives.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let poisoned = iter::once(PathBuf::from(POISON)).chain(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(poisoned).unwrap());
         command
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if thread::panicking() {
-            self.1.disable_cleanup(true);
-            eprintln!("the test's scratch directory is {}", self.0.display());
-        } else if let Err(error) = fs::remove_dir_all(&self.0) {
-            self.1.disable_cleanup(true);
-            panic!(
-                "the scratch directory {} can't be removed: {error}",
-                self.0.display()
-            );
-        }
     }
 }
 
@@ -359,10 +349,16 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 }
 
 fn invocation(command: &Command) -> String {
-    // The home that `Scratch::program` gives each command, `<scratch>/home`, is the rule: it is not
-    // shown.
+    // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
+    // one that starts with `POISON`, are the rule: they are not shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
+        Some(value)
+            if name == "PATH"
+                && std::env::split_paths(value).next() == Some(PathBuf::from(POISON)) =>
+        {
+            None
+        }
         Some(value) => Some(format!("{}={} ", name.display(), value.display())),
         None => Some(format!("env --unset={} ", name.display())),
     });
@@ -1037,27 +1033,11 @@ fn this_build() -> Value {
     json!({ "version": version, "commit": commit })
 }
 
-/// `write_on` with a `docker` that says it has no context `gone`, as Docker's command line does.
-fn write_gone(scratch: &Scratch, id: &str, outcome: Option<Value>) -> String {
-    let docker = "#!/bin/sh\necho 'context \"gone\": context not found' >&2\nexit 1\n";
-    write_on(scratch, id, "gone", outcome, docker)
-}
-
-/// Writes the record of run `id` that ran on the Docker context `context`, with `docker` as the
-/// `docker` that `PATH` finds, and returns that `PATH`.
-fn write_on(
-    scratch: &Scratch,
-    id: &str,
-    context: &str,
-    outcome: Option<Value>,
-    docker: &str,
-) -> String {
+fn write_docker_record(scratch: &Scratch, id: &str, context: &str, outcome: Option<Value>) {
     write_record(scratch, id, true, outcome);
     let ready = json!({ "report": { "context": context } });
     let provided = json!({ "providers": { "local": ready } });
     scratch.write(&format!("runs/{id}/provider.json"), &provided);
-    scratch.write_executable("bin/docker", docker.as_bytes());
-    format!("{}:/usr/bin:/bin", scratch.0.join("bin").display())
 }
 
 /// Builds the images of `task` on the engine that `config` names, so that a `run` of it after
@@ -1152,11 +1132,16 @@ fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
     // its workspace by the path it runs from, this one.
     fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
-    // The formatter that `cargo xtask ci` names, which `pumpkin fmt` and `pumpkin check` run from
-    // beside the `pumpkin` that runs.
-    if let Some(buildifier) = std::env::var_os("PUMPKIN_BUILDIFIER") {
-        fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
-    }
+    // The pinned formatter, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin`
+    // that runs, by the link that `.cargo/config.toml` names.
+    let link = env!("PUMPKIN_BUILDIFIER");
+    let buildifier = fs::canonicalize(link).unwrap_or_else(|error| {
+        panic!(
+            "{link} doesn't lead to the formatter ({error}): make it with `cargo xtask \
+             install-tools`"
+        )
+    });
+    fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
     dir.join("pumpkin")
 }
 

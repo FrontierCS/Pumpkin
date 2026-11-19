@@ -9,6 +9,7 @@
 //! other field of its kind, or holds one in another form, doesn't read: its readers leave it out
 //! and say so ([`Unread`]), and never read it with defaults.
 
+use std::fmt;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -109,6 +110,7 @@ pub(super) enum Event {
     AgentFailed {
         reason: String,
     },
+    AgentCollected,
     OpArrived {
         request: Request,
     },
@@ -150,11 +152,11 @@ pub(super) enum Event {
     },
     Tick,
     ModelRequestStarted {
-        caller: Caller,
+        caller: CallerName,
         request: u64,
     },
     ModelAnswered {
-        caller: Option<Caller>,
+        caller: Option<CallerName>,
         request: u64,
         api: Option<Api>,
         model: Option<String>,
@@ -186,6 +188,7 @@ impl Event {
             | Self::AgentStarted
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
+            | Self::AgentCollected
             | Self::OpRefused
             | Self::CallStarted { .. }
             | Self::CallTimedOut { .. }
@@ -215,6 +218,7 @@ impl Event {
             | Self::AgentStarted
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
+            | Self::AgentCollected
             | Self::OpArrived { .. }
             | Self::OpRefused
             | Self::LeaseReady { .. }
@@ -360,7 +364,7 @@ pub(super) enum Action {
     },
     StartLease {
         lease: u64,
-        holder: Option<Caller>,
+        holder: Option<CallerName>,
         grant: String,
     },
     RunCommand {
@@ -411,13 +415,13 @@ pub enum Direction {
 }
 
 /// Who a model request or a lease belongs to, written and read as `agent` or `job-<n>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Caller {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CallerName {
     Agent,
     Job(u64),
 }
 
-impl From<decision::Caller> for Caller {
+impl From<decision::Caller> for CallerName {
     fn from(caller: decision::Caller) -> Self {
         match caller {
             decision::Caller::Agent => Self::Agent,
@@ -426,22 +430,28 @@ impl From<decision::Caller> for Caller {
     }
 }
 
-impl From<Caller> for SandboxName {
-    fn from(caller: Caller) -> Self {
+impl From<CallerName> for SandboxName {
+    fn from(caller: CallerName) -> Self {
         match caller {
-            Caller::Agent => Self::Agent,
-            Caller::Job(job) => Self::Job(job),
+            CallerName::Agent => Self::Agent,
+            CallerName::Job(job) => Self::Job(job),
         }
     }
 }
 
-impl Serialize for Caller {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&SandboxName::from(*self))
+impl fmt::Display for CallerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        SandboxName::from(*self).fmt(f)
     }
 }
 
-impl<'de> Deserialize<'de> for Caller {
+impl Serialize for CallerName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for CallerName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match SandboxName::deserialize(deserializer)? {
             SandboxName::Agent => Ok(Self::Agent),

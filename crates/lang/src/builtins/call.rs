@@ -1,13 +1,40 @@
-//! A call's arguments, evaluated, with the keyword ones read in one place, [`Call::keywords`],
-//! so that a reader takes those that `**` passes with those written by name.
+//! A call's method and arguments. The receiver binds its method before the arguments run, and
+//! [`Call::keywords`] reads the keywords passed by name and by `**` together.
 
 use alloc::format;
 use alloc::vec::Vec;
 
-use crate::builtins::origin;
+use super::{DictMethod, ModuleMethod, StringMethod, origin};
+use crate::eval::{Purpose, body};
 use crate::problem::Fault;
 use crate::syntax::Name;
-use crate::value::{Budget, Key, Kind, Span, Text, Value};
+use crate::value::{Budget, Dict, Key, Kind, Span, Text, Value};
+
+pub(crate) enum BoundMethod<'v> {
+    Dict(&'v Dict, DictMethod),
+    String(&'v str, &'v (Span, Value), StringMethod),
+    Module(ModuleMethod),
+    Hosted(body::Method),
+}
+
+impl BoundMethod<'_> {
+    pub(crate) fn call(
+        self,
+        name: &Name,
+        call: &Call<'_>,
+        purpose: &mut Purpose<'_>,
+    ) -> Result<Value, Fault> {
+        match self {
+            Self::Dict(dict, method) => method(&name.text, dict, call),
+            Self::String(text, receiver, method) => Ok(Value {
+                kind: method(&name.text, text, receiver, call)?,
+                span: call.at,
+            }),
+            Self::Module(method) => method(call),
+            Self::Hosted(method) => method.call(purpose, name, call),
+        }
+    }
+}
 
 // A call's arguments, evaluated.
 pub(crate) struct Call<'a> {

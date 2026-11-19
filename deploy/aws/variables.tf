@@ -101,6 +101,17 @@ variable "controller_volume_throughput" {
   default     = 500
 }
 
+variable "ssh_from" {
+  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as the person's machine's private address as a `/32`: `pumpkin` reaches the controller at its private address, from the controller's VPC or a network routed to it. None by default, so no `pumpkin` reaches the controller."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.ssh_from : can(cidrnetmask(cidr))])
+    error_message = "An entry of `ssh_from` is not an IPv4 CIDR: give one such as `10.0.1.23/32`."
+  }
+}
+
 variable "client_roles" {
   description = "The names of the IAM roles of the person's machine, each of which gets the client policy; leave empty when the roles live elsewhere and an administrator attaches `client_policy_arn` by hand."
   type        = list(string)

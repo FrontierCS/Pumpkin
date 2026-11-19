@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 616" width="880" height="616" role="img" aria-labelledby="title desc">
 <title id="title">The programs and machines of a run</title>
-<desc id="desc">The operator's pumpkin starts the driver, one process for each run, on the operator's machine or, over ssh through SSM, on the controller. In the driver, the runtime, the decision core, the gateway, the model route and the providers work together; the providers create the sandboxes of the agent, of the targets that a call starts afresh and of the runners that a session leases, each of which has one session with the gateway, and the route sends the requests it admits to the model provider.</desc>
+<desc id="desc">The operator's pumpkin starts the driver, one process for each run, on the operator's machine or, over ssh, on the controller. In the driver, the runtime, the decision core, the gateway, the model route and the providers work together; the providers create the sandboxes of the agent, of the targets that a call starts afresh and of the runners that a session leases, each of which has one session with the gateway, and the route sends the requests it admits to the model provider.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -27,7 +27,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="code mid" x="312" y="52">pumpkin</text><text class="note mid" x="312" y="70">the command line</text>
 <path class="arrow" d="M312 82V199" marker-end="url(#head)"/>
 <text class="note" x="322" y="119"><tspan class="code">pumpkin run</tspan> starts the driver on this machine, or on</text>
-<text class="note" x="322" y="135">the controller, which it reaches over ssh through SSM</text>
+<text class="note" x="322" y="135">the controller, which it reaches over ssh</text>
 
 <rect class="zone" x="16" y="150" width="596" height="366" rx="12"/>
 <text class="zone-label" x="32" y="172">THE DRIVER'S MACHINE</text>

@@ -25,8 +25,8 @@ use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox};
 use serde_json::{Value, json};
 use stdx::Deadline;
-use test_support::HUNG;
 use test_support::http::read_request;
+use test_support::{HUNG, TestDir};
 
 mod kept;
 mod read;
@@ -119,12 +119,8 @@ fn check(cases: &[(&str, Request)], expect: &Expect) {
     reason = "it runs a session, a stand-in and each case's exchange in one place"
 )]
 fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Expect) {
-    // Kept if the test fails.
-    let dir = tempfile::Builder::new()
-        .prefix(&format!("route-{}-", thread::current().name().unwrap()))
-        .tempdir()
-        .unwrap()
-        .keep();
+    let scratch = TestDir::new();
+    let dir = scratch.path();
     let stand_in = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = stand_in.local_addr().unwrap().to_string();
     let (receipts, received) = mpsc::channel();
@@ -152,7 +148,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     };
     let entries: Vec<(Route, Upstream)> = entries.iter().map(entry).collect();
     // Its sockets fit in a socket's address by this path to their directory.
-    let (_sockets, registration, socket) = meeting(&dir);
+    let (_sockets, registration, socket) = meeting(dir);
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
@@ -205,7 +201,6 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .collect();
     expect.assert_eq(&lines.join("\n").replace(&address, "<stand-in>"));
     drop(session);
-    fs::remove_dir_all(dir).unwrap();
 }
 
 /// Keeps of an exchange only the names of the headers that the route left behind.
@@ -714,6 +709,10 @@ fn chat_closure() {
             ("the client's", chat(|_| {})),
             ("not stored", chat(|body| body["store"] = json!(false))),
             ("stored", chat(|body| body["store"] = json!(true))),
+            ("not JSON", {
+                let (method, path, headers, _) = chat(|_| {});
+                (method, path, headers, b"{".to_vec())
+            }),
             (
                 "web search",
                 chat(|body| body["web_search_options"] = json!({})),
@@ -739,6 +738,7 @@ fn chat_closure() {
             the client's: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "355"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-stainless-lang"]
             not stored: went upstream, as POST /v1/chat/completions HTTP/1.1 with [("accept-encoding", "identity"), ("content-length", "369"), ("host", "<stand-in>"), ("content-type", "application/json"), ("accept", "application/json"), ("user-agent", "OpenAI/Python 1.99.0"), ("authorization", "Bearer sk-test-0123")] and the body as sent, leaving ["x-stainless-lang"]
             stored: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`store` is not false: leave it out, or set it to false, since the route keeps nothing on the provider's side","param":null,"type":"invalid_request_error"}}
+            not JSON: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the body is not a JSON object (EOF while parsing an object at line 1 column 1): send one","param":null,"type":"invalid_request_error"}}
             web search: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"`web_search_options` has the provider search the web, which the route refuses: leave it out","param":null,"type":"invalid_request_error"}}
             a hosted tool: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the tool `web_search_preview` runs on the provider's side, which the route refuses: declare client-side tools only (function or custom)","param":null,"type":"invalid_request_error"}}
             a hosted tool chosen: 400 [("content-type", "application/json")] {"error":{"code":null,"message":"the tool choice `web_search_preview` names a tool that runs on the provider's side, which the route refuses: choose `auto`, `none`, `required`, or a client-side tool (function, custom or allowed_tools)","param":null,"type":"invalid_request_error"}}

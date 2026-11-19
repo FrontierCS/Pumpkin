@@ -9,36 +9,32 @@ page says what each is for and how they fit.
 ## Installing
 
 A repository of tasks runs Pumpkin through `./pumpkin`, a copy of `deploy/pumpkin`, beside a
-`.pumpkinversion` file of one line: the Pumpkin tag to run, the full commit that the tag must
-name, and the SHA-256 checksum of the tag's release archive. The checksum is the first word of the
-`.sha256` file beside the archive on the release's page, under
-<https://github.com/FrontierCS/Pumpkin/releases>.
+one-line `.pumpkinversion` containing the release tag, its full commit and the SHA-256 checksum
+of its archive. Copy the checksum from the first word of the `.sha256` file on the release page.
+[Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases)
 
 ```console
-$ cp ../Pumpkin/deploy/pumpkin ./pumpkin
-$ echo "<tag> <commit> <checksum>" > .pumpkinversion
+$ tag='<tag>'
+$ curl --fail --location --proto '=https' --output pumpkin \
+    "https://raw.githubusercontent.com/FrontierCS/Pumpkin/$tag/deploy/pumpkin"
+$ chmod +x pumpkin
+$ printf '%s %s %s\n' "$tag" '<commit>' '<checksum>' > .pumpkinversion
 $ ./pumpkin --version
 ```
 
-The first run downloads the release's archive, checks its SHA-256 against the checksum, unpacks it
-and runs it; later runs start the unpacked one at once. A release is downloaded once per user: the
-archive is kept in `${XDG_CACHE_HOME:-~/.cache}/pumpkin/`, and another repository that pins the same
-release checks it again and unpacks it. It needs Linux on x86-64, curl or wget, `sha256sum`, tar
-and TLS certificates, and names the packages to install if one is missing.
+The first run downloads the archive, verifies its checksum and unpacks the release under
+`${XDG_CACHE_HOME:-$HOME/.cache}/pumpkin/`. Every repository that pins the same release runs it
+from that cache. Installing an uncached release on Linux x86-64 needs curl or wget, `sha256sum`,
+tar, xz, `flock` from util-linux and TLS certificates.
 
-With no checksum, the first run builds Pumpkin from source instead, for a tag that has no release
-or a change to try: it fetches the tag and checks that it names that commit, downloads a pinned
-Rust toolchain's installer and checks its SHA-256, builds Pumpkin and runs it. That needs git and
-a C linker as well, and about 1.5 GB. `./pumpkin --pumpkin-repository=<url> …`, as its first
-argument, builds from source fetched from another repository, such as a local clone, whatever
-`.pumpkinversion` holds after the commit.
+To update a two-word pin, choose a published release and write its tag, full commit and checksum.
+To build a checkout for development, run `cargo xtask install` from it and use its
+`.pumpkin/bin/pumpkin`.
 
-What Pumpkin writes for a repository is below `.pumpkin/` beside `./pumpkin`: the build, the
-runs' records in `.pumpkin/runs/`, and what builds and providers keep. It ignores itself in git,
-and deleting it loses only the records and the build. Outside it are only the Docker engine's
-images, the cache of release archives, the records of a run whose `--runs` names another
-directory, the files that `fmt` and `lock` rewrite, and the ssh key that a machine keeps for its
-controller, in `~/.config/pumpkin/ssh/`.
+The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/` and the state
+its builds and providers keep. The directory ignores itself in Git. The shared release cache,
+Docker engine's images, records written to an explicit `--runs` directory, files `fmt` and
+`lock` rewrite, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live elsewhere.
 
 ## The machine's configuration
 
@@ -150,8 +146,9 @@ shows.
 
 `pumpkin cancel <run>` stops a run: the driver deletes the run's sandboxes, and the run's outcome
 says which signal ended it. A run whose driver died is lost; `cancel` removes what it left, and
-`pumpkin reap` does so for every run that has ended. Every sandbox also ends by its run's hard
-end, which the workflow's bounds give, even if nothing reaps it.
+`pumpkin reap` does so for ended runs. On a controller it reaps the runs made by this build
+and names those left to other builds. Every sandbox also ends by its run's hard end, which the
+workflow's bounds give, even if nothing reaps it.
 
 ## What a command prints next
 

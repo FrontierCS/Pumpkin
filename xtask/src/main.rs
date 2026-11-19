@@ -11,15 +11,15 @@
     reason = "a command line reports on its standard output and error"
 )]
 
+use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::{env, iter};
 
-use xshell::{Cmd, Shell};
+use xshell::{Cmd, Shell, cmd};
 
 mod diff;
 mod figure;
@@ -33,8 +33,7 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The target that the static `sandboxd` and `ec2-boot` are built for, and that `install --target`
-/// builds a static `pumpkin` for.
+/// The target of the static binaries in an install.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
 /// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
@@ -103,19 +102,19 @@ mod flags {
             /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
             /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
             /// which `pumpkin fmt` and `pumpkin check` run; prints each path. It runs on Linux
-            /// on x86-64 alone, the one platform buildifier is pinned for. `pumpkin` is built for
-            /// the host, unless `--target` names another, as a release's static build does.
+            /// on x86-64 alone, the platform the tools are pinned for.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
-                /// The target that `pumpkin` is built for, as cargo's `--target`: the host by
-                /// default. `x86_64-unknown-linux-musl` builds it static, which needs a musl C
-                /// compiler for `ring` and `mimalloc`: `CC_x86_64_unknown_linux_musl=musl-gcc`.
+                /// The target for `pumpkin`, as in cargo's `--target`. The default is
+                /// `x86_64-unknown-linux-musl`, built static with Zig as its C compiler.
                 optional --target triple: String
             }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
-            /// listed in `mutants.out`, is a finding to read, not a failure.
+            /// listed in `mutants.out`, is a finding to read, not a failure. Given paths whose
+            /// source the changes leave as it is, it mutates that source whole, and names the
+            /// mutants missed that the tests of the merge base catch.
             cmd mutants {
                 /// The paths whose changes alone are taken, if any are given.
                 repeated paths: PathBuf
@@ -135,8 +134,9 @@ mod flags {
             }
 
             /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
-            /// pinned version, and fetches each that its project releases as a file, such as
-            /// TypeScript's compiler, into the target directory.
+            /// pinned version, fetches each that its project releases as a file, such as
+            /// TypeScript's compiler, into the target directory, and links the pinned buildifier
+            /// where the tests find it, `bin/buildifier`.
             cmd install-tools {}
         }
     }
@@ -279,7 +279,7 @@ fn try_main() -> Result<()> {
             Ok(())
         }
         flags::XtaskCmd::Install(flags::Install { root, target }) => {
-            install(&cargo, root, target.as_deref())
+            install(&cargo, root, target.as_deref().unwrap_or(MUSL))
         }
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
@@ -287,7 +287,10 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Refill(flags::Refill { package, filter }) => {
             refill(&cargo, &package, filter.as_deref())
         }
-        flags::XtaskCmd::InstallTools(flags::InstallTools) => tools::install(&cargo),
+        flags::XtaskCmd::InstallTools(flags::InstallTools) => {
+            tools::install(&cargo)?;
+            star::link(&cargo).map(drop)
+        }
     }
 }
 
@@ -335,19 +338,8 @@ fn root() -> &'static Path {
     root
 }
 
-/// `tests`, a command that runs tests, with the environment they need: `PATH` with `xtask/poison`
-/// first, whose `aws` fails, so that none reaches AWS, then xtask's own; and
-/// `PUMPKIN_BUILDIFIER`, the pinned formatter ([`star::buildifier`]), which pumpkin's tests put
-/// beside each `pumpkin` they run, where `pumpkin fmt` and `pumpkin check` find it.
-fn tested<'a>(cargo: &Cargo, tests: Cmd<'a>) -> Result<Cmd<'a>> {
-    let path = env::var_os("PATH").unwrap_or_default();
-    let poisoned = iter::once(root().join("xtask/poison")).chain(env::split_paths(&path));
-    let tests = tests.env("PATH", env::join_paths(poisoned)?);
-    Ok(tests.env("PUMPKIN_BUILDIFIER", star::buildifier(cargo)?))
-}
-
 /// Runs the checks every change must pass, in order, and stops at the first that fails. The
-/// tests ([`tested`]) leave out those ignored, which [`live::docker`] runs.
+/// tests leave out those ignored, which [`live::docker`] runs.
 fn ci(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     cargo.fmt().arg("--check").run()?;
@@ -358,14 +350,12 @@ fn ci(cargo: &Cargo) -> Result<()> {
     let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
     doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
     page::check(cargo)?;
-    let buildifier = star::buildifier(cargo)?;
+    let buildifier = star::link(cargo)?;
     let pumpkin = tests_pumpkin(cargo)?;
     star::place(&buildifier, &pumpkin)?;
     star::check(&cargo.sh, &pumpkin)?;
     let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
-    let test = tested(cargo, test)?;
     let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
-    let doctests = tested(cargo, doctests)?;
     // ci checks snapshots, never rewrites them.
     tests(
         test.env_remove("UPDATE_EXPECT"),
@@ -412,23 +402,27 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
     Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
 }
 
-/// Runs the tests of `package`, those whose names hold `filter` if it is given, with the
-/// environment `ci` gives them ([`tested`]) and `UPDATE_EXPECT=1`, which rewrites each snapshot
-/// that differs; then prints `git diff --stat`, also if a test failed.
+/// Runs the tests of `package`, those whose names hold `filter` if it is given, with
+/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs; then prints `git diff --stat`,
+/// also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
+    star::link(cargo)?;
     let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
-    let test = tested(cargo, test.args(filter))?.env("UPDATE_EXPECT", "1");
+    let test = test.args(filter).env("UPDATE_EXPECT", "1");
     let ran = test.run();
     cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
     Ok(ran?)
 }
 
 /// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
-/// `paths` alone if there are any. Missed mutants and timeouts are findings, not failures.
+/// `paths` alone if there are any. If the changes leave the source below `paths` as it is, it
+/// mutates that source whole, then runs the mutants missed again on the merge base, to name those
+/// that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
 fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     tools::require(cargo, tools::MUTANTS)?;
     tools::require(cargo, tools::NEXTEST)?;
+    let buildifier = star::link(cargo)?;
     let mut again = "cargo xtask mutants".to_owned();
     for path in paths {
         again = format!("{again} {}", path.display());
@@ -436,11 +430,80 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     if let Some(rev) = rev {
         again = format!("{again} --in-diff {rev}");
     }
-    let diff = diff::since(&cargo.sh, rev.unwrap_or("origin/main"), paths, &again)?;
-    let scratch = cargo.sh.create_temp_dir()?;
+    let sh = &cargo.sh;
+    let rev = rev.unwrap_or("origin/main");
+    let base = cmd!(sh, "git merge-base {rev} HEAD").read()?;
+    let diff = diff::since(sh, &base, paths, &again)?;
+    let scratch = sh.create_temp_dir()?;
     let diff_path = scratch.path().join("changes.diff");
-    cargo.sh.write_file(&diff_path, diff)?;
-    let run = tested(cargo, cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path))?;
+    sh.write_file(&diff_path, diff)?;
+    // A glob with a slash matches the whole path in cargo-mutants, so a directory needs its `**`.
+    let files = paths
+        .iter()
+        .flat_map(|path| [path.clone(), path.join("**")]);
+    let files: Vec<_> = files
+        .flat_map(|glob| ["--file".into(), glob.into_os_string()])
+        .collect();
+    let whole = !paths.is_empty() && unchanged(cargo, &base, &files)?;
+    let run = if whole {
+        cargo.cmd(&["mutants"]).args(&files)
+    } else {
+        cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path)
+    };
+    let report = root().join("mutants.out");
+    if !missed(run, &again)? {
+        return Ok(());
+    }
+    if !whole {
+        println!(
+            "xtask: the mutants cargo-mutants missed or timed out on are findings, listed in \
+             `{}` with their diffs",
+            report.display()
+        );
+        return Ok(());
+    }
+    // The source is as it is on `base`, so each mutant there has the name it has here, and
+    // `--iterate` tests there only those that weren't caught or unviable here.
+    let archive = scratch.path().join("base.tar");
+    cmd!(sh, "git archive --output {archive} {base}").run()?;
+    let tree = sh.create_dir(scratch.path().join("base"))?;
+    cmd!(sh, "tar --extract --file {archive} --directory {tree}").run()?;
+    // Its tests find the formatter by the link in their own tree, which the archive doesn't hold.
+    let bin = sh.create_dir(tree.join("bin"))?;
+    std::os::unix::fs::symlink(&buildifier, bin.join("buildifier"))?;
+    let run = cargo.cmd(&["mutants", "--iterate", "--dir"]).arg(&tree);
+    missed(run.arg("--output").arg(root()).args(&files), &again)?;
+    let brought = sh.read_file(report.join("caught.txt"))?;
+    let brought = if brought.is_empty() {
+        "none\n"
+    } else {
+        &brought
+    };
+    println!(
+        "xtask: the mutants cargo-mutants missed or timed out on are listed in `{}` with their \
+         diffs; the changes left these uncaught, which the tests on {base} catch:\n{brought}",
+        root().join("mutants.out.old").display()
+    );
+    Ok(())
+}
+
+/// Whether the source files that `files`, cargo-mutants' `--file` arguments, select are the same
+/// in the working tree as on `base`, and there are any.
+fn unchanged(cargo: &Cargo, base: &str, files: &[OsString]) -> Result<bool> {
+    let listed = cargo.cmd(&["mutants", "--list-files"]).args(files).read()?;
+    let sources: Vec<&str> = listed.lines().collect();
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let sh = &cargo.sh;
+    let diff = cmd!(sh, "git diff --quiet {base} -- {sources...}")
+        .quiet()
+        .ignore_status();
+    Ok(diff.output()?.status.success())
+}
+
+/// Runs `run`, a cargo-mutants command, and returns whether it missed a mutant or one timed out.
+fn missed(run: Cmd<'_>, again: &str) -> Result<bool> {
     // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
     // cargo would take a mutant's artifacts as fresh for the unmutated tree.
     let run = run.env("CARGO_TARGET_DIR", "target");
@@ -448,17 +511,9 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let status = Command::from(run).status();
     let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
     match status.code() {
-        Some(0) => Ok(()),
+        Some(0) => Ok(false),
         // cargo-mutants exits with 2 when it missed a mutant and with 3 when one timed out.
-        Some(2 | 3) => {
-            let report = root().join("mutants.out");
-            println!(
-                "xtask: the mutants cargo-mutants missed or timed out on are findings, listed in \
-                 `{}` with their diffs",
-                report.display()
-            );
-            Ok(())
-        }
+        Some(2 | 3) => Ok(true),
         _ => Err(format!(
             "`{line}` ended with {status}: fix what it printed above, and run `{again}` again"
         )
@@ -483,16 +538,21 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
 /// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
 /// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    release(cargo, "ec2-boot", &["--target", MUSL])?;
-    release(cargo, "sandboxd", &["--target", MUSL])
+    release(cargo, "ec2-boot", MUSL)?;
+    release(cargo, "sandboxd", MUSL)
 }
 
-/// Builds the release binary of `package`, which has its name, with the cargo arguments `args`,
+/// Builds the release binary of `package`, which has its name, for `target`,
 /// and returns the path cargo reports for it, so that the path is right wherever cargo's
 /// configuration puts the target directory.
-fn release(cargo: &Cargo, package: &str, args: &[&str]) -> Result<PathBuf> {
+fn release(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
     let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
-    let build = build.args(args);
+    let build = build.args(["--target", target]);
+    let build = if package == "pumpkin" && target == MUSL {
+        tools::musl_cc(cargo, build)?
+    } else {
+        build
+    };
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
@@ -527,12 +587,12 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin`, for `target` if given, else the host, and the static `sandboxd` and
-/// `ec2-boot`, and installs them, with the Modal provider's helper and its lock, and the pinned
+/// Builds `pumpkin` for `target` and the static `sandboxd` and `ec2-boot`, and installs them
+/// with the Modal provider's helper and its lock, and the pinned
 /// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
 /// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
 /// `root`, says if `<root>/bin` is not on `PATH`.
-fn install(cargo: &Cargo, root: Option<PathBuf>, target: Option<&str>) -> Result<()> {
+fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -541,12 +601,8 @@ fn install(cargo: &Cargo, root: Option<PathBuf>, target: Option<&str>) -> Result
     // The Modal provider's helper and its lock, which `pumpkin` finds beside it, under the
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
-    let target_args: &[&str] = match target {
-        Some(target) => &["--target", target],
-        None => &[],
-    };
     let mut built = vec![
-        ("pumpkin", release(cargo, "pumpkin", target_args)?, 0o755),
+        ("pumpkin", release(cargo, "pumpkin", target)?, 0o755),
         ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
     let sandboxd = sandboxd(cargo)?;
