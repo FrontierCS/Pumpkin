@@ -415,7 +415,7 @@ pub enum Direction {
 }
 
 /// Who a model request or a lease belongs to, written and read as `agent` or `job-<n>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CallerName {
     Agent,
     Job(u64),

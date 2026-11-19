@@ -343,7 +343,7 @@ fn build_output() {
 }
 
 #[test]
-#[ignore = "builds the static sandboxd: run cargo xtask live docker"]
+#[ignore = "runs the installed pumpkin in an empty image: run cargo xtask live docker"]
 fn install_root() {
     let held = TestDir::new();
     let root = held.path();
@@ -367,10 +367,21 @@ fn install_root() {
         <root>/bin/pumpkin-modal.py.lock
         "#]]
     .assert_eq(&printed);
-    let pumpkin = root.join("bin/pumpkin");
-    let headers = sh.cmd("readelf").arg("-lW").arg(&pumpkin).read().unwrap();
-    assert!(!headers.split_whitespace().any(|field| field == "INTERP"));
-    sh.cmd(pumpkin).arg("--version").run().unwrap();
+    fs::write(
+        root.join("Dockerfile"),
+        "FROM scratch\nCOPY bin/pumpkin /pumpkin\nRUN [\"/pumpkin\", \"--version\"]\n",
+    )
+    .unwrap();
+    let built = test_support::docker()
+        .args(["build", "--output=type=cacheonly"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
 }
 
 /// The paths of the files below `dir`, relative to it, sorted.

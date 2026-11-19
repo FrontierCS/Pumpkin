@@ -246,7 +246,7 @@ impl Parser<'_> {
             return Err(Fault::new(self.peek().span, message));
         }
         let span = self.advance();
-        let message = if matches!(self.peek().kind, TokenKind::Name(_)) {
+        let message = if matches!(self.peek().kind, TokenKind::Name) {
             refusal("`*args`", "take the values in a list")
         } else if again {
             String::from("this is a second `*`: mark the keyword-only parameters with one")
@@ -433,15 +433,7 @@ impl Parser<'_> {
         }
         let mut names = Vec::new();
         while self.eat_punct(Punct::Comma) && !self.at_punct(Punct::RightParen) {
-            let alias = match (&self.peek().kind, self.peek_next()) {
-                (TokenKind::Name(alias), Some(TokenKind::Punct(Punct::Eq))) => Some(alias.clone()),
-                _ => None,
-            };
-            let local = alias.map(|alias| {
-                let span = self.advance();
-                self.advance();
-                Name { text: alias, span }
-            });
+            let local = self.keyword_name();
             let (text, span) = self.string("a name to load, as `\"x\"` or `y = \"x\"`")?;
             let remote = Name { text, span };
             let local = local.unwrap_or_else(|| Name {
@@ -530,11 +522,23 @@ impl Parser<'_> {
         Err(self.depth)
     }
 
+    fn keyword_name(&mut self) -> Option<Name> {
+        let (TokenKind::Name, Some(TokenKind::Punct(Punct::Eq))) =
+            (&self.peek().kind, self.peek_next())
+        else {
+            return None;
+        };
+        let text = self.spelling().into();
+        let span = self.advance();
+        self.advance();
+        Some(Name { text, span })
+    }
+
     fn name(&mut self, expected: &str) -> Result<Name, Fault> {
-        let TokenKind::Name(text) = &self.peek().kind else {
+        let TokenKind::Name = self.peek().kind else {
             return Err(self.unexpected(expected));
         };
-        let text = text.clone();
+        let text = self.spelling().into();
         Ok(Name {
             text,
             span: self.advance(),
@@ -547,6 +551,11 @@ impl Parser<'_> {
         };
         let text = String::from(&**text);
         Ok((text, self.advance()))
+    }
+
+    fn spelling(&self) -> &str {
+        let span = self.peek().span;
+        &self.text[span.start..span.end]
     }
 
     fn peek(&self) -> &Token {
@@ -594,13 +603,13 @@ impl Parser<'_> {
         let Token { kind, span } = self.peek();
         let found = match kind {
             // The lexer's refusal ends the tokens, so it is the first fault.
-            TokenKind::Error(message) => return Fault::new(*span, message.clone()),
-            TokenKind::Name(_)
+            TokenKind::Error(message) => return Fault::new(*span, String::from(message.as_ref())),
+            TokenKind::Name
             | TokenKind::Int(_)
             | TokenKind::Float(_)
             | TokenKind::Keyword(_)
             | TokenKind::Punct(_) => {
-                format!("`{}`", &self.text[span.start..span.end])
+                format!("`{}`", self.spelling())
             }
             TokenKind::Str(_) => String::from("string"),
             TokenKind::Newline => String::from("end of line"),

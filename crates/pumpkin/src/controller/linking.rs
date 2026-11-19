@@ -1,9 +1,11 @@
 //! One SSH connection to this build's `serve`. A command keeps it for all its requests.
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
+use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
-use std::{fs, thread};
 
 use schema::ir::Sha256Digest;
 use stdx::{Context as _, Deadline};
@@ -26,8 +28,8 @@ const BESIDE: [&str; 5] = [
 /// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
 /// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
+    files: Vec<(&'static str, PathBuf)>,
     pub(super) hashed: manifest::Hashed,
-    key: Sha256Digest,
 }
 
 impl Build {
@@ -42,9 +44,9 @@ impl Build {
             }
         }
         let mut entries = Vec::new();
-        let mut sources = std::collections::BTreeMap::new();
-        for (name, path) in files {
-            let (digest, size_bytes) = manifest::file_sha256(&path)?;
+        let mut sources = BTreeMap::new();
+        for &(name, ref path) in &files {
+            let (digest, size_bytes) = manifest::file_sha256(path)?;
             let kind = match name {
                 "pumpkin-modal.py" | "pumpkin-modal.py.lock" => manifest::Kind::File,
                 _ => manifest::Kind::Executable,
@@ -55,12 +57,12 @@ impl Build {
                 size_bytes,
                 path: name.to_owned(),
             });
-            sources.insert(digest, manifest::Source::File(path));
+            sources.insert(digest, manifest::Source::File(path.clone()));
         }
+        files.sort_unstable_by_key(|&(name, _)| name);
         let manifest = manifest::Manifest::new(entries);
-        let key = manifest.name();
         let hashed = manifest::Hashed { manifest, sources };
-        Ok(Self { hashed, key })
+        Ok(Self { files, hashed })
     }
 }
 
@@ -83,17 +85,18 @@ pub(super) struct Linked {
 
 impl Linked {
     pub(super) fn open(reached: &Reached, build: &Build, at: &Located) -> Result<Self, Unlinked> {
-        if let Some(linked) = Self::connect(reached, build, at)? {
+        let key = build.hashed.manifest.name();
+        if let Some(linked) = Self::connect(reached, &key, at)? {
             return Ok(linked);
         }
         install(reached, build, at)?;
-        Self::connect(reached, build, at)?.ok_or_else(|| {
+        Self::connect(reached, &key, at)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
                 reached.name,
                 link::installs(),
-                build.key.hex()
+                key.hex()
             ))
         })
     }
@@ -113,7 +116,10 @@ impl Linked {
         request: R,
         body: &[u8],
     ) -> Result<Result<R::Answer, String>, Unlinked> {
-        self.stream(reached, |link| link.ask(request, body))
+        self.stream(reached, |link| {
+            link.send(&request.ask(), body)?;
+            link.answer::<R>()
+        })
     }
 
     pub(super) fn stream<T>(
@@ -124,11 +130,15 @@ impl Linked {
         read(&mut self.link).map_err(|error| unlinked(reached, &self.diagnostics, error))
     }
 
-    fn connect(reached: &Reached, build: &Build, at: &Located) -> Result<Option<Self>, Unlinked> {
+    fn connect(
+        reached: &Reached,
+        key: &Sha256Digest,
+        at: &Located,
+    ) -> Result<Option<Self>, Unlinked> {
         let diagnostics = reached.location.diagnostics()?;
         let mut ssh = Reached::ssh_command();
         ssh.arg("-E").arg(diagnostics.path());
-        reached.remote(&mut ssh, at, &link::command(&build.key));
+        reached.remote(&mut ssh, at, &link::command(key));
         match Link::open(ssh) {
             Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
             Err(error) => Err(unlinked(reached, &diagnostics, error)),
@@ -188,7 +198,7 @@ impl Reached {
         self.carrying_on(build, what, |reached, linked, _| ask(reached, linked))
     }
 
-    /// As [`Self::asked`], with the pauses starting over each time `ask` reports progress.
+    /// As [`Self::asked`], with each attempt opening its link and reporting its progress.
     pub(super) fn carrying_on<T>(
         &mut self,
         build: &Build,
@@ -273,23 +283,7 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
-    // The files are dropped once in the archive, so that the upload holds one copy of them.
-    let archive = {
-        let read = build
-            .hashed
-            .manifest
-            .entries()
-            .iter()
-            .map(|entry| {
-                let Some(manifest::Source::File(path)) = build.hashed.sources.get(&entry.digest)
-                else {
-                    unreachable!("each install entry was hashed from a file")
-                };
-                Ok((entry.path.clone(), fs::read(path).context(path.display())?))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        manifest::archive(&read)
-    };
+    let archive = manifest::archive(&build.files)?;
     let diagnostics = reached.location.diagnostics()?;
     let mut ssh = Reached::ssh_command();
     ssh.arg("-E").arg(diagnostics.path());
