@@ -2548,7 +2548,6 @@ fn cancel_stops_the_unit_once() {
     scratch.write(&format!("run/pumpkin/{id}/held"), "");
     let ctl = r#"#!/bin/sh
 echo "$*" >> "${0%/*}/units"
-if [ "$2" = stop ]; then rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"; fi
 "#;
     scratch.write_executable("bin/systemctl", ctl.as_bytes());
     let mut lines = Vec::new();

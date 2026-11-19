@@ -1,6 +1,6 @@
 //! Stops jobs by their systemd unit and reaps runs of this build using the client's credentials.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::Duration;
@@ -69,7 +69,12 @@ pub(super) fn cancel(
 
 fn stop(id: &str, held: &Path, force: bool) -> Result<(), String> {
     let unit = format!("pumpkin-job-{id}");
-    let call = |args: &[&str]| -> Result<(), String> {
+    let calls: &[&[&str]] = if force {
+        &[&["kill", "--signal=KILL"], &["stop"]]
+    } else {
+        &[&["stop"]]
+    };
+    for &args in calls {
         if !super::exists(held)? {
             return Ok(());
         }
@@ -83,16 +88,21 @@ fn stop(id: &str, held: &Path, force: bool) -> Result<(), String> {
             ]),
         );
         ctl.arg("--user").args(args).arg(&unit);
-        let stopped = crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10));
-        match stopped {
-            Err(_) if !super::exists(held)? => Ok(()),
-            result => result.map(drop),
+        if let Err(error) =
+            crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10))
+        {
+            return if super::exists(held)? {
+                Err(error)
+            } else {
+                Ok(())
+            };
         }
-    };
-    if force {
-        call(&["kill", "--signal=KILL"])?;
     }
-    call(&["stop"])
+    // A concurrent SIGKILL to the unit can interrupt ExecStopPost while it removes the keys.
+    match fs::remove_dir_all(held) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed.context(held.display()),
+    }
 }
 
 /// A Modal configuration kept in tmpfs for the duration of this request.
