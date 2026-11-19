@@ -1,6 +1,6 @@
 //! Stops jobs by their systemd unit and reaps runs of this build using the client's credentials.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::Duration;
@@ -19,8 +19,8 @@ pub(super) fn cancel(
     request: CancelRequest,
     body: &[u8],
 ) -> Result<CancelAnswer, String> {
-    let id = RunTag::try_from(request.id)?;
-    let id = id.as_str();
+    let tag = RunTag::try_from(request.id)?;
+    let id = tag.as_str();
     let jobs = job::jobs()?;
     // A listing can see the durable job directory while Start is still submitting its unit.
     match File::open(&jobs) {
@@ -34,7 +34,7 @@ pub(super) fn cancel(
     let held = jobs.join(id);
     let record = home.join(job::runs()).join(id);
     if !super::exists(&record)? {
-        stop(id, &held, request.force)?;
+        stop(&tag, &held, request.force)?;
         // The driver can publish its record between the first check and the stop.
         if !super::exists(&record)? {
             return Ok(CancelAnswer::Unstarted);
@@ -44,7 +44,7 @@ pub(super) fn cancel(
         Ok(Writer::This) => {}
         writer => {
             // The unit can be stopped even when its record's writer cannot be read.
-            stop(id, &held, request.force)?;
+            stop(&tag, &held, request.force)?;
             let writer = match writer {
                 Ok(Writer::Other(build)) => Some(build),
                 _ => None,
@@ -59,17 +59,22 @@ pub(super) fn cancel(
         force: request.force,
         modal_config: modal.as_ref().map(|file| file.path().to_owned()),
     };
-    let (_, _, reached) = crate::cancelled(cancel, crate::Reader::Follower)?;
-    Ok(if reached {
-        CancelAnswer::Ended
-    } else {
-        CancelAnswer::EndedUnreached
+    let cancelled = crate::cancelled(cancel, crate::Reader::Follower)?;
+    Ok(match cancelled.reached {
+        Ok(true) => CancelAnswer::Ended,
+        Ok(false) => CancelAnswer::EndedUnreached,
+        Err(message) => CancelAnswer::EndedUnreaped { message },
     })
 }
 
-fn stop(id: &str, held: &Path, force: bool) -> Result<(), String> {
-    let unit = format!("pumpkin-job-{id}");
-    let call = |args: &[&str]| -> Result<(), String> {
+fn stop(id: &RunTag, held: &Path, force: bool) -> Result<(), String> {
+    let unit = job::unit_name(id);
+    let calls: &[&[&str]] = if force {
+        &[&["kill", "--signal=KILL"], &["stop"]]
+    } else {
+        &[&["stop"]]
+    };
+    for &args in calls {
         if !super::exists(held)? {
             return Ok(());
         }
@@ -83,16 +88,21 @@ fn stop(id: &str, held: &Path, force: bool) -> Result<(), String> {
             ]),
         );
         ctl.arg("--user").args(args).arg(&unit);
-        let stopped = crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10));
-        match stopped {
-            Err(_) if !super::exists(held)? => Ok(()),
-            result => result.map(drop),
+        if let Err(error) =
+            crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10))
+        {
+            return if super::exists(held)? {
+                Err(error)
+            } else {
+                Ok(())
+            };
         }
-    };
-    if force {
-        call(&["kill", "--signal=KILL"])?;
     }
-    call(&["stop"])
+    // A concurrent SIGKILL to the unit can interrupt ExecStopPost while it removes the keys.
+    match fs::remove_dir_all(held) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        removed => removed.context(held.display()),
+    }
 }
 
 /// A Modal configuration kept in tmpfs for the duration of this request.

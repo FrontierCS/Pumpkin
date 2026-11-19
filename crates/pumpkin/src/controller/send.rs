@@ -22,7 +22,7 @@ use stdx::process::Environment;
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached, SHORT_TIMEOUT, bounded};
 use crate::link::store::{Lacks, Put};
-use crate::link::{JobKind, StartAnswer, StartRequest};
+use crate::link::{JobKind, JobStart, StartAnswer, StartRequest};
 use crate::manifest::store::{Missing, PutAnswer};
 use crate::{config, manifest, say};
 
@@ -191,7 +191,7 @@ pub(super) fn send(
     if let Some(modal) = modal {
         body.extend(modal);
     }
-    let start = StartRequest {
+    let start = JobStart {
         id: id.as_str().to_owned(),
         kind,
         repo: tree.repo.clone(),
@@ -206,10 +206,12 @@ pub(super) fn send(
         key_bytes,
         modal_bytes,
     };
+    let request = StartRequest::encode(&start, &mut body)?;
     let (mut install_left, mut tree_left) = (None, None);
-    match reached.carrying_on(&build, "starting the job", |linked, advanced| {
+    match reached.carrying_on("starting the job", |advanced| {
+        let mut linked = reached.linked(&build)?;
         upload(
-            linked,
+            &mut linked,
             reached,
             &build.hashed,
             true,
@@ -217,14 +219,14 @@ pub(super) fn send(
             advanced,
         )?;
         upload(
-            linked,
+            &mut linked,
             reached,
             &tree.hashed,
             false,
             &mut tree_left,
             advanced,
         )?;
-        linked.ask_with_body(reached, start.clone(), &body)
+        linked.ask_with_body(reached, request, &body)
     })?? {
         StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),

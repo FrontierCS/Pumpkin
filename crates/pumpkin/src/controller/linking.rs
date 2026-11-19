@@ -128,7 +128,10 @@ impl Linked {
         request: R,
         body: &[u8],
     ) -> Result<Result<R::Answer, String>, Unlinked> {
-        self.stream(reached, |link| link.ask(request, body))
+        self.stream(reached, |link| {
+            link.send(&request.ask(), body)?;
+            link.answer::<R>()
+        })
     }
 
     pub(super) fn stream<T>(
@@ -165,20 +168,22 @@ impl Reached {
         what: &str,
         mut ask: impl FnMut(&mut Linked) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
-        self.carrying_on(build, what, |linked, _| ask(linked))
+        self.carrying_on(what, |_| ask(&mut self.linked(build)?))
     }
 
-    /// As [`Self::asked`], with the pauses starting over each time `ask` reports progress.
+    pub(super) fn linked(&self, build: &Build) -> Result<Linked, Unlinked> {
+        Linked::open(self, build, OPENINGS)
+    }
+
+    /// As [`Self::asked`], with each attempt opening its link and reporting its progress.
     pub(super) fn carrying_on<T>(
         &self,
-        build: &Build,
         what: &str,
-        mut ask: impl FnMut(&mut Linked, &mut dyn FnMut()) -> Result<T, Unlinked>,
+        mut ask: impl FnMut(&mut dyn FnMut()) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
         let mut attempt = 0;
         loop {
-            let asked = Linked::open(self, build, OPENINGS)
-                .and_then(|mut linked| ask(&mut linked, &mut || attempt = 0));
+            let asked = ask(&mut || attempt = 0);
             let (master, said) = match asked {
                 Ok(answer) => return Ok(answer),
                 Err(Unlinked::Cut { master, said }) => (master, said),

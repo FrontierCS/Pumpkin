@@ -323,7 +323,7 @@ Examples:
   pumpkin reap --runs runs
 
 Exit status:
-  0  Nothing that a run which has ended left remains.
+  0  Nothing that the selected runs left remains.
   1  A run can't be reaped, which `reap` says, or another error; it reaps the
      others all the same.
   2  A usage error.
@@ -349,7 +349,9 @@ says, and notes there as gone.
 
 With [controller] in the configuration, and no --runs, `reap` reaps the
 controller's runs made by this build and names the runs left to their own
-builds. It uses this machine's Modal configuration file, which the boot lacks.";
+builds. It uses this machine's Modal configuration file, which the boot lacks.
+If the reply is cut, it reaps again. The printed ids may omit runs already
+cleaned before the cut.";
 
 pub(super) const CONTROLLER_NOTES: &str = "\
 Examples:
