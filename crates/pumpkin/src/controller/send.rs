@@ -23,7 +23,7 @@ use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached, SHORT_TIMEOUT, bounded};
 use crate::link::store::{Lacks, Put};
 use crate::link::{JobKind, JobStart, StartAnswer, StartRequest};
-use crate::manifest::store::{Missing, PutAnswer};
+use crate::manifest::store::{Missing, PutAnswer, UploadId};
 use crate::{config, manifest, say};
 
 // How often a send says how much it has sent: often enough that a person sees a send move, and
@@ -208,24 +208,15 @@ pub(super) fn send(
     };
     let request = StartRequest::encode(&start, &mut body)?;
     let (mut install_left, mut tree_left) = (None, None);
+    let upload_id = UploadId::new()?;
     match reached.carrying_on("starting the job", |advanced| {
         let mut linked = reached.linked(&build)?;
-        upload(
-            &mut linked,
-            reached,
-            &build.hashed,
-            true,
-            &mut install_left,
-            advanced,
-        )?;
-        upload(
-            &mut linked,
-            reached,
-            &tree.hashed,
-            false,
-            &mut tree_left,
-            advanced,
-        )?;
+        for (tree, left) in [
+            (None, &mut install_left),
+            (Some(&tree.hashed), &mut tree_left),
+        ] {
+            linked = upload(linked, reached, &build, &upload_id, tree, left, advanced)?;
+        }
         linked.ask_with_body(reached, request, &body)
     })?? {
         StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
@@ -234,15 +225,19 @@ pub(super) fn send(
 }
 
 fn upload(
-    linked: &mut Linked,
+    mut linked: Linked,
     reached: &Reached,
-    hashed: &manifest::Hashed,
-    install: bool,
+    build: &Build,
+    id: &UploadId,
+    tree: Option<&manifest::Hashed>,
     previous: &mut Option<u64>,
     advanced: &mut dyn FnMut(),
-) -> Result<(), Unlinked> {
+) -> Result<Linked, Unlinked> {
+    let install = tree.is_none();
+    let hashed = tree.unwrap_or(&build.hashed);
     let text = hashed.manifest.text();
     let request = || Lacks {
+        upload: id.clone(),
         manifest: manifest::sha256(&text),
         body_bytes: text.len(),
         install,
@@ -284,12 +279,18 @@ fn upload(
             };
             let input = source.at(held_bytes, size_bytes)?;
             let put = Put {
+                upload: id.clone(),
                 digest: digest.clone(),
                 from: held_bytes,
                 size_bytes,
             };
             match linked.stream(reached, |link| link.put(put, input, &mut count))?? {
-                PutAnswer::Stored => advanced(),
+                PutAnswer::Stored { .. } => advanced(),
+                PutAnswer::StoredEarly { .. } => {
+                    advanced();
+                    drop(linked);
+                    linked = reached.linked(build)?;
+                }
                 PutAnswer::OffsetChanged => continue 'lacks,
                 PutAnswer::NotItsDigest => {
                     return Err(format!(
@@ -300,7 +301,7 @@ fn upload(
                 }
             }
         }
-        return Ok(());
+        return Ok(linked);
     }
 }
 

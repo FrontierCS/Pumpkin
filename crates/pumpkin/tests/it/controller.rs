@@ -1149,6 +1149,14 @@ calls=$(wc --lines < "$dir/scripts")
 if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
 cd "$dir/../home" || exit 255
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
+if [ -e "$dir/pause-$master" ]; then
+    bytes=$(cat "$dir/pause-$master"); rm "$dir/pause-$master"
+    mkfifo "$dir/feed-$$"
+    sh -c "$*" < "$dir/feed-$$" & receiving=$!
+    exec 3>"$dir/feed-$$"; rm "$dir/feed-$$"
+    stdbuf --output=0 head --bytes="$bytes" >&3
+    wait "$receiving"; exit $?
+fi
 if [ -e "$dir/cut-$master" ]; then
     bytes=$(cat "$dir/cut-$master"); rm "$dir/cut-$master"; touch "$dir/unanswered-$master"
     stdbuf --output=0 head --bytes="$bytes" | sh -c "$*"; exit 255
@@ -1962,7 +1970,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 10 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks 9 of the task's 10 files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2022,21 +2030,29 @@ fn send_by_content() {
 }
 
 #[test]
-fn send_refused_partial() {
+fn send_refuses_changed_contents() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     scratch.write("repo/stand-in/notes", "noted\n");
-    // A full-length partial with the wrong digest must be discarded.
+    // Replace the bytes after hashing, keeping their length so that the controller detects it.
     let hex = sha256(b"noted\n");
-    scratch.write(&format!("home/store/incoming/{hex}.part"), "Noted\n");
+    let notes = scratch.0.join("repo/stand-in/notes");
+    scratch.write(
+        "bin/before-1",
+        &format!("printf 'Noted\\n' > '{}'\n", notes.display()),
+    );
     let (_, refused) = start(&scratch, &client);
     let mut lines = vec![refused, send_calls(&scratch)];
     let store = scratch.0.join("home/store");
     lines.push(format!(
         "the store holds it: {}; its partial: {}",
         store.join(&hex).exists(),
-        store.join(format!("incoming/{hex}.part")).exists()
+        fs::read_dir(store.join("incoming"))
+            .unwrap()
+            .next()
+            .is_some()
     ));
+    scratch.write("repo/stand-in/notes", "noted\n");
     let (_, again) = start(&scratch, &client);
     lines.extend([again, send_calls(&scratch)]);
     check(
@@ -2101,82 +2117,198 @@ fn send_carries_on() {
     );
 }
 
+const FIRST_UPLOAD: &str = "00000000-0000-4000-8000-000000000001";
+const SECOND_UPLOAD: &str = "00000000-0000-4000-8000-000000000002";
+
+struct UploadBlob {
+    bytes: Vec<u8>,
+    hex: String,
+}
+
+impl UploadBlob {
+    fn new(bytes: Vec<u8>) -> Self {
+        let hex = sha256(&bytes);
+        Self { bytes, hex }
+    }
+
+    fn query(&self, serve: &mut Child, upload: &str) -> serde_json::Value {
+        let manifest = format!(
+            "pumpkin-tree/1\nf {} {} notes\n",
+            self.hex,
+            self.bytes.len()
+        );
+        let head = json!({"type":"lacks", "upload":upload, "manifest":format!("sha256:{}", sha256(manifest.as_bytes())), "body_bytes":manifest.len(), "install":false});
+        let input = serve.stdin.as_mut().unwrap();
+        schema::frame::write(input, &head, &[]).unwrap();
+        schema::frame::write(input, &(), manifest.as_bytes()).unwrap();
+        assert_eq!(upload_reply(serve)["type"], "missing");
+        let ((), body) = schema::frame::read(serve.stdout.as_mut().unwrap())
+            .unwrap()
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn begin(&self, serve: &mut Child, upload: &str, from: usize) {
+        let put = json!({"type":"put", "upload":upload, "digest":format!("sha256:{}", self.hex), "size_bytes":self.bytes.len(), "from":from});
+        schema::frame::write(serve.stdin.as_mut().unwrap(), &put, &[]).unwrap();
+    }
+
+    fn stored(&self, early: bool) -> serde_json::Value {
+        json!({"type": if early {"stored_early"} else {"stored"}, "committed_size":self.bytes.len()})
+    }
+}
+
+fn upload_reply(serve: &mut Child) -> serde_json::Value {
+    let (head, body) = schema::frame::read(serve.stdout.as_mut().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(body, [] as [u8; 0]);
+    head
+}
+
+fn upload_server(scratch: &Scratch) -> Child {
+    let mut serve = serve_process(scratch);
+    assert_eq!(upload_reply(&mut serve)["type"], "serving");
+    serve
+}
+
+#[test]
+fn empty_blob_is_available_in_a_cold_store() {
+    let scratch = Scratch::new();
+    let mut serve = upload_server(&scratch);
+    let mut blob = UploadBlob::new(Vec::new());
+    assert_eq!(blob.query(&mut serve, FIRST_UPLOAD), json!([]));
+    blob.begin(&mut serve, FIRST_UPLOAD, 0);
+    assert_eq!(upload_reply(&mut serve), blob.stored(false));
+    let file = scratch.0.join("home/store").join(&blob.hex);
+    assert_eq!(
+        fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+    blob.hex = sha256(b"different");
+    assert_eq!(blob.query(&mut serve, FIRST_UPLOAD)[0]["held_bytes"], 0);
+    blob.begin(&mut serve, FIRST_UPLOAD, 0);
+    assert_eq!(upload_reply(&mut serve)["type"], "not_its_digest");
+    assert!(serve.wait().unwrap().success());
+}
+
 #[test]
 fn concurrent_uploads() {
-    racing_upload(true);
+    let scratch = Scratch::new();
+    let blob = UploadBlob::new(vec![42; schema::frame::MAX_BODY_BYTES]);
+    let mut first = upload_server(&scratch);
+    assert_eq!(blob.query(&mut first, FIRST_UPLOAD)[0]["held_bytes"], 0);
+    blob.begin(&mut first, FIRST_UPLOAD, 0);
+    let writing = first.stdin.as_mut().unwrap();
+    schema::frame::write(writing, &(), b"bad").unwrap();
+    let mut frame = Vec::new();
+    schema::frame::write(&mut frame, &(), b"later").unwrap();
+    std::io::Write::write_all(writing, &frame[..frame.len() - 1]).unwrap();
+
+    let mut second = upload_server(&scratch);
+    poll(|| (blob.query(&mut second, FIRST_UPLOAD)[0]["held_bytes"] == 3).then_some(()));
+    assert_eq!(blob.query(&mut second, SECOND_UPLOAD)[0]["held_bytes"], 0);
+    let mut resume = upload_server(&scratch);
+    blob.begin(&mut resume, FIRST_UPLOAD, 3);
+    // A frame larger than the pipe can finish writing only once this reconnect is draining.
+    schema::frame::write(
+        resume.stdin.as_mut().unwrap(),
+        &(),
+        &blob.bytes[..blob.bytes.len() / 2],
+    )
+    .unwrap();
+    blob.begin(&mut second, SECOND_UPLOAD, 0);
+    schema::frame::write(second.stdin.as_mut().unwrap(), &(), &blob.bytes).unwrap();
+    assert_eq!(upload_reply(&mut second), blob.stored(false));
+    assert_eq!(blob.query(&mut second, SECOND_UPLOAD), json!([]));
+
+    // The first sender keeps its half-written frame open until it has read its success.
+    assert_eq!(upload_reply(&mut first), blob.stored(true));
+    assert_eq!(upload_reply(&mut resume), blob.stored(true));
+    assert!(first.wait().unwrap().success());
+    assert!(resume.wait().unwrap().success());
+    blob.begin(&mut second, FIRST_UPLOAD, 0);
+    assert_eq!(upload_reply(&mut second), blob.stored(true));
+    assert!(second.wait().unwrap().success());
+    assert_eq!(
+        fs::read(scratch.0.join("home/store").join(&blob.hex)).unwrap(),
+        blob.bytes
+    );
+    assert_eq!(
+        fs::read_dir(scratch.0.join("home/store/incoming"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn send_continues_after_another_upload_commits() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let blob = UploadBlob::new(vec![42; 3 << 20]);
+    fs::write(scratch.0.join("repo/stand-in/big.bin"), &blob.bytes).unwrap();
+    connect(&scratch, &client);
+    served(&scratch);
+    // Leave the link open partway into the second frame, with the client blocked in its write.
+    scratch.write("bin/pause-0", &(1536 << 10).to_string());
+    let mut client = on_client(&scratch, &client, &["run", "stand-in/task.star"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let incoming = scratch.0.join("home/store/incoming");
+    poll(|| {
+        fs::read_dir(&incoming)
+            .ok()?
+            .filter_map(Result::ok)
+            .find(|file| {
+                file.file_name().as_bytes().starts_with(blob.hex.as_bytes())
+                    && file.metadata().unwrap().len() == schema::frame::MAX_BODY_BYTES as u64
+            })
+    });
+    let mut peer = upload_server(&scratch);
+    blob.begin(&mut peer, SECOND_UPLOAD, 0);
+    for part in blob.bytes.chunks(schema::frame::MAX_BODY_BYTES) {
+        schema::frame::write(peer.stdin.as_mut().unwrap(), &(), part).unwrap();
+    }
+    assert_eq!(upload_reply(&mut peer), blob.stored(false));
+    assert!(peer.wait().unwrap().success());
+    poll(|| client.try_wait().unwrap());
+    let done = client.wait_with_output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert_eq!(send_calls(&scratch), "the calls: serve, serve");
+    assert_eq!(fs::read_dir(incoming).unwrap().count(), 0);
 }
 
 #[test]
 fn concurrent_upload_resumes_after_cut() {
-    racing_upload(false);
-}
-
-fn racing_upload(first_finishes: bool) {
     let scratch = Scratch::new();
-    let contents = vec![42; schema::frame::MAX_BODY_BYTES];
-    let digest = sha256(&contents);
-    let manifest = format!("pumpkin-tree/1\nf {digest} {} notes\n", contents.len());
-    let mut query = Vec::new();
-    let lacks = json!({"type":"lacks", "manifest":format!("sha256:{}", sha256(manifest.as_bytes())), "body_bytes":manifest.len(), "install":false});
-    schema::frame::write(&mut query, &lacks, &[]).unwrap();
-    schema::frame::write(&mut query, &(), manifest.as_bytes()).unwrap();
-    assert!(serve_fed(&scratch, &query).contains(r#""type":"missing""#));
+    let blob = UploadBlob::new(b"contents".to_vec());
+    let mut first = upload_server(&scratch);
+    blob.query(&mut first, FIRST_UPLOAD);
+    blob.begin(&mut first, FIRST_UPLOAD, 0);
+    schema::frame::write(first.stdin.as_mut().unwrap(), &(), b"con").unwrap();
+    assert!(first.wait().unwrap().success());
 
-    let mut put = json!({"type":"put", "digest":format!("sha256:{digest}"), "size_bytes":contents.len(), "from":0});
-    let mut first = serve_process(&scratch);
-    let mut writing = first.stdin.take().unwrap();
-    schema::frame::write(&mut writing, &put, &[]).unwrap();
-    let (prefix, rest) = contents.split_at(contents.len() / 2);
-    schema::frame::write(&mut writing, &(), prefix).unwrap();
-    let partial = scratch.0.join(format!("home/store/incoming/{digest}.part"));
-    poll(|| (fs::metadata(&partial).ok()?.len() == prefix.len() as u64).then_some(()));
-
-    // This frame exceeds the pipe's capacity. Its writer can finish only if the second
-    // serve reads the body while the first still holds the partial.
-    let mut second = serve_process(&scratch);
-    let mut racing = second.stdin.take().unwrap();
-    schema::frame::write(&mut racing, &put, &[]).unwrap();
-    schema::frame::write(&mut racing, &(), &contents).unwrap();
-    if first_finishes {
-        schema::frame::write(&mut writing, &(), rest).unwrap();
-    }
-    drop(writing);
-    let done = first.wait_with_output().unwrap();
-    assert!(done.status.success());
-    std::io::Write::write_all(&mut racing, &query).unwrap();
-    drop(racing);
-    let done = second.wait_with_output().unwrap();
-    assert!(done.status.success());
-    let mut frames = &done.stdout[..];
-    let answer = if first_finishes {
-        "stored"
-    } else {
-        "offset_changed"
-    };
-    for kind in ["serving", answer, "missing"] {
-        let (head, _) = schema::frame::read::<serde_json::Value>(&mut frames)
-            .unwrap()
-            .unwrap();
-        assert_eq!(head["type"], kind);
-    }
-    let ((), body) = schema::frame::read::<()>(&mut frames).unwrap().unwrap();
-    let missing: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-    if first_finishes {
-        assert_eq!(missing, [] as [serde_json::Value; 0]);
-    } else {
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0]["held_bytes"], prefix.len());
-        put["from"] = missing[0]["held_bytes"].clone();
-        let mut resume = Vec::new();
-        schema::frame::write(&mut resume, &put, &[]).unwrap();
-        schema::frame::write(&mut resume, &(), rest).unwrap();
-        assert!(serve_fed(&scratch, &resume).contains(r#""type":"stored""#));
-    }
-    assert_eq!(
-        fs::read(scratch.0.join("home/store").join(digest)).unwrap(),
-        contents
-    );
-    assert!(!partial.exists());
+    let mut next = upload_server(&scratch);
+    assert_eq!(blob.query(&mut next, FIRST_UPLOAD)[0]["held_bytes"], 3);
+    assert_eq!(blob.query(&mut next, SECOND_UPLOAD)[0]["held_bytes"], 0);
+    blob.begin(&mut next, SECOND_UPLOAD, 0);
+    schema::frame::write(next.stdin.as_mut().unwrap(), &(), b"corrupt!").unwrap();
+    assert_eq!(upload_reply(&mut next)["type"], "not_its_digest");
+    blob.begin(&mut next, FIRST_UPLOAD, 2);
+    schema::frame::write(next.stdin.as_mut().unwrap(), &(), &blob.bytes[2..]).unwrap();
+    assert_eq!(upload_reply(&mut next)["type"], "offset_changed");
+    assert_eq!(blob.query(&mut next, FIRST_UPLOAD)[0]["held_bytes"], 3);
+    blob.begin(&mut next, FIRST_UPLOAD, 3);
+    schema::frame::write(next.stdin.as_mut().unwrap(), &(), &blob.bytes[3..]).unwrap();
+    assert_eq!(upload_reply(&mut next), blob.stored(false));
+    assert!(next.wait().unwrap().success());
 }
 
 #[test]
