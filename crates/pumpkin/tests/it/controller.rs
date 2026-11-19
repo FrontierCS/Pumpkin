@@ -1426,7 +1426,7 @@ fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
     let install = install_manifest(&client_bin(scratch));
-    let lacks = json!({"type": "lacks", "manifest": format!("sha256:{key}"), "install": true, "body_bytes": install.len()});
+    let lacks = json!({"type": "lacks", "upload": FIRST_UPLOAD, "manifest": format!("sha256:{key}"), "install": true, "body_bytes": install.len()});
     schema::frame::write(&mut request, &lacks, &[]).unwrap();
     schema::frame::write(&mut request, &(), install.as_bytes()).unwrap();
     let credential_bytes = body.len();
