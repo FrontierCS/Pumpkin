@@ -253,7 +253,7 @@ impl Engine {
             return Ok(Started::Found(built));
         }
         let scratch = make_scratch(&self.dir, "build")?;
-        match self.start_in(scratch.path(), &inputs, recipe, given, repository) {
+        match self.start_in(scratch.path(), inputs, recipe, given, repository) {
             Ok((child, recipe, tag)) => Ok(Started::Building(Building {
                 child,
                 scratch,
@@ -283,7 +283,7 @@ impl Engine {
     fn start_in(
         &self,
         scratch: &Path,
-        inputs: &Inputs,
+        inputs: Inputs,
         recipe: &Recipe,
         given: &Given<&Built>,
         repository: &str,
@@ -565,7 +565,9 @@ enum Entry {
     Dir,
     File {
         mode: u32,
-        sha256: String,
+        // Linus Torvalds's Git index keeps the object ID inline in each file's entry.
+        // https://github.com/git/git/blob/e83c5163316f89bfbde7d9ab23ca2e25604af290/cache.h#L45-L57
+        sha256: [u8; 32],
         from: PathBuf,
     },
 }
@@ -574,44 +576,31 @@ impl Inputs {
     // Copies these inputs' entries to `stage`, which names nothing yet, each file from the path it
     // was read from, with its mode, and each entry below `stage` last modified at `BUILD_TIME`; and
     // returns the entries that the stage holds.
-    fn stage(&self, stage: &Path) -> Result<BTreeMap<String, Entry>, String> {
+    fn stage(mut self, stage: &Path) -> Result<BTreeMap<String, Entry>, String> {
         make_dir(stage)?;
-        let mut entries = BTreeMap::new();
         // By their paths, so each directory is made before what is below it.
-        for (path, entry) in &self.entries {
+        for (path, entry) in &mut self.entries {
             let to = stage.join(path);
-            let staged = match entry {
-                Entry::Dir => {
-                    make_dir(&to)?;
-                    Entry::Dir
-                }
-                Entry::File {
-                    mode,
-                    sha256: _,
-                    from,
-                } => {
-                    fs::copy(from, &to).context(format!(
+            match entry {
+                Entry::Dir => make_dir(&to)?,
+                Entry::File { mode, sha256, from } => {
+                    fs::copy(from.as_path(), &to).context(format!(
                         "{} to {}",
                         from.display(),
                         to.display()
                     ))?;
                     fs::set_permissions(&to, Permissions::from_mode(*mode))
                         .context(to.display())?;
-                    Entry::File {
-                        mode: *mode,
-                        // Hashed from the copy, which is what the build reads.
-                        sha256: file_sha256(&to).context(to.display())?,
-                        from: from.clone(),
-                    }
+                    // Hashed from the copy, which is what the build reads.
+                    *sha256 = file_sha256(&to).context(to.display())?;
                 }
-            };
-            entries.insert(path.clone(), staged);
+            }
         }
         // Once all is made, as making an entry changes the time of the directory it is in.
-        for path in entries.keys() {
+        for path in self.entries.keys() {
             set_build_time(&stage.join(path))?;
         }
-        Ok(entries)
+        Ok(self.entries)
     }
 
     fn checked(
@@ -634,7 +623,7 @@ impl Inputs {
                 recipe::check(&from.display().to_string(), &text, given)?;
                 // The digest covers the bytes the check passed, even if the file has changed since
                 // it was hashed.
-                *sha256 = hex(Sha256::digest(&text).into());
+                *sha256 = Sha256::digest(&text).into();
                 format!("file {path}")
             }
             Recipe::Text(text) => {
@@ -664,7 +653,12 @@ impl Inputs {
     }
 
     fn digest(&self) -> String {
-        hex(Sha256::digest(self.to_string()).into())
+        // The Go authors write each formatted file fingerprint straight into the build hash.
+        // https://github.com/golang/go/blob/46cb016190389b7e37b21f04e5343a628ca1f662/src/cmd/go/internal/work/exec.go#L288-L295
+        let mut hasher = Hasher(Sha256::new());
+        write!(hasher, "{self}")
+            .unwrap_or_else(|error| unreachable!("a hash takes every byte: {error}"));
+        hex(hasher.0.finalize().into())
     }
 }
 
@@ -683,7 +677,7 @@ impl fmt::Display for Inputs {
                     mode,
                     sha256,
                     from: _,
-                } => writeln!(f, "{path} {mode:04o} {sha256}")?,
+                } => writeln!(f, "{path} {mode:04o} {}", Sha256Digest::from(*sha256).hex())?,
             }
         }
         Ok(())
@@ -788,11 +782,11 @@ fn ambiguous(name: &str) -> bool {
     name.contains(|char: char| char.is_whitespace() || char.is_control())
 }
 
-fn file_sha256(path: &Path) -> io::Result<String> {
+fn file_sha256(path: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = Hasher(Sha256::new());
     io::copy(&mut File::open(path)?, &mut hasher)?;
     let Hasher(sha256) = hasher;
-    Ok(hex(sha256.finalize().into()))
+    Ok(sha256.finalize().into())
 }
 
 struct Hasher(Sha256);
