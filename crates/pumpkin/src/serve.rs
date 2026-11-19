@@ -187,8 +187,9 @@ fn answer(
     view: &mut Answering,
 ) -> io::Result<()> {
     match ask {
-        Ask::Start(request) => link::answer(output, *request, |start| {
-            crate::job::start(home, start, body)
+        Ask::Start(request) => link::answer(output, request, |request| {
+            let (start, credentials) = request.decode(body)?;
+            crate::job::start(home, start, credentials)
         }),
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
         Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {

@@ -1345,19 +1345,82 @@ fn keys_on_standard_input() {
     );
 }
 
-fn start_head(id: &str, bytes: usize) -> serde_json::Value {
+#[test]
+fn start_with_large_arguments_and_model_catalog() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
+    let models = (0..1500)
+        .map(|n| format!(r#"{{ name = "model-{n}", upstream_name = "provider/model-{n}" }}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let contents = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        contents.replace("models = [", &format!("models = [{models}, ")),
+    )
+    .unwrap();
+    let key = b"\0binary key\xff\n";
+    fs::write(scratch.0.join("client/.config/pumpkin/gateway-key"), key).unwrap();
+    let task = scratch.0.join("repo/stand-in/task.star");
+    let contents = fs::read_to_string(&task).unwrap();
+    fs::write(
+        &task,
+        contents.replace("workflow(", "TEXT = arg(\"text\", str)\nworkflow("),
+    )
+    .unwrap();
+    connect(&scratch, &client);
+    served(&scratch);
+    let word = format!("text={}", "x".repeat(schema::frame::MAX_MESSAGE_BYTES));
+    let output = on_client(
+        &scratch,
+        &client,
+        &["run", "stand-in/task.star", "--arg", &word],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let id = String::from_utf8(output.stdout).unwrap();
+    let sent = scratch.0.join("run/pumpkin").join(id.trim());
+    let config: toml::Table = fs::read_to_string(sent.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        config["upstreams"]["gateway"]["models"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1501
+    );
+    assert_eq!(fs::read(sent.join("gateway.key")).unwrap(), key);
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    assert!(argv.lines().any(|line| line == word));
+}
+
+fn start_head(body_bytes: usize, credential_bytes: usize) -> serde_json::Value {
+    json!({ "type": "start", "body_bytes": body_bytes, "credential_bytes": credential_bytes })
+}
+
+fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
     json!({
-        "type": "start", "id": id, "kind": "build", "repo": "tasks",
+        "id": id, "kind": "build", "repo": "tasks",
         "tree": format!("sha256:{EMPTY_TREE}"), "words": ["--", "task.star"],
         "region": "us-west-1", "parameter": "/pumpkin-alice/settings",
-        "sent": {}, "key_bytes": [], "modal_bytes": bytes,
+        "sent": {}, "key_bytes": [], "modal_bytes": modal_bytes,
     })
 }
 
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
-    let start = start_head(id, body.len());
-    schema::frame::write(&mut request, &start, &[]).unwrap();
+    let credential_bytes = body.len();
+    let mut body = body.to_vec();
+    serde_json::to_writer(&mut body, &start_job(id, credential_bytes)).unwrap();
+    schema::frame::write(&mut request, &start_head(body.len(), credential_bytes), &[]).unwrap();
     for part in body.chunks(schema::frame::MAX_BODY_BYTES) {
         schema::frame::write(&mut request, &(), part).unwrap();
     }
@@ -3194,10 +3257,18 @@ fn serve_refusals() {
         ("a request body past the cap:", 16 * 1024 * 1024 + 1),
     ] {
         let mut head = Vec::new();
-        schema::frame::write(&mut head, &start_head("once", bytes), &[]).unwrap();
+        schema::frame::write(&mut head, &start_head(bytes, 0), &[]).unwrap();
         steps.push(what.to_owned());
         steps.push(serve_fed(&scratch, &head));
     }
+    let mut job = start_job("once", 1);
+    job["key_bytes"] = json!([usize::MAX]);
+    let body = serde_json::to_vec(&job).unwrap();
+    let mut bad_lengths = Vec::new();
+    schema::frame::write(&mut bad_lengths, &start_head(body.len(), 0), &[]).unwrap();
+    schema::frame::write(&mut bad_lengths, &(), &body).unwrap();
+    steps.push("credential lengths that overflow:".to_owned());
+    steps.push(serve_fed(&scratch, &bad_lengths));
     check(
         &scratch,
         &steps.join("\n"),
@@ -3221,7 +3292,11 @@ fn serve_refusals() {
             a request body past the cap:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes"#]],
+              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+            credential lengths that overflow:
+            exit status: 0
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"the job gives a different length for its credentials","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 

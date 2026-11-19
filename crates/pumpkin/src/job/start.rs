@@ -12,7 +12,7 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
 use super::{BUILDS, JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
-use crate::link::{JobKind, StartAnswer, StartRequest};
+use crate::link::{JobKind, JobStart, StartAnswer};
 use crate::{manifest, workspace};
 
 // The bound on admitting a tree and asking systemd to start its job.
@@ -21,7 +21,7 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 // In the job's persistent directory once systemd has confirmed the start.
 const STARTED: &str = "started";
 
-pub(crate) fn start(home: &Path, start: StartRequest, body: &[u8]) -> Result<StartAnswer, String> {
+pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAnswer, String> {
     let id = RunTag::try_from(start.id.clone())?;
     let id = id.as_str();
     let jobs = super::jobs()?;
@@ -111,7 +111,7 @@ const SYSTEMD: Environment = Environment::Only(&[
 fn launch(
     pumpkin: &Path,
     name: &str,
-    start: StartRequest,
+    start: JobStart,
     command: &str,
     tree: &Path,
     sent: &Path,
@@ -211,7 +211,7 @@ fn unconfirmed(name: &str, sent: &Path, problem: &str) -> StartAnswer {
     }
 }
 
-fn write_sent(start: &StartRequest, sent: &Path, body: &[u8]) -> Result<(), String> {
+fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> {
     let config = toml::to_string(&start.sent)
         .map_err(|error| format!("writing the job's configuration: {error}"))?;
     let write = |name: &str, bytes: &[u8]| {
