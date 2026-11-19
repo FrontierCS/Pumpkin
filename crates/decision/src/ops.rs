@@ -270,23 +270,15 @@ impl Core<'_> {
         // The agent asks only about its calls to job functions: any job it didn't make is refused
         // as absent.
         let job = JobId(number);
-        let found = self
-            .jobs
-            .get(job)
-            .and_then(|found| match (caller, found.call) {
-                (Caller::Agent, JobOf::Function(id)) => Some((found, id)),
-                (Caller::Agent, JobOf::Final) => unreachable!(
-                    "the agent's ops are refused once its work has ended, and the final call's \
-                     job is added after that"
-                ),
-                (Caller::Job(_), _) => None,
-            });
-        let Some((found, function)) = found else {
-            return Err(format!(
-                "you have no job {number}: ask about a job that one of your calls returned"
-            ));
-        };
-        Ok(self.status(job, found, function))
+        if caller == Caller::Agent
+            && let Some(found) = self.jobs.get(job)
+            && let JobOf::Function(function) = found.call
+        {
+            return Ok(self.status(job, found, function));
+        }
+        Err(format!(
+            "you have no job {number}: ask about a job that one of your calls returned"
+        ))
     }
 
     /// The time from now until `end`, as a reply gives the time left: in whole seconds rounded
