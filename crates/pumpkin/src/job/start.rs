@@ -11,15 +11,19 @@ use schema::ir::Sha256Digest;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-use super::{BUILDS, JOBS, SENT_CONFIG, SENT_MODAL, TREES};
-use crate::link::{JobKind, StartAnswer, StartRequest};
+use super::{BUILDS, JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
+use crate::link::{JobKind, JobStart, StartAnswer};
 use crate::{manifest, workspace};
 
-// The bound on admitting a tree and asking systemd to start its job.
+// The bound on asking systemd to start a job.
 const START_TIMEOUT: Duration = Duration::from_mins(10);
 
-pub(crate) fn start(home: &Path, start: StartRequest, body: &[u8]) -> Result<StartAnswer, String> {
+// In the job's persistent directory once systemd has confirmed the start.
+const STARTED: &str = "started";
+
+pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAnswer, String> {
     let id = RunTag::try_from(start.id.clone())?;
+    let name = super::unit_name(&id);
     let id = id.as_str();
     let jobs = super::jobs()?;
     DirBuilder::new()
@@ -32,7 +36,15 @@ pub(crate) fn start(home: &Path, start: StartRequest, body: &[u8]) -> Result<Sta
     for kind in [JOBS, BUILDS] {
         let dir = home.join(kind).join(id);
         if dir.try_exists().context(dir.display())? {
-            return Ok(StartAnswer::AlreadyStarted);
+            // The job itself makes OWN, including one whose start wasn't recorded.
+            if dir.join(STARTED).is_file() || dir.join(OWN).is_symlink() {
+                return Ok(StartAnswer::AlreadyStarted);
+            }
+            return Ok(unconfirmed(
+                &name,
+                &jobs.join(id),
+                "a previous start reserved this job id",
+            ));
         }
     }
     if Path::new(&start.repo).file_name() != Some(start.repo.as_ref()) {
@@ -47,32 +59,44 @@ pub(crate) fn start(home: &Path, start: StartRequest, body: &[u8]) -> Result<Sta
         JobKind::Run => (JOBS, "run"),
         JobKind::Build => (BUILDS, "build"),
     };
-    // Each directory is made anew, and removed on a failure before the unit takes it.
-    let owned = |parent: &Path, mode: u32| -> Result<tempfile::TempDir, String> {
-        fs::create_dir_all(parent).context(parent.display())?;
-        tempfile::Builder::new()
-            .prefix(id)
-            .rand_bytes(0)
-            .permissions(fs::Permissions::from_mode(mode))
-            .tempdir_in(parent)
-            .context(parent.join(id).display())
-    };
-    let sent = owned(&jobs, 0o700)?;
-    let tree = owned(&home.join(TREES).join(&start.repo), 0o755)?;
-    let job = owned(&home.join(kind), 0o755)?;
+    let job = new_job_dir(&home.join(kind), id, 0o755)?;
+    let sent = new_job_dir(&jobs, id, 0o700)?;
+    let tree = new_job_dir(&home.join(TREES).join(&start.repo), id, 0o755)?;
     let workspace = home.join(workspace::DIR);
     symlink(&workspace, tree.path().join(workspace::DIR)).context(tree.path().display())?;
     write_sent(&start, sent.path(), body)?;
     let answer = launch(
         &pumpkin,
+        &name,
         start,
         command,
         tree.path(),
         sent.path(),
         job.path(),
     )?;
-    drop((sent.keep(), tree.keep(), job.keep()));
+    let job = job.keep();
+    drop((sent.keep(), tree.keep()));
+    if matches!(answer, StartAnswer::Started) {
+        let receipt = job.join(STARTED);
+        if let Err(error) = File::create(&receipt) {
+            crate::say(format_args!(
+                "{name} started but writing {} failed: {error}",
+                receipt.display()
+            ));
+        }
+    }
     Ok(answer)
+}
+
+// Each directory is made anew, and removed on a failure before the unit takes it.
+fn new_job_dir(parent: &Path, id: &str, mode: u32) -> Result<tempfile::TempDir, String> {
+    fs::create_dir_all(parent).context(parent.display())?;
+    tempfile::Builder::new()
+        .prefix(id)
+        .rand_bytes(0)
+        .permissions(fs::Permissions::from_mode(mode))
+        .tempdir_in(parent)
+        .context(parent.join(id).display())
 }
 
 const SYSTEMD: Environment = Environment::Only(&[
@@ -84,13 +108,13 @@ const SYSTEMD: Environment = Environment::Only(&[
 
 fn launch(
     pumpkin: &Path,
-    start: StartRequest,
+    name: &str,
+    start: JobStart,
     command: &str,
     tree: &Path,
     sent: &Path,
     job: &Path,
 ) -> Result<StartAnswer, String> {
-    let name = format!("pumpkin-job-{}", start.id);
     let mut unit = stdx::process::command("systemd-run", SYSTEMD);
     unit.args(["--user", "--quiet", "--expand-environment=no"])
         .arg(format!("--unit={name}"))
@@ -147,45 +171,45 @@ fn launch(
         }
         Err(error) => (format!("systemd-run failed: {error}"), false),
     };
-    after_launch(&name, sent, &problem, exited)
+    after_launch(name, sent, job, &problem, exited)
 }
 
 fn after_launch(
     name: &str,
     sent: &Path,
+    job: &Path,
     problem: &str,
     exited: bool,
 ) -> Result<StartAnswer, String> {
-    // ExecStopPost already disposed of the keys if the unit ran to its end.
-    if matches!(sent.try_exists(), Ok(false)) {
+    if job.join(OWN).is_symlink() {
         return Ok(StartAnswer::Started);
     }
-    let mut show = stdx::process::command("systemctl", SYSTEMD);
-    show.args(["--user", "show", "--property=LoadState", "--value", name]);
-    let state = stdx::process::output(&mut show, Deadline::after(Duration::from_secs(10)));
-    if let Ok(Some(state)) = state {
-        if state.status.success() && state.stdout == b"loaded\n" {
-            return Ok(StartAnswer::Started);
-        }
-        if exited && state.stdout == b"not-found\n" {
-            // A short job could have ended between the first check and systemctl's.
-            if matches!(sent.try_exists(), Ok(true)) {
-                return Err(format!(
-                    "{problem}: fix what systemd-run reports and run the command again"
-                ));
-            }
-            return Ok(StartAnswer::Started);
-        }
+    let absent = exited && {
+        let mut show = stdx::process::command("systemctl", SYSTEMD);
+        show.args(["--user", "show", "--property=LoadState", "--value", name]);
+        let state = stdx::process::output(&mut show, Deadline::after(Duration::from_secs(10)));
+        matches!(state, Ok(Some(state)) if state.stdout == b"not-found\n")
+    };
+    // A short unit may have run ExecStopPost while systemctl was looking it up.
+    match sent.try_exists() {
+        Ok(false) => Ok(StartAnswer::Started),
+        Ok(true) if absent => Err(format!(
+            "{problem}: fix what systemd-run reports and run the command again"
+        )),
+        _ => Ok(unconfirmed(name, sent, problem)),
     }
-    Ok(StartAnswer::Unconfirmed {
-        message: format!(
-            "{problem}; the start of {name} is unconfirmed: check `systemctl --user status {name}` on the controller; if it is stopped or absent, remove {} there and run the task again",
-            sent.display()
-        ),
-    })
 }
 
-fn write_sent(start: &StartRequest, sent: &Path, body: &[u8]) -> Result<(), String> {
+fn unconfirmed(name: &str, sent: &Path, problem: &str) -> StartAnswer {
+    StartAnswer::Unconfirmed {
+        message: format!(
+            "{problem}; the start of {name} is unconfirmed: check `systemctl --user status {name}` and `journalctl --user -u {name}` on the controller; if it never ran, remove {} there and run the task again",
+            sent.display()
+        ),
+    }
+}
+
+fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> {
     let config = toml::to_string(&start.sent)
         .map_err(|error| format!("writing the job's configuration: {error}"))?;
     let write = |name: &str, bytes: &[u8]| {
@@ -243,6 +267,9 @@ fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
             };
             fs::hard_link(&source, made.path().join(&entry.path)).context(source.display())?;
         }
+        // Older installs share this layout but their boot may reap another writer's records.
+        let boot = made.path().join("pumpkin-boot");
+        symlink("pumpkin", &boot).context(boot.display())?;
         fs::rename(made.path(), &bin).context(bin.display())?;
     }
     Ok(pumpkin)

@@ -30,7 +30,12 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     {
         return controller::cancel(&client, prefix, flags.force);
     }
-    let (record, named, reached) = cancelled(flags, Reader::Operator)?;
+    let Cancelled {
+        record,
+        named,
+        reached,
+    } = cancelled(flags, Reader::Operator)?;
+    let reached = reached?;
     let named = named.as_deref();
     // `cancel`'s exit says only that the run has ended, however that was, and whether what it
     // left on its provider is gone.
@@ -46,13 +51,15 @@ pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Signals the run's driver, if it has one, waits for the run to end and reaps it. Returns the
-/// record, its runs directory as [`crate::runs_dir`]'s second names it, and whether every
-/// provider that the run used could be reached.
-pub(crate) fn cancelled(
-    flags: cli::Cancel,
-    reader: Reader,
-) -> Result<(Record, Option<String>, bool), String> {
+pub(crate) struct Cancelled {
+    record: Record,
+    named: Option<String>,
+    /// Whether every provider could be reached, or the error from reaping the ended run.
+    pub(crate) reached: Result<bool, String>,
+}
+
+/// Signals the run's driver, if it has one, and waits for the run to end before reaping it.
+pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled, String> {
     let cli::Cancel {
         run,
         runs,
@@ -95,9 +102,13 @@ pub(crate) fn cancelled(
     // has yet to say which it is.
     record.wait(|| {})?;
     let reaping = &mut Reaching::new(modal_config);
-    let reaped = reaped(&record, reaping, named.as_deref(), Reaper::Command)?;
-    let Swept { left: _, reached } = reaped;
-    Ok((record, named, reached))
+    let reached = reaped(&record, reaping, named.as_deref(), Reaper::Command)
+        .map(|Swept { left: _, reached }| reached);
+    Ok(Cancelled {
+        record,
+        named,
+        reached,
+    })
 }
 
 /// The exit code of a command that could not reach a provider to remove what a run left on it.
@@ -120,8 +131,8 @@ pub(crate) enum Reaper {
     Command,
     /// A client's request: the ended or lost runs this build wrote.
     Controller,
-    /// The controller's boot: only the runs that may have left something, not one that ended
-    /// clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
+    /// The controller's boot: runs this build wrote that may have left something, not one that
+    /// ended clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
     /// credentials reach the controller only with a job, it says leaves what the run left
     /// there to end by the run's hard end, and goes on.
     Boot,

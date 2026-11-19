@@ -49,8 +49,8 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
 there. The client's `controller serve` receives the files by content, starts jobs, streams
 their output, copies ended records and handles commands that inspect or stop runs. Each job runs
-in its own systemd unit. On boot, systemd invokes each installed build's `controller boot` so
-that each reaps the records it wrote.
+in its own systemd unit. A job install publishes its `bin/pumpkin-boot` link with the build.
+On boot, systemd runs these entries so each build reaps the records it wrote.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -395,8 +395,10 @@ reads a task's source below its root (`Root`) and serves the standard library's,
 starts the driver process. `run` starts a run and drives it in that process, `ending` follows a run
 and says how it ended, and `reaping` stops runs and removes what they left. `controller` reaches
 the controller, which its `aws` finds, starts and enrols this machine's key with, over a direct SSH
-connection a command keeps for its requests (`Reached`). The workspace saves its address and serialises repairs. Its `send` sends a run's or a
-build's job, its `copy` receives an ended record file by file, with `record.json` last, its
+connection a command keeps for its requests (`Reached`). The workspace saves its address and
+serialises repairs. Its `send` sends a run's or a build's job, sharing large task uploads by digest
+across up to four connections before starting the job on the first. Its `copy` receives an ended record
+file by file, with `record.json` last, its
 `listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
 client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
@@ -632,7 +634,7 @@ provider that the record names, every sandbox tagged with the run that the provi
 every one that the record holds undeleted, listed or not, as one that has ended may still hold
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
 `pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
-those left to other builds. The boot unit runs each installed build and leaves to the hard end
+those left to other builds. The boot unit runs the registered builds and leaves to the hard end
 what it cannot reach, such as Modal's sandboxes, whose credentials reach the controller
 only with a job.
 

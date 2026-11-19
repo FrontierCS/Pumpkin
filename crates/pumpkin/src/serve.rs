@@ -16,7 +16,7 @@ mod reaping;
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
 use std::io::{self, BufReader, Read as _, Seek as _, SeekFrom, Write};
-use std::os::fd::AsFd as _;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -33,6 +33,7 @@ use crate::job::{JOBS, WAITING};
 use crate::link::{
     self, Ask, Boot, Health, HealthRequest, Hello, JobsRequest, ListRequest, Listed, ViewRequest,
 };
+use crate::manifest::store::{Missing, PutAnswer};
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 use crate::view::Answering;
@@ -65,90 +66,156 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
-    // Kept for the link's life: it holds what it read of the live runs.
-    let mut view = Answering::new(home.join(crate::job::runs()));
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
         return Ok(ExitCode::SUCCESS);
     }
-    while arrives(&input)? {
-        let broken = match frame::read::<Ask>(&mut input) {
-            Ok(Some((ask, body))) if body.is_empty() => {
-                if let Ok(install) = &install {
-                    mark_install_used(install);
-                }
-                let uploads = match &ask {
-                    Ask::Put(put) => Some(Ok(std::slice::from_ref(put))),
-                    Ask::Puts { blobs } => {
-                        Some(link::store::check_group(blobs).map(|()| blobs.as_slice()))
-                    }
-                    _ => None,
-                };
-                if let Some(puts) = uploads {
-                    match puts.and_then(|puts| receive_puts(&home, puts, &mut input, &mut output)) {
-                        Ok(()) => continue,
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
-                            ) =>
-                        {
-                            break;
-                        }
-                        Err(error) => error.to_string(),
-                    }
-                } else {
-                    match ask.read_body(&mut input) {
-                        Ok(body) => {
-                            if !delivered(answer(&mut output, &home, ask, &body, &mut view))? {
-                                break;
-                            }
-                            continue;
-                        }
-                        Err(error) => error.to_string(),
-                    }
+    requests(&mut input, &mut output, &home, install.as_deref().ok())
+}
+
+fn requests(
+    input: &mut BufReader<File>,
+    output: &mut impl Write,
+    home: &Path,
+    install: Option<&Path>,
+) -> Result<ExitCode, String> {
+    // Kept for the link's life: it holds what it read of the live runs.
+    let mut view = Answering::new(home.join(crate::job::runs()));
+    while arrives(input)? {
+        let ask = match frame::read::<Ask>(input) {
+            Ok(Some((ask, body))) if body.is_empty() => ask,
+            Ok(Some((_, body))) => {
+                return invalid_request(
+                    output,
+                    format!("a request has a {}-byte body", body.len()),
+                );
+            }
+            Ok(None) => break,
+            Err(error) => return invalid_request(output, error),
+        };
+        if let Some(install) = install {
+            mark_install_used(install);
+        }
+        let body = match ask.read_buffered_body(input) {
+            Ok(body) => body,
+            Err(error) => return invalid_request(output, error),
+        };
+        let written = match ask {
+            Ask::Copy(request) => copy::answer(output, home, request, &body),
+            Ask::Lacks(request) => {
+                link::answer(output, request, |request| missing(home, &request, &body))
+            }
+            Ask::Put(put) => match receive_put(home, &put, input) {
+                Ok(Ok(answer)) => frame::write(output, &answer, &[]),
+                Ok(Err(message)) => link::refuse(output, message),
+                Err(error) => match error.kind() {
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => break,
+                    _ => return invalid_request(output, error),
+                },
+            },
+            Ask::Puts { blobs } => {
+                match link::store::check_group(&blobs)
+                    .and_then(|()| receive_group(home, &blobs, input))
+                {
+                    Ok(answers) => output.write_all(&answers).and_then(|()| output.flush()),
+                    Err(error) => match error.kind() {
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => break,
+                        _ => return invalid_request(output, error),
+                    },
                 }
             }
-            Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
-            Ok(None) => break,
-            Err(error) => error.to_string(),
+            Ask::Start(request) => link::answer(output, request, |request| {
+                let (start, credentials) = request.decode(&body)?;
+                crate::job::start(home, start, credentials)
+            }),
+            Ask::Reap(request) => link::answer(output, request, |request| {
+                reaping::reap(home, request, &body)
+            }),
+            Ask::Cancel(request) => link::answer(output, request, |request| {
+                reaping::cancel(home, request, &body)
+            }),
+            Ask::Follow {
+                id,
+                log_from_bytes,
+                after_cut,
+            } => follow::answer(output, home, id, log_from_bytes, after_cut),
+            Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health(home)),
+            Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
+                crate::job::ids(&home.join(JOBS))
+            }),
+            Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
+                listed(home, &prefixes)
+            }),
+            Ask::View(request) => {
+                link::answer(output, request, |ViewRequest { target, deflate }| {
+                    Ok(view.answer(&target, deflate))
+                })
+            }
         };
-        let message = format!("{broken}: expected a request of this pumpkin");
-        delivered(link::refuse(&mut output, message))?;
-        return Ok(ExitCode::FAILURE);
+        if !delivered(written)? {
+            break;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn receive_puts(
+fn invalid_request(
+    output: &mut impl Write,
+    error: impl std::fmt::Display,
+) -> Result<ExitCode, String> {
+    let message = format!("{error}: expected a request of this pumpkin");
+    delivered(link::refuse(output, message))?;
+    Ok(ExitCode::FAILURE)
+}
+
+fn missing(home: &Path, request: &link::store::Lacks, body: &[u8]) -> Result<Vec<Missing>, String> {
+    let manifest = crate::manifest::Manifest::parse(body)?;
+    if manifest.name() != request.manifest {
+        return Err(
+            "the manifest that arrived differs from its digest: send the task again".to_owned(),
+        );
+    }
+    let install = request.install.then(own_install).transpose()?;
+    crate::manifest::store::lacks(&home.join(crate::job::STORE), &manifest, install.as_deref())
+}
+
+fn receive_put(
+    home: &Path,
+    put: &link::store::Put,
+    input: &mut impl io::Read,
+) -> io::Result<Result<PutAnswer, String>> {
+    let mut parts = link::store::Parts::new(input, put.body_bytes()?);
+    let stored = crate::manifest::store::put(
+        &home.join(crate::job::STORE),
+        &put.digest,
+        put.from,
+        put.size_bytes,
+        &mut parts,
+    );
+    parts.finish()?;
+    Ok(stored)
+}
+
+fn receive_group(
     home: &Path,
     puts: &[link::store::Put],
     input: &mut impl io::Read,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    let store = home.join(crate::job::STORE);
+) -> io::Result<Vec<u8>> {
     // A refusal can fill the return pipe while the client is still writing the group's bodies.
     let mut answers = Vec::new();
     let mut failed = false;
     for put in puts {
-        let mut parts = link::store::Parts::new(input, put.body_bytes()?);
-        if !failed {
-            let stored = crate::manifest::store::put(
-                &store,
-                &put.digest,
-                put.from,
-                put.size_bytes,
-                &mut parts,
-            );
-            failed = !matches!(stored, Ok(crate::manifest::store::PutAnswer::Stored));
+        if failed {
+            link::store::Parts::new(input, put.body_bytes()?).finish()?;
+        } else {
+            let stored = receive_put(home, put, input)?;
+            failed = !matches!(stored, Ok(PutAnswer::Stored));
             match stored {
                 Ok(answer) => frame::write(&mut answers, &answer, &[])?,
                 Err(error) => link::refuse(&mut answers, error)?,
             }
         }
-        parts.finish()?;
     }
-    output.write_all(&answers)?;
-    output.flush()
+    Ok(answers)
 }
 
 // The client may leave at any frame, including while an answer is still streaming.
@@ -165,16 +232,19 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     if !input.buffer().is_empty() {
         return Ok(true);
     }
-    let Ok(timeout) = Timespec::try_from(IDLE) else {
-        unreachable!("{IDLE:?} fits a `timespec`")
+    ready(input.get_ref(), PollFlags::IN, IDLE).context("polling the standard input failed")
+}
+
+fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<bool> {
+    let Ok(timeout) = Timespec::try_from(timeout) else {
+        unreachable!("{timeout:?} fits a timespec")
     };
+    let mut polled = [PollFd::new(fd, events)];
     loop {
-        let mut polled = [PollFd::new(input.get_ref(), PollFlags::IN)];
         match event::poll(&mut polled, Some(&timeout)) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
+            Ok(count) => return Ok(count != 0),
             Err(Errno::INTR) => {}
-            Err(error) => return Err(format!("polling the standard input failed: {error}")),
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -243,58 +313,6 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
         // Another `serve`'s prune removed it first.
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         removed => removed.context(path.display()),
-    }
-}
-
-/// Writes the answer to `ask` on `output`, with `view` the view of the runs below `home`: a
-/// refusal if what it asks for fails.
-fn answer(
-    output: &mut impl Write,
-    home: &Path,
-    ask: Ask,
-    body: &[u8],
-    view: &mut Answering,
-) -> io::Result<()> {
-    match ask {
-        Ask::Copy(request) => copy::answer(output, home, request, body),
-        Ask::Lacks(request) => link::answer(output, request, |request| {
-            let manifest = crate::manifest::Manifest::parse(body)?;
-            if manifest.name() != request.manifest {
-                return Err(
-                    "the manifest that arrived differs from its digest: send the task again"
-                        .to_owned(),
-                );
-            }
-            let install = request.install.then(own_install).transpose()?;
-            crate::manifest::store::lacks(
-                &home.join(crate::job::STORE),
-                &manifest,
-                install.as_deref(),
-            )
-        }),
-        Ask::Put(_) | Ask::Puts { .. } => {
-            unreachable!("the upload's body is streamed before answering other requests")
-        }
-        Ask::Start(request) => link::answer(output, *request, |start| {
-            crate::job::start(home, start, body)
-        }),
-        Ask::Reap(request) => link::answer(output, request, |request| {
-            reaping::reap(home, request, body)
-        }),
-        Ask::Cancel(request) => link::answer(output, request, |request| {
-            reaping::cancel(home, request, body)
-        }),
-        Ask::Follow { id, log_from_bytes } => follow::answer(output, home, id, log_from_bytes),
-        Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health(home)),
-        Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
-            crate::job::ids(&home.join(JOBS))
-        }),
-        Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
-            listed(home, &prefixes)
-        }),
-        Ask::View(request) => link::answer(output, request, |ViewRequest { target, deflate }| {
-            Ok(view.answer(&target, deflate))
-        }),
     }
 }
 

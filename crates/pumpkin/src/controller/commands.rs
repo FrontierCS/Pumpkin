@@ -15,7 +15,9 @@ use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
-use crate::link::{CancelAnswer, CancelRequest, JobKind, JobsRequest};
+use crate::link::{
+    Ask, CancelAnswer, CancelRequest, JobKind, JobsRequest, ReapRequest, Unanswered,
+};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
@@ -247,6 +249,12 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
         CancelAnswer::Unstarted => say(format_args!(
             "run {id}'s job on controller `{name}` is stopped, before the run started"
         )),
+        CancelAnswer::EndedUnreaped { message } => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
+            }
+            return Err(message);
+        }
         CancelAnswer::Stopped { writer } => {
             let writer = reached.copy(&build, &id)?.or(writer);
             let copy = PathBuf::from(crate::default_runs()?).join(&id);
@@ -278,11 +286,20 @@ pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
     let modal = client.modal_file()?;
-    let request = crate::link::ReapRequest {
+    let request = Ask::Reap(ReapRequest {
         modal_bytes: modal.as_ref().map(Vec::len),
-    };
+    });
     let report = reached.asked(&build, "reaping the runs", |reached, linked| {
-        linked.ask_with_body(reached, request, modal.as_deref().unwrap_or_default())
+        linked.stream(reached, |link| {
+            link.send(&request, modal.as_deref().unwrap_or_default())?;
+            link.answer::<ReapRequest>().inspect_err(|error| {
+                if matches!(error, Unanswered::Unreached(_)) {
+                    say(
+                        "the reap's reply was cut: the output may omit ids of runs already cleaned",
+                    );
+                }
+            })
+        })
     })??;
     report.report(None, crate::Reaper::Controller)
 }

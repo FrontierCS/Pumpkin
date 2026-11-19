@@ -124,6 +124,7 @@ resource "aws_instance" "controller" {
   user_data = templatefile("${path.module}/controller.yaml", {
     ubuntu_snapshot    = "https://snapshot.ubuntu.com/ubuntu/${local.controller_versions.ubuntu_snapshot}"
     docker_key         = file("${path.module}/docker.asc")
+    boot_script        = file("${path.module}/pumpkin-boot")
     docker_version     = local.controller_versions.docker
     containerd_version = local.controller_versions.containerd
     buildx_version     = local.controller_versions.buildx
