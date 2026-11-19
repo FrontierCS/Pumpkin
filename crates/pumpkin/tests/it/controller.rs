@@ -2260,6 +2260,55 @@ fn racing_upload(first_finishes: bool) {
 }
 
 #[test]
+fn sends_from_a_repository_with_a_native_name() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let repo = scratch.0.join("repo");
+    let native = scratch.0.join(OsStr::from_bytes(b"native-\xff\n"));
+    fs::rename(&repo, &native).unwrap();
+    symlink(&native, &repo).unwrap();
+    let (_, sent) = start(&scratch, &client);
+    check(
+        &scratch,
+        &sent,
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.8 KiB
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>"#]],
+    );
+}
+
+#[test]
+fn refuses_a_non_utf8_entry_below_the_repository() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    scratch.write_task_in("repo/tasks", "stand-in", &workflow(&image('0'), &["true"]));
+    scratch.write("repo/.gitignore", "*\n");
+    let tasks = scratch.0.join("repo/tasks");
+    let native = scratch.0.join(OsStr::from_bytes(b"repo/tasks-\xff"));
+    fs::rename(&tasks, &native).unwrap();
+    symlink(&native, &tasks).unwrap();
+    let run = on_client(&scratch, &client, &["run", "tasks/stand-in/task.star"]);
+    let refused = super::ran(run, &scratch.0, false);
+    check(
+        &scratch,
+        &refused,
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run tasks/stand-in/task.star
+        exit status: Some(1)
+        pumpkin: tasks/stand-in/task.star: its path below the git repository isn't UTF-8: rename it so it can be sent to the controller"#]],
+    );
+}
+
+#[test]
 fn send_refusals() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
