@@ -29,6 +29,7 @@ pub(super) fn job(reached: &Reached, build: &Build, id: &str) -> Result<Finished
 #[derive(Default)]
 struct Shown {
     log_bytes: u64,
+    asked: bool,
     mid_line: bool,
     said: BTreeSet<String>,
 }
@@ -44,9 +45,11 @@ impl Shown {
             &Ask::Follow {
                 id: id.to_owned(),
                 log_from_bytes: self.log_bytes,
+                after_cut: self.asked,
             },
             &[],
         )?;
+        self.asked = true;
         loop {
             let (item, body) = match link.item::<Followed>()? {
                 Ok(frame) => frame,

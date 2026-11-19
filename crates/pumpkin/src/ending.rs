@@ -61,15 +61,23 @@ pub(crate) const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_se
 /// says each of its milestones meanwhile, once, and the parts of its log that can't be read, if
 /// any, to the operator.
 pub(crate) fn followed(record: &Record) -> Result<Ending, String> {
-    milestones(record, |message| {
-        say(message);
-        Ok(())
-    })
+    milestones(
+        record,
+        |message| {
+            say(message);
+            Ok(())
+        },
+        || {
+            std::thread::sleep(FOLLOW_POLL);
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn milestones(
     record: &Record,
     mut tell_reader: impl FnMut(&dyn fmt::Display) -> Result<(), String>,
+    mut wait: impl FnMut() -> Result<(), String>,
 ) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
@@ -95,7 +103,7 @@ pub(crate) fn milestones(
         if let Some(ending) = ending {
             return Ok(ending);
         }
-        std::thread::sleep(FOLLOW_POLL);
+        wait()?;
     }
 }
 
