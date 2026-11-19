@@ -377,17 +377,11 @@ fn caller_arguments<'d>(
     at: Span,
     budget: &value::Budget,
 ) -> Result<Vec<(&'d Name, Value)>, Fault> {
-    let [_, _, caller @ ..] = &def.params[..def.positional] else {
-        unreachable!(
-            "`{}` takes fewer positional parameters than its handle and the payload, though \
-             reading a body refuses such a `def`",
-            def.name.text
-        )
-    };
+    let caller = def.params.iter().take(def.positional).skip(2);
     let mut bound = Vec::with_capacity(arguments.len());
     for (name, argument) in arguments {
         let Some(param) = caller
-            .iter()
+            .clone()
             .find(|param| *param.name.text == *name.as_str())
         else {
             let message = format!(
