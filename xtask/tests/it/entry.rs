@@ -1,7 +1,9 @@
 //! The release launcher against pinned archives read through curl, and the static install.
 
+use std::ffi::OsString;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
@@ -26,165 +28,17 @@ enum Release {
 
 fn check(release: Release, pin: Option<&str>, lacking: bool, expect: &Expect) {
     let held = TestDir::new();
-    let scratch = held.path();
-    let home = scratch.join("home");
-    let sh = Shell::new().unwrap();
-    let checksum = match release {
-        Release::None => WRONG_SHA.to_owned(),
-        Release::WrongCommit => archive(&sh, scratch, WRONG_COMMIT),
-        Release::Current | Release::Cached | Release::Concurrent => archive(&sh, scratch, COMMIT),
-    };
-    let (cache, xdg) = if matches!(release, Release::Cached) {
-        let root = scratch.join("cache");
-        (root.join("pumpkin"), Some(root))
-    } else {
-        (home.join(".cache/pumpkin"), None)
-    };
-    let probes = matches!(release, Release::Concurrent).then(|| {
-        let path = env::var_os("PATH").unwrap();
-        let bin = scratch.join("bin");
-        fs::create_dir(&bin).unwrap();
-        let tools = ["flock", "curl"].map(|tool| {
-            let original = env::split_paths(&path)
-                .map(|dir| dir.join(tool))
-                .find(|file| file.is_file())
-                .unwrap();
-            let probe = bin.join(tool);
-            fs::write(
-                &probe,
-                format!(
-                    r#"#!/bin/sh
-printf '.\n' >> "$PROBES/{tool}"
-exec "$REAL_{name}" "$@"
-"#,
-                    name = tool.to_ascii_uppercase()
-                ),
-            )
-            .unwrap();
-            fs::set_permissions(probe, fs::Permissions::from_mode(0o755)).unwrap();
-            original
-        });
-        let path = env::join_paths((std::iter::once(bin)).chain(env::split_paths(&path))).unwrap();
-        (tools, path)
-    });
-    let run = |name: &str, pin: Option<&str>| {
-        let repo = scratch.join(name);
-        let subdir = repo.join("subdir");
-        fs::create_dir_all(&subdir).unwrap();
-        let launcher = fs::read_to_string(SCRIPT).unwrap();
-        let launcher = if matches!(release, Release::None) {
-            launcher
-        } else {
-            launcher
-                .replace(
-                    RELEASES,
-                    &format!("file://{}/releases/download", scratch.display()),
-                )
-                .replace("'=https'", "'=file'")
-        };
-        fs::write(repo.join("pumpkin"), launcher).unwrap();
-        if let Some(pin) = pin {
-            fs::write(
-                repo.join(".pumpkinversion"),
-                pin.replace("<checksum>", &checksum),
-            )
-            .unwrap();
+    let fixture = Fixture::new(held.path(), release, lacking);
+    let output = match release {
+        Release::Cached => {
+            fixture.warm_cache();
+            fixture.run("repo", pin)
         }
-        let path = if lacking {
-            let path = env::var_os("PATH").unwrap();
-            let bin = scratch.join("bin");
-            fs::create_dir(&bin).unwrap();
-            for tool in ["sh", "uname", "dirname"] {
-                let found = env::split_paths(&path)
-                    .map(|dir| dir.join(tool))
-                    .find(|file| file.is_file())
-                    .unwrap();
-                symlink(found, bin.join(tool)).unwrap();
-            }
-            bin.into_os_string()
-        } else if let Some((_, path)) = &probes {
-            path.clone()
-        } else {
-            env::var_os("PATH").unwrap()
-        };
-        let sh = Shell::new().unwrap();
-        sh.change_dir(subdir);
-        let call = sh
-            .cmd("sh")
-            .args(["../pumpkin", "check", "task with spaces.star"])
-            .env("HOME", &home)
-            .env("PATH", path);
-        let call = if let Some(root) = &xdg {
-            call.env("XDG_CACHE_HOME", root)
-        } else {
-            call.env_remove("XDG_CACHE_HOME")
-        };
-        let call = if let Some(([flock, curl], _)) = &probes {
-            call.env("PROBES", scratch)
-                .env("REAL_FLOCK", flock)
-                .env("REAL_CURL", curl)
-        } else {
-            call
-        };
-        call.ignore_status().quiet().output().unwrap()
+        Release::Concurrent => fixture.run_concurrent(pin),
+        Release::None | Release::WrongCommit | Release::Current => fixture.run("repo", pin),
     };
-    if matches!(release, Release::Cached) {
-        let pin = format!("v1 {COMMIT} {checksum}");
-        let first = run("first", Some(&pin));
-        assert!(
-            first.status.success(),
-            "{}",
-            String::from_utf8_lossy(&first.stderr)
-        );
-        assert_eq!(listed(&scratch.join("first/.pumpkin")), ".gitignore");
-        fs::remove_dir_all(scratch.join("releases")).unwrap();
-    }
-    let output = if matches!(release, Release::Concurrent) {
-        let locks = cache.join("locks");
-        fs::create_dir_all(&locks).unwrap();
-        let gate = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(locks.join(&checksum))
-            .unwrap();
-        gate.lock().unwrap();
-        thread::scope(|scope| {
-            let first = scope.spawn(|| run("first", pin));
-            let second = scope.spawn(|| run("repo", pin));
-            let start = Instant::now();
-            let attempted = || {
-                fs::read_to_string(scratch.join("flock"))
-                    .is_ok_and(|text| text.lines().count() == 2)
-            };
-            while !attempted() && start.elapsed() < Duration::from_secs(2) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            let both_cold = attempted();
-            gate.unlock().unwrap();
-            let first = first.join().unwrap();
-            let mut second = second.join().unwrap();
-            assert!(both_cold, "both launchers must reach the cold cache lock");
-            for output in [&first, &second] {
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            assert_eq!(listed(&scratch.join("first/.pumpkin")), ".gitignore");
-            let downloads = fs::read_to_string(scratch.join("curl"))
-                .unwrap()
-                .lines()
-                .count();
-            second.stderr = format!("downloads: {downloads}\n").into_bytes();
-            second
-        })
-    } else {
-        run("repo", pin)
-    };
-    let workspace = scratch.join("repo/.pumpkin");
-    let kept = listed(&cache);
-    let entry = cache.join(&checksum);
+
+    let entry = fixture.cache.join(&fixture.checksum);
     if entry.is_dir() {
         assert_eq!(listed(&entry), "bin commit");
         assert_eq!(
@@ -197,15 +51,201 @@ exec "$REAL_{name}" "$@"
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
-        listed(&workspace),
-        kept,
+        listed(&fixture.scratch.join("repo/.pumpkin")),
+        listed(&fixture.cache),
     );
-    let report = report.replace(&scratch.display().to_string(), "<scratch>");
+    let report = report.replace(&fixture.scratch.display().to_string(), "<scratch>");
     let report = match release {
         Release::None => report,
-        _ => report.replace(&checksum, "<checksum>"),
+        _ => report.replace(&fixture.checksum, "<checksum>"),
     };
     expect.assert_eq(&report);
+}
+
+struct Fixture<'a> {
+    scratch: &'a Path,
+    cache: PathBuf,
+    xdg: Option<PathBuf>,
+    checksum: String,
+    launcher: String,
+    path: OsString,
+    probes: Option<[PathBuf; 2]>,
+}
+
+impl<'a> Fixture<'a> {
+    fn new(scratch: &'a Path, release: Release, lacking: bool) -> Self {
+        let sh = Shell::new().unwrap();
+        let checksum = match release {
+            Release::None => WRONG_SHA.to_owned(),
+            Release::WrongCommit => archive(&sh, scratch, WRONG_COMMIT),
+            Release::Current | Release::Cached | Release::Concurrent => {
+                archive(&sh, scratch, COMMIT)
+            }
+        };
+        let xdg = matches!(release, Release::Cached).then(|| scratch.join("cache"));
+        let cache = match &xdg {
+            Some(root) => root.join("pumpkin"),
+            None => scratch.join("home/.cache/pumpkin"),
+        };
+        let launcher = fs::read_to_string(SCRIPT).unwrap();
+        let launcher = if matches!(release, Release::None) {
+            launcher
+        } else {
+            launcher
+                .replace(
+                    RELEASES,
+                    &format!("file://{}/releases/download", scratch.display()),
+                )
+                .replace("'=https'", "'=file'")
+        };
+        let (path, probes) = launcher_path(scratch, release, lacking);
+        Self {
+            scratch,
+            cache,
+            xdg,
+            checksum,
+            launcher,
+            path,
+            probes,
+        }
+    }
+
+    fn run(&self, name: &str, pin: Option<&str>) -> Output {
+        let repo = self.scratch.join(name);
+        let subdir = repo.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(repo.join("pumpkin"), &self.launcher).unwrap();
+        if let Some(pin) = pin {
+            fs::write(
+                repo.join(".pumpkinversion"),
+                pin.replace("<checksum>", &self.checksum),
+            )
+            .unwrap();
+        }
+        let sh = Shell::new().unwrap();
+        sh.change_dir(subdir);
+        let call = sh
+            .cmd("sh")
+            .args(["../pumpkin", "check", "task with spaces.star"])
+            .env("HOME", self.scratch.join("home"))
+            .env("PATH", &self.path);
+        let call = if let Some(root) = &self.xdg {
+            call.env("XDG_CACHE_HOME", root)
+        } else {
+            call.env_remove("XDG_CACHE_HOME")
+        };
+        let call = if let Some([flock, curl]) = &self.probes {
+            call.env("PROBES", self.scratch)
+                .env("REAL_FLOCK", flock)
+                .env("REAL_CURL", curl)
+        } else {
+            call
+        };
+        call.ignore_status().quiet().output().unwrap()
+    }
+
+    fn warm_cache(&self) {
+        let pin = format!("v1 {COMMIT} <checksum>");
+        self.check_installed("first", &self.run("first", Some(&pin)));
+        fs::remove_dir_all(self.scratch.join("releases")).unwrap();
+    }
+
+    fn run_concurrent(&self, pin: Option<&str>) -> Output {
+        let locks = self.cache.join("locks");
+        fs::create_dir_all(&locks).unwrap();
+        let gate = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(locks.join(&self.checksum))
+            .unwrap();
+        gate.lock().unwrap();
+        thread::scope(|scope| {
+            let first = scope.spawn(|| self.run("first", pin));
+            let second = scope.spawn(|| self.run("repo", pin));
+            let started = Instant::now();
+            let attempts = self.scratch.join("flock");
+            let both_cold = loop {
+                if fs::read_to_string(&attempts).is_ok_and(|text| text.lines().count() == 2) {
+                    break true;
+                }
+                if first.is_finished()
+                    || second.is_finished()
+                    || started.elapsed() >= Duration::from_secs(2)
+                {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(5));
+            };
+            gate.unlock().unwrap();
+            let first = first.join().unwrap();
+            let mut second = second.join().unwrap();
+            self.check_installed("first", &first);
+            self.check_installed("repo", &second);
+            assert!(both_cold, "both launchers must reach the cold cache lock");
+            let downloads = fs::read_to_string(self.scratch.join("curl"))
+                .unwrap()
+                .lines()
+                .count();
+            second.stderr = format!("downloads: {downloads}\n").into_bytes();
+            second
+        })
+    }
+
+    fn check_installed(&self, name: &str, output: &Output) {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            listed(&self.scratch.join(name).join(".pumpkin")),
+            ".gitignore"
+        );
+    }
+}
+
+fn launcher_path(
+    scratch: &Path,
+    release: Release,
+    lacking: bool,
+) -> (OsString, Option<[PathBuf; 2]>) {
+    let path = env::var_os("PATH").unwrap();
+    let tool = |name| {
+        env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|file| file.is_file())
+            .unwrap()
+    };
+    let bin = scratch.join("bin");
+    if lacking {
+        fs::create_dir(&bin).unwrap();
+        for name in ["sh", "uname", "dirname"] {
+            symlink(tool(name), bin.join(name)).unwrap();
+        }
+        return (bin.into_os_string(), None);
+    }
+    if !matches!(release, Release::Concurrent) {
+        return (path, None);
+    }
+    fs::create_dir(&bin).unwrap();
+    let originals = ["flock", "curl"].map(|name| {
+        let probe = bin.join(name);
+        fs::write(
+            &probe,
+            format!(
+                r#"#!/bin/sh
+printf '.\n' >> "$PROBES/{name}"
+exec "$REAL_{tool}" "$@"
+"#,
+                tool = name.to_ascii_uppercase(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(probe, fs::Permissions::from_mode(0o755)).unwrap();
+        tool(name)
+    });
+    let path = env::join_paths(std::iter::once(bin).chain(env::split_paths(&path))).unwrap();
+    (path, Some(originals))
 }
 
 fn listed(dir: &Path) -> String {
