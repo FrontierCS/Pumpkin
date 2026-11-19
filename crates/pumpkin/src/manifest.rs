@@ -20,9 +20,8 @@
 //! The store holds each blob as `<sha256>`, 0444; the same bytes as `<sha256>.x`, 0555, for a
 //! file that its owner may execute, as a link shares its file's mode; each manifest as
 //! [`MANIFESTS`]`/<sha256>`; and the pieces that have arrived, unchecked, as
-//! [`INCOMING`]`/<sha256>.<index>`. The scripts are run over `ssh` by the controller's shell, not
-//! by a Pumpkin: the controller builds the tree's own Pumpkin only once the tree is there. Making
-//! the tree of links into the store, and collecting what no tree links, are the job's.
+//! [`INCOMING`]`/<sha256>.<index>`. The job makes its tree of links into the store, and collects
+//! what no tree or recent manifest names.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -40,9 +39,8 @@ use stdx::Context as _;
 use crate::job::STORE;
 
 // The first line of a manifest, which the scripts check too; any change to what a line holds
-// changes it. The client writes a manifest and the job of the Pumpkin it pins makes its tree, so
-// those two are of one commit; the prune of any job reads every manifest in the store, and keeps
-// every blob while one is of a form it can't read.
+// changes it. The job runs the client's build to make its tree, but the prune reads every
+// manifest in the store, and keeps every blob while one is of a form it can't read.
 const FORM: &str = "pumpkin-tree/1";
 
 /// The most bytes of a blob that one piece carries, and so of what a dropped connection loses.
@@ -64,8 +62,6 @@ pub(crate) enum Kind {
     Executable,
     /// A symbolic link, whose blob is its target's text, as Git stores a link.
     Link,
-    /// The git bundle of the Pumpkin that builds the tree, whose path is that commit's hash.
-    Bundle,
 }
 
 impl Kind {
@@ -74,7 +70,6 @@ impl Kind {
             Self::File => 'f',
             Self::Executable => 'x',
             Self::Link => 'l',
-            Self::Bundle => 'b',
         }
     }
 
@@ -83,7 +78,6 @@ impl Kind {
             "f" => Some(Self::File),
             "x" => Some(Self::Executable),
             "l" => Some(Self::Link),
-            "b" => Some(Self::Bundle),
             _ => None,
         }
     }
@@ -151,8 +145,8 @@ impl Manifest {
 fn entry(line: &str) -> Result<Entry, String> {
     let wrong = || {
         format!(
-            "the manifest's line `{}` isn't `<kind> <sha256> <size> <path>`: expected `f`, `x`, \
-             `l` or `b`, 64 lowercase hexadecimal digits, a number of bytes and a path",
+            "the manifest's line `{}` isn't `<kind> <sha256> <size> <path>`: expected `f`, `x` \
+             or `l`, 64 lowercase hexadecimal digits, a number of bytes and a path",
             line.escape_debug()
         )
     };
@@ -165,16 +159,12 @@ fn entry(line: &str) -> Result<Entry, String> {
     let kind = Kind::from_letter(kind).ok_or_else(wrong)?;
     let digest = digest(hex).ok_or_else(wrong)?;
     let size_bytes = size.parse().map_err(|_| wrong())?;
-    match kind {
-        Kind::Bundle if commit(path) => {}
-        Kind::Bundle => return Err(wrong()),
-        Kind::File | Kind::Executable | Kind::Link => sendable(path).map_err(|error| {
-            format!(
-                "the manifest's line `{}` is refused: {error}",
-                line.escape_debug()
-            )
-        })?,
-    }
+    sendable(path).map_err(|error| {
+        format!(
+            "the manifest's line `{}` is refused: {error}",
+            line.escape_debug()
+        )
+    })?;
     Ok(Entry {
         kind,
         digest,
@@ -190,13 +180,6 @@ pub(crate) fn digest(hex: &str) -> Option<Sha256Digest> {
 
 pub(crate) fn sha256(bytes: &[u8]) -> Sha256Digest {
     Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(bytes)))
-}
-
-fn commit(path: &str) -> bool {
-    path.len() == 40
-        && path
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn sendable(path: &str) -> Result<(), String> {
@@ -223,7 +206,7 @@ fn sendable(path: &str) -> Result<(), String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Where a blob's bytes are.
 pub(crate) enum Source {
-    /// A file, the tree's or the bundle.
+    /// A file of the tree.
     File(PathBuf),
     /// A symbolic link's target, its text.
     Text(Vec<u8>),
@@ -243,19 +226,13 @@ impl Hashed {
 }
 
 /// The manifest of a tree, and where its blobs are: each file below `top` whose path is in
-/// `files`, which lists NUL-ended paths as `git ls-files -z` does, and the git `bundle`, as the
-/// path `commit`.
+/// `files`, which lists NUL-ended paths as `git ls-files -z` does.
 ///
 /// A path listed twice is taken once; one that is gone, or is a directory, as a submodule's is, is
 /// left out. It fails on a path that a manifest
 /// can't hold, a file that is neither a regular file nor a symbolic link, or one over
 /// `BLOB_BYTES`.
-pub(crate) fn hash(
-    top: &Path,
-    files: &[u8],
-    commit: &str,
-    bundle: &Path,
-) -> Result<Hashed, String> {
+pub(crate) fn hash(top: &Path, files: &[u8]) -> Result<Hashed, String> {
     let mut entries = Vec::new();
     let mut sources = BTreeMap::new();
     // A path listed twice, as git lists one in a merge's conflict once for each of its stages.
@@ -312,15 +289,6 @@ pub(crate) fn hash(
         });
         sources.insert(digest, source);
     }
-    let source = Source::File(bundle.to_owned());
-    let (digest, size_bytes) = hashed(&source)?;
-    entries.push(Entry {
-        kind: Kind::Bundle,
-        digest: digest.clone(),
-        size_bytes,
-        path: commit.to_owned(),
-    });
-    sources.insert(digest, source);
     Ok(Hashed {
         manifest: Manifest::new(entries),
         sources,
@@ -480,6 +448,7 @@ pub(crate) fn admit(tree: &Sha256Digest) -> String {
     let tree = tree.hex();
     format!(
         r#"cd "$HOME/{STORE}"
+[ -r "{MANIFESTS}/{tree}" ] || {{ echo "the tree {tree} is missing: send it again" >&2; exit 1; }}
 {lacking}whole() {{
   lacking {MANIFESTS}/{tree} | awk -v piece={PIECE_BYTES} '
     $1 == "missing" {{
@@ -521,21 +490,12 @@ rm "$refused"
     )
 }
 
-/// What to tell the operator of what [`admit`]'s script printed, `printed`, ending with what to do.
-pub(crate) fn unadmitted(hashed: &Hashed, printed: &[u8]) -> String {
-    let printed = String::from_utf8_lossy(printed);
-    let mut changed = Vec::new();
-    let mut gone = BTreeSet::new();
-    for line in printed.lines() {
-        let (word, hex) = line.split_once(' ').unwrap_or((line, ""));
-        let Some(digest) = digest(hex) else { continue };
-        match word {
-            "changed" => changed.push(digest),
-            _ => {
-                gone.insert(digest);
-            }
-        }
-    }
+/// What to tell the operator when the start refused a blob.
+pub(crate) fn unadmitted(
+    hashed: &Hashed,
+    changed: &[Sha256Digest],
+    gone: &[Sha256Digest],
+) -> String {
     if let Some(first) = changed.first() {
         let others = match changed.len() - 1 {
             0 => " changed while it was sent".to_owned(),
@@ -546,26 +506,15 @@ pub(crate) fn unadmitted(hashed: &Hashed, printed: &[u8]) -> String {
         };
         return format!("{}{others}: run it again", hashed.shown(first));
     }
-    let entries = hashed.manifest.entries.iter();
-    let (bundles, files): (Vec<&Entry>, Vec<&Entry>) = (entries)
+    let gone: BTreeSet<_> = gone.iter().collect();
+    let files = hashed
+        .manifest
+        .entries
+        .iter()
         .filter(|entry| gone.contains(&entry.digest))
-        .partition(|entry| entry.kind == Kind::Bundle);
-    let mut what = Vec::new();
-    if !files.is_empty() {
-        what.push(format!("{} of the task's files", files.len()));
-    }
-    if !bundles.is_empty() {
-        what.push("Pumpkin's bundle".to_owned());
-    }
-    let is = if files.len() + bundles.len() == 1 {
-        "is"
-    } else {
-        "are"
-    };
-    format!(
-        "{} {is} no longer whole on the controller: run it again",
-        what.join(" and ")
-    )
+        .count();
+    let is = if files == 1 { "is" } else { "are" };
+    format!("{files} of the task's files {is} no longer whole on the controller: run it again")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

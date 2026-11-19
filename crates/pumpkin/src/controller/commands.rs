@@ -19,7 +19,7 @@ use super::send::{send, tree};
 use super::{Reached, SSH_FAILED};
 use crate::ending::Printed;
 use crate::job::{BUILDS, JOBS};
-use crate::link::JobsRequest;
+use crate::link::{JobKind, JobsRequest};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
 
@@ -150,10 +150,7 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
         id.as_str()
     ));
     let reached = Reached::reach(&client.controller)?;
-    let mut words = vec!["run".to_owned()];
-    words.extend(crate::arg_flags(&args));
-    words.extend(["--".to_owned(), tree.entry.clone()]);
-    send(&reached, client, &id, JOBS, &tree, &words)?;
+    send(&reached, client, &id, JobKind::Run, &tree, &args)?;
     let id = id.as_str();
     say(format_args!(
         "run {id} is a job on controller `{name}`, which builds it, then runs it"
@@ -329,10 +326,7 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
     let id = runtime::new_id(SystemTime::now())?;
     let tree = tree(&entry, &args)?;
     let reached = Reached::reach(&client.controller)?;
-    let mut words = vec!["build".to_owned()];
-    words.extend(crate::arg_flags(&args));
-    words.extend(["--".to_owned(), tree.entry.clone()]);
-    send(&reached, client, &id, BUILDS, &tree, &words)?;
+    send(&reached, client, &id, JobKind::Build, &tree, &args)?;
     let then = format!("[ -s out ] || exit {UNSTARTED}\nexec cat out");
     // Its IR, in `out`, is whole only once the job has ended.
     let following = following(BUILDS, id.as_str(), "false", None, &then);

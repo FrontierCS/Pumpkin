@@ -73,7 +73,7 @@ pub(crate) struct ClientModal {
 /// What a client sends of its configuration with each job, which the job reads: its upstreams,
 /// each with its key in a file of its own beside this, named by [`key_file`], and its Modal
 /// provider's `profile` and `classes`.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Sent {
     #[serde(default)]
@@ -81,7 +81,7 @@ pub(crate) struct Sent {
     pub(crate) modal: Option<SentModal>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SentModal {
     profile: String,
@@ -215,6 +215,11 @@ impl Upstreams {
         let models = self.0.values().flat_map(|upstream| &upstream.models);
         let priced = models.filter_map(|model| Some((model.name.clone(), model.usd_per_mtok?)));
         priced.collect()
+    }
+
+    /// The key files that arrive with a job, in upstream order.
+    pub(crate) fn key_files(&self) -> impl ExactSizeIterator<Item = String> {
+        self.0.keys().map(key_file)
     }
 
     /// Points each upstream's `key_file` at its key in `dir`, where a client sends it with a job.
@@ -436,16 +441,15 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
 }
 
 impl Client {
-    /// What a job is sent of this configuration, and the key files to send with it: each the name
-    /// of its file there and the path of its source here.
-    pub(crate) fn sent(&self) -> (Sent, Vec<(String, PathBuf)>) {
+    /// What a job is sent of this configuration and the source of each key in upstream order.
+    pub(crate) fn sent(&self) -> (Sent, Vec<PathBuf>) {
         let mut upstreams = self.upstreams.clone();
         let mut keys = Vec::new();
         for (name, upstream) in &mut upstreams.0 {
-            let file = key_file(name);
-            // A job of an earlier build reads the key from the file that `key_file` names.
-            let source = std::mem::replace(&mut upstream.key_file, PathBuf::from(&file));
-            keys.push((file, source));
+            keys.push(std::mem::replace(
+                &mut upstream.key_file,
+                key_file(name).into(),
+            ));
         }
         let modal = (self.controller.modal.as_ref()).map(|modal| {
             let ClientModal {

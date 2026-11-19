@@ -72,16 +72,19 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                 if let Ok(install) = &install {
                     mark_install_used(install);
                 }
-                answer(&mut output, &home, ask, &mut view).context(written)?;
-                continue;
+                match ask.read_body(&mut input) {
+                    Ok(body) => {
+                        answer(&mut output, &home, ask, &body, &mut view).context(written)?;
+                        continue;
+                    }
+                    Err(error) => error.to_string(),
+                }
             }
             Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
             Ok(None) => break,
             Err(error) => error.to_string(),
         };
-        let message = format!(
-            "{broken}: expected a request, with no body, as a client of this pumpkin sends"
-        );
+        let message = format!("{broken}: expected a request of this pumpkin");
         link::refuse(&mut output, message).context(written)?;
         return Ok(ExitCode::FAILURE);
     }
@@ -176,8 +179,18 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
 
 /// Writes the answer to `ask` on `output`, with `view` the view of the runs below `home`: a
 /// refusal if what it asks for fails.
-fn answer(output: &mut impl Write, home: &Path, ask: Ask, view: &mut Answering) -> io::Result<()> {
+fn answer(
+    output: &mut impl Write,
+    home: &Path,
+    ask: Ask,
+    body: &[u8],
+    view: &mut Answering,
+) -> io::Result<()> {
     match ask {
+        Ask::Start(request) => link::answer(output, request, |request| {
+            let (start, credentials) = request.decode(body)?;
+            crate::job::start(home, start, credentials)
+        }),
         Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
         Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
             crate::job::ids(&home.join(JOBS))

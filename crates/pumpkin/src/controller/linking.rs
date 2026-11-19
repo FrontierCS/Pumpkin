@@ -1,6 +1,6 @@
 //! A link ([`crate::link`]) to the controller's `serve` of this build, over a session of a shared
 //! master: the `serve` is uploaded there first if it has none, and a link that is cut is opened
-//! again, as only what reads goes over it, by [`Reached::asked`] or by the caller.
+//! again, by [`Reached::asked`] or by the caller.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -108,7 +108,16 @@ impl Linked {
         reached: &Reached,
         request: R,
     ) -> Result<Result<R::Answer, String>, Unlinked> {
-        let asked = self.link.ask(request);
+        self.ask_with_body(reached, request, &[])
+    }
+
+    pub(super) fn ask_with_body<R: Request>(
+        &mut self,
+        reached: &Reached,
+        request: R,
+        body: &[u8],
+    ) -> Result<Result<R::Answer, String>, Unlinked> {
+        let asked = self.link.ask(request, body);
         asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 

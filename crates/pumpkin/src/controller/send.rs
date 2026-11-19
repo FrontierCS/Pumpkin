@@ -5,10 +5,9 @@
 //! sent, in streams over connections of their own. A connection that ends, or a stream that
 //! stalls, costs only the pieces not yet stored: the send asks again what the controller lacks.
 //!
-//! The job's start then sends this machine's upstreams, their keys and its Modal settings into
-//! the job's directory in tmpfs, as a `tar` on the connection's standard input, never in an
-//! argument or in a file of this machine's, takes in what arrived, and starts the job in a unit of
-//! the user's systemd, which outlives every connection.
+//! The start request sends this machine's settings and keys on the link's standard input. The
+//! controller writes them to the job's directory in tmpfs and starts its systemd unit, which
+//! outlives the connection.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,15 +21,13 @@ use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use schema::ir::Sha256Digest;
 use schema::workflow::Workflow;
+use stdx::Context as _;
 use stdx::process::Environment;
-use stdx::{Context as _, Deadline};
 
-use super::{
-    AGAIN, Name, Reached, SHORT_TIMEOUT, SSH_FAILED, STALL_TIMEOUT, Session, bounded, finished,
-};
-use crate::job::{SENT_CONFIG, SENT_MODAL, STARTED, STORE, TREES};
-use crate::manifest::{self, INCOMING};
-use crate::{config, next, say, workspace};
+use super::linking::Build;
+use super::{AGAIN, Name, Reached, SHORT_TIMEOUT, SSH_FAILED, STALL_TIMEOUT, Session, bounded};
+use crate::link::{JobKind, JobStart, StartAnswer, StartRequest};
+use crate::{config, manifest, say};
 
 // How often a send says how much it has sent: often enough that a person sees a send move, and
 // seldom enough that a log of a send of minutes keeps a few lines of it. BuildKit's plain progress
@@ -45,29 +42,18 @@ fn parameter(name: &Name) -> String {
 
 /// A task's git repository, as this machine sends it to the controller.
 pub(super) struct Tree {
-    /// Of the files git lists there, tracked, or untracked but not ignored, those it sends, and
-    /// the git bundle of the Pumpkin that its `.pumpkinversion` names, which `./pumpkin` keeps once
-    /// it has built it, from which the controller builds the same Pumpkin.
+    /// The files the task reaches, by content.
     hashed: manifest::Hashed,
     /// The entry's path below the repository's top.
-    pub(super) entry: String,
+    entry: String,
     /// The repository's name, the top's own as `plain` gives it, which its trees on the
     /// controller are below.
     repo: String,
-    commit: String,
     /// The task's workflow, as checking it gave it, which isn't sent.
     pub(super) workflow: Workflow,
 }
 
-/// Hashes what a run of `entry` needs of its git repository: the tracked and unignored files
-/// that the task reaches, and what the controller builds Pumpkin with (`pumpkin`,
-/// `.pumpkinversion` and the bundle of the commit that names).
-///
-/// # Errors
-///
-/// Fails if the entry isn't in a git repository, the repository has no `pumpkin` or
-/// `.pumpkinversion` that names a commit with a bundle built here, or the task's root is above
-/// the repository.
+/// Hashes the tracked and unignored files that the task reaches below its repository.
 pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree, String> {
     let path = fs::canonicalize(entry.path()).context(entry.path())?;
     let dir = path.parent().unwrap_or(Path::new("/"));
@@ -81,14 +67,6 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
     })?;
     let top = PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches('\n'));
     let top = fs::canonicalize(&top).context(top.display())?;
-    if !top.join("pumpkin").is_file() {
-        return Err(format!(
-            "{} has no ./pumpkin, with which the controller builds the Pumpkin that \
-             .pumpkinversion names: copy Pumpkin's deploy/pumpkin there",
-            top.display()
-        ));
-    }
-    let (commit, bundle) = pumpkin_version(&top)?;
     let files = git(
         &top,
         &[
@@ -104,7 +82,7 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
         Err(problems) => return Err(crate::task_problems(entry, &problems)),
     };
     let files = needed(entry, &reach.root, &reach.paths, &top, &files)?;
-    let hashed = manifest::hash(&top, &files, &commit, &bundle)?;
+    let hashed = manifest::hash(&top, &files)?;
     let below = path.strip_prefix(&top).ok().and_then(Path::to_str);
     let Some(below) = below else {
         unreachable!(
@@ -122,7 +100,6 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
         hashed,
         entry: below.to_owned(),
         repo,
-        commit,
         workflow: reach.workflow,
     })
 }
@@ -138,7 +115,7 @@ fn plain(name: &str) -> String {
 
 /// Of `listed`, the files that git lists in `top`, each ended by a NUL, those that checking the
 /// task whose entry is `entry` reaches, `reached` below its `root`, as files or as directories
-/// that hold them, with `pumpkin` and `.pumpkinversion`, which the job runs.
+/// that hold them.
 fn needed(
     entry: &crate::star::Entry,
     root: &Path,
@@ -163,8 +140,7 @@ fn needed(
         prefix if path.is_empty() => prefix.to_owned(),
         prefix => format!("{prefix}/{path}"),
     };
-    let mut kept: Vec<String> = reached.iter().map(|path| under(path)).collect();
-    kept.extend(["pumpkin".to_owned(), ".pumpkinversion".to_owned()]);
+    let kept: Vec<String> = reached.iter().map(|path| under(path)).collect();
     let wanted = |file: &str| {
         kept.iter().any(|path| {
             path.is_empty()
@@ -187,161 +163,62 @@ fn needed(
     Ok(files)
 }
 
-/// The commit that `.pumpkinversion` names, and the path of the bundle of it that this machine
-/// built.
-fn pumpkin_version(top: &Path) -> Result<(String, PathBuf), String> {
-    let path = top.join(".pumpkinversion");
-    let text = fs::read_to_string(&path).context(path.display())?;
-    let commit = text.split_whitespace().nth(1).unwrap_or_default();
-    let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
-    if commit.len() != 40 || !commit.chars().all(hex) {
-        return Err(format!(
-            "{} names no commit after its tag: write the tag's full 40-digit commit",
-            path.display()
-        ));
-    }
-    let bundle = top.join(".pumpkin").join(commit).join("pumpkin.bundle");
-    if !bundle.is_file() {
-        return Err(format!(
-            "{} isn't there, which the controller builds Pumpkin {commit} from: build it here \
-             with `./pumpkin --version`, after removing {} if it was built without one",
-            bundle.display(),
-            top.join(".pumpkin").join(commit).display()
-        ));
-    }
-    Ok((commit.to_owned(), bundle))
-}
-
 /// Sends the task's `tree` and the client's configuration, keys and Modal configuration to the
-/// controller, and starts the job `id` of `kind` there, which runs `pumpkin` with `words`.
+/// controller, and starts the job `id` of `kind` there, which runs the task with `args`.
 /// The keys go on the connection's standard input, to the job's directory in tmpfs, and are not
 /// stored.
 pub(super) fn send(
     reached: &Reached,
     client: &config::Client,
     id: &RunTag,
-    kind: &str,
+    kind: JobKind,
     tree: &Tree,
-    words: &[String],
-) -> Result<(), String> {
-    let id = id.as_str();
+    args: &lang::Args,
+) -> Result<Build, String> {
     send_tree(reached, tree)?;
-    let (config, keys) = client.sent();
-    let config = toml::to_string(&config)
-        .map_err(|error| format!("writing what the job is sent: {error}"))?;
-    let mut files = vec![(SENT_CONFIG.to_owned(), config.into_bytes())];
-    for (file, key) in keys {
+    let build = Build::of_this("expected to send it to the controller to run the job")?;
+    let (sent, keys) = client.sent();
+    let mut body = Vec::new();
+    let mut key_bytes = Vec::new();
+    for key in keys {
         let read = fs::read(&key).map_err(|error| {
             format!(
                 "the key file {} can't be read ({error}): put the key there",
                 key.display()
             )
         })?;
-        files.push((file, read));
+        key_bytes.push(read.len());
+        body.extend(read);
     }
-    if let Some(modal) = client.modal_file()? {
-        files.push((SENT_MODAL.to_owned(), modal));
+    let modal = client.modal_file()?;
+    let modal_bytes = modal.as_ref().map(Vec::len);
+    if let Some(modal) = modal {
+        body.extend(modal);
     }
-    // Each name, `config.toml`, `modal.toml` or an upstream's name of at most 64 bytes with
-    // `.key`, fits the 100 bytes of a name in the archive.
-    let archive = manifest::archive(&files);
-    let script = starting(&client.controller, id, kind, tree, words);
-    let mut ssh = reached.ssh(&script)?;
-    let output = ssh.output(Some(&archive), Deadline::after(SHORT_TIMEOUT));
-    if let Ok(Some(output)) = &output
-        && output.status.code() == Some(manifest::UNADMITTED)
-    {
-        return Err(manifest::unadmitted(&tree.hashed, &output.stdout));
+    let start = JobStart {
+        id: id.as_str().to_owned(),
+        kind,
+        repo: tree.repo.clone(),
+        tree: tree.hashed.manifest.name(),
+        words: crate::arg_flags(args)
+            .chain(["--".to_owned(), tree.entry.clone()])
+            .collect(),
+        region: client.controller.region.clone(),
+        parameter: parameter(&client.controller.name),
+        sent,
+        key_bytes,
+        modal_bytes,
+    };
+    let request = StartRequest::encode(&start, &mut body)?;
+    match reached.asked(&build, "starting the job", |linked| {
+        linked.ask_with_body(reached, request, &body)
+    })?? {
+        StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
+        StartAnswer::Unconfirmed { message } => Err(message),
+        StartAnswer::Unadmitted { changed, gone } => {
+            Err(manifest::unadmitted(&tree.hashed, &changed, &gone))
+        }
     }
-    let master = ssh.slot.master;
-    finished(output, "ssh", SHORT_TIMEOUT)
-        .map(|_| ())
-        .map_err(|error| reached.lost(master, error))
-}
-
-/// The script that the controller runs to start the job: it unpacks the archive on its standard
-/// input, admits the tree's blobs into the store, links the tree from them, with the bundle as
-/// `<commit>.bundle` in the controller's one workspace, and starts the job's unit. It exits
-/// [`manifest::UNADMITTED`] if a blob isn't whole.
-fn starting(
-    controller: &config::Controller,
-    id: &str,
-    kind: &str,
-    tree: &Tree,
-    words: &[String],
-) -> String {
-    let (repo, commit) = (&tree.repo, &tree.commit);
-    let config::Controller {
-        name,
-        region,
-        modal: _,
-    } = controller;
-    let words: Vec<String> = words.iter().map(|word| next::quoted(word)).collect();
-    let (parameter, region) = (next::quoted(&parameter(name)), region.as_str());
-    let manifest = &tree.hashed.manifest;
-    let mut links = String::new();
-    for entry in manifest.entries() {
-        let manifest::Entry {
-            kind,
-            digest,
-            size_bytes: _,
-            path,
-        } = entry;
-        let (blob, to) = (format!("\"$store\"/{}", digest.hex()), next::quoted(path));
-        let link = match kind {
-            manifest::Kind::Bundle => {
-                let bundle = format!("\"$HOME\"/{}/{path}.bundle", workspace::DIR);
-                // The store's, in place of any other, as of one cut short by an earlier send;
-                // linked aside and moved over it, as another job's start may link it at once, and
-                // a job that reads it keeps what it opened.
-                format!(
-                    "if ! [ {bundle} -ef {blob} ]; then\n  ln --force {blob} {bundle}.$$\n  \
-                     mv --force {bundle}.$$ {bundle}\nfi\n"
-                )
-            }
-            _ if !STARTED.contains(&path.as_str()) => continue,
-            manifest::Kind::File => format!("ln {blob} \"$tree\"/{to}\n"),
-            // A link shares its file's mode, so an executable links to a copy of its own, 0555,
-            // which another job's start may make at once, so it is made aside and moved in.
-            manifest::Kind::Executable => format!(
-                "[ -e {blob}.x ] || {{ copy=$(mktemp --tmpdir=\"$store\"/{INCOMING} \
-                 executable.XXXXXX) && cp {blob} \"$copy\" && chmod 0555 \"$copy\" && \
-                 mv \"$copy\" {blob}.x; }}\nln {blob}.x \"$tree\"/{to}\n"
-            ),
-            // With a `.` after it, so that `$(…)` keeps the target's own trailing newlines.
-            manifest::Kind::Link => format!(
-                "target=$(cat {blob} && echo .)\nln --symbolic -- \"${{target%.}}\" \"$tree\"/{to}\n"
-            ),
-        };
-        links.push_str(&link);
-    }
-    format!(
-        r#"set -o errexit -o nounset
-sent="$XDG_RUNTIME_DIR/pumpkin/{id}"
-tree="$HOME/{TREES}/{repo}/{id}"
-store="$HOME/{STORE}"
-mkdir --parents --mode=0700 "$XDG_RUNTIME_DIR/pumpkin" "$sent"
-# Until the unit takes the keys, whose end removes them, a failure here does.
-trap 'rm --recursive --force "$sent"' EXIT
-tar --extract --directory="$sent"
-(
-{admit})
-mkdir --parents "$tree" "$HOME/{kind}/{id}" "$HOME/{WORKSPACE}"
-ln --symbolic "$HOME/{WORKSPACE}" "$tree/.pumpkin"
-{links}systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-{id} \
-    --working-directory="$tree" --property=ExitType=cgroup \
-    --property="ExecStopPost=/usr/bin/rm --recursive --force $sent" \
-    --property="StandardOutput=append:$HOME/{kind}/{id}/out" \
-    --property="StandardError=append:$HOME/{kind}/{id}/log" \
-    -- "$tree/pumpkin" --pumpkin-repository="$HOME/{WORKSPACE}/{commit}.bundle" \
-    controller job {id} --region {region} --parameter {parameter} --tree {tree} -- {}
-trap - EXIT
-"#,
-        words.join(" "),
-        admit = manifest::admit(&manifest.name()),
-        tree = manifest.name().hex(),
-        WORKSPACE = workspace::DIR
-    )
 }
 
 /// Sends the blobs of the tree that the controller lacks, saying what that is, until it lacks none.
@@ -609,10 +486,7 @@ impl io::Write for Pipe {
 fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Piece>]) -> String {
     let pieces = || streams.iter().flatten();
     let lacked: BTreeSet<&Sha256Digest> = pieces().map(|piece| &piece.digest).collect();
-    let (bundles, files): (Vec<&manifest::Entry>, Vec<&manifest::Entry>) = (manifest.entries())
-        .iter()
-        .partition(|entry| entry.kind == manifest::Kind::Bundle);
-    // A task's files are never none, as `pumpkin` and `.pumpkinversion` go with its own.
+    let files = manifest.entries();
     let files_count = files.len();
     if lacked.is_empty() {
         return format!("controller `{name}` holds all {files_count} of the task's files");
@@ -621,23 +495,18 @@ fn holds(name: &Name, manifest: &manifest::Manifest, streams: &[Vec<manifest::Pi
         .iter()
         .filter(|file| lacked.contains(&file.digest))
         .count();
-    let mut lacks = Vec::new();
-    if lacked_count == files_count {
-        lacks.push(format!("all {files_count} of the task's files"));
-    } else if lacked_count > 0 {
-        lacks.push(format!("{lacked_count} of the task's {files_count} files"));
-    }
-    if bundles.iter().any(|bundle| lacked.contains(&bundle.digest)) {
-        lacks.push("Pumpkin's bundle".to_owned());
-    }
+    let lacks = if lacked_count == files_count {
+        format!("all {files_count} of the task's files")
+    } else {
+        format!("{lacked_count} of the task's {files_count} files")
+    };
     let size_bytes = pieces().map(|piece| piece.size_bytes).sum();
     let over = match streams.len() {
         1 => String::new(),
         count => format!(" over {count} connections"),
     };
     format!(
-        "controller `{name}` lacks {}: sending {}{over}",
-        lacks.join(" and "),
+        "controller `{name}` lacks {lacks}: sending {}{over}",
         size(size_bytes)
     )
 }
