@@ -18,9 +18,9 @@ $ echo "<tag> <commit>" > .pumpkinversion
 $ ./pumpkin --version
 ```
 
-The first run fetches the tag and checks that it names that commit, downloads a pinned Rust
-toolchain's installer and checks its SHA-256, builds Pumpkin and runs it; later runs start the
-built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, a C linker and TLS
+The first run fetches the tag and checks that it names that commit, downloads Rust's installer and the Zig
+C compiler, checks their SHA-256 pins, builds a static Pumpkin and runs it. Later runs start the
+built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, tar, xz, a C linker and TLS
 certificates, and names the packages to install if one is missing. `./pumpkin
 --pumpkin-repository=<url> …`, as its first argument, fetches from another repository, such as a
 local clone.
@@ -142,8 +142,9 @@ shows.
 
 `pumpkin cancel <run>` stops a run: the driver deletes the run's sandboxes, and the run's outcome
 says which signal ended it. A run whose driver died is lost; `cancel` removes what it left, and
-`pumpkin reap` does so for every run that has ended. Every sandbox also ends by its run's hard
-end, which the workflow's bounds give, even if nothing reaps it.
+`pumpkin reap` does so for ended runs. On a controller it reaps the runs made by this build
+and names those left to other builds. Every sandbox also ends by its run's hard end, which the
+workflow's bounds give, even if nothing reaps it.
 
 ## What a command prints next
 

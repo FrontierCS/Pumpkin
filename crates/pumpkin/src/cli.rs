@@ -121,8 +121,7 @@ workflow, which names each image by its ID.")]
     Build(Build),
     #[command(hide = true, about = "Remove what the runs that have ended left")]
     #[command(long_about = "\
-Remove what each run in --runs that has ended, or is lost, left, and print the
-id of each run that left something.")]
+Remove what ended or lost runs left and print the run ids reported as cleaned.")]
     #[command(after_help = REAP_NOTES)]
     Reap(Reap),
     #[command(
@@ -132,11 +131,9 @@ id of each run that left something.")]
     #[command(long_about = "\
 On the controller: `job` runs a job of the controller target, which `pumpkin
 run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
-runs left, at the controller's boot; `follow` follows a run for `pumpkin wait`,
-and `cancel` cancels one for `pumpkin cancel`, on a client, which says the run's
+runs left, at the controller's boot; `cancel` cancels a run for `pumpkin cancel`, on a client, which says the run's
 ending from its copy of the record; `serve` answers, on its standard input and
-output, `pumpkin ls` on a client, which lists the controller's runs, and
-`pumpkin view`, which shows them; and `publish` uploads the runs to the bucket
+output, the client that follows a job, lists the runs or views them; and `publish` uploads the runs to the bucket
 of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
@@ -183,12 +180,6 @@ writes.")]
     Boot,
     #[command(about = "Cancel a run for a client, which says its ending")]
     Cancel(Cancel),
-    #[command(about = "Follow a run for a client, saying its milestones until it ends")]
-    Follow {
-        #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
-        #[arg(help = "The run's id.")]
-        id: RunTag,
-    },
     #[command(about = "Answer a client's link, on the standard input and output")]
     Serve,
     #[command(about = "Upload the runs to the bucket of the public page")]
@@ -254,7 +245,6 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
-    Follow(RunTag),
     CancelFor(Cancel),
     Serve,
     Publish(Publish),
@@ -745,9 +735,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Boot,
         } => Command::Boot,
         Parsed::Controller {
-            action: Action::Follow { id },
-        } => Command::Follow(id),
-        Parsed::Controller {
             action: Action::Cancel(cancel),
         } => Command::CancelFor(cancel),
         Parsed::Controller {
@@ -791,7 +778,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::View(_)
         | Command::Job(_)
         | Command::Boot
-        | Command::Follow(_)
         | Command::CancelFor(_)
         | Command::Serve
         | Command::Publish(_)

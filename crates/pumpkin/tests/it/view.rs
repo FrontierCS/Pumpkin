@@ -36,8 +36,8 @@ impl Served {
         let mut child = command.spawn().unwrap();
         let mut said = String::new();
         let mut stderr = BufReader::new(child.stderr.take().unwrap());
-        for _ in 0..2 {
-            stderr.read_line(&mut said).unwrap();
+        while !said.contains("http://127.0.0.1:") {
+            assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
         }
         let address = said.split_once("http://127.0.0.1:").unwrap().1;
         let (port, token) = address.trim_end().split_once("/?t=").unwrap();
@@ -887,6 +887,46 @@ fn cancels_a_run() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
 
             the workspace's tmp/ then holds: []"#]],
+    );
+}
+
+#[test]
+fn counts_a_jobs_answers_under_its_caller_name() {
+    let scratch = Scratch::new();
+    let id = "20261110-170000-00000012";
+    let call = json!({ "kind": "start_call", "job": 4, "grant": "train",
+        "payload": { "size": 0 }, "timeout_ns": "10000000000" });
+    let mut answer = answered(3, "job-04", 0, 429, json!({}), None);
+    answer["event"]["failed"] = json!({ "code": "rate_limit_exceeded" });
+    let log = [
+        logged(1, json!({ "kind": "tick" }), json!([call])),
+        started(2, "job-4", 0),
+        answer,
+    ];
+    write_run(
+        &scratch,
+        id,
+        asked(id, 0),
+        &log,
+        None,
+        &lease_places(Prices::Both),
+    );
+    let served = Served::start(&scratch);
+    let since = served.get(&format!("/api/runs/{id}/since?log=0"));
+    let lane = &since["run"]["lanes"][1];
+    let event = &since["records"].as_array().unwrap().last().unwrap()["event"];
+    let said = format!(
+        "logged {}, lane {}, caller {}, answered {}, failed {}",
+        event["caller"], lane["lane"], lane["caller"], lane["answered"], lane["failed"]
+    );
+    check(
+        &scratch,
+        [Step::Ran(said)],
+        false,
+        &[],
+        &expect![[
+            r#"logged "job-04", lane "job 4", caller "job-4", answered [3.0], failed [3.0]"#
+        ]],
     );
 }
 

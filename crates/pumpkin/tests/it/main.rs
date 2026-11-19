@@ -1033,27 +1033,11 @@ fn this_build() -> Value {
     json!({ "version": version, "commit": commit })
 }
 
-/// `write_on` with a `docker` that says it has no context `gone`, as Docker's command line does.
-fn write_gone(scratch: &Scratch, id: &str, outcome: Option<Value>) -> String {
-    let docker = "#!/bin/sh\necho 'context \"gone\": context not found' >&2\nexit 1\n";
-    write_on(scratch, id, "gone", outcome, docker)
-}
-
-/// Writes the record of run `id` that ran on the Docker context `context`, with `docker` as the
-/// `docker` that `PATH` finds, and returns that `PATH`.
-fn write_on(
-    scratch: &Scratch,
-    id: &str,
-    context: &str,
-    outcome: Option<Value>,
-    docker: &str,
-) -> String {
+fn write_docker_record(scratch: &Scratch, id: &str, context: &str, outcome: Option<Value>) {
     write_record(scratch, id, true, outcome);
     let ready = json!({ "report": { "context": context } });
     let provided = json!({ "providers": { "local": ready } });
     scratch.write(&format!("runs/{id}/provider.json"), &provided);
-    scratch.write_executable("bin/docker", docker.as_bytes());
-    format!("{}:/usr/bin:/bin", scratch.0.join("bin").display())
 }
 
 /// Builds the images of `task` on the engine that `config` names, so that a `run` of it after

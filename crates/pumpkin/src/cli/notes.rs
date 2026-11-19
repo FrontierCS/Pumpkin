@@ -323,7 +323,7 @@ Examples:
   pumpkin reap --runs runs
 
 Exit status:
-  0  Nothing that a run which has ended left remains.
+  0  Nothing that the selected runs left remains.
   1  A run can't be reaped, which `reap` says, or another error; it reaps the
      others all the same.
   2  A usage error.
@@ -348,8 +348,10 @@ lists, as when the configuration now points to another region or profile, it
 says, and notes there as gone.
 
 With [controller] in the configuration, and no --runs, `reap` reaps the
-controller's runs there, as the controller does at each boot, but with this
-machine's Modal configuration file, which the boot lacks.";
+controller's runs made by this build and names the runs left to their own
+builds. It uses this machine's Modal configuration file, which the boot lacks.
+If the reply is cut, it reaps again. The printed ids may omit runs already
+cleaned before the cut.";
 
 pub(super) const CONTROLLER_NOTES: &str = "\
 Examples:
@@ -540,15 +542,17 @@ without it, nothing is published:
 `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
-controller's tmpfs, which its end removes. They run `aws`, AWS CLI v2, and
-`ssh`, `tar`, `ssh-keygen` and `git`, from PATH, and reach the controller at
-its private address, to which deploy/aws's `ssh_from` must admit this
-machine; the controller's settings are the module's, but for
-[controller.modal]. This machine's key to it, which the first command makes
-and enrols through EC2 Instance Connect, and the host key it pins, are in
-$HOME/.config/pumpkin/ssh/.
+controller's tmpfs, which its end removes. The client uses AWS CLI v2, ssh,
+ssh-keygen and git from PATH. It sends the task's files and starts its job
+over SSH to the controller's private address, using up to four connections
+for large task uploads. The machine must have a route there and deploy/aws's
+`ssh_from` must admit it. The job runs the client's install with the module's
+settings and [controller.modal].
+The first command creates a key and enrols it through EC2 Instance Connect.
+The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
   name          The `name` that deploy/aws was applied with.
   region        The region it was applied in.
+  address       `private` (the default) uses the instance's private address.
 
 [controller.modal], the Modal provider that the controller's runs may place
 roles on, if any: the settings of a provider of kind modal, but `images`, which

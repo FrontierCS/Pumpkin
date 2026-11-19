@@ -1,104 +1,25 @@
 //! The commands that a machine whose runs go to a controller makes of it: `run`, `build`,
 //! `wait`, `cancel` and `reap`.
 //!
-//! Each runs a shell script on the controller over a session of [`Reached`], `wait` and `cancel`
-//! once they have found the run among the jobs that the controller's `serve` lists, and what the
-//! script says is forwarded as it says it. A script ends with the code of what it ran: the codes
-//! this module names mean what the script found, and any other is the command's own. The record of
-//! a run that has ended is copied into this machine's runs directory.
+//! A run or build follows its job over a link. An ended run's record is copied into this
+//! machine's runs directory, where its ending is said.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::SystemTime;
 
 use stdx::Context as _;
 
+use super::Reached;
+use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
-use super::{Reached, SSH_FAILED};
 use crate::ending::Printed;
-use crate::job::{BUILDS, JOBS};
-use crate::link::JobsRequest;
+use crate::link::{
+    Ask, CancelAnswer, CancelRequest, JobKind, JobsRequest, ReapRequest, Unanswered,
+};
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
-
-// The code of a script that finds no job of the run's id on the controller.
-const NO_JOB: i32 = 100;
-
-// The code of a script that finds the job there, but no run it started, or no IR of a build.
-const UNSTARTED: i32 = 101;
-
-/// The script that follows the log of job `id` below `kind` on the controller until the job's
-/// process ends or the shell condition `done` holds, then runs `then`.
-///
-/// With `after`, which is the count of log lines already shown, the log is written to the
-/// script's standard output from the next line, and ends with `LOGGED` so that `then`'s output
-/// can be told from it. Without, the log goes to the standard error from the first line, and the
-/// standard output is `then`'s alone.
-// `tail` follows the log until the loop before it ends, then shows what the log holds by then.
-fn following(kind: &str, id: &str, done: &str, after: Option<u64>, then: &str) -> String {
-    let (first, to, logged) = match after {
-        None => (1, " >&2", ""),
-        Some(after) => (after + 1, "", "printf '\\0pumpkin: the log ends\\0\\n'\n"),
-    };
-    format!(
-        r#"cd "$HOME/{kind}/{id}" 2>/dev/null || exit {NO_JOB}
-pid=$(systemctl --user show --property=MainPID --value pumpkin-job-{id})
-while [ "${{pid:-0}}" -gt 0 ] && kill -0 "$pid" 2>/dev/null && ! {done}; do sleep 1; done &
-tail --lines=+{first} --follow --pid=$! log{to} &
-wait
-{logged}{then}
-"#
-    )
-}
-
-// The line that ends a followed log, printed on the end of its last line, which the job may have
-// left in part. The NULs keep a line of the log from being taken for it. What follows isn't the
-// log's.
-const LOGGED: &[u8] = b"\0pumpkin: the log ends\0\n";
-
-/// What following a job has shown over its connections so far, so that the follow over the next
-/// shows no line twice and loses none. The log only grows, so the next skips the whole lines
-/// shown; what the job says after the log comes again from its start, so each line is shown once.
-/// A line that came in part is shown only once it is whole.
-#[derive(Default)]
-struct Shown {
-    log_lines: u64,
-    logged: bool,
-    past_log: bool,
-    said: BTreeSet<Vec<u8>>,
-}
-
-impl Shown {
-    fn again(&mut self) {
-        self.past_log = false;
-    }
-
-    fn shown(&self) -> (u64, bool, usize) {
-        (self.log_lines, self.logged, self.said.len())
-    }
-
-    fn show(&mut self, line: &[u8]) {
-        if self.past_log {
-            if self.said.insert(line.to_vec()) {
-                crate::to_stderr(line);
-            }
-            return;
-        }
-        if let Some(rest) = line.strip_suffix(LOGGED) {
-            self.past_log = true;
-            // The log's last line, shown in part as the job wrote it.
-            if !self.logged && !rest.is_empty() {
-                crate::to_stderr(&[rest, b"\n"].concat());
-            }
-            self.logged = true;
-        } else if !self.logged {
-            self.log_lines += 1;
-            crate::to_stderr(line);
-        }
-    }
-}
 
 /// Fails, naming each flag given, as each names something of this machine's that a run on the
 /// controller can't use.
@@ -149,17 +70,14 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
         "run {} goes to controller `{name}`",
         id.as_str()
     ));
-    let reached = Reached::reach(&client.controller)?;
-    let mut words = vec!["run".to_owned()];
-    words.extend(crate::arg_flags(&args));
-    words.extend(["--".to_owned(), tree.entry.clone()]);
-    send(&reached, client, &id, JOBS, &tree, &words)?;
+    let mut reached = Reached::reach(&client.controller)?;
+    let build = send(&mut reached, client, &id, JobKind::Run, &tree, &args)?;
     let id = id.as_str();
     say(format_args!(
         "run {id} is a job on controller `{name}`, which builds it, then runs it"
     ));
     if let Some(printed) = wait {
-        return follow(&reached, id, config.as_deref(), printed);
+        return follow(&mut reached, &build, id, config.as_deref(), printed);
     }
     crate::advise("follow it", &next::of_run("wait", None, id));
     crate::advise("stop it", &next::of_run("cancel", None, id));
@@ -176,84 +94,43 @@ pub(crate) fn wait(
     run: &str,
     printed: Printed,
 ) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
-    let id = job_id(&reached, run)?;
-    follow(&reached, &id, None, printed)
+    let mut reached = Reached::reach(&client.controller)?;
+    let (build, id) = job_id(&mut reached, run)?;
+    follow(&mut reached, &build, &id, None, printed)
 }
 
 /// The id of the job on the controller that `run` names, which may be a prefix of it.
-fn job_id(reached: &Reached, run: &str) -> Result<String, String> {
+fn job_id(reached: &mut Reached, run: &str) -> Result<(Build, String), String> {
     let build = Build::of_this("expected to send it to the controller, to find the run there")?;
-    let ids = reached.asked(&build, "finding the run", |linked| {
+    let ids = reached.asked(&build, "finding the run", |reached, linked| {
         linked.ask(reached, JobsRequest {})
     })?;
     let name = &reached.name;
     let ids = ids.map_err(|message| format!("controller `{name}` refused: {message}"))?;
-    runtime::named(&ids, run, &format!("on controller `{name}`")).map(str::to_owned)
+    let id = runtime::named(&ids, run, &format!("on controller `{name}`"))?;
+    Ok((build, id.to_owned()))
 }
 
 fn follow(
-    reached: &Reached,
+    reached: &mut Reached,
+    build: &Build,
     id: &str,
     config: Option<&str>,
     printed: Printed,
 ) -> Result<ExitCode, String> {
-    // A job prints its run's id once it has said all it says of the run's start.
-    let started = "[ -s out ]";
-    // A job with no `pumpkin` of its own is followed by the controller's current one, whose `wait`
-    // says the run's ending as the controller would run it again. All that the remote command
-    // says is commentary, so it goes to the standard error, whatever build `current` is.
-    let then = format!(
-        "cd\n[ -d {runs}/{id} ] || exit {UNSTARTED}\n\
-         [ ! -x {JOBS}/{id}/{own} ] || exec {JOBS}/{id}/{own} controller follow {id} 2>&1\n\
-         exec ./{current} wait {id} >&2",
-        runs = crate::job::runs(),
-        own = crate::job::OWN,
-        current = crate::job::CURRENT
-    );
-    let again = format!("follow it again: {}", next::of_run("wait", None, id));
-    let mut attempt = 0;
-    let mut shown = Shown::default();
-    let code = loop {
-        let script = following(JOBS, id, started, Some(shown.log_lines), &then);
-        shown.again();
-        let before = shown.shown();
-        let (attached, rest) = reached.relayed(&script, |line| shown.show(line))?;
-        // A connection that showed a line moved the follow on, as `pause` counts attempts.
-        if shown.shown() != before {
-            attempt = 0;
-        }
-        let ended = reached.ended_connection(attached.status, &[SSH_FAILED], attached.master);
-        let what = format!("following run {id} again from where it was");
-        // `rest`, a line cut in part, is shown only once nothing follows (`Shown`).
-        if ended && reached.pause(attempt, attached.master, &what) {
-            attempt += 1;
-            continue;
-        }
-        crate::to_stderr(&rest);
-        break reached.ended(attached, &again)?;
-    };
+    let finished = follow::job(reached, build, id)?;
     let name = &reached.name;
-    match code {
-        NO_JOB => Err(format!("controller `{name}` has no run {id}")),
-        UNSTARTED => Err(format!(
+    match finished {
+        Finished::Ran { writer } => said_here(reached, build, id, writer, config, printed),
+        Finished::Unstarted => Err(format!(
             "run {id}'s job on controller `{name}` ended before the run started, as its log \
              says above: once that is fixed, run the task again as it was sent; to see that log \
              again: {}",
             next::of_run("wait", None, id)
         )),
-        code if code == i32::from(crate::job::ENDED) => said_here(reached, id, config, printed),
-        code => {
-            reached.copy(id)?;
-            // The follow ended without the run's ending said here, so what `printed` asks for
-            // comes from the copy, which has no `outcome.json` if the run is lost.
-            let copy = PathBuf::from(crate::default_runs()?).join(id);
-            let recorded = copy.join("outcome.json");
-            if recorded.try_exists().context(recorded.display())? {
-                printed.print(&copy)?;
-            }
-            Ok(exit(code))
-        }
+        Finished::Built(_) | Finished::Unbuilt => Err(format!(
+            "job {id} on controller `{name}` is a build: expected a run"
+        )),
     }
 }
 
@@ -261,14 +138,22 @@ fn follow(
 /// does, after printing what `printed` asks for, ending with the command that runs it again from
 /// here.
 fn said_here(
-    reached: &Reached,
+    reached: &mut Reached,
+    build: &Build,
     id: &str,
+    writer: Option<String>,
     config: Option<&str>,
     printed: Printed,
 ) -> Result<ExitCode, String> {
-    reached.copy(id)?;
-    let runs = PathBuf::from(crate::default_runs()?);
-    let record = runtime::Record::open(&runs.join(id))?;
+    let writer = reached.copy(build, id)?.or(writer);
+    let dir = PathBuf::from(crate::default_runs()?).join(id);
+    if let Some(writer) = writer {
+        return Err(format!(
+            "copied run {id}'s record to {}; it was made by pumpkin {writer}: read it with that build",
+            dir.display()
+        ));
+    }
+    let record = runtime::Record::open(&dir)?;
     let Some(ending) = record.ending()? else {
         return Err(format!(
             "run {id}'s copy, {}, reads as live, though its run has ended: wait for what holds \
@@ -314,10 +199,6 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
     Ok(words)
 }
 
-fn exit(code: i32) -> ExitCode {
-    u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
-}
-
 /// Sends the task to the controller as a build job and prints its IR once the images are built.
 /// If the connection ends first, the build goes on there.
 pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCode, String> {
@@ -328,112 +209,97 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
     } = flags;
     let id = runtime::new_id(SystemTime::now())?;
     let tree = tree(&entry, &args)?;
-    let reached = Reached::reach(&client.controller)?;
-    let mut words = vec!["build".to_owned()];
-    words.extend(crate::arg_flags(&args));
-    words.extend(["--".to_owned(), tree.entry.clone()]);
-    send(&reached, client, &id, BUILDS, &tree, &words)?;
-    let then = format!("[ -s out ] || exit {UNSTARTED}\nexec cat out");
-    // Its IR, in `out`, is whole only once the job has ended.
-    let following = following(BUILDS, id.as_str(), "false", None, &then);
-    let status = reached.attached(&following, None)?;
-    let name = &reached.name;
-    let again = format!(
-        "the build goes on there: its IR is in ~/{BUILDS}/{}/out there once it ends",
-        id.as_str()
-    );
-    match reached.ended(status, &again)? {
-        UNSTARTED => Err(format!(
+    let mut reached = Reached::reach(&client.controller)?;
+    let build = send(&mut reached, client, &id, JobKind::Build, &tree, &args)?;
+    let name = &client.controller.name;
+    match follow::job(&mut reached, &build, id.as_str())? {
+        Finished::Built(ir) => {
+            crate::print(&ir).context("printing the IR failed")?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Finished::Unbuilt => Err(format!(
             "the build on controller `{name}` failed, as its log says above"
         )),
-        code => Ok(exit(code)),
+        Finished::Ran { .. } | Finished::Unstarted => Err(format!(
+            "job {} on controller `{name}` is a run: expected a build",
+            id.as_str()
+        )),
     }
 }
 
-/// The script that `body` makes, and the Modal configuration of the client, if it has one, to feed
-/// it. The script takes the file into a directory of its own in tmpfs, which its end removes, so
-/// that the command reaches the Modal providers of runs whose jobs, which held the file, have
-/// ended. `body` is given the flag that names the file there, or an empty one.
-fn with_modal(
-    client: &config::Client,
-    body: impl FnOnce(&str) -> String,
-) -> Result<(String, Option<Vec<u8>>), String> {
-    let Some(file) = client.modal_file()? else {
-        return Ok((body(""), None));
-    };
-    let script = format!(
-        "umask 077\nmodal=$(mktemp --directory \"$XDG_RUNTIME_DIR/pumpkin-modal.XXXXXX\")\n\
-         trap 'rm --recursive --force \"$modal\"' EXIT\ncat > \"$modal/modal.toml\"\n{}",
-        body(" --modal-config \"$modal/modal.toml\"")
-    );
-    Ok((script, Some(file)))
-}
-
-/// Stops the run that `run` names on the controller, as `pumpkin cancel` does there, `force`
-/// included, and says its ending from the copy of its record here. A job whose run hasn't
-/// started is stopped and removed.
+/// Stops the run that `run` names on the controller and copies its record once it has ended.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
-    let id = job_id(&reached, run)?;
-    let force = if force { " --force" } else { "" };
-    let (script, modal) = with_modal(client, |flag| {
-        format!(
-            "cd\n[ -d {JOBS}/{id} ] || exit {NO_JOB}\n\
-             if [ -d {runs}/{id} ]; then\n\
-             [ ! -x {JOBS}/{id}/{own} ] || {{ {JOBS}/{id}/{own} controller cancel{force}{flag} {id}; exit; }}\n\
-             ./{current} cancel{force}{flag} {id}; exit; fi\n\
-             systemctl --user stop pumpkin-job-{id}\n[ -d {runs}/{id} ] || rm --recursive --force {JOBS}/{id}\n\
-             exit {UNSTARTED}\n",
-            runs = crate::job::runs(),
-            own = crate::job::OWN,
-            current = crate::job::CURRENT
+    let mut reached = Reached::reach(&client.controller)?;
+    let (build, id) = job_id(&mut reached, run)?;
+    let modal = client.modal_file()?;
+    let request = CancelRequest {
+        id: id.clone(),
+        force,
+        modal_bytes: modal.as_ref().map(Vec::len),
+    };
+    let name = &client.controller.name;
+    let answer = reached.asked(&build, "cancelling the run", |reached, linked| {
+        linked.ask_with_body(
+            reached,
+            request.clone(),
+            modal.as_deref().unwrap_or_default(),
         )
-    })?;
-    let again = format!("cancel it again: {}", next::of_run("cancel", None, &id));
-    let name = &reached.name;
-    match reached.ended(reached.attached(&script, modal.as_deref())?, &again)? {
-        NO_JOB => Err(format!("controller `{name}` has no run {id}")),
-        UNSTARTED => {
-            say(format_args!(
-                "run {id}'s job on controller `{name}` is stopped, before the run started"
-            ));
-            Ok(ExitCode::SUCCESS)
+    })??;
+    match answer {
+        CancelAnswer::Unstarted => say(format_args!(
+            "run {id}'s job on controller `{name}` is stopped, before the run started"
+        )),
+        CancelAnswer::EndedUnreaped { message } => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
+            }
+            return Err(message);
         }
-        // `cancel`'s exit says only that the run has ended, however that was, and whether what it
-        // left on its provider is gone, as a local one's does.
-        code if code == i32::from(crate::job::ENDED) => {
-            said_here(&reached, &id, None, Printed::Nothing)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        code if code == i32::from(crate::job::ENDED_UNREACHED) => {
-            said_here(&reached, &id, None, Printed::Nothing)?;
-            crate::advise(
-                "remove what it left once its provider can be reached",
-                &next::reap(None),
+        CancelAnswer::Stopped { writer } => {
+            let writer = reached.copy(&build, &id)?.or(writer);
+            let copy = PathBuf::from(crate::default_runs()?).join(&id);
+            let writer = writer.map_or_else(
+                || "the pumpkin that made it".to_owned(),
+                |build| format!("pumpkin {build}"),
             );
-            Ok(ExitCode::from(crate::UNREACHED))
+            say(format_args!(
+                "stopped job {id} on controller `{name}`; copied its record to {}: read it with {writer}",
+                copy.display()
+            ));
         }
-        code => {
-            reached.copy(&id)?;
-            Ok(exit(code))
+        CancelAnswer::Ended | CancelAnswer::EndedUnreached => {
+            said_here(&mut reached, &build, &id, None, None, Printed::Nothing)?;
+            if matches!(answer, CancelAnswer::EndedUnreached) {
+                crate::advise(
+                    "remove what it left once its provider can be reached",
+                    &next::reap(None),
+                );
+                return Ok(ExitCode::from(crate::UNREACHED));
+            }
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Removes on the controller what runs left, as `pumpkin reap` does there.
 pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
-    let current = crate::job::CURRENT;
-    // Before its first job, the controller has no `pumpkin`, and no run to reap.
-    let (script, modal) = with_modal(client, |flag| {
-        format!(
-            "cd\n[ -x {current} ] && [ -d {runs} ] || exit 0\n./{current} reap{flag}\n",
-            runs = crate::job::runs()
-        )
-    })?;
-    let again = "reap again: pumpkin reap";
-    Ok(exit(reached.ended(
-        reached.attached(&script, modal.as_deref())?,
-        again,
-    )?))
+    let mut reached = Reached::reach(&client.controller)?;
+    let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
+    let modal = client.modal_file()?;
+    let request = Ask::Reap(ReapRequest {
+        modal_bytes: modal.as_ref().map(Vec::len),
+    });
+    let report = reached.asked(&build, "reaping the runs", |reached, linked| {
+        linked.stream(reached, |link| {
+            link.send(&request, modal.as_deref().unwrap_or_default())?;
+            link.answer::<ReapRequest>().inspect_err(|error| {
+                if matches!(error, Unanswered::Unreached(_)) {
+                    say(
+                        "the reap's reply was cut: the output may omit ids of runs already cleaned",
+                    );
+                }
+            })
+        })
+    })??;
+    report.report(None, crate::Reaper::Controller)
 }

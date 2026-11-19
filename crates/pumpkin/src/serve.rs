@@ -9,10 +9,14 @@
 //! the protocol, which it refuses and exits 1. It marks its install as used again as each request
 //! arrives, so that a `serve` kept for days by an open page keeps its install.
 
+mod copy;
+mod follow;
+mod reaping;
+
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
-use std::io::{self, BufReader, Write};
-use std::os::fd::AsFd as _;
+use std::io::{self, BufReader, Read as _, Seek as _, SeekFrom, Write};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -29,16 +33,16 @@ use crate::job::{JOBS, WAITING};
 use crate::link::{
     self, Ask, Boot, Health, HealthRequest, Hello, JobsRequest, ListRequest, Listed, ViewRequest,
 };
+use crate::manifest::store::{Missing, PutAnswer};
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 use crate::view::Answering;
 
 /// How long to wait for a request before ending: a page that is open polls every few seconds, so
-/// a minute with none is a closed page or a lost connection, and ending lets the `ssh` session,
-/// and the master it goes over, end too.
+/// a minute with none is a closed page or a lost connection, and ending closes its SSH connection.
 pub(crate) const IDLE: Duration = Duration::from_mins(1);
 
-// How long an install lasts that no `serve` uses: a day, as a store's unchecked pieces last, so
+// How long an install lasts that no `serve` uses: a day, as a store's partial blobs last, so
 // that a build used every day keeps its install, and one left behind is gone by the next.
 const INSTALL_KEPT: Duration = Duration::from_hours(24);
 
@@ -62,30 +66,131 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
+    if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
+        return Ok(ExitCode::SUCCESS);
+    }
+    requests(&mut input, &mut output, &home, install.as_deref().ok())
+}
+
+fn requests(
+    input: &mut BufReader<File>,
+    output: &mut impl Write,
+    home: &Path,
+    install: Option<&Path>,
+) -> Result<ExitCode, String> {
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home.join(crate::job::runs()));
-    let written = "writing to the standard output failed";
-    frame::write(&mut output, &Hello::Serving, &[]).context(written)?;
-    while arrives(&input)? {
-        let broken = match frame::read::<Ask>(&mut input) {
-            Ok(Some((ask, body))) if body.is_empty() => {
-                if let Ok(install) = &install {
-                    mark_install_used(install);
-                }
-                answer(&mut output, &home, ask, &mut view).context(written)?;
-                continue;
+    while arrives(input)? {
+        let ask = match frame::read::<Ask>(input) {
+            Ok(Some((ask, body))) if body.is_empty() => ask,
+            Ok(Some((_, body))) => {
+                return invalid_request(
+                    output,
+                    format!("a request has a {}-byte body", body.len()),
+                );
             }
-            Ok(Some((_, body))) => format!("a request has a {}-byte body", body.len()),
             Ok(None) => break,
-            Err(error) => error.to_string(),
+            Err(error) => return invalid_request(output, error),
         };
-        let message = format!(
-            "{broken}: expected a request, with no body, as a client of this pumpkin sends"
-        );
-        link::refuse(&mut output, message).context(written)?;
-        return Ok(ExitCode::FAILURE);
+        if let Some(install) = install {
+            mark_install_used(install);
+        }
+        let body = match ask.read_buffered_body(input) {
+            Ok(body) => body,
+            Err(error) => return invalid_request(output, error),
+        };
+        let written = match ask {
+            Ask::Copy(request) => copy::answer(output, home, request, &body),
+            Ask::Lacks(request) => {
+                link::answer(output, request, |request| missing(home, &request, &body))
+            }
+            Ask::Put(put) => match receive_put(home, &put, input) {
+                Ok(Ok(answer)) => frame::write(output, &answer, &[]),
+                Ok(Err(message)) => link::refuse(output, message),
+                Err(error) => match error.kind() {
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => break,
+                    _ => return invalid_request(output, error),
+                },
+            },
+            Ask::Start(request) => link::answer(output, request, |request| {
+                let (start, credentials) = request.decode(&body)?;
+                crate::job::start(home, start, credentials)
+            }),
+            Ask::Reap(request) => link::answer(output, request, |request| {
+                reaping::reap(home, request, &body)
+            }),
+            Ask::Cancel(request) => link::answer(output, request, |request| {
+                reaping::cancel(home, request, &body)
+            }),
+            Ask::Follow {
+                id,
+                log_from_bytes,
+                after_cut,
+            } => follow::answer(output, home, id, log_from_bytes, after_cut),
+            Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health(home)),
+            Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
+                crate::job::ids(&home.join(JOBS))
+            }),
+            Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
+                listed(home, &prefixes)
+            }),
+            Ask::View(request) => {
+                link::answer(output, request, |ViewRequest { target, deflate }| {
+                    Ok(view.answer(&target, deflate))
+                })
+            }
+        };
+        if !delivered(written)? {
+            break;
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn invalid_request(
+    output: &mut impl Write,
+    error: impl std::fmt::Display,
+) -> Result<ExitCode, String> {
+    let message = format!("{error}: expected a request of this pumpkin");
+    delivered(link::refuse(output, message))?;
+    Ok(ExitCode::FAILURE)
+}
+
+fn missing(home: &Path, request: &link::store::Lacks, body: &[u8]) -> Result<Vec<Missing>, String> {
+    let manifest = crate::manifest::Manifest::parse(body)?;
+    if manifest.name() != request.manifest {
+        return Err(
+            "the manifest that arrived differs from its digest: send the task again".to_owned(),
+        );
+    }
+    let install = request.install.then(own_install).transpose()?;
+    crate::manifest::store::lacks(&home.join(crate::job::STORE), &manifest, install.as_deref())
+}
+
+fn receive_put(
+    home: &Path,
+    put: &link::store::Put,
+    input: &mut impl io::Read,
+) -> io::Result<Result<PutAnswer, String>> {
+    let mut parts = link::store::Parts::new(input, put.body_bytes()?);
+    let stored = crate::manifest::store::put(
+        &home.join(crate::job::STORE),
+        &put.digest,
+        put.from,
+        put.size_bytes,
+        &mut parts,
+    );
+    parts.finish()?;
+    Ok(stored)
+}
+
+// The client may leave at any frame, including while an answer is still streaming.
+fn delivered(written: io::Result<()>) -> Result<bool, String> {
+    match written {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(error) => Err(error).context("writing to the standard output failed"),
+    }
 }
 
 /// Whether `input` brings a request, or its end, within [`IDLE`].
@@ -93,16 +198,19 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     if !input.buffer().is_empty() {
         return Ok(true);
     }
-    let Ok(timeout) = Timespec::try_from(IDLE) else {
-        unreachable!("{IDLE:?} fits a `timespec`")
+    ready(input.get_ref(), PollFlags::IN, IDLE).context("polling the standard input failed")
+}
+
+fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<bool> {
+    let Ok(timeout) = Timespec::try_from(timeout) else {
+        unreachable!("{timeout:?} fits a timespec")
     };
+    let mut polled = [PollFd::new(fd, events)];
     loop {
-        let mut polled = [PollFd::new(input.get_ref(), PollFlags::IN)];
         match event::poll(&mut polled, Some(&timeout)) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
+            Ok(count) => return Ok(count != 0),
             Err(Errno::INTR) => {}
-            Err(error) => return Err(format!("polling the standard input failed: {error}")),
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -174,24 +282,7 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-/// Writes the answer to `ask` on `output`, with `view` the view of the runs below `home`: a
-/// refusal if what it asks for fails.
-fn answer(output: &mut impl Write, home: &Path, ask: Ask, view: &mut Answering) -> io::Result<()> {
-    match ask {
-        Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health()),
-        Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
-            crate::job::ids(&home.join(JOBS))
-        }),
-        Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
-            listed(home, &prefixes)
-        }),
-        Ask::View(request) => link::answer(output, request, |ViewRequest { target, deflate }| {
-            Ok(view.answer(&target, deflate))
-        }),
-    }
-}
-
-fn health() -> Result<Health, String> {
+fn health(home: &Path) -> Result<Health, String> {
     let uptime = fs::read_to_string(UPTIME).context(UPTIME)?;
     let seconds = uptime.split(['.', ' ']).next().unwrap_or_default();
     let up_seconds = seconds.parse().map_err(|_| {
@@ -209,11 +300,11 @@ fn health() -> Result<Health, String> {
         up_seconds,
         disk_size_bytes: size_bytes,
         disk_free_bytes: free_bytes,
-        boot: boot(),
+        boot: boot(home),
     })
 }
 
-fn boot() -> Boot {
+fn boot(home: &Path) -> Boot {
     let mut systemctl = stdx::process::command("systemctl", Environment::Only(&["PATH"]));
     systemctl.args([
         "show",
@@ -234,6 +325,7 @@ fn boot() -> Boot {
         Some("failed") => match property("ExecMainStatus").map(str::parse) {
             Some(Ok(status)) => Boot::Failed {
                 status,
+                log: boot_log(&home.join("boot.log")).unwrap_or_else(|error| error.to_string()),
                 at: property("ExecMainExitTimestamp")
                     .filter(|at| !at.is_empty())
                     .map(str::to_owned),
@@ -242,6 +334,25 @@ fn boot() -> Boot {
         },
         Some(_) => Boot::Done,
     }
+}
+
+/// The last lines of the boot unit's output, small enough to fit in the health frame even
+/// when the JSON encoding escapes every byte.
+fn boot_log(path: &Path) -> io::Result<String> {
+    const TAIL_BYTES: u64 = 4096;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error),
+    };
+    let size = file.metadata()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<_> = text.lines().rev().take(5).collect();
+    lines.reverse();
+    Ok(lines.join("\n"))
 }
 
 /// The listing of the runs below `home` whose ids start with one of `prefixes`, as

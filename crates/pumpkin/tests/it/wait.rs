@@ -773,10 +773,87 @@ fn summarizes() {
     );
 }
 
+fn followed(scratch: &Scratch, id: &str, last: &str) -> Step {
+    let driver = File::open(scratch.0.join("runs").join(id).join("driver.pid")).unwrap();
+    driver.lock().unwrap();
+    let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let invoked = invocation(&command);
+    let mut child = command.spawn().unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains(last) {
+        if stderr.read_line(&mut said).unwrap() == 0 {
+            break;
+        }
+    }
+    let outcome = returned(49.36);
+    end_run(scratch, id, &outcome);
+    drop(driver);
+    stderr.read_to_string(&mut said).unwrap();
+    child.wait().unwrap();
+    // The summary, which follows, says the part too, on a line of its own.
+    let said: Vec<&str> = (said.lines())
+        .filter(|line| line.starts_with("pumpkin:  ") || line.contains("can't be read"))
+        .collect();
+    Step::Ran(format!("{invoked}\n{}", said.join("\n")))
+}
+
+#[test]
+fn follows_an_agent_that_asks_at_startup() {
+    let scratch = Scratch::new();
+    let id = "20261110-100000-0000000a";
+    let mut log = vec![logged(2, json!({ "kind": "agent_started" }), json!([]))];
+    let call = json!({
+        "kind": "start_call", "job": 0, "grant": "train", "payload": payload(), "timeout_ns": "600000000000",
+    });
+    let lease = json!({ "kind": "start_lease", "grant": "gpu", "holder": "agent", "lease": 0 });
+    // The reader stamps both arrivals just before the loop reports startup across a second's edge.
+    for (request, action, observed) in [
+        (
+            json!({ "kind": "call", "grant": "train" }),
+            call,
+            "1999950938",
+        ),
+        (
+            json!({ "kind": "lease_open", "grant": "gpu" }),
+            lease,
+            "1999999999",
+        ),
+    ] {
+        let mut line = logged(
+            2,
+            json!({ "kind": "op_arrived", "request": request }),
+            json!([action]),
+        );
+        line["observed_ns"] = json!(observed);
+        log.push(line);
+    }
+    write_run(
+        &scratch,
+        id,
+        asked(id, 30),
+        &log,
+        None,
+        &lease_places(Prices::Nothing),
+    );
+    let step = followed(&scratch, id, "gpu lease 0 asked");
+    check(
+        &scratch,
+        [step],
+        false,
+        &[],
+        &expect![[r#"
+        $ pumpkin wait 20261110-100000-0000000a --runs runs
+        pumpkin:    0:02 the agent started on aws/judge
+        pumpkin:    0:02 train job 0 asked on modal/a100_80
+        pumpkin:    0:02 gpu lease 0 asked on modal/a100_80"#]],
+    );
+}
+
 // `wait` of a live run says each milestone its log records, and once the part that doesn't read;
 // the test ends the run once it has said the last, so `wait` reads the log again a poll later.
 #[test]
-#[expect(clippy::too_many_lines, reason = "most of it is its snapshot")]
 fn follows_milestones() {
     let scratch = Scratch::new();
     let id = "20261110-100000-0000000a";
@@ -787,31 +864,9 @@ fn follows_milestones() {
         json!({ "kind": "tick" }),
         json!([{ "kind": "close_lease" }]),
     ));
-    let dir = write_run(&scratch, id, asked(id, 30), &log, None, &priced);
+    write_run(&scratch, id, asked(id, 30), &log, None, &priced);
     scratch.write(&format!("runs/{id}/ir.json"), &over_budget_task());
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    let mut command = scratch.pumpkin(&["wait", id, "--runs", "runs"]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let invoked = invocation(&command);
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("final call job 4 ended") {
-        if stderr.read_line(&mut said).unwrap() == 0 {
-            break;
-        }
-    }
-    let outcome = returned(49.36);
-    end_run(&scratch, id, &outcome);
-    drop(driver);
-    stderr.read_to_string(&mut said).unwrap();
-    child.wait().unwrap();
-    // The summary, which follows, says the part too, on a line of its own.
-    let said: Vec<&str> = (said.lines())
-        .filter(|line| line.starts_with("pumpkin:  ") || line.contains("can't be read"))
-        .collect();
-    let step = Step::Ran(format!("{invoked}\n{}", said.join("\n")));
+    let step = followed(&scratch, id, "final call job 4 ended");
     check(
         &scratch,
         [step],
@@ -849,55 +904,6 @@ fn follows_milestones() {
             pumpkin:   16:50 final call job 4 started with NVIDIA A100-SXM4-80GB
             pumpkin:   18:20 final call job 4 ended: score=49.36 metrics={"solved":3}
               1 part of its log can't be read by this pumpkin, the first at line 64, its action 1: missing field `lease`"#]],
-    );
-}
-
-// A follower whose standard error has closed ends at the next line it says, though the run goes on.
-#[test]
-fn follower_without_its_client() {
-    let scratch = Scratch::new();
-    let id = "20261110-100000-0000000b";
-    let dir = write_run(
-        &scratch,
-        id,
-        asked(id, 30),
-        &[],
-        None,
-        &lease_places(Prices::Nothing),
-    );
-    fs::rename(scratch.0.join("runs"), scratch.0.join(".pumpkin/runs")).unwrap();
-    let dir = scratch
-        .0
-        .join(".pumpkin/runs")
-        .join(dir.file_name().unwrap());
-    let driver = File::open(dir.join("driver.pid")).unwrap();
-    driver.lock().unwrap();
-    let mut command = scratch.pumpkin(&["controller", "follow", id]);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let invoked = invocation(&command);
-    let mut child = command.spawn().unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    stderr.read_line(&mut said).unwrap();
-    drop(stderr);
-    let mut started = logged(5, json!({ "kind": "agent_started" }), json!([]));
-    started["seq"] = json!(1);
-    let mut log = fs::OpenOptions::new()
-        .append(true)
-        .open(dir.join("log.jsonl"))
-        .unwrap();
-    writeln!(log, "{started}").unwrap();
-    let mut output = child.wait_with_output().unwrap();
-    output.stderr = said.into_bytes();
-    check(
-        &scratch,
-        [Step::Ran(report(invoked, &output, &scratch.0, false))],
-        false,
-        &[],
-        &expect![[r#"
-            $ pumpkin controller follow 20261110-100000-0000000b
-            exit status: Some(1)
-            pumpkin: following run 20261110-100000-0000000b: ending this command does not stop it"#]],
     );
 }
 

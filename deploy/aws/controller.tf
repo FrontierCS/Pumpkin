@@ -11,13 +11,6 @@ resource "aws_iam_role" "controller" {
   })
 }
 
-# The SSM agent's registration and sessions, through which the clients of the last tag reach the
-# controller.
-resource "aws_iam_role_policy_attachment" "controller_ssm" {
-  role       = aws_iam_role.controller.name
-  policy_arn = "${local.arn}:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
 resource "aws_iam_role_policy" "controller" {
   name = "run"
   role = aws_iam_role.controller.id
@@ -124,13 +117,14 @@ resource "aws_instance" "controller" {
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [aws_security_group.controller.id]
   iam_instance_profile   = aws_iam_instance_profile.controller.name
-  # A public address: the way out to SSM, ECR and Modal, and the one Modal's tunnels admit.
+  # A public address: the way out to the settings parameter, ECR and Modal, and the one Modal's tunnels admit.
   associate_public_ip_address = true
   # A shutdown stops it, keeping its volume: the build cache, the trees and the records.
   instance_initiated_shutdown_behavior = "stop"
   user_data = templatefile("${path.module}/controller.yaml", {
     ubuntu_snapshot    = "https://snapshot.ubuntu.com/ubuntu/${local.controller_versions.ubuntu_snapshot}"
     docker_key         = file("${path.module}/docker.asc")
+    boot_script        = file("${path.module}/pumpkin-boot")
     docker_version     = local.controller_versions.docker
     containerd_version = local.controller_versions.containerd
     buildx_version     = local.controller_versions.buildx

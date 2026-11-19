@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 700" width="880" height="700" role="img" aria-labelledby="title desc">
 <title id="title">The data between a machine and its controller</title>
-<desc id="desc">Between the operator's machine and the controller, over ssh, in each direction: the task's tree goes to the controller's store, by content, and only what the store lacks; the job's start sends the configuration and its keys into the job's directory, and the job runs the driver in a systemd unit. What the run says comes back as it is followed. The rows that ls lists, and the ids of the jobs that wait and cancel find a run among, come back from serve, made where the records are, and an ended run's record into the runs directory. The view's requests for the runs' data go to serve on the controller, over one ssh, which reads the controller's runs and sends back each reply.</desc>
+<desc id="desc">The operator opens an SSH connection to its matching controller serve. The client sends the task's missing files and the configuration and keys for a job. The controller runs the job in its own unit and streams its progress. It returns listings, view data, and the files missing from the operator's copy of an ended record.</desc>
 <style>
 :root{--bg:#ffffff;--ink:#1f2328;--mute:#59636e;--line:#818b98;--card:#f6f8fa;--hot:#0969da;--hot-bg:#ddf4ff}
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--ink:#e6edf3;--mute:#9198a1;--line:#6e7681;--card:#151b23;--hot:#58a6ff;--hot-bg:#10243e}}
@@ -20,7 +20,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker>
 <marker id="tail" viewBox="0 0 8 8" refX="0" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M8 0L0 4L8 8z"/></marker></defs>
 <rect class="bg" width="880" height="700"/>
-<text class="note" x="440" y="36" text-anchor="middle">over ssh, on the connections that the workspace's commands share</text>
+<text class="note" x="440" y="36" text-anchor="middle">one SSH connection per command, up to four for large task uploads</text>
 <rect class="zone" x="16" y="56" width="260" height="624" rx="12"/>
 <text class="zone-label" x="30" y="76">THE OPERATOR'S MACHINE</text>
 <rect class="box" x="32" y="100" width="228" height="276" rx="8"/>
@@ -40,8 +40,8 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <rect class="box" x="620" y="100" width="228" height="120" rx="8"/>
 <text class="name mid" x="734" y="120">the store</text>
 <text class="note mid" x="734" y="137">each file named by its SHA-256;</text>
-<text class="note mid" x="734" y="152">pieces land in <tspan class="code">INCOMING</tspan>,</text>
-<text class="note mid" x="734" y="167">a start takes them in · <tspan class="code">admit</tspan></text>
+<text class="note mid" x="734" y="152">uploads resume in <tspan class="code">INCOMING</tspan>,</text>
+<text class="note mid" x="734" y="167">checked before admission · <tspan class="code">put</tspan></text>
 <rect class="box" x="620" y="236" width="228" height="54" rx="8"/>
 <text class="name mid" x="734" y="256">the job's directory</text>
 <text class="note mid" x="734" y="273">in tmpfs, which its unit removes</text>
@@ -54,17 +54,17 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note mid" x="734" y="433">each run's record, as the</text>
 <text class="note mid" x="734" y="448">driver writes it</text>
 <path class="arrow" d="M262 140H618" marker-end="url(#head)"/>
-<text class="note" x="290" y="119">the tree's manifest, by content</text>
-<text class="note" x="290" y="134"><tspan class="code">Manifest</tspan> · <tspan class="code">query</tspan></text>
+<text class="note" x="290" y="119">the task and install manifests</text>
+<text class="note" x="290" y="134"><tspan class="code">Manifest</tspan> · <tspan class="code">Lacks</tspan></text>
 <path class="arrow" d="M618 180H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="159">the files the store lacks</text>
-<text class="note" x="290" y="174"><tspan class="code">missing</tspan></text>
+<text class="note" x="290" y="174"><tspan class="code">Missing</tspan></text>
 <path class="arrow" d="M262 218H618" marker-end="url(#head)"/>
-<text class="note" x="290" y="197">those pieces, over several</text>
-<text class="note" x="290" y="212">connections at once · <tspan class="code">deal</tspan></text>
+<text class="note" x="290" y="197">one blob at a time, from the offset</text>
+<text class="note" x="290" y="212">the controller holds · <tspan class="code">Put</tspan></text>
 <path class="arrow" d="M262 270H618" marker-end="url(#head)"/>
-<text class="note" x="290" y="249">the job's start: the configuration and</text>
-<text class="note" x="290" y="264">its keys, on standard input · <tspan class="code">send</tspan></text>
+<text class="note" x="290" y="249">start the job with its configuration and</text>
+<text class="note" x="290" y="264">keys · <tspan class="code">StartRequest</tspan></text>
 <path class="arrow" d="M618 350H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="329">what the run says, as it is followed</text>
 <text class="note" x="290" y="344"><tspan class="code">wait</tspan></text>
@@ -74,7 +74,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <text class="note" x="290" y="434"><tspan class="code">serve</tspan> · <tspan class="code">Link</tspan></text>
 <path class="arrow" d="M618 500H264" marker-end="url(#head)"/>
 <text class="note" x="290" y="479">an ended run's record: what differs from</text>
-<text class="note" x="290" y="494">the copy here, in one archive · <tspan class="code">copy</tspan></text>
+<text class="note" x="290" y="494">the copy here, one file at a time · <tspan class="code">copy</tspan></text>
 <rect class="box" x="32" y="572" width="228" height="88" rx="8"/>
 <text class="name mid" x="146" y="592"><tspan class="code">pumpkin</tspan> <tspan class="code">view</tspan></text>
 <text class="note mid" x="146" y="609">serves the page, the token</text>

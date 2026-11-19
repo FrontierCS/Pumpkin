@@ -43,7 +43,7 @@ mod style;
 mod view;
 mod workspace;
 
-use ending::{end, follow, followed};
+use ending::{end, follow};
 use reaping::{Reaper, UNREACHED, cancel, cancelled, reap};
 use run::{driver_run, run, start};
 
@@ -84,7 +84,6 @@ fn main() -> ExitCode {
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
-        Ok(cli::Command::Follow(id)) => job::follow(&id),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Serve) => serve::serve(),
         Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
@@ -526,12 +525,7 @@ fn advise(to: &str, command: &str) {
 
 /// Writes `message` as a line on the standard error, and ignores a failure to write it.
 fn say(message: impl fmt::Display) {
-    let _ = tell(message);
-}
-
-/// [`say`], but returns the failure to write.
-fn tell(message: impl fmt::Display) -> io::Result<()> {
-    io::stderr().write_all(format!("pumpkin: {message}\n").as_bytes())
+    to_stderr(format!("pumpkin: {message}\n").as_bytes());
 }
 
 fn to_stderr(bytes: &[u8]) {

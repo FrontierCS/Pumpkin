@@ -33,38 +33,24 @@ output "modal_images" {
 
 output "client_config" {
   description = "The `[controller]` table of the person's machine's `pumpkin.toml`, beside its `[upstreams]`."
-  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\n"
+  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\naddress = \"private\"\n"
 }
 
 # What the person's machine needs to reach the controller: find it by its tag, start it, and push
-# the machine's key for the controller's user, then reach its `sshd` from `ssh_from`. The SSM
-# grants are for the clients of the last tag, which open SSH sessions through SSM's
-# `AWS-StartSSHSession` alone, as the access check holds them to, until the controller is made
-# anew.
+# the machine's key for the controller's user, then reach its `sshd` from `ssh_from`.
 resource "aws_iam_policy" "client" {
   name        = "${local.prefix}-client"
   description = "What the machine of a person needs to reach its Pumpkin controller"
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["ec2:DescribeInstances", "ssm:DescribeInstanceInformation"], Resource = "*" },
+      { Effect = "Allow", Action = "ec2:DescribeInstances", Resource = "*" },
       { Effect = "Allow", Action = "ec2:StartInstances", Resource = local.controller_arn },
       {
         Effect    = "Allow"
         Action    = "ec2-instance-connect:SendSSHPublicKey"
         Resource  = local.controller_arn
         Condition = { StringEquals = { "ec2:osuser" = "pumpkin" } }
-      },
-      {
-        Effect    = "Allow"
-        Action    = "ssm:StartSession"
-        Resource  = [local.controller_arn, "${local.arn}:ssm:${var.region}::document/AWS-StartSSHSession"]
-        Condition = { BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" } }
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ssm:TerminateSession", "ssm:ResumeSession"]
-        Resource = "${local.arn}:ssm:*:${local.account}:session/$${aws:userid}-*"
       },
       # A live check's look for a run's timers left behind: Scheduler's list takes no resource.
       { Effect = "Allow", Action = "scheduler:ListSchedules", Resource = "*" },

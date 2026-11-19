@@ -6,8 +6,8 @@
 //! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each build's
 //! in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and its unit's
 //! standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that every tree's
-//! `.pumpkin` links to, where each job's Pumpkin is built, which keeps the runs' records, the build
-//! slots and `serve`'s installs; and `current-pumpkin`, the `pumpkin` that the last job ran.
+//! `.pumpkin` links to, which keeps the installed builds, the runs' records, the build
+//! slots and `serve`'s installs.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
@@ -43,6 +43,10 @@ use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, publish, say, star};
 
+mod start;
+
+pub(crate) use start::start;
+
 pub(crate) const JOBS: &str = "jobs";
 
 pub(crate) const BUILDS: &str = "builds";
@@ -51,31 +55,18 @@ pub(crate) const TREES: &str = "trees";
 
 pub(crate) const STORE: &str = "store";
 
-// The files of a job's tree that its start links there, as its unit runs them rather than the
-// job: `pumpkin`, the consumer entry that builds the job's Pumpkin, and `.pumpkinversion`, which
-// it reads. `materialize` links the others.
-pub(crate) const STARTED: [&str; 2] = ["pumpkin", ".pumpkinversion"];
-
-// The link in the home to the `pumpkin` of the last job started, which the controller's boot and
-// the commands that act on runs there run.
-pub(crate) const CURRENT: &str = "current-pumpkin";
-
 /// The runs directory of the controller's one workspace, relative to the user's home: that of
-/// every job's `pumpkin`, as each is built in that workspace.
+/// every job's `pumpkin`, as each runs from that workspace.
 pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+pub(crate) fn unit_name(id: &RunTag) -> String {
+    format!("pumpkin-job-{}", id.as_str())
+}
+
 // The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
-
-// The exit status of `controller follow` and `cancel` once the run has ended, and the record is
-// the client's to copy.
-pub(crate) const ENDED: u8 = 102;
-
-// The exit status of `controller cancel` once the run ended but its provider couldn't be
-// reached, so that what it left isn't removed.
-pub(crate) const ENDED_UNREACHED: u8 = 103;
 
 pub(crate) const SENT_CONFIG: &str = "config.toml";
 
@@ -98,7 +89,7 @@ pub(crate) const WAITING: &str = "waiting";
 // own.
 const KEPT: Duration = Duration::from_hours(14 * 24);
 
-// How long a manifest or an unchecked piece lasts in the store, and so what no tree links of the
+// How long a manifest or a partial blob lasts in the store, and so what no tree links of the
 // files a manifest names. A day is long enough that a send cut off, or a start that failed,
 // carries on the next day from what had arrived, and short enough that what no tree links, as of
 // an edit made and undone, is gone soon. A tree, which a run's record names, keeps its files for
@@ -120,8 +111,8 @@ const IMDS: &str = "http://169.254.169.254/latest";
 // own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs job `job`, in its tree and as its unit does: it points `CURRENT` at this `pumpkin`,
-/// assembles the job's configuration, prunes, builds the task's images under the controller's
+/// Runs job `job`, in its tree and as its unit does. It assembles the job's
+/// configuration, prunes, builds the task's images under the controller's
 /// build slots, and then runs the task, or builds it for a build job, as the job's command says,
 /// publishing the runs meanwhile if the settings have `[publish]`. Returns the command's exit
 /// status.
@@ -138,15 +129,13 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     materialize(&home, &id, &tree, &working)?;
     let jobs = jobs()?;
     let sent = jobs.join(id.as_str());
-    point_current(&home, &id)?;
     let (kind, entry, args) = match &command {
         cli::JobCommand::Run(run) => (JOBS, &run.entry, &run.args.0),
         cli::JobCommand::Build(build) => (BUILDS, &build.entry, &build.args.0),
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
-    // So that a client that follows the run has it followed by the `pumpkin` it sent the job with,
-    // as `current-pumpkin` may be another job's by then.
+    // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
@@ -196,7 +185,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
 }
 
 /// Makes the tree named `tree` in `dir`, job `id`'s tree below `home`, of links into the store
-/// there, as its manifest names each file, but those that the start linked (`STARTED`): a file to
+/// there, as its manifest names each file: a file to
 /// its blob, one that its owner may execute to the blob's copy at 0555, made if need be, and a
 /// symbolic link to its blob's text.
 ///
@@ -211,13 +200,11 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
     let path = store.join(MANIFESTS).join(tree.hex());
     let manifest = fs::read(&path).context(path.display())?;
     let manifest = Manifest::parse(&manifest).context(path.display())?;
-    let made =
-        |entry: &&Entry| entry.kind != Kind::Bundle && !STARTED.contains(&entry.path.as_str());
     let trees = home.join(TREES);
     let above = dir.parent().and_then(Path::parent).map(fs::canonicalize);
     let own = dir.file_name() == Some(OsStr::new(id.as_str()))
         && matches!((fs::canonicalize(&trees), above), (Ok(trees), Some(Ok(above))) if trees == above);
-    if !own && manifest.entries().iter().any(|entry| made(&entry)) {
+    if !own && !manifest.entries().is_empty() {
         return Err(format!(
             "the job's working directory, {}, isn't its tree, {}/<repository>/{id}, which its \
              start makes: run the job there, as its unit does",
@@ -226,7 +213,7 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
             id = id.as_str()
         ));
     }
-    for entry in manifest.entries().iter().filter(made) {
+    for entry in manifest.entries() {
         let Entry {
             kind,
             digest,
@@ -245,7 +232,6 @@ fn materialize(home: &Path, id: &RunTag, tree: &Sha256Digest, dir: &Path) -> Res
                 let target = fs::read(&blob).context(blob.display())?;
                 symlink(OsStr::from_bytes(&target), &to)
             }
-            Kind::Bundle => unreachable!("the bundle is passed over just above"),
         };
         linked.context(to.display())?;
     }
@@ -273,9 +259,8 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
-/// The controller's boot: reaps what each run that has ended or is lost, but one that ended clean,
-/// may have left, with the configuration of its job; returns the reap's exit status, 0 though a
-/// provider can't be reached.
+/// Reaps what this build's ended or lost runs may have left, using each job's configuration.
+/// Returns the reap's exit status, 0 though a provider can't be reached.
 pub(crate) fn boot() -> Result<ExitCode, String> {
     // No prune, which each job's start makes: a client may start a job as soon as the
     // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
@@ -289,42 +274,21 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     crate::reap(reap, crate::Reaper::Boot)
 }
 
-/// Follows run `id` for a client, as `pumpkin wait` does, saying its milestones until it ends, but
-/// none of its ending; then exits `ENDED`. Fails at the first line that can't be written. Ending
-/// it doesn't stop the run.
-pub(crate) fn follow(id: &RunTag) -> Result<ExitCode, String> {
-    let runs = crate::default_runs()?;
-    let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
-    if record.ending()?.is_none() {
-        crate::tell(format_args!(
-            "following run {}: ending this command does not stop it",
-            record.id()
-        ))
-        .context(format_args!(
-            "telling the client of run {} failed",
-            record.id()
-        ))?;
-        crate::followed(&record, crate::Reader::Follower)?;
-    }
-    Ok(ExitCode::from(ENDED))
-}
-
-/// Cancels the run that `flags` name for a client, as `pumpkin cancel` does, but says none of its
-/// ending; then exits `ENDED`, or `ENDED_UNREACHED` if its provider couldn't be reached. Fails as
-/// `pumpkin cancel` does before the run's ending.
+/// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
+/// the client to copy the ended record, 103 to also report that a provider couldn't be reached.
 pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
-    let (_, _, reached) = crate::cancelled(flags, crate::Reader::Follower)?;
-    Ok(ExitCode::from(if reached {
-        ENDED
-    } else {
-        ENDED_UNREACHED
-    }))
+    let reached = crate::cancelled(flags, crate::Reader::Follower)?.reached?;
+    Ok(ExitCode::from(if reached { 102 } else { 103 }))
 }
 
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.
 pub(crate) fn jobs() -> Result<PathBuf, String> {
+    Ok(runtime_dir()?.join("pumpkin"))
+}
+
+pub(crate) fn runtime_dir() -> Result<PathBuf, String> {
     // The same for every job: the user's systemd gives each job's unit the user's runtime
     // directory, as `pam_systemd` gives the session that makes the job's directory there.
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty());
@@ -335,7 +299,7 @@ pub(crate) fn jobs() -> Result<PathBuf, String> {
                 .to_owned(),
         );
     };
-    Ok(Path::new(&runtime).join("pumpkin"))
+    Ok(runtime.into())
 }
 
 /// What the jobs that run hold, of the directories of every job in `jobs`, and their runs'
@@ -378,11 +342,6 @@ fn held(jobs: &Path, runs: &Path) -> Result<Held, String> {
 /// looks it up is removed while the job runs.
 fn open_jobs(jobs: &Path) -> Result<File, String> {
     File::open(jobs).context(jobs.display())
-}
-
-fn point_current(home: &Path, id: &RunTag) -> Result<(), String> {
-    let staged = home.join(format!(".{CURRENT}.{}", id.as_str()));
-    point(&home.join(CURRENT), &staged)
 }
 
 /// Points `link` at this `pumpkin`, replacing what it pointed at whole, by way of `staged`, a path
@@ -641,16 +600,24 @@ fn collect_store(store: &Path) -> Result<(), String> {
             removed(&path)?;
             continue;
         }
-        match Manifest::parse(&fs::read(&path).context(path.display())?) {
-            Ok(manifest) => {
-                named.extend(manifest.entries().iter().map(|entry| entry.digest.clone()));
-            }
+        match manifest::referenced(&fs::read(&path).context(path.display())?) {
+            Ok(digests) => named.extend(digests),
             Err(error) => unread = Some(format!("{}: {error}", path.display())),
         }
     }
     for (path, metadata) in files(&store.join(INCOMING))? {
         if old(&path, &metadata)? {
-            removed(&path)?;
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context(path.display()),
+            };
+            match file.try_lock() {
+                // A live upload may have waited for a frame since before the cutoff.
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(error)) => return Err(error).context(path.display()),
+                Ok(()) => removed(&path)?,
+            }
         }
     }
     // Of another Pumpkin's, which may name any blob.
