@@ -1133,6 +1133,47 @@ fn boot_without_runs() {
     );
 }
 
+#[test]
+fn boot_registered_builds() {
+    let scratch = Scratch::new();
+    let (_, id, _) = started_job(&scratch);
+    write_record(&scratch, &id, true, None);
+    move_runs(&scratch, "home/.pumpkin/runs");
+    scratch.write_executable(
+        "home/.pumpkin/legacy/bin/pumpkin",
+        b"#!/bin/sh\ntouch \"$HOME/legacy-ran\"\n",
+    );
+    let broken = scratch.0.join("home/.pumpkin/0/bin");
+    fs::create_dir_all(&broken).unwrap();
+    symlink("/bin/false", broken.join("pumpkin-boot")).unwrap();
+    scratch.write_executable(
+        "boot",
+        include_bytes!("../../../../deploy/aws/pumpkin-boot"),
+    );
+    let status = scratch
+        .program(scratch.0.join("boot"), &[])
+        .status()
+        .unwrap();
+    let home = scratch.0.join("home");
+    let log = fs::read_to_string(home.join("boot.log")).unwrap();
+    let recovered = home
+        .join(format!(".pumpkin/runs/{id}/outcome.json"))
+        .is_file();
+    let legacy = home.join("legacy-ran").exists();
+    check(
+        &scratch,
+        &format!("{status}\n{log}recovered: {recovered}\nlegacy ran: {legacy}"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            exit status: 1
+            pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            <id>
+            controller boot failed for <scratch>/home/.pumpkin/0/bin/pumpkin-boot (exit 1)
+            recovered: true
+            legacy ran: false"#]],
+    );
+}
+
 const PINNED: &str = "1fe98e9dcf36c2dafe0df654e3899facc7dfa6f8";
 
 const INSTANCE: &str = "i-0c00000000000a11c";

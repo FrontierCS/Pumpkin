@@ -67,8 +67,9 @@ The controller starts when a command needs it and stops itself once it has been 
 with no job and no ssh session; at boot it reaps what lost runs left. A machine's keys go to it
 only with a job, into the job's directory in memory, which the job's unit removes as it ends. A job
 runs the same Pumpkin and helper programs as the machine, which uploads its install when
-the controller lacks it. At boot, each installed build reaps its own records and appends its
-output to `~/boot.log`.
+the controller lacks it. At boot, each build with a `bin/pumpkin-boot` link reaps its own
+records and appends its output to `~/boot.log`. For older installs, run `pumpkin reap` from the
+client build that wrote their records.
 
 A controller can also publish its runs, live and ended, to a read-only page served from a private
 bucket behind CloudFront, for a team that knows its address. `deploy/aws`'s README says how to
