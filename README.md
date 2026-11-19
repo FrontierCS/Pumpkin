@@ -81,13 +81,6 @@ its id. `wait` follows a run named by a prefix of that id; ending it leaves the 
 lists the runs that are live or ended in the last day. `view` serves them to this machine's
 browser. The record is `.pumpkin/runs/<id>/`.
 
-A FrontierCS task repository has the same shape. Each problem is `tasks/<id>/task.star`, and the
-same configuration and the same commands run it. `--arg agent=reference` submits that task's
-reference solution, with no model. `--arg agent=codex --arg model=<name>` runs a harness once an
-`[upstreams.<name>]` table in `pumpkin.toml` names the model and the file that holds its key. A
-role that fits no configured class, for lack of cores, memory or a GPU, is refused before anything
-is reserved.
-
 [Run it](#run-it) shows these commands with their output.
 [docs/running.md](docs/running.md) goes through installing, configuring and each command.
 
