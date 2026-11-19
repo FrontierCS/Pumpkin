@@ -6,7 +6,7 @@
 #
 # Everything lives in `.pumpkin/` beside this file, which ignores itself in git and is safe to
 # delete; nothing is written elsewhere. `.pumpkinversion` holds Pumpkin's tag, then the full
-# commit the tag must name. To build it, it needs Linux x86_64, git, curl, sha256sum, a C linker
+# commit the tag must name. To build it, it needs Linux x86_64, git, curl, sha256sum, tar, xz, a C linker
 # (`cc`) and TLS certificates, which it checks for first.
 #
 # Everything after this script's own option goes to `pumpkin`. The option, only if it comes
@@ -40,10 +40,11 @@ RUSTUP_CHECKSUM="5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f
 # openSUSE, or where `SSL_CERT_FILE` names.
 need() {
     missing='' packages=''
-    for tool in git curl sha256sum cc; do
+    for tool in git curl sha256sum tar xz cc; do
         command -v "$tool" > /dev/null && continue
         case "$tool" in
             sha256sum) package=coreutils ;;
+            xz) package=xz-utils ;;
             cc) package="gcc libc6-dev" tool="cc (a C linker)" ;;
             *) package=$tool ;;
         esac
@@ -142,8 +143,8 @@ build() {
     trap 'rm --recursive --force "$scratch" "$stage"' EXIT
     trap 'exit 1' HUP INT TERM
     if [ ! -x "$state/cargo/bin/rustup" ]; then
-        say "this first run fetches a Rust toolchain and builds Pumpkin, about 250 MB and a few minutes;"
-        say "all of it, about 1.5 GB, goes to $state, safe to delete, and later runs start at once"
+        say "this first run fetches Rust and Zig and builds Pumpkin, about 300 MB and a few minutes;"
+        say "all of it, about 2 GB, goes to $state, safe to delete, and later runs start at once"
     fi
     say "building Pumpkin $tag ($commit) from $repository ..."
     fetch -c advice.detachedHead=false clone --quiet --depth 1 --single-branch --branch "$tag" -- \
@@ -168,7 +169,7 @@ build() {
         curl --location --silent --show-error --fail --proto '=https' --tlsv1.2 \
             --output "$scratch/rustup-init" "$RUSTUP_URL" || {
             status=$?
-            say "the first run downloads from static.rust-lang.org, index.crates.io, static.crates.io, github.com and release-assets.githubusercontent.com; check that this machine reaches them with
+            say "the first run downloads from static.rust-lang.org, index.crates.io, static.crates.io, ziglang.org, github.com and release-assets.githubusercontent.com; check that this machine reaches them with
     curl --head $RUSTUP_URL"
             exit "$status"
         }

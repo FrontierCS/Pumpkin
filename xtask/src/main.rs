@@ -33,8 +33,7 @@ mod wait;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The target that the static `sandboxd` and `ec2-boot` are built for, and that `install --target`
-/// builds a static `pumpkin` for.
+/// The target of the static binaries in an install.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
 /// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
@@ -103,14 +102,12 @@ mod flags {
             /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
             /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
             /// which `pumpkin fmt` and `pumpkin check` run; prints each path. It runs on Linux
-            /// on x86-64 alone, the one platform buildifier is pinned for. `pumpkin` is built for
-            /// the host, unless `--target` names another, as a release's static build does.
+            /// on x86-64 alone, the platform the tools are pinned for.
             cmd install {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
-                /// The target that `pumpkin` is built for, as cargo's `--target`: the host by
-                /// default. `x86_64-unknown-linux-musl` builds it static, which needs a musl C
-                /// compiler for `ring` and `mimalloc`: `CC_x86_64_unknown_linux_musl=musl-gcc`.
+                /// The target for `pumpkin`, as in cargo's `--target`. The default is
+                /// `x86_64-unknown-linux-musl`, built static with Zig as its C compiler.
                 optional --target triple: String
             }
 
@@ -282,7 +279,7 @@ fn try_main() -> Result<()> {
             Ok(())
         }
         flags::XtaskCmd::Install(flags::Install { root, target }) => {
-            install(&cargo, root, target.as_deref())
+            install(&cargo, root, target.as_deref().unwrap_or(MUSL))
         }
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
@@ -541,16 +538,21 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
 /// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
 /// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    release(cargo, "ec2-boot", &["--target", MUSL])?;
-    release(cargo, "sandboxd", &["--target", MUSL])
+    release(cargo, "ec2-boot", MUSL)?;
+    release(cargo, "sandboxd", MUSL)
 }
 
-/// Builds the release binary of `package`, which has its name, with the cargo arguments `args`,
+/// Builds the release binary of `package`, which has its name, for `target`,
 /// and returns the path cargo reports for it, so that the path is right wherever cargo's
 /// configuration puts the target directory.
-fn release(cargo: &Cargo, package: &str, args: &[&str]) -> Result<PathBuf> {
+fn release(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
     let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
-    let build = build.args(args);
+    let build = build.args(["--target", target]);
+    let build = if package == "pumpkin" && target == MUSL {
+        tools::musl_cc(cargo, build)?
+    } else {
+        build
+    };
     let build = build.args(["--message-format", "json-render-diagnostics"]);
     // One JSON message per line; diagnostics are rendered on standard error instead.
     for line in build.read()?.lines() {
@@ -585,12 +587,12 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin`, for `target` if given, else the host, and the static `sandboxd` and
-/// `ec2-boot`, and installs them, with the Modal provider's helper and its lock, and the pinned
+/// Builds `pumpkin` for `target` and the static `sandboxd` and `ec2-boot`, and installs them
+/// with the Modal provider's helper and its lock, and the pinned
 /// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
 /// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
 /// `root`, says if `<root>/bin` is not on `PATH`.
-fn install(cargo: &Cargo, root: Option<PathBuf>, target: Option<&str>) -> Result<()> {
+fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -599,12 +601,8 @@ fn install(cargo: &Cargo, root: Option<PathBuf>, target: Option<&str>) -> Result
     // The Modal provider's helper and its lock, which `pumpkin` finds beside it, under the
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
-    let target_args: &[&str] = match target {
-        Some(target) => &["--target", target],
-        None => &[],
-    };
     let mut built = vec![
-        ("pumpkin", release(cargo, "pumpkin", target_args)?, 0o755),
+        ("pumpkin", release(cargo, "pumpkin", target)?, 0o755),
         ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
     let sandboxd = sandboxd(cargo)?;

@@ -50,8 +50,8 @@ $ echo "<tag> <commit>" > .pumpkinversion
 The first `./pumpkin` clones the commit `.pumpkinversion` names and compiles it into `.pumpkin/`
 beside the script. Later runs start that binary. `--pumpkin-repository=<url>`, as the script's
 first argument, builds from another repository, such as this checkout. The script needs Linux on
-x86-64, git, curl,
-`sha256sum`, a C linker and TLS certificates, and names the packages to install if one is missing.
+x86-64, git, curl, `sha256sum`, tar, xz, a C linker and TLS certificates, and names the packages
+to install if one is missing.
 Docker runs the sandboxes.
 
 One file configures the machine for every task: `~/.config/pumpkin/pumpkin.toml`. A machine whose
