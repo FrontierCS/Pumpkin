@@ -2159,10 +2159,10 @@ fn racing_upload(first_finishes: bool) {
             .unwrap();
         assert_eq!(head["type"], kind);
     }
-    let (_, body) = schema::frame::read::<()>(&mut frames).unwrap().unwrap();
+    let ((), body) = schema::frame::read::<()>(&mut frames).unwrap().unwrap();
     let missing: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
     if first_finishes {
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [serde_json::Value; 0]);
     } else {
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0]["held_bytes"], prefix.len());
