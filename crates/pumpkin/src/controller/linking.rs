@@ -1,4 +1,4 @@
-//! One SSH connection to this build's `serve`. A command keeps it for all its requests.
+//! Direct SSH connections to this build's `serve`. A command keeps its first for its requests.
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
 use std::collections::BTreeMap;
@@ -209,7 +209,7 @@ impl Reached {
         what: &str,
         mut ask: impl FnMut(&Self, &mut Linked) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
-        self.carrying_on(build, what, |reached, linked, _| ask(reached, linked))
+        self.carrying_on(build, what, |reached, linked, _, _| ask(reached, linked))
     }
 
     /// As [`Self::asked`], with each attempt opening its link and reporting its progress.
@@ -217,7 +217,12 @@ impl Reached {
         &mut self,
         build: &Build,
         what: &str,
-        mut ask: impl FnMut(&Self, &mut Linked, &mut dyn FnMut()) -> Result<T, Unlinked>,
+        mut ask: impl FnMut(
+            &Self,
+            &mut Linked,
+            &Located,
+            &mut (dyn FnMut() + Send),
+        ) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
         let mut attempt = 0;
         loop {
@@ -225,7 +230,7 @@ impl Reached {
                 Some(link) => link,
                 None => self.opening(build)?,
             };
-            let error = match ask(self, &mut linked, &mut || attempt = 0) {
+            let error = match ask(self, &mut linked, &found.at, &mut || attempt = 0) {
                 Ok(answer) => {
                     self.linked = Some((linked, found));
                     return Ok(answer);

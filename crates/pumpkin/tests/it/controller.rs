@@ -2086,6 +2086,39 @@ fn send_carries_on() {
 }
 
 #[test]
+fn cut_upload_finishes_on_the_original_connection() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    for mib in [224, 32] {
+        let path = scratch.0.join(format!("repo/stand-in/{mib}.bin"));
+        fs::File::create(path).unwrap().set_len(mib << 20).unwrap();
+    }
+    scratch.write(
+        "bin/before-2",
+        &format!("echo {} > '{}/bin/cut-in'", 1536 << 10, scratch.0.display()),
+    );
+    let (_, sent) = start(&scratch, &client);
+    check(
+        &scratch,
+        &format!("{sent}\n{}", send_calls(&scratch)),
+        &[],
+        &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks all 8 of the task's files: sending 256.0 MiB
+            pumpkin: controller `alice` didn't answer: ended during the upload: continuing the upload on the open connection
+            pumpkin: controller `alice` lacks 1 of the task's 8 files: sending 31.0 MiB
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>
+            the calls: serve, serve"#]],
+    );
+}
+
+#[test]
 fn concurrent_uploads() {
     racing_upload(true);
 }
