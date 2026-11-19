@@ -93,7 +93,7 @@ pub(crate) const WAITING: &str = "waiting";
 // own.
 const KEPT: Duration = Duration::from_hours(14 * 24);
 
-// How long a manifest or an unchecked piece lasts in the store, and so what no tree links of the
+// How long a manifest or a partial blob lasts in the store, and so what no tree links of the
 // files a manifest names. A day is long enough that a send cut off, or a start that failed,
 // carries on the next day from what had arrived, and short enough that what no tree links, as of
 // an edit made and undone, is gone soon. A tree, which a run's record names, keeps its files for
@@ -611,16 +611,24 @@ fn collect_store(store: &Path) -> Result<(), String> {
             removed(&path)?;
             continue;
         }
-        match Manifest::parse(&fs::read(&path).context(path.display())?) {
-            Ok(manifest) => {
-                named.extend(manifest.entries().iter().map(|entry| entry.digest.clone()));
-            }
+        match manifest::referenced(&fs::read(&path).context(path.display())?) {
+            Ok(digests) => named.extend(digests),
             Err(error) => unread = Some(format!("{}: {error}", path.display())),
         }
     }
     for (path, metadata) in files(&store.join(INCOMING))? {
         if old(&path, &metadata)? {
-            removed(&path)?;
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context(path.display()),
+            };
+            match file.try_lock() {
+                // A live upload may have waited for a frame since before the cutoff.
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(error)) => return Err(error).context(path.display()),
+                Ok(()) => removed(&path)?,
+            }
         }
     }
     // Of another Pumpkin's, which may name any blob.

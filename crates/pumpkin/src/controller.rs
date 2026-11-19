@@ -35,7 +35,7 @@ use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
@@ -49,16 +49,11 @@ pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, answers, find, kept};
 use crate::workspace::Workspace;
-use crate::{config, manifest, next, say};
+use crate::{config, next, say};
 
 // The user that every session logs in as on the controller, and that runs every Pumpkin process
 // there.
 const USER: &str = "pumpkin";
-
-// How long a send may move no byte before it is given up. A send has no bound on its whole time,
-// as its size sets it. `ssh` ends a dead connection by itself in 90 s (a `ServerAliveInterval` of
-// 30 s and the default of 3 misses), so this is a little beyond that.
-const STALL_TIMEOUT: Duration = Duration::from_mins(2);
 
 // How long `ssh` may take to connect to the controller's address. Inside its VPC a whole login
 // takes under a second, so an address that takes this long drops what `ssh` sends it, as an
@@ -84,9 +79,6 @@ const MASTERS: usize = 16;
 // `SESSIONS` commands at a time each take 2 at most, which 10 still takes.
 // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/servconf.h#L42
 const SESSIONS: usize = 5;
-
-// A send's streams each go over a master of their own.
-const _: () = assert!(manifest::STREAMS <= MASTERS);
 
 // The pauses before each repeat of a command whose connection ended. The first is at once, as one
 // connection's end leaves the controller reachable over another. The rest add up to about four
@@ -203,20 +195,6 @@ impl Shared {
 
     fn log(&self, master: usize) -> PathBuf {
         self.dir.join(format!("{master}.log"))
-    }
-
-    // One send at a time in a workspace, so that no piece goes twice and a batch's starts don't
-    // refuse a blob that two sends wrote at once, part written, as `ARCHITECTURE.md`'s invariant
-    // on the store says. A send from another workspace can still make a start refuse it, and
-    // sending again mends that. In return, sends that each lack little go in turn rather than at
-    // once, and a send holds a session for each of its streams, so the rest stay for the
-    // workspace's other commands.
-    fn upload(&self, name: &Name) -> Result<File, String> {
-        let waiting = format_args!(
-            "waiting for another command's send to controller `{name}`, which may send some of \
-             what this one would"
-        );
-        locked(&self.dir.join("upload"), waiting)
     }
 
     fn command(&self, program: &str) -> Command {
@@ -741,41 +719,6 @@ impl Reached {
         let output = session.output(input, Deadline::after(timeout));
         let master = session.slot.master;
         finished(output, shown, timeout).map_err(|error| self.lost(master, error))
-    }
-
-    /// Runs the session that `make` makes, and again after a pause if the connection ended with a
-    /// status in `ended`, up to the pauses of `AGAIN`; `what` says in the message what is repeated.
-    /// `input` goes to each run's standard input.
-    ///
-    /// The command must be safe to run again: a cut connection says nothing of how far it got.
-    fn again(
-        &self,
-        make: impl Fn() -> Result<Session, String>,
-        input: Option<&[u8]>,
-        shown: &str,
-        ended: &[i32],
-        timeout: Duration,
-        what: &str,
-    ) -> Result<Vec<u8>, String> {
-        let mut attempt = 0;
-        loop {
-            let mut session = make()?;
-            let output = session.output(input, Deadline::after(timeout));
-            let master = session.slot.master;
-            drop(session);
-            let cut = matches!(&output, Ok(Some(output)) if self.ended_connection(output.status, ended, master));
-            if !(cut && self.pause(attempt, master, what)) {
-                return finished(output, shown, timeout).map_err(|error| self.lost(master, error));
-            }
-            attempt += 1;
-        }
-    }
-
-    /// Whether `status` is one of `codes` and the connection `master` no longer answers, so that
-    /// the command was cut rather than failed.
-    fn ended_connection(&self, status: ExitStatus, codes: &[i32], master: usize) -> bool {
-        status.code().is_some_and(|code| codes.contains(&code))
-            && !self.shared.answers(master, &self.host())
     }
 
     /// Whether a call whose connection ended goes on again: after attempt `attempt` in a row,
