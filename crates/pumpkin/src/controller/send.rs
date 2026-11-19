@@ -2,12 +2,14 @@
 //! the controller's store, and the command that starts the job from them.
 //!
 //! The controller says which blobs of the task's manifest its store lacks, and only those are
-//! sent, each by its held offset, on the link that starts the job. A cut costs at most the last
-//! incomplete frame: the next link asks again what the controller lacks.
+//! sent, each from its held offset. Large task uploads can use up to four links.
+//! After a cut, the next store query finds which complete frames arrived.
 //!
 //! The start request sends this machine's settings and keys on the link's standard input. The
 //! controller writes them to the job's directory in tmpfs and starts its systemd unit, which
 //! outlives the connection.
+
+mod upload;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -19,11 +21,10 @@ use schema::workflow::Workflow;
 use stdx::Context as _;
 use stdx::process::Environment;
 
-use super::linking::{Build, Linked, Unlinked};
+use super::linking::Build;
 use super::{Name, Reached, SHORT_TIMEOUT, bounded};
-use crate::link::store::{Lacks, Put};
 use crate::link::{JobKind, JobStart, StartAnswer, StartRequest};
-use crate::manifest::store::{Missing, PutAnswer};
+use crate::manifest::store::Missing;
 use crate::{config, manifest, say};
 
 // How often a send says how much it has sent: often enough that a person sees a send move, and
@@ -208,98 +209,31 @@ pub(super) fn send(
     };
     let request = StartRequest::encode(&start, &mut body)?;
     let (mut install_left, mut tree_left) = (None, None);
-    match reached.carrying_on(&build, "starting the job", |reached, linked, advanced| {
-        upload(
-            linked,
-            reached,
-            &build.hashed,
-            true,
-            &mut install_left,
-            advanced,
-        )?;
-        upload(
-            linked,
-            reached,
-            &tree.hashed,
-            false,
-            &mut tree_left,
-            advanced,
-        )?;
-        linked.ask_with_body(reached, request, &body)
-    })?? {
+    match reached.carrying_on(
+        &build,
+        "starting the job",
+        |reached, linked, at, advanced| {
+            upload::send(
+                linked,
+                reached,
+                &build.hashed,
+                None,
+                &mut install_left,
+                advanced,
+            )?;
+            upload::send(
+                linked,
+                reached,
+                &tree.hashed,
+                Some((&build, at)),
+                &mut tree_left,
+                advanced,
+            )?;
+            linked.ask_with_body(reached, request, &body)
+        },
+    )?? {
         StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),
-    }
-}
-
-fn upload(
-    linked: &mut Linked,
-    reached: &Reached,
-    hashed: &manifest::Hashed,
-    install: bool,
-    previous: &mut Option<u64>,
-    advanced: &mut dyn FnMut(),
-) -> Result<(), Unlinked> {
-    let text = hashed.manifest.text();
-    let request = || Lacks {
-        manifest: manifest::sha256(&text),
-        body_bytes: text.len(),
-        install,
-    };
-    'lacks: loop {
-        let missing = linked.ask_with_body(reached, request(), &text)??;
-        let bytes: u64 = missing
-            .iter()
-            .map(|blob| blob.size_bytes.saturating_sub(blob.held_bytes))
-            .sum();
-        if previous
-            .replace(bytes)
-            .is_some_and(|earlier| bytes < earlier)
-        {
-            advanced();
-        }
-        if !install || !missing.is_empty() {
-            say(holds(
-                &reached.name,
-                &hashed.manifest,
-                &missing,
-                bytes,
-                install,
-            ));
-        }
-        let mut count = counting(&reached.name, bytes);
-        for Missing {
-            digest,
-            held_bytes,
-            size_bytes,
-        } in missing
-        {
-            let Some(source) = hashed.sources.get(&digest) else {
-                return Err(format!(
-                    "the controller asked for an unknown blob {}: send the task again",
-                    digest.hex()
-                )
-                .into());
-            };
-            let input = source.at(held_bytes, size_bytes)?;
-            let put = Put {
-                digest: digest.clone(),
-                from: held_bytes,
-                size_bytes,
-            };
-            match linked.stream(reached, |link| link.put(put, input, &mut count))?? {
-                PutAnswer::Stored => advanced(),
-                PutAnswer::OffsetChanged => continue 'lacks,
-                PutAnswer::NotItsDigest => {
-                    return Err(format!(
-                        "{} changed since it was hashed: send the task again",
-                        hashed.shown(&digest)
-                    )
-                    .into());
-                }
-            }
-        }
-        return Ok(());
     }
 }
 

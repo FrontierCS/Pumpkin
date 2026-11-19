@@ -47,7 +47,7 @@ impl Reached {
         lock.lock().context(scratch.path().display())?;
         drop(runs_lock);
         let what = format!("copying run {}'s record", id.as_str());
-        let answer = self.carrying_on(build, &what, |reached, linked, progress| {
+        let answer = self.carrying_on(build, &what, |reached, linked, _, progress| {
             let held = held(&copy, MAX_REQUEST_BODY_BYTES);
             let ask = Ask::Copy(CopyRequest {
                 id: id.as_str().to_owned(),
