@@ -23,6 +23,7 @@ const STARTED: &str = "started";
 
 pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAnswer, String> {
     let id = RunTag::try_from(start.id.clone())?;
+    let name = super::unit_name(&id);
     let id = id.as_str();
     let jobs = super::jobs()?;
     DirBuilder::new()
@@ -32,7 +33,6 @@ pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAn
         .context(jobs.display())?;
     let lock = File::open(&jobs).context(jobs.display())?;
     lock.lock().context(jobs.display())?;
-    let name = format!("pumpkin-job-{id}");
     for kind in [JOBS, BUILDS] {
         let dir = home.join(kind).join(id);
         if dir.try_exists().context(dir.display())? {

@@ -19,8 +19,8 @@ pub(super) fn cancel(
     request: CancelRequest,
     body: &[u8],
 ) -> Result<CancelAnswer, String> {
-    let id = RunTag::try_from(request.id)?;
-    let id = id.as_str();
+    let tag = RunTag::try_from(request.id)?;
+    let id = tag.as_str();
     let jobs = job::jobs()?;
     // A listing can see the durable job directory while Start is still submitting its unit.
     match File::open(&jobs) {
@@ -34,7 +34,7 @@ pub(super) fn cancel(
     let held = jobs.join(id);
     let record = home.join(job::runs()).join(id);
     if !super::exists(&record)? {
-        stop(id, &held, request.force)?;
+        stop(&tag, &held, request.force)?;
         // The driver can publish its record between the first check and the stop.
         if !super::exists(&record)? {
             return Ok(CancelAnswer::Unstarted);
@@ -44,7 +44,7 @@ pub(super) fn cancel(
         Ok(Writer::This) => {}
         writer => {
             // The unit can be stopped even when its record's writer cannot be read.
-            stop(id, &held, request.force)?;
+            stop(&tag, &held, request.force)?;
             let writer = match writer {
                 Ok(Writer::Other(build)) => Some(build),
                 _ => None,
@@ -67,8 +67,8 @@ pub(super) fn cancel(
     })
 }
 
-fn stop(id: &str, held: &Path, force: bool) -> Result<(), String> {
-    let unit = format!("pumpkin-job-{id}");
+fn stop(id: &RunTag, held: &Path, force: bool) -> Result<(), String> {
+    let unit = job::unit_name(id);
     let calls: &[&[&str]] = if force {
         &[&["kill", "--signal=KILL"], &["stop"]]
     } else {

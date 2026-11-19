@@ -65,6 +65,10 @@ pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+pub(crate) fn unit_name(id: &RunTag) -> String {
+    format!("pumpkin-job-{}", id.as_str())
+}
+
 // The link in a job's directory to the `pumpkin` that runs it.
 pub(crate) const OWN: &str = "pumpkin";
 
