@@ -14,7 +14,7 @@ mod follow;
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, File};
 use std::io::{self, BufReader, Write};
-use std::os::fd::AsFd as _;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -110,16 +110,19 @@ pub(crate) fn arrives(input: &BufReader<File>) -> Result<bool, String> {
     if !input.buffer().is_empty() {
         return Ok(true);
     }
-    let Ok(timeout) = Timespec::try_from(IDLE) else {
-        unreachable!("{IDLE:?} fits a `timespec`")
+    ready(input.get_ref(), PollFlags::IN, IDLE).context("polling the standard input failed")
+}
+
+fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<bool> {
+    let Ok(timeout) = Timespec::try_from(timeout) else {
+        unreachable!("{timeout:?} fits a timespec")
     };
+    let mut polled = [PollFd::new(fd, events)];
     loop {
-        let mut polled = [PollFd::new(input.get_ref(), PollFlags::IN)];
         match event::poll(&mut polled, Some(&timeout)) {
-            Ok(0) => return Ok(false),
-            Ok(_) => return Ok(true),
+            Ok(count) => return Ok(count != 0),
             Err(Errno::INTR) => {}
-            Err(error) => return Err(format!("polling the standard input failed: {error}")),
+            Err(error) => return Err(error.into()),
         }
     }
 }

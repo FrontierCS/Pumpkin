@@ -1,11 +1,12 @@
 //! A job's log while it builds, then the run's milestones or the completed build's IR.
 
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Seek as _, SeekFrom, Write};
 use std::path::Path;
 
 use provider::RunTag;
 use runtime::{ReadError, Record, Writer};
+use rustix::event::PollFlags;
 use schema::frame;
 use stdx::Context as _;
 
@@ -59,7 +60,7 @@ fn follow(
         if ready {
             break;
         }
-        std::thread::sleep(FOLLOW_POLL);
+        wait()?;
     }
     if !is_run {
         return built(output, &out);
@@ -98,24 +99,41 @@ fn ran(output: &mut impl Write, dir: &Path, id: &str, active: &Path) -> Result<(
         if record.ending()?.is_none() {
             let first = format!("following run {id}: ending this command does not stop it");
             say(output, &first)?;
-            milestones(&record, |message| say(output, &message.to_string()))?;
+            milestones(&record, |message| say(output, &message.to_string()), wait)?;
         }
     } else {
         while exists(active)? {
-            std::thread::sleep(FOLLOW_POLL);
+            wait()?;
         }
     }
     // Its outcome may already be written while its driver still holds the last write lock.
     // Wait for that lock before telling the client to copy, even for a record we can't read.
     let path = dir.join("driver.pid");
     if let Some(driver) = open(&path)? {
-        driver.lock_shared().context(path.display())?;
+        loop {
+            match driver.try_lock_shared() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => wait()?,
+                Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
+            }
+        }
     }
     let writer = match writer {
         Ok(Writer::Other(build)) => Some(build),
         Ok(Writer::This | Writer::Older) | Err(_) => None,
     };
     frame::write(output, &Followed::Ran { writer }, &[]).context(written)
+}
+
+// A quiet job can outlive its follower. Watch the reader of stdout as journalctl --follow does.
+// <https://github.com/systemd/systemd/blob/ca78951bd398e191ebc4550710e33ef34190514e/src/journal/journalctl-show.c#L468-L489>
+fn wait() -> Result<(), String> {
+    let closed = super::ready(&io::stdout(), PollFlags::ERR | PollFlags::HUP, FOLLOW_POLL)
+        .context("polling the standard output failed")?;
+    if closed {
+        return Err("the client closed its output".to_owned());
+    }
+    Ok(())
 }
 
 fn say(output: &mut impl Write, message: &str) -> Result<(), String> {

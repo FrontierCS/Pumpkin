@@ -2557,6 +2557,43 @@ fn follow_carries_on() {
 }
 
 #[test]
+fn silent_build_loses_its_follower() {
+    let scratch = Scratch::new();
+    let id = id_ago(0, "0f000007");
+    let log = format!("home/builds/{id}/log");
+    scratch.write(&log, "building\n");
+    let active = scratch.0.join("run/pumpkin").join(&id);
+    fs::create_dir_all(&active).unwrap();
+    let mut child = scratch
+        .program(PUMPKIN, &["controller", "serve"])
+        .env("XDG_RUNTIME_DIR", scratch.0.join("run"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = json!({ "type": "follow", "id": id, "log_from_bytes": 0 });
+    schema::frame::write(&mut child.stdin.take().unwrap(), &request, &[]).unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut next = || {
+        schema::frame::read::<serde_json::Value>(&mut stdout)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(next().0, json!({ "type": "serving" }));
+    assert_eq!(next().1, b"building\n");
+    scratch.write(&log, "building\nready\n");
+    assert_eq!(next().1, b"ready\n");
+    drop(stdout);
+    let exit = child.wait().unwrap();
+    check(
+        &scratch,
+        &format!("{exit}; build still active: {}", active.is_dir()),
+        &[],
+        &expect!["exit status: 0; build still active: true"],
+    );
+}
+
+#[test]
 fn follow_repeats_no_milestone() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
