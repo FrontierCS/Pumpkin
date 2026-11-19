@@ -68,6 +68,7 @@ impl Build {
 
 pub(super) enum Unlinked {
     Cut { said: String, denied: bool },
+    HostKey(String),
     Failed(String),
 }
 
@@ -150,13 +151,26 @@ impl Reached {
     fn connected(&self, build: &Build, mut found: Found) -> Result<(Linked, Found), String> {
         let mut repaired = false;
         let mut enrolled = false;
-        for attempt in 0..OPENINGS {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
             let (said, denied) = match Linked::open(self, build, &found.at) {
                 Ok(link) => return Ok((link, found)),
                 Err(Unlinked::Failed(error)) => return Err(error),
+                Err(Unlinked::HostKey(error)) => {
+                    if !repaired && attempt < OPENINGS {
+                        // The cached address may now belong to a different host. Check the pin
+                        // against the discovered address before reporting a change there.
+                        (found, _) = self.repair(&found, false, &error)?;
+                        repaired = true;
+                        continue;
+                    }
+                    self.location.failed(&self.name, &found, &error)?;
+                    return Err(error);
+                }
                 Err(Unlinked::Cut { said, denied }) => (said, denied),
             };
-            if attempt + 1 == OPENINGS || denied && enrolled {
+            if attempt == OPENINGS || denied && enrolled {
                 let hosts = self.kept.join("known_hosts");
                 let error = format!(
                     "{said}: check SSH access to the controller and the host key pinned for `{}` in {}, then run the command again",
@@ -166,20 +180,20 @@ impl Reached {
                 self.location.failed(&self.name, &found, &error)?;
                 return Err(error);
             }
-            if denied || !repaired && attempt > 0 {
-                found = self.repair(&found, denied, &said)?;
+            if denied || !repaired && attempt > 1 {
+                let (next, tried) = self.repair(&found, denied, &said)?;
+                found = next;
                 repaired = true;
-                enrolled |= denied;
+                enrolled |= tried;
             }
-            let pause = Duration::from_secs(((1_u64 << attempt) - 1).min(30));
+            let pause = Duration::from_secs(((1_u64 << (attempt - 1)) - 1).min(30));
             say(format_args!(
                 "{said}: opening it again {}, attempt {} of {OPENINGS}",
                 when(pause),
-                attempt + 2
+                attempt + 1
             ));
             thread::sleep(pause);
         }
-        unreachable!("the last opening returns above")
     }
 
     /// Opens the first link of a command, starting the controller if its opening needs repair.
@@ -217,7 +231,7 @@ impl Reached {
                     return Ok(answer);
                 }
                 Err(Unlinked::Cut { said, .. }) => said,
-                Err(Unlinked::Failed(error)) => return Err(error),
+                Err(Unlinked::HostKey(error) | Unlinked::Failed(error)) => return Err(error),
             };
             drop(linked);
             let Some(pause) = AGAIN.get(attempt) else {
@@ -247,13 +261,18 @@ fn unlinked(
     match error {
         Unanswered::Unreached(ended) => {
             let line = last_line(diagnostics);
+            // OpenSSH's fatal when the server's host key cannot be verified.
+            // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
+            let host_refused = line.as_deref() == Some("Host key verification failed.");
             let denied = line
                 .as_ref()
                 .is_some_and(|line| line.contains("Permission denied ("));
             let said = line.map_or(ended, |line| format!("ssh says: {line}"));
-            Unlinked::Cut {
-                said: format!("controller `{name}` didn't answer: {said}"),
-                denied,
+            let said = format!("controller `{name}` didn't answer: {said}");
+            if host_refused {
+                Unlinked::HostKey(reached.host_refused(&said))
+            } else {
+                Unlinked::Cut { said, denied }
             }
         }
         Unanswered::Failed(error) => {

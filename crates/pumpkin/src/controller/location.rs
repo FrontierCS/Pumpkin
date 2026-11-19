@@ -22,10 +22,22 @@ pub(super) struct Location {
     dir: PathBuf,
 }
 
-#[derive(Clone)]
 pub(super) struct Found {
     pub(super) at: Located,
-    inode: u64,
+    // Keep the file open so a later repair cannot reuse its inode, as GNU find does for -samefile.
+    // https://git.savannah.gnu.org/cgit/findutils.git/tree/find/parser.c?id=71d158fdd51b755fd85cc763435fb675b541acd9#n2253
+    file: File,
+}
+
+impl Found {
+    fn same_file(&self, other: &Self, path: &Path) -> Result<bool, String> {
+        let inode = |file: &File| {
+            file.metadata()
+                .map(|stat| (stat.dev(), stat.ino()))
+                .context(path.display())
+        };
+        Ok(inode(&self.file)? == inode(&other.file)?)
+    }
 }
 
 impl Location {
@@ -47,13 +59,14 @@ impl Location {
 
     pub(super) fn found(&self) -> Result<Option<Found>, String> {
         let path = self.dir.join("found");
-        let Some(file) = open(&path)? else {
+        let Some(mut file) = open(&path)? else {
             return Ok(None);
         };
-        let inode = file.metadata().context(path.display())?.ino();
-        Ok(serde_json::from_reader(file)
+        let mut json = Vec::new();
+        file.read_to_end(&mut json).context(path.display())?;
+        Ok(serde_json::from_slice(&json)
             .ok()
-            .map(|at| Found { at, inode }))
+            .map(|at| Found { at, file }))
     }
 
     pub(super) fn repair(
@@ -63,12 +76,12 @@ impl Location {
         repair: impl FnOnce() -> Result<Located, String>,
     ) -> Result<Found, String> {
         let _lock = self.lock(name)?;
+        self.recent()?;
         if let Some(found) = self.found()?
-            && previous.is_none_or(|old| old.inode != found.inode)
+            && !matches!(previous, Some(old) if old.same_file(&found, &self.dir.join("found"))?)
         {
             return Ok(found);
         }
-        self.recent()?;
         let at = match repair() {
             Ok(at) => at,
             Err(error) => {
@@ -76,15 +89,14 @@ impl Location {
                 return Err(error);
             }
         };
-        let json = serde_json::to_vec(&at)
-            .unwrap_or_else(|error| unreachable!("an instance id and address are JSON: {error}"));
-        let inode = self.write("found", &json)?;
+        let json = serde_json::to_vec(&at).context("encoding the controller's location")?;
+        let file = self.write("found", &json)?;
         let failed = self.dir.join("failed");
         match fs::remove_file(&failed) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             result => result.context(failed.display())?,
         }
-        Ok(Found { at, inode })
+        Ok(Found { at, file })
     }
 
     pub(super) fn recent(&self) -> Result<(), String> {
@@ -105,7 +117,9 @@ impl Location {
 
     pub(super) fn failed(&self, name: &Name, found: &Found, error: &str) -> Result<(), String> {
         let _lock = self.lock(name)?;
-        if self.found()?.is_some_and(|now| now.inode == found.inode) {
+        if let Some(now) = self.found()?
+            && now.same_file(found, &self.dir.join("found"))?
+        {
             self.write("failed", error.as_bytes())?;
         }
         Ok(())
@@ -118,12 +132,11 @@ impl Location {
         )
     }
 
-    fn write(&self, name: &str, bytes: &[u8]) -> Result<u64, String> {
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<File, String> {
         let mut aside = tempfile::NamedTempFile::new_in(&self.dir).context(self.dir.display())?;
         aside.write_all(bytes).context(aside.path().display())?;
         let file = self.dir.join(name);
-        let saved = aside.persist(&file).context(file.display())?;
-        Ok(saved.metadata().context(file.display())?.ino())
+        aside.persist(&file).context(file.display())
     }
 }
 

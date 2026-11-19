@@ -3411,6 +3411,25 @@ fn ls_refusals() {
 
 #[test]
 fn repair_uses_the_location_found_while_it_waited() {
+    repair_while_waiting(
+        None,
+        &expect![[r#"
+            SSH attempts: 3
+            AWS calls: 0"#]],
+    );
+}
+
+#[test]
+fn repair_uses_the_failure_at_the_new_location() {
+    repair_while_waiting(
+        Some("another command could not reach this location"),
+        &expect![[r#"
+            SSH attempts: 2
+            AWS calls: 0"#]],
+    );
+}
+
+fn repair_while_waiting(failure: Option<&str>, expected: &Expect) {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
@@ -3436,12 +3455,23 @@ fn repair_uses_the_location_found_while_it_waited() {
     while !said.contains("waiting for another command") {
         assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
     }
-    // The repair ahead of this one found the same instance and atomically replaced its cache.
-    fs::copy(dir.join("found"), dir.join("found.new")).unwrap();
-    fs::rename(dir.join("found.new"), dir.join("found")).unwrap();
+    // A second replacement can reuse the first inode once all readers have closed it.
+    for _ in 0..2 {
+        fs::copy(dir.join("found"), dir.join("found.new")).unwrap();
+        fs::rename(dir.join("found.new"), dir.join("found")).unwrap();
+    }
+    if let Some(error) = failure {
+        fs::write(dir.join("failed"), error).unwrap();
+    }
     drop(lock);
     let output = ended(child, stderr, said);
-    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.status.success(), failure.is_none(), "{output:?}");
+    if let Some(error) = failure {
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+    }
     let attempts = fs::read_to_string(scratch.0.join("bin/scripts"))
         .unwrap()
         .lines()
@@ -3453,9 +3483,7 @@ fn repair_uses_the_location_found_while_it_waited() {
             noted(&scratch).len()
         ),
         &[],
-        &expect![[r#"
-            SSH attempts: 3
-            AWS calls: 0"#]],
+        expected,
     );
 }
 

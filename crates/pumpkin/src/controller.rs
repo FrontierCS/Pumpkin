@@ -156,24 +156,25 @@ impl Reached {
         }
     }
 
-    fn host_changed(&self) -> String {
+    fn host_refused(&self, said: &str) -> String {
         let hosts = self.kept.join("known_hosts");
         format!(
-            "controller `{}` was replaced: check the new instance with its administrator, then unpin the old host key: ssh-keygen -R {} -f {}",
+            "{said}: verify the host key for controller `{}` with its administrator. If its key changed as expected, unpin the old key: ssh-keygen -R {} -f {}",
             self.name,
             self.alias,
             next::quoted(&hosts.to_string_lossy())
         )
     }
 
-    fn repair(&self, previous: &Found, denied: bool, said: &str) -> Result<Found, String> {
+    fn repair(&self, previous: &Found, denied: bool, said: &str) -> Result<(Found, bool), String> {
+        let mut enrolled = false;
         let found = self.location.repair(&self.name, Some(previous), || {
             let probe = aws::answers(previous.at.address);
             let at = find(&self.region, &self.name).map_err(|error| match probe {
                 Ok(()) => format!("{said}; finding the controller again: {error}"),
                 Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
             })?;
-            if denied && at.instance == previous.at.instance {
+            if denied && at.instance == previous.at.instance && at.address == previous.at.address {
                 let _enrol = self.enrolling()?;
                 let mut probe = self.ssh(&at, "true");
                 if bounded(&mut probe, "ssh", SHORT_TIMEOUT).is_err() {
@@ -185,13 +186,11 @@ impl Reached {
                     self.push(&at)?;
                     self.enrol(&at)?;
                 }
+                enrolled = true;
             }
             Ok(at)
         })?;
-        if found.at.instance != previous.at.instance {
-            return Err(self.host_changed());
-        }
-        Ok(found)
+        Ok((found, enrolled))
     }
 
     fn ssh_command() -> Command {
