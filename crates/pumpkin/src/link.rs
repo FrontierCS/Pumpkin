@@ -32,7 +32,7 @@ use crate::{config, manifest, workspace};
 // record keeps is at most the 64 MiB that the gateway takes of a request.
 const MAX_ANSWER_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
-// Room for the keys and configuration that arrive with a job.
+// Room for a job's keys and configuration. Copy uses the same budget for its optional file stamps.
 pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 16 << 20;
 
 /// What `serve` says first, in a frame with no body.
@@ -67,36 +67,34 @@ pub(crate) trait Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
     Copy(copy::CopyRequest),
-    Follow { id: String, log_from_bytes: u64 },
+    Follow {
+        id: String,
+        log_from_bytes: u64,
+        after_cut: bool,
+    },
     Health(HealthRequest),
     Jobs(JobsRequest),
     List(ListRequest),
     View(ViewRequest),
-    Start(Box<StartRequest>),
+    Start(StartRequest),
     Cancel(CancelRequest),
 }
 
 impl Ask {
     fn body_bytes(&self) -> io::Result<usize> {
         let bytes = match self {
-            Self::Copy(copy) => Some(copy.held_bytes),
-            Self::Start(start) => start
-                .key_bytes
-                .iter()
-                .try_fold(start.modal_bytes.unwrap_or(0), |sum, bytes| {
-                    sum.checked_add(*bytes)
-                }),
-            Self::Cancel(request) => Some(request.modal_bytes.unwrap_or(0)),
-            _ => Some(0),
+            Self::Copy(copy) => copy.held_bytes,
+            Self::Start(start) => start.body_bytes,
+            Self::Cancel(request) => request.modal_bytes.unwrap_or(0),
+            _ => 0,
         };
-        bytes
-            .filter(|bytes| *bytes <= MAX_REQUEST_BODY_BYTES)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "a request's body holds at most 16 MiB",
-                )
-            })
+        if bytes > MAX_REQUEST_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a request's body holds at most 16 MiB",
+            ));
+        }
+        Ok(bytes)
     }
 
     /// Reads the body of this request before any of it takes effect.
@@ -308,10 +306,16 @@ pub(crate) enum JobKind {
     Build,
 }
 
-/// Starts one job of this build. The body's bytes are one key per upstream, in name order,
-/// then the optional Modal file. A repeat of the same id leaves the first job alone.
-#[derive(Clone, Serialize, Deserialize)]
+/// The body holds one key per upstream, in name order, the optional Modal file, then the job's
+/// JSON. A repeat of the same id leaves the first job alone.
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct StartRequest {
+    body_bytes: usize,
+    credential_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct JobStart {
     pub(crate) id: String,
     pub(crate) kind: JobKind,
     pub(crate) repo: String,
@@ -322,6 +326,36 @@ pub(crate) struct StartRequest {
     pub(crate) sent: config::Sent,
     pub(crate) key_bytes: Vec<usize>,
     pub(crate) modal_bytes: Option<usize>,
+}
+
+impl StartRequest {
+    pub(crate) fn encode(start: &JobStart, body: &mut Vec<u8>) -> Result<Self, String> {
+        let credential_bytes = body.len();
+        serde_json::to_writer(&mut *body, start)
+            .map_err(|error| format!("writing the job's start: {error}"))?;
+        Ok(Self {
+            body_bytes: body.len(),
+            credential_bytes,
+        })
+    }
+
+    pub(crate) fn decode(self, body: &[u8]) -> Result<(JobStart, &[u8]), String> {
+        let (credentials, job) = body
+            .split_at_checked(self.credential_bytes)
+            .ok_or("the job's credentials exceed its request body")?;
+        let start: JobStart = serde_json::from_slice(job)
+            .map_err(|error| format!("reading the job's start: {error}"))?;
+        let bytes = start
+            .key_bytes
+            .iter()
+            .try_fold(start.modal_bytes.unwrap_or(0), |sum, key| {
+                sum.checked_add(*key)
+            });
+        if bytes != Some(credentials.len()) {
+            return Err("the job gives a different length for its credentials".to_owned());
+        }
+        Ok((start, credentials))
+    }
 }
 
 pub(crate) enum StartAnswer {
@@ -350,7 +384,7 @@ impl Request for StartRequest {
     type Head = StartHead;
 
     fn ask(self) -> Ask {
-        Ask::Start(Box::new(self))
+        Ask::Start(self)
     }
 
     fn sent(answer: StartAnswer) -> (StartHead, Vec<u8>) {

@@ -1345,19 +1345,82 @@ fn keys_on_standard_input() {
     );
 }
 
-fn start_head(id: &str, bytes: usize) -> serde_json::Value {
+#[test]
+fn start_with_large_arguments_and_model_catalog() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
+    let models = (0..1500)
+        .map(|n| format!(r#"{{ name = "model-{n}", upstream_name = "provider/model-{n}" }}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let contents = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        contents.replace("models = [", &format!("models = [{models}, ")),
+    )
+    .unwrap();
+    let key = b"\0binary key\xff\n";
+    fs::write(scratch.0.join("client/.config/pumpkin/gateway-key"), key).unwrap();
+    let task = scratch.0.join("repo/stand-in/task.star");
+    let contents = fs::read_to_string(&task).unwrap();
+    fs::write(
+        &task,
+        contents.replace("workflow(", "TEXT = arg(\"text\", str)\nworkflow("),
+    )
+    .unwrap();
+    connect(&scratch, &client);
+    served(&scratch);
+    let word = format!("text={}", "x".repeat(schema::frame::MAX_MESSAGE_BYTES));
+    let output = on_client(
+        &scratch,
+        &client,
+        &["run", "stand-in/task.star", "--arg", &word],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let id = String::from_utf8(output.stdout).unwrap();
+    let sent = scratch.0.join("run/pumpkin").join(id.trim());
+    let config: toml::Table = fs::read_to_string(sent.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        config["upstreams"]["gateway"]["models"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1501
+    );
+    assert_eq!(fs::read(sent.join("gateway.key")).unwrap(), key);
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    assert!(argv.lines().any(|line| line == word));
+}
+
+fn start_head(body_bytes: usize, credential_bytes: usize) -> serde_json::Value {
+    json!({ "type": "start", "body_bytes": body_bytes, "credential_bytes": credential_bytes })
+}
+
+fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
     json!({
-        "type": "start", "id": id, "kind": "build", "repo": "tasks",
+        "id": id, "kind": "build", "repo": "tasks",
         "tree": format!("sha256:{EMPTY_TREE}"), "words": ["--", "task.star"],
         "region": "us-west-1", "parameter": "/pumpkin-alice/settings",
-        "sent": {}, "key_bytes": [], "modal_bytes": bytes,
+        "sent": {}, "key_bytes": [], "modal_bytes": modal_bytes,
     })
 }
 
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
-    let start = start_head(id, body.len());
-    schema::frame::write(&mut request, &start, &[]).unwrap();
+    let credential_bytes = body.len();
+    let mut body = body.to_vec();
+    serde_json::to_writer(&mut body, &start_job(id, credential_bytes)).unwrap();
+    schema::frame::write(&mut request, &start_head(body.len(), credential_bytes), &[]).unwrap();
     for part in body.chunks(schema::frame::MAX_BODY_BYTES) {
         schema::frame::write(&mut request, &(), part).unwrap();
     }
@@ -1368,6 +1431,7 @@ fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) ->
     let mut process = scratch.program(serve, &["controller", "serve"]);
     process
         .env("PATH", path)
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env("XDG_RUNTIME_DIR", scratch.0.join("run"));
     process
         .stdin(Stdio::piped())
@@ -1398,11 +1462,20 @@ fn retry_start() {
         "pumpkin-tree/1\n",
     );
     let id = id_ago(0, "0123abcd");
-    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
     let tmpfs = scratch.0.join(format!("run/pumpkin/{id}"));
-    scratch.write_executable("bin/systemd-run", b"#!/bin/sh\nexit 1\n");
-    scratch.write_executable("bin/systemctl", b"#!/bin/sh\necho not-found\nexit 4\n");
-    assert_eq!(ask(b"failed")["type"], "refused");
+    let path = scratch.0.join("without-systemd");
+    fs::create_dir(&path).unwrap();
+    for tool in ["sh", "find", "awk"] {
+        symlink(Path::new("/usr/bin").join(tool), path.join(tool)).unwrap();
+    }
+    let failed = ask_start(&scratch, &key, path.to_str().unwrap(), &id, b"failed");
+    assert_eq!(failed["type"], "refused");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap()
+            .contains("systemd-run could not start")
+    );
     for path in [
         &tmpfs,
         &home.join("builds").join(&id),
@@ -1410,7 +1483,7 @@ fn retry_start() {
     ] {
         assert!(!path.exists(), "{}", path.display());
     }
-    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
+    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
     let modal = vec![b'm'; schema::frame::MAX_BODY_BYTES + 1];
     assert_eq!(ask(&modal)["type"], "started");
     assert_eq!(ask(b"repeated")["type"], "already_started");
@@ -1451,11 +1524,23 @@ fn interrupted_launch_keeps_the_job() {
             .unwrap()
             .contains("systemctl --user status")
     );
-    assert_eq!(ask(b"second")["type"], "already_started");
+    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
+    assert_eq!(ask(b"second")["type"], "unconfirmed");
     assert_eq!(
         fs::read(scratch.0.join(format!("run/pumpkin/{id}/modal.toml"))).unwrap(),
         b"first"
     );
+    // A reboot loses the tmpfs even when the server died before submitting the unit.
+    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    assert_eq!(ask(b"third")["type"], "unconfirmed");
+    // The link that controller job writes survives the unit, including an older install's job.
+    symlink(
+        scratch.0.join(format!("home/.pumpkin/{key}/bin/pumpkin")),
+        scratch.0.join(format!("home/builds/{id}/pumpkin")),
+    )
+    .unwrap();
+    assert_eq!(ask(b"fourth")["type"], "already_started");
+    assert!(!scratch.0.join("bin/argv").exists());
 }
 
 #[test]
@@ -2548,18 +2633,65 @@ fn follow_carries_on() {
 }
 
 #[test]
+fn silent_build_loses_its_follower() {
+    let scratch = Scratch::new();
+    let id = id_ago(0, "0f000007");
+    let log = format!("home/builds/{id}/log");
+    scratch.write(&log, "building\n");
+    let active = scratch.0.join("run/pumpkin").join(&id);
+    fs::create_dir_all(&active).unwrap();
+    let mut child = scratch
+        .program(PUMPKIN, &["controller", "serve"])
+        .env("XDG_RUNTIME_DIR", scratch.0.join("run"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = json!({ "type": "follow", "id": id, "log_from_bytes": 0, "after_cut": false });
+    schema::frame::write(&mut child.stdin.take().unwrap(), &request, &[]).unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut next = || {
+        schema::frame::read::<serde_json::Value>(&mut stdout)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(next().0, json!({ "type": "serving" }));
+    assert_eq!(next().1, b"building\n");
+    scratch.write(&log, "building\nready\n");
+    assert_eq!(next().1, b"ready\n");
+    drop(stdout);
+    let exit = child.wait().unwrap();
+    check(
+        &scratch,
+        &format!("{exit}; build still active: {}", active.is_dir()),
+        &[],
+        &expect!["exit status: 0; build still active: true"],
+    );
+}
+
+fn said_bytes(message: &str) -> usize {
+    frame_bytes(&json!({ "type": "said", "body_bytes": message.len() }), &[])
+        + frame_bytes(&serde_json::Value::Null, message.as_bytes())
+}
+
+#[test]
 fn follow_repeats_no_milestone() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000005");
-    let log = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
+    let start = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
+    let end = super::logged(
+        2,
+        json!({ "kind": "agent_exited", "status": { "code": 0 } }),
+        json!([{ "kind": "tear_down_agent" }]),
+    );
     let dir = write_run(
         &scratch,
         &id,
         asked(&id, 30),
-        &[log],
+        &[start, end],
         None,
         &lease_places(Prices::Nothing),
     );
@@ -2569,32 +2701,31 @@ fn follow_repeats_no_milestone() {
     scratch.write(&format!("home/jobs/{id}/out"), &id);
     let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
     let first = format!("following run {id}: ending this command does not stop it");
-    let said = frame_bytes(&json!({ "type": "said", "body_bytes": first.len() }), &[]);
-    let part = frame_bytes(&serde_json::Value::Null, first.as_bytes());
     let _ = calls(&scratch);
-    // Cut within the second milestone. The next link sees both milestones in the live record.
+    let started = "   0:01 the agent started on aws/judge";
+    let cut = hello + said_bytes(&first) + said_bytes(started) + 3;
+    let root = scratch.0.display();
+    // Cut in the next milestone. The run ends before the next link opens.
     scratch.write(
         "bin/before-2",
-        &format!(
-            "echo {} > '{}/bin/cut-out-0'",
-            hello + said + part + 3,
-            scratch.0.display()
-        ),
+        &format!("echo {cut} > '{root}/bin/cut-out-0'"),
     );
-    let mut child = on_client(&scratch, &client, &["wait", &id])
+    scratch.write("outcome", &returned(1.0));
+    scratch.write(
+        "bin/before-3",
+        &format!("cp '{root}/outcome' '{root}/home/.pumpkin/runs/{id}/outcome.json'"),
+    );
+    let child = on_client(&scratch, &client, &["wait", &id])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("the agent started") && stderr.read_line(&mut said).unwrap() > 0 {}
-    scratch.write(
-        &format!("home/.pumpkin/runs/{id}/outcome.json"),
-        &returned(1.0),
-    );
+    let outcome = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{id}/outcome.json"));
+    poll(|| outcome.exists().then_some(()));
     drop(driver);
-    let output = ended(child, stderr, said);
+    let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let shown: Vec<_> = stderr
@@ -2602,6 +2733,7 @@ fn follow_repeats_no_milestone() {
         .filter(|line| {
             line.contains("ending this command")
                 || line.contains("the agent started on")
+                || line.contains("0:02 the work phase ended")
                 || line.contains("attempt 2 of 7")
         })
         .collect();
@@ -2611,8 +2743,9 @@ fn follow_repeats_no_milestone() {
         &[(&id, "<id>")],
         &expect![[r#"
             pumpkin: following run <id>: ending this command does not stop it
+            pumpkin:    0:01 the agent started on aws/judge
             pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
-            pumpkin:    0:01 the agent started on aws/judge"#]],
+            pumpkin:    0:02 the work phase ended"#]],
     );
 }
 
@@ -3325,10 +3458,18 @@ fn serve_refusals() {
         ("a request body past the cap:", 16 * 1024 * 1024 + 1),
     ] {
         let mut head = Vec::new();
-        schema::frame::write(&mut head, &start_head("once", bytes), &[]).unwrap();
+        schema::frame::write(&mut head, &start_head(bytes, 0), &[]).unwrap();
         steps.push(what.to_owned());
         steps.push(serve_fed(&scratch, &head));
     }
+    let mut job = start_job("once", 1);
+    job["key_bytes"] = json!([usize::MAX]);
+    let body = serde_json::to_vec(&job).unwrap();
+    let mut bad_lengths = Vec::new();
+    schema::frame::write(&mut bad_lengths, &start_head(body.len(), 0), &[]).unwrap();
+    schema::frame::write(&mut bad_lengths, &(), &body).unwrap();
+    steps.push("credential lengths that overflow:".to_owned());
+    steps.push(serve_fed(&scratch, &bad_lengths));
     check(
         &scratch,
         &steps.join("\n"),
@@ -3352,7 +3493,11 @@ fn serve_refusals() {
             a request body past the cap:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes"#]],
+              {"message":"a request's body holds at most 16 MiB: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+            credential lengths that overflow:
+            exit status: 0
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"the job gives a different length for its credentials","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 
@@ -3582,6 +3727,61 @@ fn record_copy() {
               outcome.json 644
               record.json 644
             runs: .<id>.a1-2c3, .<id>.a1B2c3d, .<id>.locked, <id>"#]],
+    );
+}
+
+#[test]
+fn copy_with_unreadable_directories() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let hex = served(&scratch);
+    let id = id_ago(0, "0d000003");
+    ended_job(&scratch, &id, "built\n");
+    symlink(
+        scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin")),
+        scratch.0.join(format!("home/jobs/{id}/pumpkin")),
+    )
+    .unwrap();
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{id}"));
+    let copy = scratch.0.join(format!("repo/.pumpkin/runs/{id}"));
+    let remote = record.join("private");
+    let local = copy.join("local");
+    fs::create_dir(&remote).unwrap();
+    fs::write(remote.join("output"), "whole").unwrap();
+    fs::create_dir_all(&local).unwrap();
+    fs::set_permissions(&local, Permissions::from_mode(0o000)).unwrap();
+    let mut lines = Vec::new();
+    for mode in [0o000, 0o700] {
+        fs::set_permissions(&remote, Permissions::from_mode(mode)).unwrap();
+        let output = on_client(&scratch, &client, &["cancel", &id])
+            .output()
+            .unwrap();
+        lines.push(output.status.to_string());
+        lines.extend(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|line| line.contains("Permission denied"))
+                .map(str::to_owned),
+        );
+        lines.push(format!(
+            "outcome.json: {}, private/output: {}, record.json: {}",
+            copy.join("outcome.json").exists(),
+            copy.join("private/output").exists(),
+            copy.join("record.json").exists()
+        ));
+    }
+    fs::set_permissions(&local, Permissions::from_mode(0o700)).unwrap();
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            exit status: 1
+            pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/private: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
+            outcome.json: true, private/output: false, record.json: false
+            exit status: 0
+            outcome.json: true, private/output: true, record.json: true"#]],
     );
 }
 

@@ -65,6 +65,9 @@ pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+// The link in a job's directory to the `pumpkin` that runs it.
+pub(crate) const OWN: &str = "pumpkin";
+
 pub(crate) const SENT_CONFIG: &str = "config.toml";
 
 pub(crate) const SENT_MODAL: &str = "modal.toml";
@@ -133,6 +136,8 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     };
     let dir = home.join(kind).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
+    // Record that the unit ran even if its start receipt could not be written.
+    point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
     let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;

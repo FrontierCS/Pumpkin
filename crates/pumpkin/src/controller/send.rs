@@ -26,7 +26,7 @@ use stdx::process::Environment;
 
 use super::linking::Build;
 use super::{AGAIN, Name, Reached, SHORT_TIMEOUT, SSH_FAILED, STALL_TIMEOUT, Session, bounded};
-use crate::link::{JobKind, StartAnswer, StartRequest};
+use crate::link::{JobKind, JobStart, StartAnswer, StartRequest};
 use crate::{config, manifest, say};
 
 // How often a send says how much it has sent: often enough that a person sees a send move, and
@@ -195,7 +195,7 @@ pub(super) fn send(
     if let Some(modal) = modal {
         body.extend(modal);
     }
-    let start = StartRequest {
+    let start = JobStart {
         id: id.as_str().to_owned(),
         kind,
         repo: tree.repo.clone(),
@@ -209,8 +209,9 @@ pub(super) fn send(
         key_bytes,
         modal_bytes,
     };
+    let request = StartRequest::encode(&start, &mut body)?;
     match reached.asked(&build, "starting the job", |linked| {
-        linked.ask_with_body(reached, start.clone(), &body)
+        linked.ask_with_body(reached, request, &body)
     })?? {
         StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),
