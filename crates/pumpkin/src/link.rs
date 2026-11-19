@@ -436,6 +436,7 @@ pub(crate) struct CancelRequest {
 pub(crate) enum CancelAnswer {
     Ended,
     EndedUnreached,
+    EndedUnreaped { message: String },
     Unstarted,
     Stopped { writer: Option<String> },
 }

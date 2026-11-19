@@ -2584,6 +2584,33 @@ rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"
     );
 }
 
+#[test]
+fn cancel_copies_the_record_when_reaping_fails() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0c000008");
+    scratch.write(&format!("home/jobs/{id}/log"), "");
+    write_record(&scratch, &id, true, None);
+    scratch.write(&format!("runs/{id}/agent/sandbox.json"), "{}");
+    move_runs(&scratch, "home/.pumpkin/runs");
+    let cancel = on_client(&scratch, &client, &["cancel", &id])
+        .output()
+        .unwrap();
+    assert_eq!(cancel.status.code(), Some(1));
+    let said = String::from_utf8_lossy(&cancel.stderr);
+    assert!(
+        said.contains("sandbox.json names no provider and id"),
+        "{said}"
+    );
+    let copy = scratch
+        .0
+        .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
+    let outcome: serde_json::Value = serde_json::from_slice(&fs::read(copy).unwrap()).unwrap();
+    assert_eq!(outcome["reason"], "its driver ended without an outcome");
+}
+
 fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
     let mut frame = Vec::new();
     schema::frame::write(&mut frame, message, body).unwrap();

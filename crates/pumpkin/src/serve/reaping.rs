@@ -59,11 +59,11 @@ pub(super) fn cancel(
         force: request.force,
         modal_config: modal.as_ref().map(|file| file.path().to_owned()),
     };
-    let (_, _, reached) = crate::cancelled(cancel, crate::Reader::Follower)?;
-    Ok(if reached {
-        CancelAnswer::Ended
-    } else {
-        CancelAnswer::EndedUnreached
+    let cancelled = crate::cancelled(cancel, crate::Reader::Follower)?;
+    Ok(match cancelled.reached {
+        Ok(true) => CancelAnswer::Ended,
+        Ok(false) => CancelAnswer::EndedUnreached,
+        Err(message) => CancelAnswer::EndedUnreaped { message },
     })
 }
 

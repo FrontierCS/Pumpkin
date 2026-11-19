@@ -269,6 +269,12 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
         CancelAnswer::Unstarted => say(format_args!(
             "run {id}'s job on controller `{name}` is stopped, before the run started"
         )),
+        CancelAnswer::EndedUnreaped { message } => {
+            if let Err(error) = reached.copy(&build, &id) {
+                say(error);
+            }
+            return Err(message);
+        }
         CancelAnswer::Stopped { writer } => {
             let writer = reached.copy(&build, &id)?.or(writer);
             let copy = PathBuf::from(crate::default_runs()?).join(&id);
