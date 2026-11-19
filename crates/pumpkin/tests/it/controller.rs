@@ -1017,7 +1017,7 @@ fn boot() {
         (&lost, "aws", None, false),
         // On a provider that the boot can't reach, so that a reap of it would say so.
         (&older, "aws", Some(older_finished()), true),
-        (&older_left, "local", Some(older_finished()), false),
+        (&older_left, "local", None, false),
     ];
     for (run, provider, outcome, deleted) in runs {
         let config = match provider {
@@ -1028,10 +1028,13 @@ fn boot() {
         scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), &config);
         let record = format!("home/.pumpkin/runs/{run}");
         let args = ["--config".to_owned(), path.display().to_string()];
-        let mut header = json!({ "record_version": "pumpkin.record/v0", "args": args });
-        if run == &local {
-            header["pumpkin"] = json!({ "version": "1.2.3" });
-        }
+        let writer = if run == &older_left {
+            json!({ "version": "1.2.3" })
+        } else {
+            super::this_build()
+        };
+        let header =
+            json!({ "record_version": "pumpkin.record/v0", "pumpkin": writer, "args": args });
         scratch.write(&format!("{record}/record.json"), &header);
         scratch.write(&format!("{record}/driver.pid"), "4242\n");
         let ir = json!({ "roles": [{ "name": "agent", "image": image('a') }] });
@@ -1054,6 +1057,11 @@ fn boot() {
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
+    let foreign = format!("home/.pumpkin/runs/{}/record.json", id_ago(1, "0e000001"));
+    scratch.write(
+        &foreign,
+        &json!({ "record_version": "future", "pumpkin": { "version": "9.9.9" } }),
+    );
     // The image of a job that a client started as the controller came up, which no IR names yet.
     scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
     send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
@@ -1068,6 +1076,11 @@ fn boot() {
         let outcome = fs::read_to_string(scratch.0.join(outcome)).unwrap();
         lines.push(format!("{run}'s outcome.json: {outcome}"));
     }
+    let foreign_outcome = home.join(format!(".pumpkin/runs/{older_left}/outcome.json"));
+    lines.push(format!(
+        "{older_left}'s outcome.json exists: {}",
+        foreign_outcome.exists()
+    ));
     check(
         &scratch,
         &lines.join("\n"),
@@ -1085,11 +1098,9 @@ fn boot() {
             pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
             pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run <older left>'s sandbox sandbox-<older left> on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             printed:
               <local>
               <lost>
-              <older left>
             aws --version
             aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
             <clean>'s outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
@@ -1101,7 +1112,24 @@ fn boot() {
             <lost>'s outcome.json: {
               "reason": "its driver ended without an outcome",
               "state": "failed"
-            }"#]],
+            }
+
+            <older left>'s outcome.json exists: false"#]],
+    );
+}
+
+#[test]
+fn boot_without_runs() {
+    let scratch = Scratch::new();
+    install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
+    let boot = on_controller(&scratch, &["controller", "boot"]);
+    check(
+        &scratch,
+        &super::ran(boot, &scratch.0, false),
+        &[],
+        &expect![[r#"
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller boot
+            exit status: Some(0)"#]],
     );
 }
 

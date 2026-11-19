@@ -259,9 +259,8 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
-/// The controller's boot: reaps what each run that has ended or is lost, but one that ended clean,
-/// may have left, with the configuration of its job; returns the reap's exit status, 0 though a
-/// provider can't be reached.
+/// Reaps what this build's ended or lost runs may have left, using each job's configuration.
+/// Returns the reap's exit status, 0 though a provider can't be reached.
 pub(crate) fn boot() -> Result<ExitCode, String> {
     // No prune, which each job's start makes: a client may start a job as soon as the
     // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
