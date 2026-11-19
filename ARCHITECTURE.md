@@ -630,9 +630,9 @@ provider that the record names, every sandbox tagged with the run that the provi
 every one that the record holds undeleted, listed or not, as one that has ended may still hold
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
 `pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
-those left to other builds. At boot it reaps its own, leaving to the
-hard end what it can't reach, such as Modal's sandboxes, whose credentials reach the controller
-only with a job.
+those left to other builds. At boot the last job's build reaps the runs whose records it can
+read, leaving to the hard end what it can't reach, such as Modal's sandboxes, whose credentials
+reach the controller only with a job.
 
 ### Determinism and pinning
 

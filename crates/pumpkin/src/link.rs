@@ -733,13 +733,8 @@ impl Link {
         })
     }
 
-    /// The answer to `request`, or the message of its refusal.
-    pub(crate) fn ask<R: Request>(
-        &mut self,
-        request: R,
-        body: &[u8],
-    ) -> Result<Result<R::Answer, String>, Unanswered> {
-        self.send(&request.ask(), body)?;
+    /// Reads the answer once the whole request has been sent, or the message of its refusal.
+    pub(crate) fn answer<R: Request>(&mut self) -> Result<Result<R::Answer, String>, Unanswered> {
         match self.received("the answer")? {
             Head::Refused { message } => Ok(Err(message)),
             Head::Answered(head) => R::received(head, self).map(Ok),

@@ -1033,10 +1033,11 @@ fn boot() {
         scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), &config);
         let record = format!("home/.pumpkin/runs/{run}");
         let args = ["--config".to_owned(), path.display().to_string()];
-        scratch.write(
-            &format!("{record}/record.json"),
-            &json!({ "record_version": "pumpkin.record/v0", "pumpkin": super::this_build(), "args": args }),
-        );
+        let mut header = json!({ "record_version": "pumpkin.record/v0", "args": args });
+        if run == &local {
+            header["pumpkin"] = json!({ "version": "1.2.3" });
+        }
+        scratch.write(&format!("{record}/record.json"), &header);
         scratch.write(&format!("{record}/driver.pid"), "4242\n");
         let ir = json!({ "roles": [{ "name": "agent", "image": image('a') }] });
         scratch.write(&format!("{record}/ir.json"), &ir);
@@ -1058,11 +1059,6 @@ fn boot() {
         }
         scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
     }
-    let foreign = format!("home/.pumpkin/runs/{}/record.json", id_ago(1, "0e000001"));
-    scratch.write(
-        &foreign,
-        &json!({"record_version":"future", "pumpkin":{"version":"9.9.9"}}),
-    );
     // The image of a job that a client started as the controller came up, which no IR names yet.
     scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
     send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
@@ -2707,6 +2703,42 @@ fn reap_by_writer() {
             exit status: Some(0)
             pumpkin: to reap runs made by an older pumpkin, use that build: <old>
             pumpkin: to reap runs made by pumpkin 1.2.3, use that build: <other>"#]],
+    );
+}
+
+#[test]
+fn reap_after_a_cut() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0e000004");
+    write_record(&scratch, &id, true, None);
+    move_runs(&scratch, "home/.pumpkin/runs");
+    let record = format!("home/.pumpkin/runs/{id}");
+    scratch.write(
+        &format!("{record}/provider.json"),
+        &json!({"providers": {}}),
+    );
+    // One byte of the reply proves the first sweep finished.
+    let cut = frame_bytes(&json!({ "type": "serving" }), &[]) + 1;
+    scratch.write("bin/cut-out-0", &cut);
+    let mut reap = on_client(&scratch, &client, &["reap"]);
+    let invoked = invocation(&reap);
+    let reaped = reap.output().unwrap();
+    let outcome = fs::read(scratch.0.join(format!("{record}/outcome.json"))).unwrap();
+    let outcome: serde_json::Value = serde_json::from_slice(&outcome).unwrap();
+    assert_eq!(outcome["state"], "failed");
+    check(
+        &scratch,
+        &report(invoked, &reaped, &scratch.0, false),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap
+            exit status: Some(0)
+            pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
+            pumpkin: the reap's reply was cut: the output may omit ids of runs already cleaned
+            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: reaping the runs again, now, attempt 2 of 7"#]],
     );
 }
 

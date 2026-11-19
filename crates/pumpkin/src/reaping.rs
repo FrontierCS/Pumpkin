@@ -172,7 +172,7 @@ pub(crate) fn sweep(
 ) -> Result<ReapedRuns, String> {
     let mut reaching = Reaching::new(modal_config);
     let mut report = ReapedRuns::default();
-    if reaper != Reaper::Command && !runs.try_exists().context(runs.display())? {
+    if reaper == Reaper::Controller && !runs.try_exists().context(runs.display())? {
         return Ok(report);
     }
     for id in Record::names(runs)? {
@@ -182,16 +182,14 @@ pub(crate) fn sweep(
             if !path.try_exists().context(path.display())? {
                 return Ok(None);
             }
-            if reaper != Reaper::Command {
+            if reaper == Reaper::Controller {
                 let other = match runtime::writer(&dir)? {
                     Writer::This => None,
                     Writer::Other(build) => Some(format!("pumpkin {build}")),
                     Writer::Older => Some("an older pumpkin".to_owned()),
                 };
                 if let Some(build) = other {
-                    if reaper == Reaper::Controller {
-                        report.others.entry(build).or_default().push(id.clone());
-                    }
+                    report.others.entry(build).or_default().push(id.clone());
                     return Ok(None);
                 }
             }
