@@ -352,8 +352,14 @@ pub(crate) fn file_sha256(path: &Path) -> Result<(Sha256Digest, u64), String> {
 }
 
 fn hash_reader(mut file: impl Read) -> io::Result<(Sha256Digest, u64)> {
+    digesting(|hasher| io::copy(&mut file, hasher))
+}
+
+fn digesting(
+    write: impl FnOnce(&mut Hasher) -> io::Result<u64>,
+) -> io::Result<(Sha256Digest, u64)> {
     let mut hasher = Hasher(Sha256::new());
-    let copied = io::copy(&mut file, &mut hasher)?;
+    let copied = write(&mut hasher)?;
     let Hasher(sha256) = hasher;
     let digest = Sha256Digest::from(<[u8; 32]>::from(sha256.finalize()));
     Ok((digest, copied))

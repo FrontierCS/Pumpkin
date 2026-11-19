@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{Ask, Head, Link, Part, Request, Unanswered};
 use crate::manifest;
-use crate::manifest::store::{Missing, PutAnswer};
+use crate::manifest::store::{Missing, PutAnswer, UploadId};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Lacks {
+    pub(crate) upload: UploadId,
     pub(crate) manifest: Sha256Digest,
     pub(crate) body_bytes: usize,
     pub(crate) install: bool,
@@ -68,6 +69,7 @@ impl Request for Lacks {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Put {
+    pub(crate) upload: UploadId,
     pub(crate) digest: Sha256Digest,
     pub(crate) from: u64,
     pub(crate) size_bytes: u64,
@@ -103,6 +105,10 @@ impl<'a, R: Read> Parts<'a, R> {
             left: bytes,
             broken: None,
         }
+    }
+
+    pub(crate) fn remaining(&self) -> u64 {
+        self.left
     }
 
     /// Consumes a body left by a store error or a racing upload that finished first.
@@ -158,7 +164,8 @@ impl Link {
         let mut left = request
             .body_bytes()
             .map_err(|error| Unanswered::Failed(error.to_string()))?;
-        let mut pipe = Pipe(&mut self.stdin);
+        let size_bytes = request.size_bytes;
+        let mut pipe = Pipe(&mut self.stdin, self.stdout.get_ref());
         let failed = |error: io::Error| match error.kind() {
             io::ErrorKind::BrokenPipe => {
                 Unanswered::Unreached("ended during the upload".to_owned())
@@ -176,11 +183,24 @@ impl Link {
             source.read_exact(part).map_err(|error| Unanswered::Failed(format!(
                 "the file changed or could not be read while it was sent: {error}: send the task again"
             )))?;
-            frame::write(&mut pipe, &Part, part).map_err(failed)?;
+            if let Err(error) = frame::write(&mut pipe, &Part, part) {
+                if error.kind() == io::ErrorKind::BrokenPipe {
+                    break;
+                }
+                return Err(failed(error));
+            }
             left -= size as u64;
             progress(size as u64);
         }
         match self.received("the upload's answer")? {
+            Head::Answered(
+                PutAnswer::Stored { committed_size } | PutAnswer::StoredEarly { committed_size },
+            ) if committed_size != size_bytes => Err(Unanswered::Failed(format!(
+                "the controller committed {committed_size} bytes of a {size_bytes}-byte upload"
+            ))),
+            Head::Answered(PutAnswer::Stored { .. }) if left != 0 => Err(Unanswered::Failed(
+                "the controller answered before the upload was complete".to_owned(),
+            )),
             Head::Answered(answer) => Ok(Ok(answer)),
             Head::Refused { message } => Ok(Err(message)),
         }
@@ -190,7 +210,7 @@ impl Link {
 // A send has no deadline on its whole time. It stops once the connection takes no more bytes.
 const STALL_TIMEOUT: Duration = Duration::from_mins(2);
 
-struct Pipe<'a>(&'a mut ChildStdin);
+struct Pipe<'a>(&'a mut ChildStdin, &'a std::process::ChildStdout);
 
 impl Write for Pipe<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -198,13 +218,19 @@ impl Write for Pipe<'_> {
             unreachable!("{STALL_TIMEOUT:?} fits a `timespec`")
         };
         loop {
-            let mut polled = [PollFd::new(&*self.0, PollFlags::OUT)];
+            let mut polled = [
+                PollFd::new(&*self.0, PollFlags::OUT),
+                PollFd::new(self.1, PollFlags::IN),
+            ];
             match event::poll(&mut polled, Some(&timeout)) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!("it took no byte for {} s", STALL_TIMEOUT.as_secs()),
                     ));
+                }
+                Ok(_) if !polled[1].revents().is_empty() => {
+                    return Err(io::ErrorKind::BrokenPipe.into());
                 }
                 Ok(_) => break,
                 Err(Errno::INTR) => {}

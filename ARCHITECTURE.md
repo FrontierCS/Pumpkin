@@ -440,11 +440,12 @@ providers, so the class a role is placed in never turns on the machine's memory.
 that names a provider of kind `docker` names no other (`Providers::new`).
 
 **Architecture Invariant:** each file in the controller's store has the SHA-256 that names it.
-A sender holds the partial file's lock while appending and checking its digest. A blob from the
-running install is checked on a private copy. Both are admitted under the store lock, which the
-prune also takes. The prune leaves active partials alone. A job's tree links to the store and
-its `.pumpkin` links to the controller's workspace, which no manifest path is below. A client
-sends only what the store lacks, and no secret of a job's goes there.
+A sender resumes its own partial file by upload UUID and digest, and holds its lock while
+appending and checking its digest. The first verified upload ends the others with the full
+committed size. A blob from the running install is checked on a private copy. Both are admitted
+under the store lock, which the prune also takes. The prune leaves active partials alone. A job's tree links to the
+store and its `.pumpkin` links to the controller's workspace, which no manifest path is below. A
+client sends only what the store lacks, and no secret of a job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
 or that the IR of a running job's started run names. Each job names what it holds in its directory

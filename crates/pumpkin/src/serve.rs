@@ -11,6 +11,7 @@
 
 mod copy;
 mod follow;
+mod put;
 mod reaping;
 
 use std::ffi::OsStr;
@@ -78,8 +79,9 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
                     mark_install_used(install);
                 }
                 if let Ask::Put(put) = ask {
-                    match receive_put(&home, &put, &mut input, &mut output) {
-                        Ok(()) => continue,
+                    match put::receive(&home, &put, &mut input, &mut output) {
+                        Ok(true) => continue,
+                        Ok(false) => break,
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -111,27 +113,6 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
-}
-
-fn receive_put(
-    home: &Path,
-    put: &link::store::Put,
-    input: &mut impl io::Read,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    let mut parts = link::store::Parts::new(input, put.body_bytes()?);
-    let stored = crate::manifest::store::put(
-        &home.join(crate::job::STORE),
-        &put.digest,
-        put.from,
-        put.size_bytes,
-        &mut parts,
-    );
-    parts.finish()?;
-    match stored {
-        Ok(answer) => frame::write(output, &answer, &[]),
-        Err(error) => link::refuse(output, error),
-    }
 }
 
 // The client may leave at any frame, including while an answer is still streaming.
@@ -255,6 +236,7 @@ fn answer(
             crate::manifest::store::lacks(
                 &home.join(crate::job::STORE),
                 &manifest,
+                &request.upload,
                 install.as_deref(),
             )
         }),
