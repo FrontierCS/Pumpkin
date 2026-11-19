@@ -39,9 +39,10 @@ jobs:
           # The upstream formatter includes compressed Go debug sections in its release binary.
           strip --strip-debug dist/bin/buildifier
           dist/bin/buildifier --version
+          cp deploy/buildifier-LICENSE dist/
           archive="pumpkin-$TAG-$TARGET.tar.xz"
           tar --create --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-            --file - --directory dist bin commit | xz --threads=1 --stdout > "$archive"
+            --file - --directory dist bin buildifier-LICENSE commit | xz --threads=1 --stdout > "$archive"
           sha256sum "$archive" > "$archive.sha256"
           mkdir unpacked
           tar --extract --xz --file "$archive" --directory unpacked
