@@ -488,8 +488,7 @@ fn usage() {
             $ pumpkin reap --help
             exit status: Some(0)
             printed:
-              Remove what each run in --runs that has ended, or is lost, left, and print the
-              id of each run that left something.
+              Remove what ended or lost runs left and print the run ids reported as cleaned.
 
               Usage: pumpkin reap [OPTIONS]
 
@@ -506,7 +505,7 @@ fn usage() {
                 pumpkin reap --runs runs
 
               Exit status:
-                0  Nothing that a run which has ended left remains.
+                0  Nothing that the selected runs left remains.
                 1  A run can't be reaped, which `reap` says, or another error; it reaps the
                    others all the same.
                 2  A usage error.
@@ -531,8 +530,10 @@ fn usage() {
               says, and notes there as gone.
 
               With [controller] in the configuration, and no --runs, `reap` reaps the
-              controller's runs there, as the controller does at each boot, but with this
-              machine's Modal configuration file, which the boot lacks.
+              controller's runs made by this build and names the runs left to their own
+              builds. It uses this machine's Modal configuration file, which the boot lacks.
+              If the reply is cut, it reaps again. The printed ids may omit runs already
+              cleaned before the cut.
             $ pumpkin help --help
             exit status: Some(0)
             printed:

@@ -121,8 +121,7 @@ workflow, which names each image by its ID.")]
     Build(Build),
     #[command(hide = true, about = "Remove what the runs that have ended left")]
     #[command(long_about = "\
-Remove what each run in --runs that has ended, or is lost, left, and print the
-id of each run that left something.")]
+Remove what ended or lost runs left and print the run ids reported as cleaned.")]
     #[command(after_help = REAP_NOTES)]
     Reap(Reap),
     #[command(

@@ -211,6 +211,9 @@ fn answer(
             let (start, credentials) = request.decode(body)?;
             crate::job::start(home, start, credentials)
         }),
+        Ask::Reap(request) => link::answer(output, request, |request| {
+            reaping::reap(home, request, body)
+        }),
         Ask::Cancel(request) => link::answer(output, request, |request| {
             reaping::cancel(home, request, body)
         }),

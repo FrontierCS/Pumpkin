@@ -78,6 +78,7 @@ pub(crate) enum Ask {
     View(ViewRequest),
     Start(StartRequest),
     Cancel(CancelRequest),
+    Reap(ReapRequest),
 }
 
 impl Ask {
@@ -86,6 +87,7 @@ impl Ask {
             Self::Copy(copy) => copy.held_bytes,
             Self::Start(start) => start.body_bytes,
             Self::Cancel(request) => request.modal_bytes.unwrap_or(0),
+            Self::Reap(request) => request.modal_bytes.unwrap_or(0),
             _ => 0,
         };
         if bytes > MAX_REQUEST_BODY_BYTES {
@@ -458,6 +460,43 @@ impl Request for CancelRequest {
     }
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct ReapRequest {
+    pub(crate) modal_bytes: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ReapHead {
+    Reaped { body_bytes: u64 },
+}
+
+impl Request for ReapRequest {
+    type Answer = crate::reaping::ReapedRuns;
+    type Head = ReapHead;
+
+    fn ask(self) -> Ask {
+        Ask::Reap(self)
+    }
+
+    fn sent(answer: Self::Answer) -> (ReapHead, Vec<u8>) {
+        let body = serde_json::to_vec(&answer)
+            .unwrap_or_else(|error| unreachable!("run ids and counts are JSON: {error}"));
+        (
+            ReapHead::Reaped {
+                body_bytes: body.len() as u64,
+            },
+            body,
+        )
+    }
+
+    fn received(head: ReapHead, link: &mut Link) -> Result<Self::Answer, Unanswered> {
+        let ReapHead::Reaped { body_bytes } = head;
+        serde_json::from_slice(&link.body(body_bytes)?)
+            .map_err(|error| Unanswered::Failed(format!("its reaped runs don't read: {error}")))
+    }
+}
+
 /// A `GET` of `target`, a path with an optional query, of the view's data of the runs there
 /// ([`crate::view`]), whose body may come deflated if `deflate`. What fails, such as a run that
 /// isn't there, is answered with the view's status for it, never refused.
@@ -694,13 +733,8 @@ impl Link {
         })
     }
 
-    /// The answer to `request`, or the message of its refusal.
-    pub(crate) fn ask<R: Request>(
-        &mut self,
-        request: R,
-        body: &[u8],
-    ) -> Result<Result<R::Answer, String>, Unanswered> {
-        self.send(&request.ask(), body)?;
+    /// Reads the answer once the whole request has been sent, or the message of its refusal.
+    pub(crate) fn answer<R: Request>(&mut self) -> Result<Result<R::Answer, String>, Unanswered> {
         match self.received("the answer")? {
             Head::Refused { message } => Ok(Err(message)),
             Head::Answered(head) => R::received(head, self).map(Ok),

@@ -117,7 +117,10 @@ impl Linked {
         request: R,
         body: &[u8],
     ) -> Result<Result<R::Answer, String>, Unlinked> {
-        self.stream(reached, |link| link.ask(request, body))
+        self.stream(reached, |link| {
+            link.send(&request.ask(), body)?;
+            link.answer::<R>()
+        })
     }
 
     pub(super) fn stream<T>(
