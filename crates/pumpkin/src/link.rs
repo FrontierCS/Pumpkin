@@ -57,7 +57,7 @@ pub(crate) trait Request {
     fn ask(self) -> Ask;
 
     /// The head of `answer`, and its body, of the length that the head gives.
-    fn sent(answer: Self::Answer) -> (Self::Head, Vec<u8>);
+    fn sent(answer: Self::Answer) -> io::Result<(Self::Head, Vec<u8>)>;
 
     /// The answer that `head` begins, with its body, if it has one, read from `link`.
     fn received(head: Self::Head, link: &mut Link) -> Result<Self::Answer, Unanswered>;
@@ -85,7 +85,7 @@ pub(crate) enum Ask {
 }
 
 impl Ask {
-    fn body_bytes(&self) -> io::Result<usize> {
+    fn buffered_bytes(&self) -> io::Result<usize> {
         let bytes = match self {
             Self::Copy(copy) => copy.held_bytes,
             Self::Start(start) => start.body_bytes,
@@ -103,9 +103,9 @@ impl Ask {
         Ok(bytes)
     }
 
-    /// Reads the body of this request before any of it takes effect.
-    pub(crate) fn read_body(&self, input: &mut impl Read) -> io::Result<Vec<u8>> {
-        let bytes = self.body_bytes()?;
+    /// Reads the buffered body before the request takes effect. A `Put` streams its own body.
+    pub(crate) fn read_buffered_body(&self, input: &mut impl Read) -> io::Result<Vec<u8>> {
+        let bytes = self.buffered_bytes()?;
         let mut body = Vec::new();
         store::Parts::new(input, bytes as u64).read_to_end(&mut body)?;
         Ok(body)
@@ -155,8 +155,8 @@ impl Request for HealthRequest {
         Ask::Health(self)
     }
 
-    fn sent(health: Health) -> (HealthHead, Vec<u8>) {
-        (HealthHead::Health(health), Vec::new())
+    fn sent(health: Health) -> io::Result<(HealthHead, Vec<u8>)> {
+        Ok((HealthHead::Health(health), Vec::new()))
     }
 
     fn received(head: HealthHead, _: &mut Link) -> Result<Health, Unanswered> {
@@ -219,20 +219,18 @@ impl Request for ListRequest {
         Ask::List(self)
     }
 
-    fn sent(listed: Listed) -> (ListedHead, Vec<u8>) {
+    fn sent(listed: Listed) -> io::Result<(ListedHead, Vec<u8>)> {
         let Listed {
             listing,
             unlisted_count,
         } = listed;
-        let body = serde_json::to_vec(&listing).unwrap_or_else(|error| {
-            unreachable!("a listing, whose maps are keyed by strings, is JSON: {error}")
-        });
+        let body = serde_json::to_vec(&listing)?;
         let body_bytes = body.len() as u64;
         let head = ListedHead::Listed {
             body_bytes,
             unlisted_count,
         };
-        (head, body)
+        Ok((head, body))
     }
 
     fn received(head: ListedHead, link: &mut Link) -> Result<Listed, Unanswered> {
@@ -275,11 +273,10 @@ impl Request for JobsRequest {
         Ask::Jobs(self)
     }
 
-    fn sent(ids: Vec<String>) -> (JobsHead, Vec<u8>) {
-        let body = serde_json::to_vec(&ids)
-            .unwrap_or_else(|error| unreachable!("a list of strings is JSON: {error}"));
+    fn sent(ids: Vec<String>) -> io::Result<(JobsHead, Vec<u8>)> {
+        let body = serde_json::to_vec(&ids)?;
         let body_bytes = body.len() as u64;
-        (JobsHead::Jobs { body_bytes }, body)
+        Ok((JobsHead::Jobs { body_bytes }, body))
     }
 
     fn received(head: JobsHead, link: &mut Link) -> Result<Vec<String>, Unanswered> {
@@ -372,14 +369,14 @@ impl Request for StartRequest {
         Ask::Start(self)
     }
 
-    fn sent(answer: StartAnswer) -> (StartHead, Vec<u8>) {
-        match answer {
+    fn sent(answer: StartAnswer) -> io::Result<(StartHead, Vec<u8>)> {
+        Ok(match answer {
             StartAnswer::Started => (StartHead::Started, Vec::new()),
             StartAnswer::AlreadyStarted => (StartHead::AlreadyStarted, Vec::new()),
             StartAnswer::Unconfirmed { message } => {
                 (StartHead::Unconfirmed { message }, Vec::new())
             }
-        }
+        })
     }
 
     fn received(head: StartHead, _: &mut Link) -> Result<StartAnswer, Unanswered> {
@@ -417,8 +414,8 @@ impl Request for CancelRequest {
         Ask::Cancel(self)
     }
 
-    fn sent(answer: CancelAnswer) -> (CancelAnswer, Vec<u8>) {
-        (answer, Vec::new())
+    fn sent(answer: CancelAnswer) -> io::Result<(CancelAnswer, Vec<u8>)> {
+        Ok((answer, Vec::new()))
     }
 
     fn received(head: CancelAnswer, _: &mut Link) -> Result<CancelAnswer, Unanswered> {
@@ -445,15 +442,14 @@ impl Request for ReapRequest {
         Ask::Reap(self)
     }
 
-    fn sent(answer: Self::Answer) -> (ReapHead, Vec<u8>) {
-        let body = serde_json::to_vec(&answer)
-            .unwrap_or_else(|error| unreachable!("run ids and counts are JSON: {error}"));
-        (
+    fn sent(answer: Self::Answer) -> io::Result<(ReapHead, Vec<u8>)> {
+        let body = serde_json::to_vec(&answer)?;
+        Ok((
             ReapHead::Reaped {
                 body_bytes: body.len() as u64,
             },
             body,
-        )
+        ))
     }
 
     fn received(head: ReapHead, link: &mut Link) -> Result<Self::Answer, Unanswered> {
@@ -492,7 +488,7 @@ impl Request for ViewRequest {
         Ask::View(self)
     }
 
-    fn sent(viewed: Viewed) -> (ViewedHead, Vec<u8>) {
+    fn sent(viewed: Viewed) -> io::Result<(ViewedHead, Vec<u8>)> {
         let Viewed {
             status,
             content_type,
@@ -506,7 +502,7 @@ impl Request for ViewRequest {
             deflated,
             body_bytes,
         };
-        (head, body)
+        Ok((head, body))
     }
 
     fn received(head: ViewedHead, link: &mut Link) -> Result<Viewed, Unanswered> {
@@ -549,7 +545,7 @@ pub(crate) fn answer<R: Request>(
 ) -> io::Result<()> {
     let (head, body) = match answering(request) {
         Ok(answer) => {
-            let (head, body) = R::sent(answer);
+            let (head, body) = R::sent(answer)?;
             (Head::Answered(head), body)
         }
         Err(message) => (Head::Refused { message }, Vec::new()),
@@ -680,7 +676,7 @@ impl Link {
     /// Sends one request and its body.
     pub(crate) fn send(&mut self, ask: &Ask, body: &[u8]) -> Result<(), Unanswered> {
         let mut write = || -> io::Result<()> {
-            if ask.body_bytes()? != body.len() {
+            if ask.buffered_bytes()? != body.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "the request gives a different length for its body",

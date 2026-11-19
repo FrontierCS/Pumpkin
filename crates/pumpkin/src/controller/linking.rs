@@ -2,9 +2,9 @@
 //! master: the `serve` is uploaded there first if it has none, and a link that is cut is opened
 //! again, by [`Reached::asked`] or by the caller.
 
-use std::collections::BTreeSet;
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
@@ -27,8 +27,8 @@ const BESIDE: [&str; 5] = [
 /// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
 /// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
+    files: Vec<(&'static str, PathBuf)>,
     pub(super) hashed: manifest::Hashed,
-    key: Sha256Digest,
 }
 
 impl Build {
@@ -43,9 +43,9 @@ impl Build {
             }
         }
         let mut entries = Vec::new();
-        let mut sources = std::collections::BTreeMap::new();
-        for (name, path) in files {
-            let (digest, size_bytes) = manifest::file_sha256(&path)?;
+        let mut sources = BTreeMap::new();
+        for &(name, ref path) in &files {
+            let (digest, size_bytes) = manifest::file_sha256(path)?;
             let kind = match name {
                 "pumpkin-modal.py" | "pumpkin-modal.py.lock" => manifest::Kind::File,
                 _ => manifest::Kind::Executable,
@@ -56,12 +56,12 @@ impl Build {
                 size_bytes,
                 path: name.to_owned(),
             });
-            sources.insert(digest, manifest::Source::File(path));
+            sources.insert(digest, manifest::Source::File(path.clone()));
         }
+        files.sort_unstable_by_key(|&(name, _)| name);
         let manifest = manifest::Manifest::new(entries);
-        let key = manifest.name();
         let hashed = manifest::Hashed { manifest, sources };
-        Ok(Self { hashed, key })
+        Ok(Self { files, hashed })
     }
 }
 
@@ -97,17 +97,18 @@ impl Linked {
         build: &Build,
         openings: NonZeroU32,
     ) -> Result<Self, Unlinked> {
-        if let Some(linked) = Self::connect(reached, build, openings)? {
+        let key = build.hashed.manifest.name();
+        if let Some(linked) = Self::connect(reached, &key, openings)? {
             return Ok(linked);
         }
         install(reached, build)?;
-        Self::connect(reached, build, openings)?.ok_or_else(|| {
+        Self::connect(reached, &key, openings)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
                 reached.name,
                 link::installs(),
-                build.key.hex()
+                key.hex()
             ))
         })
     }
@@ -143,14 +144,14 @@ impl Linked {
         asked.map_err(|unanswered| unlinked(reached, self.slot.master, unanswered))
     }
 
-    /// `None` if the controller has no `serve` of `build`.
+    /// `None` if the controller has no install named by `key`.
     fn connect(
         reached: &Reached,
-        build: &Build,
+        key: &Sha256Digest,
         openings: NonZeroU32,
     ) -> Result<Option<Self>, Unlinked> {
         let slot = reached.slot_opening(&BTreeSet::new(), openings)?;
-        let Session { command, slot } = reached.session(&link::command(&build.key), slot);
+        let Session { command, slot } = reached.session(&link::command(key), slot);
         match Link::open(command) {
             Ok(link) => Ok(link.map(|link| Self { link, slot })),
             Err(unanswered) => Err(unlinked(reached, slot.master, unanswered)),
@@ -224,23 +225,7 @@ fn install(reached: &Reached, build: &Build) -> Result<(), String> {
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
-    // The files are dropped once in the archive, so that the upload holds one copy of them.
-    let archive = {
-        let read = build
-            .hashed
-            .manifest
-            .entries()
-            .iter()
-            .map(|entry| {
-                let Some(manifest::Source::File(path)) = build.hashed.sources.get(&entry.digest)
-                else {
-                    unreachable!("each install entry was hashed from a file")
-                };
-                Ok((entry.path.clone(), fs::read(path).context(path.display())?))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        manifest::archive(&read)
-    };
+    let archive = manifest::archive(&build.files)?;
     let mut session = reached.ssh(&link::installing(&build.hashed.manifest))?;
     let installed = reached.call(&mut session, Some(&archive), "ssh", SHORT_TIMEOUT);
     let installed = installed.map_err(|error| format!("installing it failed: {error}"));

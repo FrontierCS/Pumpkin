@@ -3305,6 +3305,12 @@ fn ls_lists_other_formats_unread() {
 fn ls_installs_its_serve_there() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
+    // The executable's local name can differ from its name in the install.
+    let bin = client_bin(&scratch);
+    let renamed = bin.with_file_name("renamed");
+    fs::rename(bin.join("pumpkin"), &renamed).unwrap();
+    symlink(&renamed, bin.join("pumpkin")).unwrap();
+    fs::hard_link(bin.join("buildifier"), renamed.with_file_name("buildifier")).unwrap();
     connect(&scratch, &client);
     write_record(
         &scratch,
@@ -3602,6 +3608,32 @@ fn serve_refusals() {
             exit status: 0
               {"type":"serving"}, and a body of 0 bytes
               {"message":"the job gives a different length for its credentials","type":"refused"}, and a body of 0 bytes"#]],
+    );
+}
+
+#[test]
+fn serve_cut_and_malformed_uploads() {
+    let scratch = Scratch::new();
+    let mut upload = Vec::new();
+    let put = json!({"type":"put", "digest":format!("sha256:{}", sha256(b"x")), "from":0, "size_bytes":1});
+    schema::frame::write(&mut upload, &put, &[]).unwrap();
+    schema::frame::write(&mut upload, &(), b"xx").unwrap();
+    let cut = serve_fed(&scratch, &upload[..upload.len() - 1]);
+    let oversized = serve_fed(&scratch, &upload);
+    check(
+        &scratch,
+        &format!(
+            "a cut within an upload part:\n{cut}\nan upload part past the declared size:\n{oversized}"
+        ),
+        &[],
+        &expect![[r#"
+            a cut within an upload part:
+            exit status: 0
+              {"type":"serving"}, and a body of 0 bytes
+            an upload part past the declared size:
+            exit status: 1
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"a part of the request's body holds 2 bytes: expected 1 to 1: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes"#]],
     );
 }
 

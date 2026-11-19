@@ -388,22 +388,22 @@ pub(crate) const LOCK: &str = "lock";
 
 const BLOCK: usize = 512;
 
-/// A ustar archive of `files`, each a name and what the file holds, each mode 0600: made in memory,
-/// so that nothing it holds is written on this machine but in the files that hold it.
+/// A ustar archive of `files`, each an archive name and its source path, each mode 0600.
 ///
 /// # Panics
 ///
 /// If a name is over 100 bytes, which a ustar header holds at most.
-pub(crate) fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn archive(files: &[(&str, PathBuf)]) -> Result<Vec<u8>, String> {
     let mut archive = Vec::new();
-    for (name, holds) in files {
+    for (name, path) in files {
+        let holds = fs::read(path).context(path.display())?;
         archive.extend_from_slice(&header(name, 0o600, holds.len() as u64));
-        archive.extend_from_slice(holds);
+        archive.extend_from_slice(&holds);
         archive.resize(archive.len().next_multiple_of(BLOCK), 0);
     }
     // Two blocks of zeros end it.
     archive.resize(archive.len() + 2 * BLOCK, 0);
-    archive
+    Ok(archive)
 }
 
 /// The ustar header of a file `name` of `mode` and `size_bytes`, owned by user and group 0, last

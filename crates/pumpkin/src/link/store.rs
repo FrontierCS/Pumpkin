@@ -2,7 +2,6 @@
 
 use std::io::{self, Cursor, Read, Write};
 use std::process::ChildStdin;
-use std::time::Duration;
 
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -35,15 +34,14 @@ impl Request for Lacks {
         Ask::Lacks(self)
     }
 
-    fn sent(missing: Vec<Missing>) -> (LacksHead, Vec<u8>) {
-        let body = serde_json::to_vec(&missing)
-            .unwrap_or_else(|error| unreachable!("digests and byte counts are JSON: {error}"));
-        (
+    fn sent(missing: Vec<Missing>) -> io::Result<(LacksHead, Vec<u8>)> {
+        let body = serde_json::to_vec(&missing)?;
+        Ok((
             LacksHead::Missing {
                 body_bytes: body.len() as u64,
             },
             body,
-        )
+        ))
     }
 
     fn received(head: LacksHead, link: &mut Link) -> Result<Vec<Missing>, Unanswered> {
@@ -188,22 +186,22 @@ impl Link {
 }
 
 // A send has no deadline on its whole time. It stops once the connection takes no more bytes.
-const STALL_TIMEOUT: Duration = Duration::from_mins(2);
+const STALL_TIMEOUT: Timespec = Timespec {
+    tv_sec: 2 * 60,
+    tv_nsec: 0,
+};
 
 struct Pipe<'a>(&'a mut ChildStdin);
 
 impl Write for Pipe<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let Ok(timeout) = Timespec::try_from(STALL_TIMEOUT) else {
-            unreachable!("{STALL_TIMEOUT:?} fits a `timespec`")
-        };
         loop {
             let mut polled = [PollFd::new(&*self.0, PollFlags::OUT)];
-            match event::poll(&mut polled, Some(&timeout)) {
+            match event::poll(&mut polled, Some(&STALL_TIMEOUT)) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        format!("it took no byte for {} s", STALL_TIMEOUT.as_secs()),
+                        format!("it took no byte for {} s", STALL_TIMEOUT.tv_sec),
                     ));
                 }
                 Ok(_) => break,
