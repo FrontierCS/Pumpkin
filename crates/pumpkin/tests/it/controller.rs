@@ -1368,6 +1368,7 @@ fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) ->
     let mut process = scratch.program(serve, &["controller", "serve"]);
     process
         .env("PATH", path)
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env("XDG_RUNTIME_DIR", scratch.0.join("run"));
     process
         .stdin(Stdio::piped())
@@ -1398,11 +1399,20 @@ fn retry_start() {
         "pumpkin-tree/1\n",
     );
     let id = id_ago(0, "0123abcd");
-    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
     let tmpfs = scratch.0.join(format!("run/pumpkin/{id}"));
-    scratch.write_executable("bin/systemd-run", b"#!/bin/sh\nexit 1\n");
-    scratch.write_executable("bin/systemctl", b"#!/bin/sh\necho not-found\nexit 4\n");
-    assert_eq!(ask(b"failed")["type"], "refused");
+    let path = scratch.0.join("without-systemd");
+    fs::create_dir(&path).unwrap();
+    for tool in ["sh", "find", "awk"] {
+        symlink(Path::new("/usr/bin").join(tool), path.join(tool)).unwrap();
+    }
+    let failed = ask_start(&scratch, &key, path.to_str().unwrap(), &id, b"failed");
+    assert_eq!(failed["type"], "refused");
+    assert!(
+        failed["message"]
+            .as_str()
+            .unwrap()
+            .contains("systemd-run could not start")
+    );
     for path in [
         &tmpfs,
         &home.join("builds").join(&id),
@@ -1410,7 +1420,7 @@ fn retry_start() {
     ] {
         assert!(!path.exists(), "{}", path.display());
     }
-    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
+    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
     let modal = vec![b'm'; schema::frame::MAX_BODY_BYTES + 1];
     assert_eq!(ask(&modal)["type"], "started");
     assert_eq!(ask(b"repeated")["type"], "already_started");
@@ -1451,11 +1461,23 @@ fn interrupted_launch_keeps_the_job() {
             .unwrap()
             .contains("systemctl --user status")
     );
-    assert_eq!(ask(b"second")["type"], "already_started");
+    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
+    assert_eq!(ask(b"second")["type"], "unconfirmed");
     assert_eq!(
         fs::read(scratch.0.join(format!("run/pumpkin/{id}/modal.toml"))).unwrap(),
         b"first"
     );
+    // A reboot loses the tmpfs even when the server died before submitting the unit.
+    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    assert_eq!(ask(b"third")["type"], "unconfirmed");
+    // The link that controller job writes survives the unit, including an older install's job.
+    symlink(
+        scratch.0.join(format!("home/.pumpkin/{key}/bin/pumpkin")),
+        scratch.0.join(format!("home/builds/{id}/pumpkin")),
+    )
+    .unwrap();
+    assert_eq!(ask(b"fourth")["type"], "already_started");
+    assert!(!scratch.0.join("bin/argv").exists());
 }
 
 #[test]
