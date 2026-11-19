@@ -276,6 +276,13 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     crate::reap(reap, crate::Reaper::Boot)
 }
 
+/// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
+/// the client to copy the ended record, 103 to also report that a provider couldn't be reached.
+pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
+    let reached = crate::cancelled(flags, crate::Reader::Follower)?.reached?;
+    Ok(ExitCode::from(if reached { 102 } else { 103 }))
+}
+
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.

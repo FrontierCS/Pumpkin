@@ -179,6 +179,8 @@ writes.")]
     },
     #[command(about = "Reap what lost runs left, at the controller's boot")]
     Boot,
+    #[command(about = "Cancel a run for a client, which says its ending")]
+    Cancel(Cancel),
     #[command(about = "Answer a client's link, on the standard input and output")]
     Serve,
     #[command(about = "Upload the runs to the bucket of the public page")]
@@ -244,6 +246,7 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
+    CancelFor(Cancel),
     Serve,
     Publish(Publish),
     Print(String),
@@ -733,6 +736,9 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Boot,
         } => Command::Boot,
         Parsed::Controller {
+            action: Action::Cancel(cancel),
+        } => Command::CancelFor(cancel),
+        Parsed::Controller {
             action: Action::Serve,
         } => Command::Serve,
         Parsed::Controller {
@@ -773,6 +779,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::View(_)
         | Command::Job(_)
         | Command::Boot
+        | Command::CancelFor(_)
         | Command::Serve
         | Command::Publish(_)
         | Command::Print(_) => {

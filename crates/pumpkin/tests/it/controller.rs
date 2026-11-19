@@ -2509,6 +2509,35 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) {
 }
 
 #[test]
+fn shell_client_cancels_with_the_jobs_executable() {
+    let scratch = Scratch::new();
+    let id = id_ago(0, "0c000005");
+    ended_job(&scratch, &id, "");
+    let pumpkin = install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
+    let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
+    symlink(pumpkin, &own).unwrap();
+    let args = [
+        "controller",
+        "cancel",
+        "--force",
+        "--modal-config",
+        "modal.toml",
+        &id,
+    ];
+    let mut cancel = scratch.program(own, &args);
+    let invoked = invocation(&cancel);
+    let output = cancel.output().unwrap();
+    check(
+        &scratch,
+        &report(invoked, &output, &scratch.0, false),
+        &[(&id, "<id>")],
+        &expect![[r#"
+            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --force --modal-config modal.toml <id>
+            exit status: Some(102)"#]],
+    );
+}
+
+#[test]
 fn cancel_stops_the_unit_once() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
