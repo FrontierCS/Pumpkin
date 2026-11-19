@@ -368,7 +368,12 @@ fn install_root() {
         "#]]
     .assert_eq(&printed);
     let pumpkin = root.join("bin/pumpkin");
-    let headers = sh.cmd("readelf").arg("-lW").arg(&pumpkin).read().unwrap();
+    let headers = sh
+        .cmd("readelf")
+        .args(["--program-headers", "--wide"])
+        .arg(&pumpkin)
+        .read()
+        .unwrap();
     assert!(!headers.split_whitespace().any(|field| field == "INTERP"));
     sh.cmd(pumpkin).arg("--version").run().unwrap();
 }
