@@ -5,8 +5,7 @@
 <h1 align="center">Pumpkin</h1>
 
 <p align="center">
-  Pumpkin runs agents as workflows, each run in sandboxes that reach only what the
-  workflow grants, and each leaving a record that no sandbox can alter.
+  Pumpkin is an orchestration layer that handles multi-agent multi-sandbox workflows. It provides optimized communication abstractions for easy management and error handling.
 </p>
 
 <p align="center">
@@ -19,30 +18,80 @@
   <a href="ARCHITECTURE.md">Architecture</a>
 </p>
 
-## What Pumpkin is
 
-A workflow is a short program, in a subset of Starlark, that says what a run is made of: its
-roles, each a sandbox image with the resources it needs; what each role may reach, such as a model
-through a route with a budget, and which functions it may call; and how the run's result is
-produced from what the agent submits. `pumpkin` checks a workflow without running anything, builds
-its images, and runs it on a provider: the machine's own Docker engine, EC2, or Modal, from the
-machine or through a controller. Every run leaves a record, which `pumpkin wait`, `pumpkin ls` and
-a web page read.
+## Why Pumpkin?
 
-The agent's code is untrusted: it may be buggy, and it uses whatever it can reach to finish its
-task or raise its score. So:
+Running a multi-agent multi-sandbox flow requires extensive communication and error handling. 
+Naively setting up such a workflow can result in increased obscene failures and unncessary context overhead for agents.
+We built Pumpkin to provide clean abstractions so people can easily do error handling.  
 
-- **A sandbox's only way out is its session** with the run's driver, the process that runs the run.
-  It has no network of its own and no credentials, and the driver authorizes each call it makes
-  against the workflow.
-- **Every bound is the workflow's**: the agent's deadline, each function's calls and seconds, each
-  model entry's budget. The run's hard end follows from them, and every sandbox ends by it.
-- **A model key stays on the host.** The route adds it to each request it admits, and the record
-  keeps every exchange as it passed.
-- **The same sources and arguments give the same workflow.** Evaluation reads no clock, no
-  environment, and no network, and a recipe must pin what Docker fetches for its image.
+| | Without Pumpkin | With Pumpkin |
+| --- | --- | --- |
+| Agent | A container you start. It has the network and the mounts you give it. | A sandbox the workflow names. Its only way out is its session with the driver. |
+| Model key | In the container's environment, or behind a proxy you run. | On the host. The route adds it to requests the workflow allows. |
+| Judge | Another container or script, wired up per task. | A fresh sandbox of the final-call role, after the agent's work has ended. |
+| Limits | Timeouts and spend caps in each launcher. | The workflow's deadline, call bounds, and model budget, on every run. |
+| Record | The logs you saved. | One directory per run: the workflow, the log, sandbox output, model exchanges, and the result. `wait`, `ls`, and `view` read it. |
+| Where it runs | Local Docker, or another launcher for EC2 or Modal. | The same `pumpkin run`, on this machine's Docker, on EC2, or on Modal. |
+| Harbor Support | Need to implement communication with extra effort | Decoupled from runtime and can directly use Harbor Run |
 
-## A workflow
+## Quickstart
+
+This repository is the source of the runner. A workflow lives in a repository of tasks, and that
+repository is where a run starts. Install Pumpkin there as `./pumpkin`, a copy of
+[`deploy/pumpkin`](deploy/pumpkin), beside a `.pumpkinversion` of one line: the tag to build, then
+the full commit that tag must name.
+
+```console
+$ cp /path/to/Pumpkin/deploy/pumpkin ./pumpkin
+$ echo "<tag> <commit>" > .pumpkinversion
+```
+
+The first `./pumpkin` clones the commit `.pumpkinversion` names and compiles it into `.pumpkin/`
+beside the script. Later runs start that binary. `--pumpkin-repository=<url>`, as the script's
+first argument, builds from another repository, such as this checkout. The script needs Linux on
+x86-64, git, curl,
+`sha256sum`, a C linker and TLS certificates, and names the packages to install if one is missing.
+Docker runs the sandboxes.
+
+One file configures the machine for every task: `~/.config/pumpkin/pumpkin.toml`. A machine whose
+runs stay on its own Docker engine needs only this:
+
+```toml
+[docker]
+context = "default"
+
+[providers.local.docker]
+```
+
+Each task is an entry file, `task.star`. `examples/hello` ships in this repository, needs no model,
+and runs once `./pumpkin` and `.pumpkinversion` sit beside `examples/`. From that directory:
+
+```console
+$ ./pumpkin check examples/hello/task.star
+$ ./pumpkin run examples/hello/task.star
+20261116-195228-234cd166
+$ ./pumpkin wait 234c
+$ ./pumpkin ls
+$ ./pumpkin view
+```
+
+`check` prints nothing when it finds no problem. `run` builds the images, starts the run and prints
+its id. `wait` follows a run named by a prefix of that id; ending it leaves the run going. `ls`
+lists the runs that are live or ended in the last day. `view` serves them to this machine's
+browser. The record is `.pumpkin/runs/<id>/`.
+
+A FrontierCS task repository has the same shape. Each problem is `tasks/<id>/task.star`, and the
+same configuration and the same commands run it. `--arg agent=reference` submits that task's
+reference solution, with no model. `--arg agent=codex --arg model=<name>` runs a harness once an
+`[upstreams.<name>]` table in `pumpkin.toml` names the model and the file that holds its key. A
+role that fits no configured class, for lack of cores, memory or a GPU, is refused before anything
+is reserved.
+
+[Run it](#run-it) shows these commands with their output.
+[docs/running.md](docs/running.md) goes through installing, configuring and each command.
+
+## Workflow in Pumpkin
 
 A workflow is the one `workflow()` call of a task's entry file: the workflow's name, its roles,
 and the final call that gives a run its result. `examples/hello` needs no model, so it runs
