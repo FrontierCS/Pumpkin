@@ -10,11 +10,9 @@
 //! [`Viewing::start`] is called. A request opens a link with one attempt, as the page asks again
 //! after a pause of its own, and the view answers no other request while one waits.
 
-use std::num::NonZeroU32;
-
 use ::aws::Cli;
 
-use super::aws::{self, answers, unanswered};
+use super::aws::{self, Located, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
 use crate::link::{ViewRequest, Viewed};
@@ -43,6 +41,7 @@ enum Over {
 pub(crate) struct Viewing {
     reached: Reached,
     build: Build,
+    located: Located,
     linked: Option<Linked>,
     /// Whether the controller couldn't answer at the last request, so that the next asks EC2 and
     /// its `sshd` first rather than wait out a connection to an instance that doesn't run.
@@ -62,10 +61,12 @@ impl Viewing {
         let expected = "expected to send it to the controller, to read the runs there";
         let build = Build::of_this(expected)?;
         let reached = Reached::reach(&client.controller)?;
+        let (linked, found) = reached.opening(&build)?;
         Ok(Self {
             reached,
             build,
-            linked: None,
+            located: found.at,
+            linked: Some(linked),
             down: false,
             cli: None,
         })
@@ -95,13 +96,14 @@ impl Viewing {
         // What it asks for only reads, so it is safe to ask again.
         let over = match self.once(target, deflate) {
             Over::Unanswered(Unlinked::Cut { .. }) => self.once(target, deflate),
-            over
-            @ (Over::Viewed(_) | Over::Unanswered(Unlinked::Failed(_)) | Over::Unopened(_)) => over,
+            over @ (Over::Viewed(_)
+            | Over::Unanswered(Unlinked::HostKey(_) | Unlinked::Failed(_))
+            | Over::Unopened(_)) => over,
         };
         let unopened = match over {
             Over::Viewed(viewed) => return Ok(viewed),
-            Over::Unanswered(unlinked) => return Err(Unviewed::Failed(self.failed(unlinked))),
-            Over::Unopened(unlinked) => self.failed(unlinked),
+            Over::Unanswered(unlinked) => return Err(Unviewed::Failed(Self::failed(unlinked))),
+            Over::Unopened(unlinked) => Self::failed(unlinked),
         };
         Err(match self.answerable() {
             Ok(()) => Unviewed::Failed(unopened),
@@ -123,7 +125,7 @@ impl Viewing {
     /// Fails if EC2 refuses, as when the instance is stopping.
     pub(crate) fn start(&mut self) -> Result<(), String> {
         let Self { reached, cli, .. } = self;
-        let id = &reached.located.instance;
+        let id = &self.located.instance;
         say(format_args!(
             "starting controller `{}`, {id}, as the page asked",
             reached.name
@@ -134,7 +136,8 @@ impl Viewing {
     /// Whether the controller runs, as EC2 says, and its `sshd` answers where it was found.
     fn answerable(&mut self) -> Result<(), Unviewed> {
         let Self { reached, cli, .. } = self;
-        let Reached { name, located, .. } = &*reached;
+        let name = &reached.name;
+        let located = &self.located;
         let state =
             connected(cli, reached).and_then(|cli| aws::state(cli, name, &located.instance));
         let address = located.address;
@@ -167,7 +170,7 @@ impl Viewing {
         let mut linked = match self.linked.take() {
             Some(linked) => linked,
             // Once, as the page asks again after a pause, which lets the view answer others.
-            None => match Linked::open(&self.reached, &self.build, NonZeroU32::MIN) {
+            None => match Linked::open(&self.reached, &self.build, &self.located) {
                 Ok(linked) => linked,
                 Err(unlinked) => return Over::Unopened(unlinked),
             },
@@ -188,17 +191,9 @@ impl Viewing {
         }
     }
 
-    /// What failed, as `unlinked` says, with where the log of its master is if that has ended.
-    fn failed(&self, unlinked: Unlinked) -> String {
+    fn failed(unlinked: Unlinked) -> String {
         match unlinked {
-            Unlinked::Cut { master, said } => {
-                let failed = format!(
-                    "asking the view on controller `{}` failed, as `ssh` {said}",
-                    self.name()
-                );
-                self.reached.lost(master, failed)
-            }
-            Unlinked::Failed(error) => error,
+            Unlinked::Cut { said, .. } | Unlinked::HostKey(said) | Unlinked::Failed(said) => said,
         }
     }
 }

@@ -1119,50 +1119,37 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 
 const KEY: &str = "sk-client-stand-in";
 
-// Stands in for `ssh` over shared masters that answer, and runs a command on this machine as the
-// controller's user. A file in `bin` shapes it: `refused-M` closes the connection that next opens
-// master M; `-O check` succeeds, but fails once after a cut; `before-N` runs before the Nth
-// command that `scripts` notes; `cut-M` ends a receive over master M after as many bytes as it
-// holds, `cut-out-M` ends any other command's output so, as a cut connection does, whatever the
-// command goes on to do, and `answer` is one command's output; `count-out` notes in `counted` the
-// bytes of each other command's output.
+// Runs the controller command in the test's home, with cuts before the requested byte on either
+// stream. Each before-N action runs just before the Nth connection.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -N) if rm "$dir/refused-$master" 2>/dev/null; then
-                echo 'Connection closed by UNKNOWN port 65535' >> "$master.log"; exit 255
-            fi
-            (umask 077 && : > "$master"); exit 0 ;;
-        -O) if rm "$dir/unanswered-$master" 2>/dev/null; then exit 255; fi; exit 0 ;;
-        -o) case $2 in ControlPath=*) master=${2#ControlPath=} ;; esac; shift 2 ;;
-        -F|-i|-E|-l) shift 2 ;;
-        -*) shift ;;
+        -o|-F|-i|-E) shift 2 ;;
         *) break ;;
     esac
 done
 shift
-first=$(printf '%s\n' "$*" | sed --quiet '/^set /!{p;q;}')
+first=$(printf '%s\n' "$*" | head --lines=1)
 printf '%s\n' "$first" >> "$dir/scripts"
 calls=$(wc --lines < "$dir/scripts")
-if [ -e "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
-cd "$dir/../home" || exit 255
+if [ -f "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
+cd "$dir/../home" || exit 1
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
-if [ -e "$dir/cut-$master" ]; then
-    bytes=$(cat "$dir/cut-$master"); rm "$dir/cut-$master"; touch "$dir/unanswered-$master"
-    stdbuf --output=0 head --bytes="$bytes" | sh -c "$*"; exit 255
+if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
+    stdbuf --output=0 head --bytes="$(cat "$dir/cut-in-$$")" | sh -c "$*"
+    exit 1
 fi
 if mv "$dir/answer" "$dir/answered" 2>/dev/null; then exec cat "$dir/answered"; fi
-if [ -e "$dir/cut-out-$master" ]; then
+if mv "$dir/cut-out" "$dir/cut-out-$$" 2>/dev/null; then
     exec 3<&0; mkfifo "$dir/fifo-$$"
     sh -c "$*" <&3 > "$dir/fifo-$$" &
-    dd bs=1 count="$(cat "$dir/cut-out-$master")" status=none < "$dir/fifo-$$"
-    rm "$dir/cut-out-$master" "$dir/fifo-$$"; touch "$dir/unanswered-$master"; exit 255
+    dd bs=1 count="$(cat "$dir/cut-out-$$")" status=none < "$dir/fifo-$$"
+    exit 1
 fi
-[ -e "$dir/count-out" ] || exec sh -c "$*"
-sh -c "$*" > "$dir/out-$$"; status=$?
-cat "$dir/out-$$"; wc --bytes < "$dir/out-$$" >> "$dir/counted"; exit "$status"
+if [ -f "$dir/link-pid" ]; then echo $$ > "$dir/link-pid"; fi
+exec sh -c "$*"
 "#;
 
 const SYSTEMCTL: &str = "#!/bin/sh\n";
@@ -1170,8 +1157,13 @@ const SYSTEMCTL: &str = "#!/bin/sh\n";
 const SYSTEMD_RUN: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/argv\"\n";
 
 fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
+    if !scratch.0.join("bin/aws").exists() {
+        scratch.write_executable(
+            "bin/aws",
+            b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\nexit 1\n",
+        );
+    }
     for (name, script) in [
-        ("aws", AWS),
         ("ssh", SSH),
         ("systemctl", SYSTEMCTL),
         ("systemd-run", SYSTEMD_RUN),
@@ -1245,28 +1237,20 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     (client, id, ran)
 }
 
-// The first `ls` makes the client's key and the shared connections and finds no controller, as the
-// stand-in `aws` describes none; the `found` and socket written then are what a controller found
-// over a master that answers leaves.
+// As a previous command that found the controller left the address, with no AWS call on the
+// next warm connection.
 fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
-    let socket = scratch.0.join(SHARED).join("0");
-    if socket.exists() {
+    let dir = scratch.0.join(SHARED);
+    if dir.join("found").exists() {
         return;
     }
     let first = on_client(scratch, client, &["ls"]).output().unwrap();
     assert!(!first.status.success(), "{first:?}");
-    // An address that the kernel refuses a connection to at once, as it is a broadcast's, so that
-    // a probe of it reaches no network.
+    fs::remove_file(dir.join("failed")).unwrap();
     let found = json!({ "instance": INSTANCE, "address": "255.255.255.255" });
-    // As the client keeps `found`, and `ssh` makes a master's socket, which only its user may
-    // reach.
-    for (path, text) in [
-        (scratch.0.join(SHARED).join("found"), found.to_string()),
-        (socket, String::new()),
-    ] {
-        fs::write(&path, text).unwrap();
-        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
-    }
+    let file = dir.join("found");
+    fs::write(&file, found.to_string()).unwrap();
+    fs::set_permissions(file, Permissions::from_mode(0o600)).unwrap();
 }
 
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
@@ -1561,7 +1545,7 @@ fn interrupted_launch_keeps_the_job() {
 fn start_after_a_cut() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
-    let cut = scratch.0.join("bin/cut-out-0");
+    let cut = scratch.0.join("bin/cut-out");
     let (_, first) = start(&scratch, &client);
     assert!(first.contains("exit status: Some(0)"), "{first}");
     let mut replies = Vec::new();
@@ -1603,7 +1587,7 @@ fn modes_of_what_the_client_keeps() {
             mode_and_modes(&scratch.0.join("client/.config/pumpkin/ssh"))
         ),
         format!(
-            "the shared connections: {}",
+            "the saved controller location: {}",
             mode_and_modes(&scratch.0.join(SHARED))
         ),
         format!(
@@ -1621,7 +1605,7 @@ fn modes_of_what_the_client_keeps() {
         &[],
         &expect![[r#"
             this machine's key: 700: key 600, key.pub 644
-            the shared connections: 700: 0 600, 0-0 600, lock 600
+            the saved controller location: 700: lock 600
             the jobs' directories in tmpfs: 700: <id> 700
             the job's directory in tmpfs: 700: config.toml 600, gateway.key 600"#]],
     );
@@ -2070,7 +2054,7 @@ fn send_carries_on() {
     let client = set_up_client(&scratch);
     fs::write(scratch.0.join("repo/stand-in/big.bin"), vec![42; 3 << 20]).unwrap();
     // End the link in the second frame of the large file, after the first MiB is durable.
-    scratch.write("bin/cut-0", &(1536 << 10).to_string());
+    scratch.write("bin/cut-in", &(1536 << 10).to_string());
     let (_, sent) = start(&scratch, &client);
     let holders = holders(&scratch, &[]);
     let mut lines = vec![sent, send_calls(&scratch)];
@@ -2088,7 +2072,7 @@ fn send_carries_on() {
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 3.0 MiB
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: starting the job again, now, attempt 2 of 7
+            pumpkin: controller `alice` didn't answer: ended during the upload: starting the job again now, attempt 2 of 7
             pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.0 MiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
@@ -2659,7 +2643,7 @@ fn reap_after_a_cut() {
     );
     // One byte of the reply proves the first sweep finished.
     let cut = frame_bytes(&json!({ "type": "serving" }), &[]) + 1;
-    scratch.write("bin/cut-out-0", &cut);
+    scratch.write("bin/cut-out", &cut);
     let mut reap = on_client(&scratch, &client, &["reap"]);
     let invoked = invocation(&reap);
     let reaped = reap.output().unwrap();
@@ -2675,7 +2659,7 @@ fn reap_after_a_cut() {
             exit status: Some(0)
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: the reap's reply was cut: the output may omit ids of runs already cleaned
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: reaping the runs again, now, attempt 2 of 7"#]],
+            pumpkin: controller `alice` didn't answer: ended within the answer: reaping the runs again now, attempt 2 of 7"#]],
     );
 }
 
@@ -2683,6 +2667,13 @@ fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
     let mut frame = Vec::new();
     schema::frame::write(&mut frame, message, body).unwrap();
     frame.len()
+}
+
+// Status precedes Follow on the same link. The job is the only one in this controller home.
+fn named_bytes(id: &str) -> usize {
+    let body = serde_json::to_vec(&[id]).unwrap();
+    frame_bytes(&json!({ "type": "jobs", "body_bytes": body.len() }), &[])
+        + frame_bytes(&serde_json::Value::Null, &body)
 }
 
 #[test]
@@ -2704,8 +2695,12 @@ fn follow_carries_on() {
     ] {
         let _ = calls(&scratch);
         scratch.write(
-            "bin/before-2",
-            &format!("echo {bytes} > '{}/bin/cut-out-0'", scratch.0.display()),
+            "bin/before-1",
+            &format!(
+                "echo {} > '{}/bin/cut-out'",
+                bytes + named_bytes(&id),
+                scratch.0.display()
+            ),
         );
         let _ = fs::remove_dir_all(scratch.0.join(format!("repo/.pumpkin/runs/{id}")));
         let waited = on_client(&scratch, &client, &["wait", &id])
@@ -2721,9 +2716,9 @@ fn follow_carries_on() {
         &lines.join("\n"),
         &[(id.as_str(), "<id>")],
         &expect![[r#"
-            cut within the log: "pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\nbuilding<NUL>task\nstep 1\nstep 1\npublish\n"
-            cut after the log: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\n"
-            cut within the ending: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7\n""#]],
+            cut within the log: "pumpkin: controller `alice` didn't answer: ended within the answer: following job <id> again now, attempt 2 of 7\nbuilding<NUL>task\nstep 1\nstep 1\npublish\n"
+            cut after the log: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: controller `alice` didn't answer: ended before the answer: following job <id> again now, attempt 2 of 7\n"
+            cut within the ending: "building<NUL>task\nstep 1\nstep 1\npublish\npumpkin: controller `alice` didn't answer: ended within the answer: following job <id> again now, attempt 2 of 7\n""#]],
     );
 }
 
@@ -2798,16 +2793,16 @@ fn follow_repeats_no_milestone() {
     let first = format!("following run {id}: ending this command does not stop it");
     let _ = calls(&scratch);
     let started = "   0:01 the agent started on aws/judge";
-    let cut = hello + said_bytes(&first) + said_bytes(started) + 3;
+    let cut = hello + named_bytes(&id) + said_bytes(&first) + said_bytes(started) + 3;
     let root = scratch.0.display();
     // Cut in the next milestone. The run ends before the next link opens.
     scratch.write(
-        "bin/before-2",
-        &format!("echo {cut} > '{root}/bin/cut-out-0'"),
+        "bin/before-1",
+        &format!("echo {cut} > '{root}/bin/cut-out'"),
     );
     scratch.write("outcome", &returned(1.0));
     scratch.write(
-        "bin/before-3",
+        "bin/before-2",
         &format!("cp '{root}/outcome' '{root}/home/.pumpkin/runs/{id}/outcome.json'"),
     );
     let child = on_client(&scratch, &client, &["wait", &id])
@@ -2839,7 +2834,7 @@ fn follow_repeats_no_milestone() {
         &expect![[r#"
             pumpkin: following run <id>: ending this command does not stop it
             pumpkin:    0:01 the agent started on aws/judge
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
+            pumpkin: controller `alice` didn't answer: ended within the answer: following job <id> again now, attempt 2 of 7
             pumpkin:    0:02 the work phase ended"#]],
     );
 }
@@ -2856,13 +2851,14 @@ fn build_carries_on_inside_the_ir() {
     let logged = frame_bytes(&json!({ "type": "logged" }), log.as_bytes());
     let head = frame_bytes(&json!({ "type": "built", "body_bytes": ir.len() }), &[]);
     let part = frame_bytes(&serde_json::Value::Null, ir.as_bytes());
-    // Arm the cut as the unit is recorded, so it reaches the Follow after the start.
-    let recorder = format!(
-        "{SYSTEMD_RUN}echo {} > '{}/bin/cut-out-0'\n",
-        hello + logged + head + part - 1,
-        scratch.0.display()
-    );
-    scratch.write_executable("bin/systemd-run", recorder.as_bytes());
+    // The warmed store answers the two Lacks with empty lists, then starts the build on this link.
+    let (_, warm) = start(&scratch, &client);
+    assert!(warm.contains("exit status: Some(0)"), "{warm}");
+    let missing = frame_bytes(&json!({"type":"missing","body_bytes":2}), &[])
+        + frame_bytes(&serde_json::Value::Null, b"[]");
+    let started = frame_bytes(&json!({"type":"started"}), &[]);
+    let cut = hello + 2 * missing + started + logged + head + part - 1;
+    scratch.write("bin/cut-out", &cut.to_string());
     let mut build = on_client(&scratch, &client, &["build", "stand-in/task.star"])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2918,11 +2914,12 @@ fn follow_cut_often() {
     let _ = calls(&scratch);
     // A new line on each connection advances the byte offset and starts the pauses over.
     for index in 1..=9 {
+        let before = if index == 1 { named_bytes(&id) } else { 0 };
         scratch.write(
-            &format!("bin/before-{}", index + 1),
+            &format!("bin/before-{index}"),
             &format!(
-                "echo 'line {index:02}' >> '{0}/home/jobs/{id}/log'\necho {1} > '{0}/bin/cut-out-0'\n",
-                scratch.0.display(), hello + logged + 2
+                "echo 'line {index:02}' >> '{0}/home/jobs/{id}/log'\necho {1} > '{0}/bin/cut-out'\n",
+                scratch.0.display(), hello + before + logged + 2
             ),
         );
     }
@@ -2964,11 +2961,17 @@ fn follow_cut_before_a_line() {
     let id = id_ago(0, "0f000003");
     ended_job(&scratch, &id, "line 01 of 01\n");
     let _ = calls(&scratch);
-    let cut = scratch.0.join("bin/cut-out-0");
+    let cut = scratch.0.join("bin/cut-out");
+    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
     for cut_index in 0..3 {
+        let bytes = if cut_index == 0 {
+            hello + named_bytes(&id)
+        } else {
+            hello
+        };
         scratch.write(
-            &format!("bin/before-{}", 2 + cut_index),
-            &format!("echo 0 > '{}'\n", cut.display()),
+            &format!("bin/before-{}", 1 + cut_index),
+            &format!("echo {bytes} > '{}'\n", cut.display()),
         );
     }
     let mut waiting = on_client(&scratch, &client, &["wait", &id])
@@ -2993,51 +2996,8 @@ fn follow_cut_before_a_line() {
         &shown.join("\n"),
         &[(id.as_str(), "<id>")],
         &expect![[r#"
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, now, attempt 2 of 7
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: following job <id> again, in 5 s, attempt 3 of 7"#]],
-    );
-}
-
-#[test]
-fn master_opened_again() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let id = id_ago(0, "0f000004");
-    ended_job(&scratch, &id, "line 01 of 01\n");
-    let _ = calls(&scratch);
-    // As the `wait` finds the run, its master ends, and the follow's opening of it is closed once.
-    let (socket, refused) = (
-        scratch.0.join(SHARED).join("0"),
-        scratch.0.join("bin/refused-0"),
-    );
-    scratch.write(
-        "bin/before-1",
-        &format!("rm '{}'\ntouch '{}'\n", socket.display(), refused.display()),
-    );
-    let waited = on_client(&scratch, &client, &["wait", &id])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(waited.stderr).unwrap();
-    let mut shown: Vec<&str> = stderr
-        .lines()
-        .take_while(|line| !line.starts_with("pumpkin: copying run"))
-        .collect();
-    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
-    let openings = format!(
-        "openings: {}",
-        argv.lines().filter(|arg| *arg == "-N").count()
-    );
-    shown.push(&openings);
-    check(
-        &scratch,
-        &shown.join("\n"),
-        &[(id.as_str(), "<id>")],
-        &expect![[r#"
-            pumpkin: connection 0 to controller `alice` didn't get through, as `ssh` said: Connection closed by UNKNOWN port 65535: opening it again now, attempt 2 of 8
-            line 01 of 01
-            openings: 2"#]],
+            pumpkin: controller `alice` didn't answer: ended before the answer: following job <id> again now, attempt 2 of 7
+            pumpkin: controller `alice` didn't answer: ended before the answer: following job <id> again in 5 s, attempt 3 of 7"#]],
     );
 }
 
@@ -3386,7 +3346,7 @@ fn ls_carries_on_after_a_cut() {
     );
     move_runs(&scratch, "home/.pumpkin/runs");
     // Past the hello, within the answer to `Health`.
-    scratch.write("bin/cut-out-0", "40");
+    scratch.write("bin/cut-out", "40");
     let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
     check(
         &scratch,
@@ -3395,7 +3355,7 @@ fn ls_carries_on_after_a_cut() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(0)
-            pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: listing the runs again, now, attempt 2 of 7
+            pumpkin: controller `alice` didn't answer: ended within the answer: listing the runs again now, attempt 2 of 7
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             printed:
               20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
@@ -3411,10 +3371,6 @@ fn ls_refusals() {
     connect(&scratch, &client);
     served(&scratch);
     let mut steps = Vec::new();
-    // No master answers, and nothing does where the controller was found, so it is found again,
-    // which the stand-in `aws` refuses.
-    scratch.write("bin/unanswered-0", "");
-    steps.push(ls_ran(&scratch, &client, &[]));
     scratch.write("bin/answer", "Welcome to the controller!\n");
     steps.push(ls_ran(&scratch, &client, &[]));
     // A run of this build that doesn't read, beside one that does.
@@ -3438,9 +3394,6 @@ fn ls_refusals() {
         &expect![[r#"
             $ pumpkin ls
             exit status: Some(1)
-            pumpkin: controller `alice` didn't answer SSH at 255.255.255.255, where it was last found: Network is unreachable (os error 101); finding it again: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
-            $ pumpkin ls
-            exit status: Some(1)
             pumpkin: linking to controller `alice` failed: its hello is no frame that `pumpkin controller serve` sends: a frame's message is 1466264675 bytes: it holds at most 65536: expected its frames alone on the standard output there, which a shell's startup file may write to
             $ pumpkin ls
             exit status: Some(1)
@@ -3457,28 +3410,120 @@ fn ls_refusals() {
 }
 
 #[test]
-fn ls_fails_at_once_when_serve_ends() {
+fn repair_uses_the_location_found_while_it_waited() {
+    repair_while_waiting(
+        None,
+        &expect![[r#"
+            SSH attempts: 3
+            AWS calls: 0"#]],
+    );
+}
+
+#[test]
+fn repair_uses_the_failure_at_the_new_location() {
+    repair_while_waiting(
+        Some("another command could not reach this location"),
+        &expect![[r#"
+            SSH attempts: 2
+            AWS calls: 0"#]],
+    );
+}
+
+fn repair_while_waiting(failure: Option<&str>, expected: &Expect) {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
     connect(&scratch, &client);
-    let hex = key(&client_bin(&scratch));
-    // The connection stays up, so asking again would end the same way.
-    let script = "#!/bin/sh\necho 'serve: cannot start' >&2\nexit 1\n";
-    scratch.write_executable(
-        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
-        script.as_bytes(),
-    );
-    let steps = [ls_ran(&scratch, &client, &[]), calls(&scratch)];
+    served(&scratch);
+    let dir = scratch.0.join(SHARED);
+    let lock = File::open(dir.join("lock")).unwrap();
+    lock.lock().unwrap();
+    let _ = noted(&scratch);
+    let _ = calls(&scratch);
+    for call in 1..=2 {
+        scratch.write(
+            &format!("bin/before-{call}"),
+            &format!("echo 0 > '{}/bin/cut-out'\n", scratch.0.display()),
+        );
+    }
+    let mut child = on_client(&scratch, &client, &["ls"])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut said = String::new();
+    while !said.contains("waiting for another command") {
+        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
+    }
+    // A second replacement can reuse the first inode once all readers have closed it.
+    for _ in 0..2 {
+        fs::copy(dir.join("found"), dir.join("found.new")).unwrap();
+        fs::rename(dir.join("found.new"), dir.join("found")).unwrap();
+    }
+    if let Some(error) = failure {
+        fs::write(dir.join("failed"), error).unwrap();
+    }
+    drop(lock);
+    let output = ended(child, stderr, said);
+    assert_eq!(output.status.success(), failure.is_none(), "{output:?}");
+    if let Some(error) = failure {
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+    }
+    let attempts = fs::read_to_string(scratch.0.join("bin/scripts"))
+        .unwrap()
+        .lines()
+        .count();
     check(
         &scratch,
-        &steps.join("\n"),
-        &[(&hex, "<this build>")],
+        &format!(
+            "SSH attempts: {attempts}\nAWS calls: {}",
+            noted(&scratch).len()
+        ),
+        &[],
+        expected,
+    );
+}
+
+#[test]
+fn commands_share_a_recent_failed_repair() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let _ = calls(&scratch);
+    let dir = scratch.0.join("bin");
+    for call in 1..=2 {
+        scratch.write(
+            &format!("bin/before-{call}"),
+            &format!("echo 0 > '{}/cut-out'\n", dir.display()),
+        );
+    }
+    let first = ls_ran(&scratch, &client, &[]);
+    let attempts = fs::read_to_string(dir.join("scripts"))
+        .unwrap()
+        .lines()
+        .count();
+    let _ = calls(&scratch);
+    let _ = noted(&scratch);
+    let second = ls_ran(&scratch, &client, &[]);
+    let recent = fs::read_to_string(scratch.0.join(SHARED).join("failed")).unwrap();
+    assert!(first.contains(&recent) && second.contains(&recent));
+    let lines = format!(
+        "first command: {attempts} SSH attempts\nsecond command: {}\nAWS calls after the failure: {}",
+        calls(&scratch),
+        noted(&scratch).len()
+    );
+    check(
+        &scratch,
+        &lines,
+        &[],
         &expect![[r#"
-            $ pumpkin ls
-            exit status: Some(1)
-            serve: cannot start
-            pumpkin: linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin"#]],
+        first command: 2 SSH attempts
+        second command: the calls: none
+        AWS calls after the failure: 0"#]],
     );
 }
 
@@ -3520,7 +3565,7 @@ fn wait_names_its_run_there() {
             $ pumpkin wait 9f
             exit status: Some(1)
             pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
+            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
 
@@ -3778,12 +3823,12 @@ fn record_copy() {
         let path = record.join("model").join(big);
         fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
     }
-    let cut = scratch.0.join("bin/cut-out-0");
+    let cut = scratch.0.join("bin/cut-out");
     let before_copy = format!("echo 150000 > '{}'\n", cut.display());
-    scratch.write("bin/before-3", &before_copy);
+    scratch.write("bin/before-1", &before_copy);
     // Withhold driver.pid before the retry to observe exactly what the cut placed.
     scratch.write(
-        "bin/before-4",
+        "bin/before-2",
         &format!(
             "mv '{}' '{}'\n",
             record.join("driver.pid").display(),
@@ -3793,7 +3838,7 @@ fn record_copy() {
     lines.push("cut, then refused:".to_owned());
     lines.extend(copied_record(&scratch, &client, &["cancel", &id], &copy));
     fs::rename(record.join(".held-pid"), record.join("driver.pid")).unwrap();
-    scratch.write("bin/before-3", &before_copy);
+    scratch.write("bin/before-1", &before_copy);
     lines.push("cut:".to_owned());
     lines.extend(copied_record(&scratch, &client, &["cancel", &id], &copy));
     let mut here = record_files(&copy);
@@ -3819,35 +3864,35 @@ fn record_copy() {
             unread:
             wait: exit status: 1
               pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/jobs/0/secret: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
             whole:
             wait: exit status: 0
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: jobs/0/secret, record.json
               model/marked: 755
               jobs: 0, 2
             unchanged:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: 
             changed:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: log.jsonl, model/added
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, now, attempt 2 of 7
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              pumpkin: controller `alice` didn't answer: ended within the answer: copying run <id>'s record again now, attempt 2 of 7
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: model/big-1
             cut:
             cancel: exit status: 0
-              pumpkin: the connection to controller `alice` ended, as its log says: <scratch>/repo/.pumpkin/controller/alice.us-west-1/0.log: copying run <id>'s record again, now, attempt 2 of 7
+              pumpkin: controller `alice` didn't answer: ended within the answer: copying run <id>'s record again now, attempt 2 of 7
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
               written: model/big-2, model/big-3
             the copy (but `jobs/0/out`) is the record's:
               driver.pid 644
@@ -4034,13 +4079,12 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     let scratch = Scratch::new();
     let (client, driver, [ended, live]) = viewed(&scratch);
     served(&scratch);
+    scratch.write("bin/cut-out", "1000");
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let mut steps = vec![served.said.trim_end().to_owned()];
-    // Before the first request, which opens the connection that the stand-in cuts.
-    scratch.write("bin/cut-out-0", "1000");
     let window = format!("/api/runs/{ended}/log?at=0");
     steps.push(got(&served, &window, &["next", "end"]));
-    assert!(!scratch.0.join("bin/cut-out-0").exists());
+    assert!(!scratch.0.join("bin/cut-out").exists());
     let (status, listed) = served.ask("GET", "/api/runs", &[]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
     let rows: Vec<String> = (listed["runs"].as_array().unwrap().iter())
@@ -4078,13 +4122,13 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
     let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     served(&scratch);
-    let served = Served::of(on_client(&scratch, &client, &["view"]));
     let calls = fs::read_to_string(scratch.0.join("bin/scripts")).unwrap_or_default();
-    let cut_out = scratch.0.join("bin/cut-out-0");
-    scratch.write("bin/cut-out-0", "1000");
+    let cut_out = scratch.0.join("bin/cut-out");
+    scratch.write("bin/cut-out", "1000");
     // So that the connection opened anew is cut too.
     let again = format!("echo 1000 > {}\n", cut_out.display());
     scratch.write(&format!("bin/before-{}", calls.lines().count() + 2), &again);
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
     let window = format!("/api/runs/{ended}/log?at=0");
     let mut steps = vec![got(&served, &window, &["next", "end"])];
     assert!(!cut_out.exists());
@@ -4097,7 +4141,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "asking the view on controller `alice` failed, as `ssh` ended within the answer's body"
+            "controller `alice` didn't answer: ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             next: 309222, end: 309222"#]],
@@ -4109,7 +4153,6 @@ fn view_answers_502_for_a_reply_it_cant_read() {
     let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let hex = served(&scratch);
-    let served = Served::of(on_client(&scratch, &client, &["view"]));
     let window = format!("/api/runs/{ended}/log?at=0");
     let mut hello = Vec::new();
     schema::frame::write(&mut hello, &json!({ "type": "serving" }), &[]).unwrap();
@@ -4123,6 +4166,7 @@ fn view_answers_502_for_a_reply_it_cant_read() {
         scratch.0.display()
     );
     scratch.write_executable(&exe, script.as_bytes());
+    let served = Served::of(on_client(&scratch, &client, &["view"]));
     let mut past = (u32::try_from(schema::frame::MAX_MESSAGE_BYTES).unwrap() + 1)
         .to_be_bytes()
         .to_vec();
@@ -4163,6 +4207,7 @@ fn view_asks_ec2_once_no_link_opens() {
     let scratch = Scratch::new();
     let (client, driver, [ended, _]) = viewed(&scratch);
     let hex = served(&scratch);
+    scratch.write("bin/cut-out", "1000");
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     // A `serve` that ends before its hello, so that no link opens; then EC2 is asked, which the
     // stand-in `aws` refuses.
@@ -4185,10 +4230,47 @@ fn view_asks_ec2_once_no_link_opens() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "linking to controller `alice` failed: its `serve` ended before it answered in full (the link ended before its hello): what it printed above says why; asking EC2 whether it runs failed too: `aws ec2 describe-instances` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports"
+            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1: : fix what `aws` reports"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 309222"#]],
+    );
+}
+
+#[test]
+fn view_reopens_between_requests() {
+    let scratch = Scratch::new();
+    let (client, driver, [id, _]) = viewed(&scratch);
+    served(&scratch);
+    scratch.write("bin/link-pid", "");
+    let page = Served::of(on_client(&scratch, &client, &["view"]));
+    let path = format!("/api/runs/{id}");
+    let first = got(&page, &path, &["state"]);
+    let pid = fs::read_to_string(scratch.0.join("bin/link-pid")).unwrap();
+    let pid = pid.trim().parse::<i32>().unwrap();
+    // A previously answered connection ends between requests, as when serve's idle time ends.
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(pid).unwrap(),
+        rustix::process::Signal::TERM,
+    )
+    .unwrap();
+    poll(|| (!super::alive(i64::from(pid))).then_some(()));
+    let second = got(&page, &path, &["state"]);
+    assert_eq!(first, second);
+    let connections = fs::read_to_string(scratch.0.join("bin/scripts"))
+        .unwrap()
+        .lines()
+        .count();
+    drop(driver);
+    check(
+        &scratch,
+        &format!("{second}\nSSH connections: {connections}"),
+        &[(id, "<id>")],
+        &expect![[r#"
+            GET /api/runs/<id>
+            HTTP/1.1 200 OK
+            state: "finished"
+            SSH connections: 2"#]],
     );
 }
 

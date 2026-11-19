@@ -1,23 +1,6 @@
-//! Reaching a person's controller from this machine, and the `ssh` connections that a
-//! workspace's commands share to it.
-//!
-//! A controller is one EC2 instance, found by its tag and reached by `ssh` at its private
-//! address. A workspace keeps up to `MASTERS` master `ssh` connections per controller, each
-//! carrying up to `SESSIONS` sessions at once. A session is held by a lock on a file of the
-//! workspace, so the commands of separate `pumpkin` processes share the connections and none
-//! takes a session that another holds. With no connection to share, a command opens one, with
-//! this machine's key, at the address where the workspace last found the controller, and again
-//! after a pause while `ssh` connects but doesn't get through, as opening one runs nothing there.
-//! When nothing answers there, or it still doesn't get through, it finds the controller again,
-//! starts it if it is stopped, and waits until its `sshd` answers. Once the controller refuses the
-//! key, it opens again under this machine's lock of enrolling, as the key may have just been
-//! enrolled, and if that is refused too, pushes the key through EC2 Instance Connect, opens, and
-//! appends the key to the controller user's `authorized_keys`. What goes over the connections is
-//! the submodules': `send`, `copy`, `listing`, `viewing` and `commands`; `listing` and `viewing`,
-//! and `commands` to find a run, go over a link to `serve`, which `linking` opens.
-//!
-//! A command on the controller is cut when its connection ends, and then says nothing of how far
-//! it got, so a command repeats only where its caller knows that running it again is safe.
+//! Direct SSH connections to a controller. A workspace keeps its last known address. A command
+//! tries the actual request there first and repairs a failed opening under the workspace's lock.
+//! Each link owns its SSH process. Dropping it frees the connection.
 
 mod aws;
 mod commands;
@@ -25,65 +8,35 @@ mod copy;
 mod follow;
 mod linking;
 mod listing;
+mod location;
 mod send;
 mod viewing;
 
-use std::collections::BTreeSet;
-use std::fs::{self, DirBuilder, File, TryLockError};
-use std::io::{self, Write as _};
-use std::num::NonZeroU32;
-use std::ops::{Deref, DerefMut};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::fs::{self, File, TryLockError};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
-use std::{fmt, thread};
+use std::time::Duration;
+use std::{fmt, io};
 
 use ::aws::Region;
 pub(crate) use commands::{build, cancel, here, reap, run, wait};
 pub(crate) use listing::{ls, scratch};
+use location::{Found, Location};
 use serde::Deserialize;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 pub(crate) use viewing::{Unviewed, Viewing};
 
-use self::aws::{Located, answers, find, kept};
+use self::aws::{Located, find, kept};
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
-// The user that every session logs in as on the controller, and that runs every Pumpkin process
-// there.
 const USER: &str = "pumpkin";
-
-// How long `ssh` may take to connect to the controller's address. Inside its VPC a whole login
-// takes under a second, so an address that takes this long drops what `ssh` sends it, as an
-// instance that has stopped since its `sshd` answered does. Ansible's default:
-// https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/config/base.yml#L1205-L1212
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-// The bound of a command whose time its input doesn't set.
 const SHORT_TIMEOUT: Duration = Duration::from_mins(10);
 
-// How long a master stays open after its last session ends: long enough for a batch of commands
-// that start at once, and each command's calls one after another, to share it, and short enough
-// that none lingers once they are done.
-const PERSIST: Duration = Duration::from_mins(1);
-
-// The most master connections to one controller, so that a batch can't open connections without
-// end: `MASTERS` x `SESSIONS` commands go at once, and one past that waits.
-const MASTERS: usize = 16;
-
-// Half of the 10 sessions that `sshd` takes on one connection by default (`MaxSessions`). It
-// frees a session that has closed only once it has handled all it has read, so a session that one
-// command closes and one that the next opens, in what it reads at once, both count for a moment:
-// `SESSIONS` commands at a time each take 2 at most, which 10 still takes.
-// https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/servconf.h#L42
-const SESSIONS: usize = 5;
-
-// The pauses before each repeat of a command whose connection ended. The first is at once, as one
-// connection's end leaves the controller reachable over another. The rest add up to about four
-// minutes, long enough for the network to carry a connection again after a pause, and short
-// enough that a connection that keeps ending ends the command soon after.
+// The pauses between attempts after a link ends before its answer is whole.
 const AGAIN: [Duration; 6] = [
     Duration::ZERO,
     Duration::from_secs(5),
@@ -93,24 +46,9 @@ const AGAIN: [Duration; 6] = [
     Duration::from_mins(2),
 ];
 
-// How many times an opening of a master that doesn't get through is made, so 86 s of pauses in all:
-// long enough for a burst of openings past `sshd`'s `MaxStartups`, which takes 10 at once, to get
-// in, and for a controller just started, whose `sshd` takes connections before it admits logins,
-// to admit them. An opening whose `ssh` doesn't connect to `sshd`'s port is the last, so at worst
-// the 8 openings each connect and then wait out `ConnectTimeout`, 166 s in all. The count is this
-// module's: Ansible makes none again unless its `reconnection_retries` is set:
-// https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L209-L215
-const OPENINGS: NonZeroU32 = NonZeroU32::new(8).expect("8 isn't 0");
-
-// The longest pause before an opening again; the pause after attempt n is 2^(n - 1) - 1 s up to
-// this, as Ansible's `ssh` plugin pauses before it connects again:
+// Eight openings, after Ansible's backoff for a connection that did not get through.
 // https://github.com/ansible/ansible/blob/2a4acd774aec2625b09cca2284cb2a08654e4cdd/lib/ansible/plugins/connection/ssh.py#L550-L610
-const REOPEN_PAUSE_MAX: Duration = Duration::from_secs(30);
-
-// The status with which `ssh` ends when it fails itself, not the command it ran.
-const SSH_FAILED: i32 = 255;
-
-const SESSION_POLL: Duration = Duration::from_millis(500);
+const OPENINGS: u32 = 8;
 
 /// A controller's name: the `name` that `deploy/aws` was applied with.
 #[derive(Clone, Debug, Deserialize)]
@@ -142,117 +80,6 @@ impl TryFrom<String> for Name {
 impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-/// The connections that the workspace's commands share to one controller, in
-/// `controller/<name>.<region>/` of the workspace: up to `MASTERS` masters, each by its control
-/// socket, named by its index, its `SESSIONS` session locks, `<index>-<session>`, and its log,
-/// `<index>.log`; the locks `lock` and `upload`; and `found`, which [`Lock::found`] reads.
-// Each `ssh` runs in that directory and names a socket by its name alone, so its path, with the
-// suffix that `ssh` adds while it binds it, fits a socket's address however deep the workspace is.
-struct Shared {
-    dir: PathBuf,
-}
-
-/// The lock that serialises opening connections to a controller, and finding it.
-struct Lock {
-    _file: File,
-    dir: PathBuf,
-}
-
-/// A session of connection `master`, held for as long as the slot lives.
-struct Slot {
-    master: usize,
-    _file: File,
-}
-
-/// What `Shared::scan` finds: a free session on a master that answers, else the first master
-/// that doesn't, to open, else that every session is held.
-enum Found {
-    Free(Slot),
-    Closed(usize),
-    Held,
-}
-
-impl Shared {
-    fn new(workspace: &Workspace, alias: &str) -> Result<Self, String> {
-        let dir = workspace.controller().join(alias);
-        let made = DirBuilder::new().mode(0o700).recursive(true).create(&dir);
-        made.context(dir.display())?;
-        Ok(Self { dir })
-    }
-
-    fn lock(&self, name: &Name) -> Result<Lock, String> {
-        let waiting =
-            format_args!("waiting for another command, which is reaching controller `{name}`");
-        let file = locked(&self.dir.join("lock"), waiting)?;
-        Ok(Lock {
-            _file: file,
-            dir: self.dir.clone(),
-        })
-    }
-
-    fn log(&self, master: usize) -> PathBuf {
-        self.dir.join(format!("{master}.log"))
-    }
-
-    fn command(&self, program: &str) -> Command {
-        // `HOME`, below which `ssh` keeps a directory of its own.
-        let mut command = stdx::process::command(program, Environment::Only(&["HOME", "PATH"]));
-        command.current_dir(&self.dir);
-        command
-    }
-
-    fn answers(&self, master: usize, host: &str) -> bool {
-        if !self.dir.join(master.to_string()).exists() {
-            return false;
-        }
-        let mut check = self.command("ssh");
-        let control = format!("ControlPath={master}");
-        check.args(["-F", "/dev/null", "-o", &control, "-O", "check", host]);
-        bounded(&mut check, "ssh -O check", SHORT_TIMEOUT).is_ok()
-    }
-
-    fn any_answers(&self, host: &str) -> bool {
-        (0..MASTERS).any(|master| self.answers(master, host))
-    }
-
-    fn scan(&self, host: &str, held: &BTreeSet<usize>) -> Result<Found, String> {
-        let mut closed = None;
-        for master in (0..MASTERS).filter(|master| !held.contains(master)) {
-            if !self.dir.join(master.to_string()).exists() {
-                closed = closed.or(Some(master));
-                continue;
-            }
-            // A master whose sessions are all held is in use, so it is open.
-            let Some(slot) = self.free(master)? else {
-                continue;
-            };
-            if self.answers(master, host) {
-                return Ok(Found::Free(slot));
-            }
-            closed = closed.or(Some(master));
-        }
-        Ok(closed.map_or(Found::Held, Found::Closed))
-    }
-
-    fn free(&self, master: usize) -> Result<Option<Slot>, String> {
-        for session in 0..SESSIONS {
-            let path = self.dir.join(format!("{master}-{session}"));
-            let file = private(&path)?;
-            match file.try_lock() {
-                Ok(()) => {
-                    return Ok(Some(Slot {
-                        master,
-                        _file: file,
-                    }));
-                }
-                Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
-            }
-        }
-        Ok(None)
     }
 }
 
@@ -289,170 +116,129 @@ fn private(path: &Path) -> Result<File, String> {
     file.context(path.display())
 }
 
-impl Lock {
-    /// Where the controller was last found, kept in `found` as JSON, unless that is missing or
-    /// doesn't read, when it is to be found again.
-    fn found(&self) -> Result<Option<Located>, String> {
-        let path = self.dir.join("found");
-        match fs::read(&path) {
-            Ok(json) => Ok(serde_json::from_slice(&json).ok()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context(path.display()),
-        }
-    }
-
-    /// Keeps `located` in `found`, and returns it.
-    fn keep(&self, located: Located) -> Result<Located, String> {
-        let path = self.dir.join("found");
-        let json = serde_json::to_vec(&located)
-            .unwrap_or_else(|error| unreachable!("an instance's id and address are JSON: {error}"));
-        // Made aside, 0600, and moved in whole, so that a command killed as it writes leaves the
-        // last one whole.
-        let aside = tempfile::Builder::new()
-            .prefix(".found-")
-            .tempfile_in(&self.dir);
-        let mut aside = aside.context(self.dir.display())?;
-        aside.write_all(&json).context(aside.path().display())?;
-        aside.persist(&path).context(path.display())?;
-        Ok(located)
-    }
-}
-
-/// A `ssh` command to run over the connection that `slot` holds a session of, held until the
-/// session is dropped.
-struct Session {
-    command: Command,
-    slot: Slot,
-}
-
-impl Session {
-    fn output(&mut self, input: Option<&[u8]>, by: Deadline) -> io::Result<Option<Output>> {
-        match input {
-            Some(input) => stdx::process::fed(&mut self.command, input, by),
-            None => stdx::process::output(&mut self.command, by),
-        }
-    }
-}
-
-impl Deref for Session {
-    type Target = Command;
-
-    fn deref(&self) -> &Command {
-        &self.command
-    }
-}
-
-impl DerefMut for Session {
-    fn deref_mut(&mut self) -> &mut Command {
-        &mut self.command
-    }
-}
-
-/// What opening a master connection came to.
-enum Master {
-    Open,
-    /// `ssh` didn't get through to the controller's `sshd`, as the error says, and what its log
-    /// `said`.
-    Unreached {
-        error: String,
-        said: String,
-    },
-    /// `ssh` didn't connect to `sshd`'s port, as when nothing listens there, as the error says.
-    Unconnected(String),
-    /// The controller refused this machine's key, as the error says.
-    Unenrolled(String),
-    /// The controller's host key isn't the one pinned for it.
-    HostKeyChanged,
-}
-
-/// What `Reached::open` came to, but a failure.
-enum Opened {
-    Open,
-    /// The controller may no longer be where it was found, as `ssh` didn't get through: why.
-    Unreached(String),
-    /// The controller showed a host key other than the one pinned: what to do.
-    HostKeyChanged(String),
-}
-
-/// A controller that this machine has found, and its connections.
 pub(crate) struct Reached {
     region: Region,
     name: Name,
-    /// The name by which `known_hosts` pins its host key, `<name>.<region>`.
     alias: String,
-    located: Located,
     kept: PathBuf,
-    shared: Shared,
+    location: Location,
+    linked: Option<(linking::Linked, Found)>,
 }
 
 impl Reached {
-    /// Reaches the controller that `settings` names: opens a connection that accepts this
-    /// machine's key, enrolling the key if the controller doesn't know it, at the address where
-    /// the workspace last found the controller, else where it finds it now, which starts it if it
-    /// is stopped and waits until its `sshd` answers.
-    ///
-    /// # Errors
-    ///
-    /// Fails if no one live instance carries the controller's tag, if its `sshd` doesn't answer
-    /// in time, or if no connection opens.
     pub(crate) fn reach(settings: &config::Controller) -> Result<Self, String> {
         let config::Controller {
             name,
             region,
+            address: config::Address::Private,
             modal: _,
         } = settings;
-        let kept = kept()?;
         let alias = format!("{name}.{}", region.as_str());
-        let shared = Shared::new(&Workspace::find()?, &alias)?;
-        let lock = shared.lock(name)?;
-        let (located, just_found) = match lock.found()? {
-            Some(located) => (located, false),
-            None => (lock.keep(find(region, name)?)?, true),
-        };
-        let mut reached = Self {
+        let location = Location::new(Workspace::find()?.controller().join(&alias))?;
+        let kept = kept()?;
+        Ok(Self {
             region: region.clone(),
             name: name.clone(),
             alias,
-            located,
             kept,
-            shared,
-        };
-        if reached.shared.any_answers(&reached.host()) {
-            return Ok(reached);
+            location,
+            linked: None,
+        })
+    }
+
+    fn found(&self) -> Result<Found, String> {
+        self.location.recent()?;
+        match self.location.found()? {
+            Some(found) => Ok(found),
+            None => self
+                .location
+                .repair(&self.name, None, || find(&self.region, &self.name)),
         }
-        // No master answers, so the first, master 0, is closed, and can be opened.
-        if just_found {
-            reached.open_first(&lock)?;
-            return Ok(reached);
-        }
-        let address = reached.located.address;
-        let unreached = match answers(address) {
-            Err(error) => format!(
-                "controller `{name}` didn't answer SSH at {address}, where it was last found: \
-                 {error}"
-            ),
-            Ok(()) => match reached.open(&lock, 0, OPENINGS)? {
-                Opened::Open => return Ok(reached),
-                Opened::Unreached(error) => error,
-                // Found again all the same, so that `found` names the instance there now, as when
-                // the controller was made anew.
-                Opened::HostKeyChanged(error) => {
-                    let again = find(region, name).and_then(|located| lock.keep(located));
-                    return Err(match again {
-                        Ok(_) => error,
-                        Err(again) => format!("{error}; finding it again: {again}"),
-                    });
+    }
+
+    fn host_refused(&self, said: &str) -> String {
+        let hosts = self.kept.join("known_hosts");
+        format!(
+            "{said}: verify the host key for controller `{}` with its administrator. If its key changed as expected, unpin the old key: ssh-keygen -R {} -f {}",
+            self.name,
+            self.alias,
+            next::quoted(&hosts.to_string_lossy())
+        )
+    }
+
+    fn repair(&self, previous: &Found, denied: bool, said: &str) -> Result<(Found, bool), String> {
+        let mut enrolled = false;
+        let found = self.location.repair(&self.name, Some(previous), || {
+            let probe = aws::answers(previous.at.address);
+            let at = find(&self.region, &self.name).map_err(|error| match probe {
+                Ok(()) => format!("{said}; finding the controller again: {error}"),
+                Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
+            })?;
+            if denied && at.instance == previous.at.instance && at.address == previous.at.address {
+                let _enrol = self.enrolling()?;
+                let mut probe = self.ssh(&at, "true");
+                if bounded(&mut probe, "ssh", SHORT_TIMEOUT).is_err() {
+                    say(format_args!(
+                        "enrolling this machine's key, {}, with controller `{}`",
+                        self.kept.join("key.pub").display(),
+                        self.name
+                    ));
+                    self.push(&at)?;
+                    self.enrol(&at)?;
                 }
-            },
-        };
-        // Stopped, or made anew: found again, so that a start, or a push of the key, goes to the
-        // instance it is now.
-        let again = find(region, name).and_then(|located| {
-            reached.located = lock.keep(located)?;
-            reached.open_first(&lock)
-        });
-        again.map_err(|error| format!("{unreached}; finding it again: {error}"))?;
-        Ok(reached)
+                enrolled = true;
+            }
+            Ok(at)
+        })?;
+        Ok((found, enrolled))
+    }
+
+    fn ssh_command() -> Command {
+        stdx::process::command("ssh", Environment::Only(&["HOME", "PATH"]))
+    }
+
+    fn remote(&self, ssh: &mut Command, at: &Located, remote: &str) {
+        ssh.args(self.ssh_options())
+            .arg(format!("{USER}@{}", at.address))
+            .arg(remote);
+    }
+
+    fn ssh(&self, at: &Located, remote: &str) -> Command {
+        let mut ssh = Self::ssh_command();
+        self.remote(&mut ssh, at, remote);
+        ssh
+    }
+
+    fn ssh_options(&self) -> Vec<String> {
+        let mut words = vec!["-F".to_owned(), "/dev/null".to_owned(), "-i".to_owned()];
+        words.push(self.kept.join("key").display().to_string());
+        let known_hosts = self.kept.join("known_hosts").display().to_string();
+        words.extend([
+            "-o".to_owned(),
+            format!("UserKnownHostsFile={known_hosts}"),
+            "-o".to_owned(),
+            // By the controller's name, rather than the instance that the tag finds, so that the
+            // tag that names the controller can't lead this machine's key to another instance.
+            format!("HostKeyAlias={}", self.alias),
+        ]);
+        let options = [
+            "IdentitiesOnly=yes",
+            "BatchMode=yes",
+            "StrictHostKeyChecking=accept-new",
+            "LogLevel=ERROR",
+            "Compression=no",
+            // So that a connection whose other end is gone, as when this machine slept, ends within
+            // minutes, rather than when TCP gives up.
+            "ServerAliveInterval=30",
+        ];
+        for option in options {
+            words.extend(["-o".to_owned(), option.to_owned()]);
+        }
+        words.extend([
+            "-o".to_owned(),
+            format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()),
+        ]);
+        words
     }
 }
 
@@ -489,315 +275,5 @@ fn finished(
             timeout.as_secs()
         )),
         Err(error) => Err(format!("`{shown}` didn't run: {error}: install it on PATH")),
-    }
-}
-
-impl Reached {
-    fn slot(&self) -> Result<Slot, String> {
-        self.slot_apart(&BTreeSet::new())
-    }
-
-    /// Takes a session over a connection that isn't in `held`, so as to run beside the sessions
-    /// of those, opening a connection if none is open and waiting while every one is held. When
-    /// no such connection can be had, it takes a session over any.
-    fn slot_apart(&self, held: &BTreeSet<usize>) -> Result<Slot, String> {
-        // Made once if the held go on instead, rather than wait out the pauses.
-        let openings = if held.is_empty() {
-            OPENINGS
-        } else {
-            NonZeroU32::MIN
-        };
-        self.slot_opening(held, openings)
-    }
-
-    /// Takes a session as [`Reached::slot_apart`] does, making an opening that doesn't get
-    /// through up to `openings` times in all.
-    fn slot_opening(&self, held: &BTreeSet<usize>, openings: NonZeroU32) -> Result<Slot, String> {
-        let host = self.host();
-        let mut waiting = None;
-        loop {
-            if let Found::Free(slot) = self.shared.scan(&host, held)? {
-                return Ok(self.waited(slot, waiting));
-            }
-            let lock = self.shared.lock(&self.name)?;
-            match self.shared.scan(&host, held)? {
-                Found::Free(slot) => return Ok(self.waited(slot, waiting)),
-                Found::Closed(master) => {
-                    match self.open(&lock, master, openings) {
-                        Ok(Opened::Open) => {}
-                        Ok(Opened::Unreached(_) | Opened::HostKeyChanged(_)) | Err(_)
-                            if !held.is_empty() =>
-                        {
-                            drop(lock);
-                            say(format_args!(
-                                "connection {master} to controller `{}` can't be opened, as its \
-                                 log says: {}: this goes on over those it holds",
-                                self.name,
-                                self.shared.log(master).display()
-                            ));
-                            return self.slot();
-                        }
-                        Ok(Opened::Unreached(error) | Opened::HostKeyChanged(error))
-                        | Err(error) => {
-                            return Err(error);
-                        }
-                    }
-                    // Held by commands over a master that has ended, which end with it.
-                    if let Some(slot) = self.shared.free(master)? {
-                        return Ok(self.waited(slot, waiting));
-                    }
-                }
-                Found::Held if !held.is_empty() => {
-                    drop(lock);
-                    return self.slot();
-                }
-                Found::Held => {
-                    drop(lock);
-                    if waiting.is_none() {
-                        say(format_args!(
-                            "waiting for a session of controller `{}`: all {SESSIONS} of each of \
-                             its {MASTERS} connections are held",
-                            self.name
-                        ));
-                        waiting = Some(Instant::now());
-                    }
-                    thread::sleep(SESSION_POLL);
-                }
-            }
-        }
-    }
-
-    fn waited(&self, slot: Slot, waiting: Option<Instant>) -> Slot {
-        if let Some(since) = waiting {
-            say(format_args!(
-                "took a session of controller `{}` after waiting {} s",
-                self.name,
-                since.elapsed().as_secs()
-            ));
-        }
-        slot
-    }
-
-    /// Opens connection `master`, enrolling this machine's key with the controller if it refuses
-    /// it, or says that the controller may no longer be where it was found. An opening that
-    /// doesn't get through is made up to `attempts` times in all, as `OPENINGS` says. The `_lock`
-    /// is the one that serialises this.
-    fn open(&self, _lock: &Lock, master: usize, attempts: NonZeroU32) -> Result<Opened, String> {
-        // Whether the key was pushed, and whether no opening has failed to get through since, so
-        // that a refusal now is one of the key that the controller was sent.
-        let (mut pushed, mut just_pushed) = (false, false);
-        // This machine's lock of enrolling, held from the first refusal until this returns.
-        let (mut enrolling, mut attempt) = (None, 1);
-        loop {
-            match self.master(master)? {
-                Master::Open if pushed => return self.enrol(master).map(|()| Opened::Open),
-                Master::Open => return Ok(Opened::Open),
-                Master::HostKeyChanged => {
-                    return Ok(Opened::HostKeyChanged(self.host_key_changed(master)));
-                }
-                Master::Unenrolled(error) if just_pushed => return Err(error),
-                // Opened again first under the lock, as the key may have just been enrolled, as
-                // `ssh-copy-id` tries a key before it installs it:
-                // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/contrib/ssh-copy-id#L231-L247
-                Master::Unenrolled(_) if enrolling.is_none() => {
-                    enrolling = Some(self.enrolling()?);
-                }
-                Master::Unenrolled(_) => {
-                    if !pushed {
-                        say(format_args!(
-                            "enrolling this machine's key, {}, with controller `{}`",
-                            self.kept.join("key.pub").display(),
-                            self.name
-                        ));
-                    }
-                    self.push()?;
-                    (pushed, just_pushed) = (true, true);
-                }
-                // Not opened again, as that would only wait out `ConnectTimeout` again.
-                Master::Unconnected(error) => return Ok(Opened::Unreached(error)),
-                Master::Unreached { error, said: _ } if attempt >= attempts.get() => {
-                    return Ok(Opened::Unreached(error));
-                }
-                // Pushed again if refused next, as a push lasts a minute, which a boot may outlast.
-                Master::Unreached { error: _, said } => {
-                    just_pushed = false;
-                    let pause = Duration::from_secs(2_u64.pow(attempt - 1) - 1);
-                    let pause = pause.min(REOPEN_PAUSE_MAX);
-                    attempt += 1;
-                    say(format_args!(
-                        "connection {master} to controller `{}` didn't get through, as `ssh` \
-                         said: {said}: opening it again {}, attempt {attempt} of {attempts}",
-                        self.name,
-                        when(pause)
-                    ));
-                    thread::sleep(pause);
-                }
-            }
-        }
-    }
-
-    /// Opens connection 0 as [`Reached::open`] does, or fails.
-    fn open_first(&self, lock: &Lock) -> Result<(), String> {
-        match self.open(lock, 0, OPENINGS)? {
-            Opened::Open => Ok(()),
-            Opened::Unreached(error) | Opened::HostKeyChanged(error) => Err(error),
-        }
-    }
-
-    fn host_key_changed(&self, master: usize) -> String {
-        let known_hosts = self.kept.join("known_hosts");
-        format!(
-            "controller `{}` showed a host key other than the one {} pins for it as `{}`, as its \
-             log, {}, says: unless it was made anew since, ask its administrator why before \
-             connecting again; if it was, unpin the old key, and the next command pins the new \
-             one: ssh-keygen -R {} -f {}",
-            self.name,
-            known_hosts.display(),
-            self.alias,
-            self.shared.log(master).display(),
-            self.alias,
-            next::quoted(&known_hosts.to_string_lossy())
-        )
-    }
-
-    /// Starts connection `master`, which `ssh` leaves in the background once it has authenticated,
-    /// until it has had no session for `PERSIST`. If it doesn't start, says whether the controller
-    /// refused the key or the host key, as its log says, or, if `ssh` failed itself, whether it
-    /// connected at all, and otherwise fails.
-    fn master(&self, master: usize) -> Result<Master, String> {
-        // The last master's log goes as this one opens.
-        let log = self.shared.log(master);
-        private(&log)?.set_len(0).context(log.display())?;
-        let mut ssh = self.shared.command("ssh");
-        // Before the options, as `ssh` takes the first value it is given of each: its log, at the
-        // level that says why a connection ends, as when the server stops answering.
-        let named = format!("{master}.log");
-        ssh.args(["-E", &named, "-o", "LogLevel=INFO"]);
-        ssh.args(self.ssh_options(master));
-        let persist = format!("ControlPersist={}", PERSIST.as_secs());
-        // `auto` rather than `yes`, so that `ssh` removes a socket that a killed master left, which
-        // would keep it from listening, and leave it a connection of its own that never returns.
-        ssh.args(["-N", "-o", "ControlMaster=auto", "-o", &persist]);
-        ssh.arg(self.host());
-        let output = stdx::process::output(&mut ssh, Deadline::after(SHORT_TIMEOUT));
-        let failed =
-            matches!(&output, Ok(Some(output)) if output.status.code() == Some(SSH_FAILED));
-        let Err(error) = finished(output, "ssh", SHORT_TIMEOUT) else {
-            return Ok(Master::Open);
-        };
-        let said = fs::read_to_string(&log).unwrap_or_default();
-        if said.contains("Host key verification failed") {
-            return Ok(Master::HostKeyChanged);
-        }
-        let error = format!(
-            "{error}; its log, {}, says: {}: run it again",
-            log.display(),
-            said.trim()
-        );
-        if said.contains("Permission denied (") {
-            return Ok(Master::Unenrolled(error));
-        }
-        if failed && said.contains("ssh: connect to host ") {
-            return Ok(Master::Unconnected(error));
-        }
-        if failed {
-            let said = said.trim().to_owned();
-            return Ok(Master::Unreached { error, said });
-        }
-        Err(error)
-    }
-
-    /// Runs the session to its end within `timeout` and returns its standard output; an error says
-    /// if the connection it went over has ended.
-    fn call(
-        &self,
-        session: &mut Session,
-        input: Option<&[u8]>,
-        shown: &str,
-        timeout: Duration,
-    ) -> Result<Vec<u8>, String> {
-        let output = session.output(input, Deadline::after(timeout));
-        let master = session.slot.master;
-        finished(output, shown, timeout).map_err(|error| self.lost(master, error))
-    }
-
-    /// Whether a call whose connection ended goes on again: after attempt `attempt` in a row,
-    /// counted from 0 since the call last made progress, it says where the connection's log is and
-    /// `what` it does again, and waits `AGAIN`'s pause. False once the pauses have run out.
-    fn pause(&self, attempt: usize, master: usize, what: &str) -> bool {
-        let Some(pause) = AGAIN.get(attempt) else {
-            return false;
-        };
-        say(format_args!(
-            "the connection to controller `{}` ended, as its log says: {}: {what}, {}, attempt {} \
-             of {}",
-            self.name,
-            self.shared.log(master).display(),
-            when(*pause),
-            attempt + 2,
-            AGAIN.len() + 1
-        ));
-        thread::sleep(*pause);
-        true
-    }
-
-    /// `error`, with where the log of connection `master` is if the connection has ended, which
-    /// says why.
-    fn lost(&self, master: usize, error: String) -> String {
-        if self.shared.answers(master, &self.host()) {
-            return error;
-        }
-        format!(
-            "{error}; the connection it went over has ended, as its log says: {}",
-            self.shared.log(master).display()
-        )
-    }
-
-    fn ssh_options(&self, master: usize) -> Vec<String> {
-        let mut words = vec!["-F".to_owned(), "/dev/null".to_owned(), "-i".to_owned()];
-        words.push(self.kept.join("key").display().to_string());
-        let known_hosts = self.kept.join("known_hosts").display().to_string();
-        words.extend([
-            "-o".to_owned(),
-            format!("UserKnownHostsFile={known_hosts}"),
-            "-o".to_owned(),
-            // By the controller's name, rather than the instance that the tag finds, so that the
-            // tag that names the controller can't lead this machine's key to another instance.
-            format!("HostKeyAlias={}", self.alias),
-        ]);
-        let options = [
-            "IdentitiesOnly=yes",
-            "BatchMode=yes",
-            "StrictHostKeyChecking=accept-new",
-            "LogLevel=ERROR",
-            // So that a connection whose other end is gone, as when this machine slept, ends within
-            // minutes, rather than when TCP gives up.
-            "ServerAliveInterval=30",
-        ];
-        for option in options {
-            words.extend(["-o".to_owned(), option.to_owned()]);
-        }
-        words.extend([
-            "-o".to_owned(),
-            format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()),
-            "-o".to_owned(),
-            format!("ControlPath={master}"),
-        ]);
-        words
-    }
-
-    fn host(&self) -> String {
-        format!("{USER}@{}", self.located.address)
-    }
-
-    fn ssh(&self, script: &str) -> Result<Session, String> {
-        Ok(self.session(script, self.slot()?))
-    }
-
-    fn session(&self, script: &str, slot: Slot) -> Session {
-        let mut command = self.shared.command("ssh");
-        let options = self.ssh_options(slot.master);
-        command.args(options).arg(self.host()).arg(script);
-        Session { command, slot }
     }
 }

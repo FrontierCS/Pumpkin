@@ -20,7 +20,7 @@ text{font:12.5px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;f
 <defs><marker id="head" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M0 0L8 4L0 8z"/></marker>
 <marker id="tail" viewBox="0 0 8 8" refX="0" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path class="head" d="M8 0L0 4L8 8z"/></marker></defs>
 <rect class="bg" width="880" height="700"/>
-<text class="note" x="440" y="36" text-anchor="middle">over ssh, on the connections that the workspace's commands share</text>
+<text class="note" x="440" y="36" text-anchor="middle">one SSH connection per command</text>
 <rect class="zone" x="16" y="56" width="260" height="624" rx="12"/>
 <text class="zone-label" x="30" y="76">THE OPERATOR'S MACHINE</text>
 <rect class="box" x="32" y="100" width="228" height="276" rx="8"/>

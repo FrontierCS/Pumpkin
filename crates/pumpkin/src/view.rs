@@ -85,7 +85,7 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     {
         let viewing = Viewing::reach(&client)?;
         let serving = format!("controller `{}`'s runs", viewing.name());
-        (Source::Controller(viewing), serving)
+        (Source::Controller(Box::new(viewing)), serving)
     } else {
         let (runs, named) = crate::runs_dir(runs)?;
         let serving = format!("the runs in {runs}");
@@ -165,7 +165,7 @@ enum Source {
     /// found by default.
     Here { view: View, runs_given: String },
     /// The controller's runs, which its `serve` answers requests for.
-    Controller(Viewing),
+    Controller(Box<Viewing>),
 }
 
 /// The runs of one directory, as the view reads them.

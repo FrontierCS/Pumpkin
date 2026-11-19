@@ -32,7 +32,7 @@ pub(crate) fn scratch() -> Result<TempDir, String> {
 /// they have ended, with the copies here of the runs that the controller lacks. Fails, after
 /// listing the rest, if a run can't be listed.
 pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCode, String> {
-    let reached = Reached::reach(&client.controller)?;
+    let mut reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
     let since = crate::progress::listed_since(prefixes, now);
     let Answers {
@@ -40,7 +40,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         mut listing,
         unlisted,
         asked,
-    } = answered(&reached, prefixes)?;
+    } = answered(&mut reached, prefixes)?;
     let runs = PathBuf::from(crate::default_runs()?);
     let (here, unlisted_here) = crate::listed_in(&runs, prefixes, since, now, None)?;
     // The controller's word on a run wins over a copy's.
@@ -66,15 +66,16 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
 }
 
 /// What the controller's `serve` answers, as [`Reached::asked`] asks it.
-fn answered(reached: &Reached, prefixes: &[String]) -> Result<Answers, String> {
+fn answered(reached: &mut Reached, prefixes: &[String]) -> Result<Answers, String> {
     let build = Build::of_this("expected to send it to the controller, to list the runs there")?;
-    let (health, listed, asked) = reached.asked(&build, "listing the runs", |linked| {
-        let health = linked.ask(reached, HealthRequest {})?;
-        let asked = crate::unix_now();
-        let prefixes = prefixes.to_vec();
-        let listed = linked.ask(reached, ListRequest { prefixes })?;
-        Ok((health, listed, asked))
-    })?;
+    let (health, listed, asked) =
+        reached.asked(&build, "listing the runs", |reached, linked| {
+            let health = linked.ask(reached, HealthRequest {})?;
+            let asked = crate::unix_now();
+            let prefixes = prefixes.to_vec();
+            let listed = linked.ask(reached, ListRequest { prefixes })?;
+            Ok((health, listed, asked))
+        })?;
     answers(&reached.name, health, listed, asked)
 }
 

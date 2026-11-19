@@ -300,8 +300,8 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
     Ok(())
 }
 
-/// Kills the unit of job `id` on the controller that `settings` name, over the shared connection
-/// that `./pumpkin` in `repo` opened there, so that its run is lost.
+/// Kills the unit of job `id` on the controller to leave a lost run, with the client's key and
+/// pinned host key for that controller.
 fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result<()> {
     let shared = repo
         .join(".pumpkin/controller")
@@ -314,11 +314,30 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
     };
     let host = format!("pumpkin@{address}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
-    // `ControlPath=0` is the client's own ssh connection to the controller: a socket in `shared`,
-    // which is why the command runs there.
-    let _dir = cargo.sh.push_dir(&shared);
-    let ssh = cargo.sh.cmd("ssh");
-    ssh.args(["-F", "/dev/null", "-o", "ControlPath=0", &host, &kill])
+    let home =
+        std::env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
+    let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
+    let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
+    let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
+    cargo
+        .sh
+        .cmd("ssh")
+        .args(["-F", "/dev/null", "-i"])
+        .arg(kept.join("key"))
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            &known_hosts,
+            "-o",
+            &alias,
+            &host,
+            &kill,
+        ])
         .run()?;
     Ok(())
 }

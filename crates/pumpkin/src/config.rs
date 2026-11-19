@@ -55,9 +55,18 @@ struct Tables {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Controller {
+    #[serde(default)]
+    pub(crate) address: Address,
     pub(crate) name: crate::controller::Name,
     pub(crate) region: aws::Region,
     pub(crate) modal: Option<ClientModal>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Address {
+    #[default]
+    Private,
 }
 
 /// The Modal provider of a client's jobs. A job completes it with `images`, which the

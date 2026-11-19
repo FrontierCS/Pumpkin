@@ -393,9 +393,9 @@ machine's configuration (`Config`, or `Client` for a machine whose runs go to a 
 reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
 starts the driver process. `run` starts a run and drives it in that process, `ending` follows a run
 and says how it ended, and `reaping` stops runs and removes what they left. `controller` reaches
-the controller, which its `aws` finds, starts and enrols this machine's key with, over the
-connections that a workspace's commands share (`Reached`); over them its `send` sends a run's or a
-build's job, its `copy` receives an ended record file by file, with `record.json` last, its
+the controller, which its `aws` finds, starts and enrols this machine's key with, over a direct SSH
+connection a command keeps for its requests (`Reached`). The workspace saves its address and
+serialises repairs. Its `send` sends a run's or a build's job, its `copy` receives an ended record file by file, with `record.json` last, its
 `listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
 client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
