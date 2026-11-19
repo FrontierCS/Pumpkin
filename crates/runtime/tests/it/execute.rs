@@ -2344,6 +2344,66 @@ fn torn_down_past_the_hard_end() {
     );
 }
 
+#[test]
+fn model_request_after_abandon() {
+    let mut ir = short_workflow(&["ops", "call submit 6 finalize=true"], 2);
+    ir["roles"][2]["runtime"]["target"]["egress"] = route();
+    ir["final"]["body"]["def"] = json!("routed");
+    ir["final"]["keywords"] = json!({ "argv": ["ops", "model m-small 7", "result"] });
+    // The loop waits for the agent's remaining arrivals and the start of the final call.
+    let waited = LateTake {
+        behind: 0,
+        at: Duration::ZERO,
+        then: 3,
+    };
+    // Its sandbox was created on time, but the record holds its start past the hard end.
+    let late = SlowSync {
+        record: Synced::Holding("jobs/0/.sandbox.json.partial", "sim-2"),
+        queued: 0,
+        at: PAST_THE_HARD_END,
+    };
+    // The call reports its command and model request while the loop syncs its abandon.
+    let requested = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""kind":"abandon""#),
+        queued: 2,
+        at: PAST_THE_HARD_END,
+    };
+    let host = SimHost::new()
+        .late_take(waited)
+        .slow_sync(late)
+        .slow_sync(requested);
+    check(
+        &host,
+        "model-request-after-abandon",
+        &[(PROVIDER, &Sim::with_startup(SHORT_STARTUP))],
+        &ir,
+        SANDBOXD,
+        &expect![[r#"
+            failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
+            payloads hold: ["xxxxxx"]
+            provider.json routes: {"final_judge":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
+            log.jsonl:
+            {"actions":[{"kind":"start_agent"}],"at_ns":"0","event":{"hard_end_ns":"6000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_started"},"observed_ns":"0","seq":1}
+            {"actions":[{"kind":"reply","reply":{"kind":"call","remaining_seconds":0,"returned":{"state":"accepted"}}},{"kind":"tear_down_agent"},{"job":0,"kind":"start_final_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"0","event":{"caller":"agent","kind":"op_arrived","op":0,"request":{"evaluated":{"effects":["select","end_work"],"returned":[{"name":"state","value":"accepted"}]},"grant":"submit","kind":"now","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":2}
+            {"at_ns":"0","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":3}
+            {"actions":[],"at_ns":"0","event":{"kind":"agent_collected"},"seq":4}
+            {"actions":[],"at_ns":"0","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":5}
+            {"actions":[{"kind":"abandon"}],"at_ns":"6500000000","event":{"kind":"tick"},"observed_ns":"6500000000","seq":6}
+            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_started"},"observed_ns":"6500000000","seq":7}
+            {"actions":[],"at_ns":"6500000000","event":{"argv":["ops","model m-small 7","result"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"6500000000","seq":8}
+            {"at_ns":"6500000000","note":"model request 0 wasn't answered: the run has ended","seq":9}
+            {"at_ns":"6500000000","note":"freezing job 0's target failed: the request's deadline passed before it was sent: expected time left to send it","seq":10}
+            {"at_ns":"6500000000","note":"job 0's log/0 is incomplete: collecting /pumpkin/log/0 failed: the request's deadline passed before it was sent: expected time left to send it","seq":11}
+            {"at_ns":"6500000000","note":"job 0's out is incomplete: collecting /pumpkin/out failed: the request's deadline passed before it was sent: expected time left to send it","seq":12}
+            {"actions":[],"at_ns":"6500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":13}
+            {"actions":[],"at_ns":"6500000000","event":{"job":0,"kind":"call_failed","reason":"the call was stopped"},"observed_ns":"6500000000","seq":14}
+            {"at_ns":"6500000000","note":"the run failed: the run was still going at its hard end, 6 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups","seq":15}
+            its last record came once the hard end had passed
+            the model endpoint at each create: [false, true]"#]],
+    );
+}
+
 // The agent checks that the `ops` after its 1 s sleep leaves at least 1 s less than the one
 // before, however long it took to start.
 #[test]
