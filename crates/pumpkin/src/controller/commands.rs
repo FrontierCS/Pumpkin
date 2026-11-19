@@ -125,17 +125,7 @@ fn follow(
 ) -> Result<ExitCode, String> {
     let name = &reached.name;
     match follow::job(reached, build, id)? {
-        Finished::Ran { writer: None } => said_here(reached, id, config, printed),
-        Finished::Ran {
-            writer: Some(build),
-        } => {
-            reached.copy(id)?;
-            let copy = PathBuf::from(crate::default_runs()?).join(id);
-            Err(format!(
-                "copied run {id}'s record to {}; it was made by pumpkin {build}: read it with that build",
-                copy.display()
-            ))
-        }
+        Finished::Ran { writer } => said_here(reached, build, id, writer, config, printed),
         Finished::Unstarted => Err(format!(
             "run {id}'s job on controller `{name}` ended before the run started, as its log \
              says above: once that is fixed, run the task again as it was sent; to see that log \
@@ -153,13 +143,21 @@ fn follow(
 /// here.
 fn said_here(
     reached: &Reached,
+    build: &Build,
     id: &str,
+    writer: Option<String>,
     config: Option<&str>,
     printed: Printed,
 ) -> Result<ExitCode, String> {
-    reached.copy(id)?;
-    let runs = PathBuf::from(crate::default_runs()?);
-    let record = runtime::Record::open(&runs.join(id))?;
+    let writer = reached.copy(build, id)?.or(writer);
+    let dir = PathBuf::from(crate::default_runs()?).join(id);
+    if let Some(writer) = writer {
+        return Err(format!(
+            "copied run {id}'s record to {}; it was made by pumpkin {writer}: read it with that build",
+            dir.display()
+        ));
+    }
+    let record = runtime::Record::open(&dir)?;
     let Some(ending) = record.ending()? else {
         return Err(format!(
             "run {id}'s copy, {}, reads as live, though its run has ended: wait for what holds \
@@ -261,7 +259,7 @@ fn with_modal(
 /// started is stopped and removed.
 pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
     let reached = Reached::reach(&client.controller)?;
-    let (_, id) = job_id(&reached, run)?;
+    let (build, id) = job_id(&reached, run)?;
     let force = if force { " --force" } else { "" };
     let (script, modal) = with_modal(client, |flag| {
         format!(
@@ -289,11 +287,11 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
         // `cancel`'s exit says only that the run has ended, however that was, and whether what it
         // left on its provider is gone, as a local one's does.
         code if code == i32::from(crate::job::ENDED) => {
-            said_here(&reached, &id, None, Printed::Nothing)?;
+            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
             Ok(ExitCode::SUCCESS)
         }
         code if code == i32::from(crate::job::ENDED_UNREACHED) => {
-            said_here(&reached, &id, None, Printed::Nothing)?;
+            said_here(&reached, &build, &id, None, None, Printed::Nothing)?;
             crate::advise(
                 "remove what it left once its provider can be reached",
                 &next::reap(None),
@@ -301,7 +299,7 @@ pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<
             Ok(ExitCode::from(crate::UNREACHED))
         }
         code => {
-            reached.copy(&id)?;
+            reached.copy(&build, &id)?;
             Ok(exit(code))
         }
     }

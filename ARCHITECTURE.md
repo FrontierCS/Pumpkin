@@ -395,8 +395,8 @@ starts the driver process. `run` starts a run and drives it in that process, `en
 and says how it ended, and `reaping` stops runs and removes what they left. `controller` reaches
 the controller, which its `aws` finds, starts and enrols this machine's key with, over the
 connections that a workspace's commands share (`Reached`); over them its `send` sends a run's or a
-build's job, its `copy` copies an ended run's record back, its `listing` lists the runs there for
-`ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
+build's job, its `copy` receives an ended record file by file, with `record.json` last, its
+`listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
 client's `Link` to `serve`, the controller's end, which starts jobs, answers `ls` and `view`, lists the jobs
 that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,

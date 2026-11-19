@@ -850,22 +850,6 @@ impl Reached {
         words
     }
 
-    /// An `ssh` command that opens a shell on the controller, for a person to run.
-    fn shell(&self) -> String {
-        let key = self.kept.join("key");
-        let known_hosts = format!(
-            "UserKnownHostsFile={}",
-            self.kept.join("known_hosts").display()
-        );
-        format!(
-            "ssh -i {} -o {} -o HostKeyAlias={} {}",
-            next::quoted(&key.to_string_lossy()),
-            next::quoted(&known_hosts),
-            self.alias,
-            self.host()
-        )
-    }
-
     fn host(&self) -> String {
         format!("{USER}@{}", self.located.address)
     }

@@ -9,6 +9,7 @@
 //! the protocol, which it refuses and exits 1. It marks its install as used again as each request
 //! arrives, so that a `serve` kept for days by an open page keeps its install.
 
+mod copy;
 mod follow;
 
 use std::ffi::OsStr;
@@ -204,6 +205,7 @@ fn answer(
     view: &mut Answering,
 ) -> io::Result<()> {
     match ask {
+        Ask::Copy(request) => copy::answer(output, home, request, body),
         Ask::Start(request) => link::answer(output, request, |request| {
             let (start, credentials) = request.decode(body)?;
             crate::job::start(home, start, credentials)
