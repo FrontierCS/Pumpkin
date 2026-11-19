@@ -62,7 +62,7 @@ struct State {
 
 /// Where a controller was found: its instance, and the private address at which its `sshd`
 /// answered.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub(super) struct Located {
     pub(super) instance: String,
     pub(super) address: IpAddr,

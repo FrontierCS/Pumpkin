@@ -1,9 +1,11 @@
-//! One SSH connection to this build's `serve`. A command keeps it for all its requests.
+//! Direct SSH connections to this build's `serve`. A command keeps its first for its requests.
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
+use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
-use std::{fs, thread};
 
 use schema::ir::Sha256Digest;
 use stdx::{Context as _, Deadline};
@@ -26,8 +28,8 @@ const BESIDE: [&str; 5] = [
 /// its executable, and whichever of `BESIDE` lie beside it, as they are, so that a `pumpkin` run
 /// from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
+    files: Vec<(&'static str, PathBuf)>,
     pub(super) hashed: manifest::Hashed,
-    key: Sha256Digest,
 }
 
 impl Build {
@@ -42,9 +44,9 @@ impl Build {
             }
         }
         let mut entries = Vec::new();
-        let mut sources = std::collections::BTreeMap::new();
-        for (name, path) in files {
-            let (digest, size_bytes) = manifest::file_sha256(&path)?;
+        let mut sources = BTreeMap::new();
+        for &(name, ref path) in &files {
+            let (digest, size_bytes) = manifest::file_sha256(path)?;
             let kind = match name {
                 "pumpkin-modal.py" | "pumpkin-modal.py.lock" => manifest::Kind::File,
                 _ => manifest::Kind::Executable,
@@ -55,17 +57,18 @@ impl Build {
                 size_bytes,
                 path: name.to_owned(),
             });
-            sources.insert(digest, manifest::Source::File(path));
+            sources.insert(digest, manifest::Source::File(path.clone()));
         }
+        files.sort_unstable_by_key(|&(name, _)| name);
         let manifest = manifest::Manifest::new(entries);
-        let key = manifest.name();
         let hashed = manifest::Hashed { manifest, sources };
-        Ok(Self { hashed, key })
+        Ok(Self { files, hashed })
     }
 }
 
 pub(super) enum Unlinked {
     Cut { said: String, denied: bool },
+    HostKey(String),
     Failed(String),
 }
 
@@ -83,17 +86,18 @@ pub(super) struct Linked {
 
 impl Linked {
     pub(super) fn open(reached: &Reached, build: &Build, at: &Located) -> Result<Self, Unlinked> {
-        if let Some(linked) = Self::connect(reached, build, at)? {
+        let key = build.hashed.manifest.name();
+        if let Some(linked) = Self::connect(reached, &key, at)? {
             return Ok(linked);
         }
         install(reached, build, at)?;
-        Self::connect(reached, build, at)?.ok_or_else(|| {
+        Self::connect(reached, &key, at)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
                  there, in `~/{}/{}`: see that its user may run it, and run the command again",
                 reached.name,
                 link::installs(),
-                build.key.hex()
+                key.hex()
             ))
         })
     }
@@ -113,7 +117,10 @@ impl Linked {
         request: R,
         body: &[u8],
     ) -> Result<Result<R::Answer, String>, Unlinked> {
-        self.stream(reached, |link| link.ask(request, body))
+        self.stream(reached, |link| {
+            link.send(&request.ask(), body)?;
+            link.answer::<R>()
+        })
     }
 
     pub(super) fn stream<T>(
@@ -124,11 +131,15 @@ impl Linked {
         read(&mut self.link).map_err(|error| unlinked(reached, &self.diagnostics, error))
     }
 
-    fn connect(reached: &Reached, build: &Build, at: &Located) -> Result<Option<Self>, Unlinked> {
+    fn connect(
+        reached: &Reached,
+        key: &Sha256Digest,
+        at: &Located,
+    ) -> Result<Option<Self>, Unlinked> {
         let diagnostics = reached.location.diagnostics()?;
         let mut ssh = Reached::ssh_command();
         ssh.arg("-E").arg(diagnostics.path());
-        reached.remote(&mut ssh, at, &link::command(&build.key));
+        reached.remote(&mut ssh, at, &link::command(key));
         match Link::open(ssh) {
             Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
             Err(error) => Err(unlinked(reached, &diagnostics, error)),
@@ -140,13 +151,26 @@ impl Reached {
     fn connected(&self, build: &Build, mut found: Found) -> Result<(Linked, Found), String> {
         let mut repaired = false;
         let mut enrolled = false;
-        for attempt in 0..OPENINGS {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
             let (said, denied) = match Linked::open(self, build, &found.at) {
                 Ok(link) => return Ok((link, found)),
                 Err(Unlinked::Failed(error)) => return Err(error),
+                Err(Unlinked::HostKey(error)) => {
+                    if !repaired && attempt < OPENINGS {
+                        // The cached address may now belong to a different host. Check the pin
+                        // against the discovered address before reporting a change there.
+                        (found, _) = self.repair(&found, false, &error)?;
+                        repaired = true;
+                        continue;
+                    }
+                    self.location.failed(&self.name, &found, &error)?;
+                    return Err(error);
+                }
                 Err(Unlinked::Cut { said, denied }) => (said, denied),
             };
-            if attempt + 1 == OPENINGS || denied && enrolled {
+            if attempt == OPENINGS || denied && enrolled {
                 let hosts = self.kept.join("known_hosts");
                 let error = format!(
                     "{said}: check SSH access to the controller and the host key pinned for `{}` in {}, then run the command again",
@@ -156,20 +180,20 @@ impl Reached {
                 self.location.failed(&self.name, &found, &error)?;
                 return Err(error);
             }
-            if denied || !repaired && attempt > 0 {
-                found = self.repair(&found, denied, &said)?;
+            if denied || !repaired && attempt > 1 {
+                let (next, tried) = self.repair(&found, denied, &said)?;
+                found = next;
                 repaired = true;
-                enrolled |= denied;
+                enrolled |= tried;
             }
-            let pause = Duration::from_secs(((1_u64 << attempt) - 1).min(30));
+            let pause = Duration::from_secs(((1_u64 << (attempt - 1)) - 1).min(30));
             say(format_args!(
                 "{said}: opening it again {}, attempt {} of {OPENINGS}",
                 when(pause),
-                attempt + 2
+                attempt + 1
             ));
             thread::sleep(pause);
         }
-        unreachable!("the last opening returns above")
     }
 
     /// Opens the first link of a command, starting the controller if its opening needs repair.
@@ -185,15 +209,20 @@ impl Reached {
         what: &str,
         mut ask: impl FnMut(&Self, &mut Linked) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
-        self.carrying_on(build, what, |reached, linked, _| ask(reached, linked))
+        self.carrying_on(build, what, |reached, linked, _, _| ask(reached, linked))
     }
 
-    /// As [`Self::asked`], with the pauses starting over each time `ask` reports progress.
+    /// As [`Self::asked`], with each attempt opening its link and reporting its progress.
     pub(super) fn carrying_on<T>(
         &mut self,
         build: &Build,
         what: &str,
-        mut ask: impl FnMut(&Self, &mut Linked, &mut dyn FnMut()) -> Result<T, Unlinked>,
+        mut ask: impl FnMut(
+            &Self,
+            &mut Linked,
+            &Located,
+            &mut (dyn FnMut() + Send),
+        ) -> Result<T, Unlinked>,
     ) -> Result<T, String> {
         let mut attempt = 0;
         loop {
@@ -201,13 +230,13 @@ impl Reached {
                 Some(link) => link,
                 None => self.opening(build)?,
             };
-            let error = match ask(self, &mut linked, &mut || attempt = 0) {
+            let error = match ask(self, &mut linked, &found.at, &mut || attempt = 0) {
                 Ok(answer) => {
                     self.linked = Some((linked, found));
                     return Ok(answer);
                 }
                 Err(Unlinked::Cut { said, .. }) => said,
-                Err(Unlinked::Failed(error)) => return Err(error),
+                Err(Unlinked::HostKey(error) | Unlinked::Failed(error)) => return Err(error),
             };
             drop(linked);
             let Some(pause) = AGAIN.get(attempt) else {
@@ -237,13 +266,18 @@ fn unlinked(
     match error {
         Unanswered::Unreached(ended) => {
             let line = last_line(diagnostics);
+            // OpenSSH's fatal when the server's host key cannot be verified.
+            // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
+            let host_refused = line.as_deref() == Some("Host key verification failed.");
             let denied = line
                 .as_ref()
                 .is_some_and(|line| line.contains("Permission denied ("));
             let said = line.map_or(ended, |line| format!("ssh says: {line}"));
-            Unlinked::Cut {
-                said: format!("controller `{name}` didn't answer: {said}"),
-                denied,
+            let said = format!("controller `{name}` didn't answer: {said}");
+            if host_refused {
+                Unlinked::HostKey(reached.host_refused(&said))
+            } else {
+                Unlinked::Cut { said, denied }
             }
         }
         Unanswered::Failed(error) => {
@@ -273,23 +307,7 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
     say(format_args!(
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
-    // The files are dropped once in the archive, so that the upload holds one copy of them.
-    let archive = {
-        let read = build
-            .hashed
-            .manifest
-            .entries()
-            .iter()
-            .map(|entry| {
-                let Some(manifest::Source::File(path)) = build.hashed.sources.get(&entry.digest)
-                else {
-                    unreachable!("each install entry was hashed from a file")
-                };
-                Ok((entry.path.clone(), fs::read(path).context(path.display())?))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        manifest::archive(&read)
-    };
+    let archive = manifest::archive(&build.files)?;
     let diagnostics = reached.location.diagnostics()?;
     let mut ssh = Reached::ssh_command();
     ssh.arg("-E").arg(diagnostics.path());

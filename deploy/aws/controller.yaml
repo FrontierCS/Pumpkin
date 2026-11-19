@@ -89,27 +89,15 @@ write_files:
 
       [Install]
       WantedBy=timers.target
-  # Each installed build reaps the records it wrote, even if an earlier build failed.
   - path: /usr/local/bin/pumpkin-boot
     permissions: "0755"
     content: |
-      #!/bin/sh
-      umask 077
-      exec >> "$HOME/boot.log" 2>&1
-      failed=''
-      for pumpkin in "$HOME"/.pumpkin/*/bin/pumpkin; do
-          [ -x "$pumpkin" ] || continue
-          "$pumpkin" controller boot || failed="$failed $pumpkin (exit $?)"
-      done
-      if [ -n "$failed" ]; then
-          printf 'controller boot failed for%s\n' "$failed"
-          exit 1
-      fi
+      ${indent(6, boot_script)}
   - path: /etc/systemd/system/pumpkin-boot.service
     content: |
       [Unit]
       Description=Remove what lost Pumpkin runs left
-      ConditionPathExistsGlob=/home/pumpkin/.pumpkin/*/bin/pumpkin
+      ConditionPathExistsGlob=/home/pumpkin/.pumpkin/*/bin/pumpkin-boot
       Wants=network-online.target
       After=network-online.target docker.service
 

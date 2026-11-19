@@ -323,7 +323,7 @@ Examples:
   pumpkin reap --runs runs
 
 Exit status:
-  0  Nothing that a run which has ended left remains.
+  0  Nothing that the selected runs left remains.
   1  A run can't be reaped, which `reap` says, or another error; it reaps the
      others all the same.
   2  A usage error.
@@ -349,7 +349,9 @@ says, and notes there as gone.
 
 With [controller] in the configuration, and no --runs, `reap` reaps the
 controller's runs made by this build and names the runs left to their own
-builds. It uses this machine's Modal configuration file, which the boot lacks.";
+builds. It uses this machine's Modal configuration file, which the boot lacks.
+If the reply is cut, it reaps again. The printed ids may omit runs already
+cleaned before the cut.";
 
 pub(super) const CONTROLLER_NOTES: &str = "\
 Examples:
@@ -542,9 +544,10 @@ Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file, into a directory of its own in the
 controller's tmpfs, which its end removes. The client uses AWS CLI v2, ssh,
 ssh-keygen and git from PATH. It sends the task's files and starts its job
-over one SSH connection to the controller's private address. The machine
-must have a route there and deploy/aws's `ssh_from` must admit it. The job
-runs the client's install with the module's settings and [controller.modal].
+over SSH to the controller's private address, using up to four connections
+for large task uploads. The machine must have a route there and deploy/aws's
+`ssh_from` must admit it. The job runs the client's install with the module's
+settings and [controller.modal].
 The first command creates a key and enrols it through EC2 Instance Connect.
 The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
   name          The `name` that deploy/aws was applied with.

@@ -476,62 +476,63 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
     faults
 }
 
-type TargetMethod = fn(&mut dyn Target, &Name, &Call<'_>) -> Result<value::Kind, Fault>;
-
-type RunMethod = fn(&mut dyn Run, &Name, &Call<'_>) -> Result<value::Kind, Fault>;
-
-const TARGET_METHODS: [(&str, TargetMethod); 3] = [("get", get), ("put", put), ("run", run)];
-
-const RUN_METHODS: [(&str, RunMethod); 2] = [("end_work", end_work), ("select", select)];
+#[derive(Clone, Copy)]
+pub(crate) enum Method {
+    Target(fn(&mut dyn Target, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
+    Run(fn(&mut dyn Run, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
+}
 
 impl Hosted {
-    /// The names of its methods; else, as it has none, what a refusal of one says to do instead.
-    pub(crate) fn methods(self) -> Result<Vec<&'static str>, &'static str> {
+    pub(crate) fn methods(self) -> Result<&'static [(&'static str, Method)], &'static str> {
         match self {
-            Self::Target => Ok(TARGET_METHODS.iter().map(|(has, _)| *has).collect()),
-            Self::Run => Ok(RUN_METHODS.iter().map(|(has, _)| *has).collect()),
+            Self::Target => Ok(&[
+                ("get", Method::Target(get)),
+                ("put", Method::Target(put)),
+                ("run", Method::Target(run)),
+            ]),
+            Self::Run => Ok(&[
+                ("end_work", Method::Run(end_work)),
+                ("select", Method::Run(select)),
+            ]),
             Self::Payload => Err("pass it to a `Target`'s `put` or a `Run`'s `select`"),
         }
     }
 }
 
-/// What calling its method `name` gives, through the host of the call; `None` if it has no
-/// such method.
-pub(crate) fn method(
-    hosted: Hosted,
-    purpose: &mut Purpose<'_>,
-    name: &Name,
-    call: &Call<'_>,
-) -> Option<Result<Value, Fault>> {
-    let kind = match hosted {
-        Hosted::Target => {
-            let (_, method) = TARGET_METHODS.iter().find(|(has, _)| *has == name.text)?;
-            let Purpose::Call(Host::Job(target) | Host::Final(target)) = purpose else {
-                unreachable!(
-                    "a `Target`'s method is called outside a call of a job's or the final call's \
-                     body, though only such a call makes a `Target`, and the value it is in lives \
-                     no longer than its evaluation"
-                )
-            };
-            method(&mut **target, name, call)
-        }
-        Hosted::Run => {
-            let (_, method) = RUN_METHODS.iter().find(|(has, _)| *has == name.text)?;
-            let Purpose::Call(Host::Now(run)) = purpose else {
-                unreachable!(
-                    "a `Run`'s method is called outside a call of a now function's body, though \
-                     only that call makes a `Run`, and the value it is in lives no longer than its \
-                     evaluation"
-                )
-            };
-            method(&mut **run, name, call)
-        }
-        Hosted::Payload => return None,
-    };
-    Some(kind.map(|kind| Value {
-        kind,
-        span: call.at,
-    }))
+impl Method {
+    pub(crate) fn call(
+        self,
+        purpose: &mut Purpose<'_>,
+        name: &Name,
+        call: &Call<'_>,
+    ) -> Result<Value, Fault> {
+        let kind = match self {
+            Self::Target(method) => {
+                let Purpose::Call(Host::Job(target) | Host::Final(target)) = purpose else {
+                    unreachable!(
+                        "a `Target`'s method is called outside a call of a job's or the final \
+                         call's body, though only such a call makes a `Target`, and the value it \
+                         is in lives no longer than its evaluation"
+                    )
+                };
+                method(&mut **target, name, call)
+            }
+            Self::Run(method) => {
+                let Purpose::Call(Host::Now(run)) = purpose else {
+                    unreachable!(
+                        "a `Run`'s method is called outside a call of a now function's body, \
+                         though only that call makes a `Run`, and the value it is in lives no \
+                         longer than its evaluation"
+                    )
+                };
+                method(&mut **run, name, call)
+            }
+        }?;
+        Ok(Value {
+            kind,
+            span: call.at,
+        })
+    }
 }
 
 fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {

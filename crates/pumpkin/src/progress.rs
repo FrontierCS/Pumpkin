@@ -878,15 +878,11 @@ fn clock(at: Duration) -> String {
 pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     let mut milestones = Vec::new();
     let agent = &progress.agent.sandbox;
-    if let Some(started) = agent.started {
-        milestones.push((started, format!("the agent started on {}", placed(agent))));
-    }
-    // Before the leases and the calls, so that the stable sort keeps it ahead of what follows it
-    // at the same instant: the ends of the leases it closes, then the final call's ask, which
-    // waits for them. Not before the agent's start: an agent that exits at once has its exit
-    // stamped by its session's reader, which may be before the loop stamps the start.
+    let start = agent
+        .started
+        .map(|at| (at, format!("the agent started on {}", placed(agent))));
+    // Ahead of the ends of the leases it closes and the final call's ask at the same instant.
     if let Some(work_end) = progress.work_end {
-        let work_end = work_end.max(agent.started.unwrap_or_default());
         milestones.push((work_end, "the work phase ended".to_owned()));
     }
     for lease in &progress.leases {
@@ -925,7 +921,14 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     }
     // By time, stably, so that a call asked and ended at once keeps its order.
     milestones.sort_by_key(|(at, _)| *at);
-    (milestones.into_iter())
-        .map(|(at, milestone)| format!("{:>7} {milestone}", clock(at)))
+    // The agent's reader can stamp its first ops or its exit before the loop stamps its start.
+    // Show them after the start, keeping their observed order even when their shown times tie.
+    start
+        .into_iter()
+        .chain(milestones)
+        .map(|(at, milestone)| {
+            let at = at.max(agent.started.unwrap_or_default());
+            format!("{:>7} {milestone}", clock(at))
+        })
         .collect()
 }

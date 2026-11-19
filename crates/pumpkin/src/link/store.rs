@@ -2,7 +2,7 @@
 
 use std::io::{self, Cursor, Read, Write};
 use std::process::ChildStdin;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -36,15 +36,14 @@ impl Request for Lacks {
         Ask::Lacks(self)
     }
 
-    fn sent(missing: Vec<Missing>) -> (LacksHead, Vec<u8>) {
-        let body = serde_json::to_vec(&missing)
-            .unwrap_or_else(|error| unreachable!("digests and byte counts are JSON: {error}"));
-        (
+    fn sent(missing: Vec<Missing>) -> io::Result<(LacksHead, Vec<u8>)> {
+        let body = serde_json::to_vec(&missing)?;
+        Ok((
             LacksHead::Missing {
                 body_bytes: body.len() as u64,
             },
             body,
-        )
+        ))
     }
 
     fn received(head: LacksHead, link: &mut Link) -> Result<Vec<Missing>, Unanswered> {
@@ -175,7 +174,10 @@ impl Link {
 }
 
 // A send has no deadline on its whole time. It stops once the connection takes no more bytes.
-const STALL_TIMEOUT: Duration = Duration::from_mins(2);
+const STALL_TIMEOUT: Timespec = Timespec {
+    tv_sec: 2 * 60,
+    tv_nsec: 0,
+};
 
 struct Pipe<'a>(&'a ChildStdin);
 
@@ -228,12 +230,11 @@ impl Write for Pipe<'_> {
                     ) => {}
                 written => return written,
             }
-            let Some(left) = STALL_TIMEOUT.checked_sub(started.elapsed()) else {
+            let elapsed = Timespec::try_from(started.elapsed()).unwrap_or(STALL_TIMEOUT);
+            if elapsed >= STALL_TIMEOUT {
                 break;
-            };
-            let Ok(timeout) = Timespec::try_from(left) else {
-                unreachable!("{left:?}, at most {STALL_TIMEOUT:?}, fits a `timespec`")
-            };
+            }
+            let timeout = STALL_TIMEOUT - elapsed;
             let mut polled = [PollFd::new(self.0, PollFlags::OUT)];
             match event::poll(&mut polled, Some(&timeout)) {
                 Ok(0) => break,
@@ -243,7 +244,7 @@ impl Write for Pipe<'_> {
         }
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            format!("it took no byte for {} s", STALL_TIMEOUT.as_secs()),
+            format!("it took no byte for {} s", STALL_TIMEOUT.tv_sec),
         ))
     }
 

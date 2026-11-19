@@ -142,8 +142,9 @@ shows.
 
 `pumpkin cancel <run>` stops a run: the driver deletes the run's sandboxes, and the run's outcome
 says which signal ended it. A run whose driver died is lost; `cancel` removes what it left, and
-`pumpkin reap` does so for every run that has ended. Every sandbox also ends by its run's hard
-end, which the workflow's bounds give, even if nothing reaps it.
+`pumpkin reap` does so for ended runs. On a controller it reaps the runs made by this build
+and names those left to other builds. Every sandbox also ends by its run's hard end, which the
+workflow's bounds give, even if nothing reaps it.
 
 ## What a command prints next
 

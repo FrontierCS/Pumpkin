@@ -12,9 +12,8 @@
 
 use ::aws::Cli;
 
-use super::aws::{self, answers, unanswered};
+use super::aws::{self, Located, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
-use super::location::Found;
 use super::{Name, Reached};
 use crate::link::{ViewRequest, Viewed};
 use crate::{config, say};
@@ -42,7 +41,8 @@ enum Over {
 pub(crate) struct Viewing {
     reached: Reached,
     build: Build,
-    found: Found,
+    located: Located,
+    linked: Option<Linked>,
     /// Whether the controller couldn't answer at the last request, so that the next asks EC2 and
     /// its `sshd` first rather than wait out a connection to an instance that doesn't run.
     down: bool,
@@ -60,13 +60,13 @@ impl Viewing {
     pub(crate) fn reach(client: &config::Client) -> Result<Self, String> {
         let expected = "expected to send it to the controller, to read the runs there";
         let build = Build::of_this(expected)?;
-        let mut reached = Reached::reach(&client.controller)?;
+        let reached = Reached::reach(&client.controller)?;
         let (linked, found) = reached.opening(&build)?;
-        reached.linked = Some((linked, found.clone()));
         Ok(Self {
             reached,
             build,
-            found,
+            located: found.at,
+            linked: Some(linked),
             down: false,
             cli: None,
         })
@@ -96,8 +96,9 @@ impl Viewing {
         // What it asks for only reads, so it is safe to ask again.
         let over = match self.once(target, deflate) {
             Over::Unanswered(Unlinked::Cut { .. }) => self.once(target, deflate),
-            over
-            @ (Over::Viewed(_) | Over::Unanswered(Unlinked::Failed(_)) | Over::Unopened(_)) => over,
+            over @ (Over::Viewed(_)
+            | Over::Unanswered(Unlinked::HostKey(_) | Unlinked::Failed(_))
+            | Over::Unopened(_)) => over,
         };
         let unopened = match over {
             Over::Viewed(viewed) => return Ok(viewed),
@@ -124,7 +125,7 @@ impl Viewing {
     /// Fails if EC2 refuses, as when the instance is stopping.
     pub(crate) fn start(&mut self) -> Result<(), String> {
         let Self { reached, cli, .. } = self;
-        let id = &self.found.at.instance;
+        let id = &self.located.instance;
         say(format_args!(
             "starting controller `{}`, {id}, as the page asked",
             reached.name
@@ -136,7 +137,7 @@ impl Viewing {
     fn answerable(&mut self) -> Result<(), Unviewed> {
         let Self { reached, cli, .. } = self;
         let name = &reached.name;
-        let located = &self.found.at;
+        let located = &self.located;
         let state =
             connected(cli, reached).and_then(|cli| aws::state(cli, name, &located.instance));
         let address = located.address;
@@ -166,11 +167,11 @@ impl Viewing {
 
     /// The reply over the link, opened if need be, but never again over another.
     fn once(&mut self, target: &str, deflate: bool) -> Over {
-        let (mut linked, found) = match self.reached.linked.take() {
+        let mut linked = match self.linked.take() {
             Some(linked) => linked,
             // Once, as the page asks again after a pause, which lets the view answer others.
-            None => match Linked::open(&self.reached, &self.build, &self.found.at) {
-                Ok(linked) => (linked, self.found.clone()),
+            None => match Linked::open(&self.reached, &self.build, &self.located) {
+                Ok(linked) => linked,
                 Err(unlinked) => return Over::Unopened(unlinked),
             },
         };
@@ -179,7 +180,7 @@ impl Viewing {
         let target = target.to_owned();
         match linked.ask(&self.reached, ViewRequest { target, deflate }) {
             Ok(Ok(viewed)) => {
-                self.reached.linked = Some((linked, found));
+                self.linked = Some(linked);
                 Over::Viewed(viewed)
             }
             Ok(Err(message)) => Over::Unanswered(Unlinked::Failed(format!(
@@ -192,7 +193,7 @@ impl Viewing {
 
     fn failed(unlinked: Unlinked) -> String {
         match unlinked {
-            Unlinked::Cut { said, .. } | Unlinked::Failed(said) => said,
+            Unlinked::Cut { said, .. } | Unlinked::HostKey(said) | Unlinked::Failed(said) => said,
         }
     }
 }

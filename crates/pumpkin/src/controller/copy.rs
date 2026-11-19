@@ -15,11 +15,12 @@ use tempfile::NamedTempFile;
 
 use super::Reached;
 use super::linking::Build;
-use crate::link::copy::{CopyRequest, Entries, Item, Stamp};
+use crate::link::copy::{CopyRequest, Item, Stamp, held};
 use crate::link::{Ask, Link, MAX_REQUEST_BODY_BYTES, Unanswered};
 use crate::say;
 
-// tempfile's random suffix, by which a copy recognizes scratch directories left by a killed one.
+// Match tempfile's default suffix so a copy recognizes scratch directories left by older copies.
+// https://github.com/Stebalien/tempfile/blob/5c8fa12eb584931b4f1bccfde87eb72fbfa7dc61/src/lib.rs#L195
 const SCRATCH_RANDOM: usize = 6;
 
 impl Reached {
@@ -46,16 +47,15 @@ impl Reached {
         lock.lock().context(scratch.path().display())?;
         drop(runs_lock);
         let what = format!("copying run {}'s record", id.as_str());
-        let answer = self.carrying_on(build, &what, |reached, linked, progress| {
-            let present = Entries::at(&copy)?;
-            let held = present.held(MAX_REQUEST_BODY_BYTES);
+        let answer = self.carrying_on(build, &what, |reached, linked, _, progress| {
+            let held = held(&copy, MAX_REQUEST_BODY_BYTES);
             let ask = Ask::Copy(CopyRequest {
                 id: id.as_str().to_owned(),
                 held_bytes: held.len(),
             });
             linked.stream(reached, |link| {
                 link.send(&ask, &held)?;
-                receive(link, &copy, scratch.path(), &present, progress)
+                receive(link, &copy, scratch.path(), progress)
             })
         })?;
         answer.map_err(|message| {
@@ -72,7 +72,6 @@ fn receive(
     link: &mut Link,
     copy: &Path,
     scratch: &Path,
-    present: &Entries,
     progress: &mut dyn FnMut(),
 ) -> Result<Result<Option<String>, String>, Unanswered> {
     let failed = |error| Unanswered::Failed(error);
@@ -104,11 +103,8 @@ fn receive(
                 };
                 if path == Path::new("record.json") {
                     record = Some(file);
-                } else {
-                    place(file, copy, path).map_err(failed)?;
-                    if present.files.get(path) != Some(&stamp) {
-                        progress();
-                    }
+                } else if place(file, copy, path).map_err(failed)? != Some(stamp) {
+                    progress();
                 }
             }
             Item::Data => {
@@ -222,11 +218,17 @@ fn directory(root: &Path, below: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn place(file: NamedTempFile, copy: &Path, below: &Path) -> Result<(), String> {
+fn place(file: NamedTempFile, copy: &Path, below: &Path) -> Result<Option<Stamp>, String> {
     let parent = below.parent().unwrap_or(Path::new(""));
     directory(copy, parent)?;
     let to = copy.join(below);
-    file.persist(&to).map(drop).context(to.display())
+    let previous = fs::symlink_metadata(&to)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .as_ref()
+        .map(Stamp::of);
+    file.persist(&to).context(to.display())?;
+    Ok(previous)
 }
 
 /// Removes the scratch directories that earlier copies of run `id` left in `runs`, but not one

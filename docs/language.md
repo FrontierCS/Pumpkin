@@ -70,6 +70,8 @@ Expressions: names, ints, floats, strings, lists, tuples, dicts, list and dict c
 calls, with keyword arguments and a `**` dict of them, methods called where they are named,
 indexing, `a if c else b`, `or`, `and`, `not`, comparisons, which don't chain, `in`, `not in`,
 `|` of two dicts, `+`, `-`, `*`, `/`, `//`, `%` and unary `-`.
+A method call looks up the method on its receiver before evaluating its arguments. If the lookup
+fails, the call ends there. [Starlark method calls](https://github.com/bazelbuild/starlark/blob/c0af0ea03dc90d3bbc021394b693e6957cc15030/spec.md#L2530-L2534)
 
 Left out, each refused where it is written: the `for` statement, which a comprehension
 replaces; `lambda`; a `def` inside a function; `*args`, `**kwargs` and `*` before an argument;
