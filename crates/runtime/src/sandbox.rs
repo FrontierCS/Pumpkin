@@ -283,15 +283,18 @@ impl<'p> Published<'p> {
             // minutes, as a push does; so a signal is heeded before each, not after them all.
             interruption::check()?;
             let provider = *providers.get(name);
-            let meets = match (provider.meeting(), private) {
-                (Meeting::Local(creator), _) => Meets::Sockets(creator),
-                (Meeting::Private(creator), Some(listener)) => Meets::Grants(creator, listener),
-                (Meeting::Listen(creator), _) => Meets::Dials(creator, dialer),
-                (Meeting::Private(_), None) => unreachable!(
-                    "provider `{name}` is private, and the run has no grant listener, though \
-                     `Run::execute`'s caller binds one for every run that places a role on a \
-                     private provider, as its doc requires"
-                ),
+            let meets = match provider.meeting() {
+                Meeting::Local(creator) => Meets::Sockets(creator),
+                Meeting::Private(creator) => {
+                    let listener = private.ok_or_else(|| {
+                        format!(
+                            "private provider `{name}` has no grant listener: bind one for its \
+                             sandboxes to dial"
+                        )
+                    })?;
+                    Meets::Grants(creator, listener)
+                }
+                Meeting::Listen(creator) => Meets::Dials(creator, dialer),
             };
             let published = provider.publish_sandboxd(sandboxd);
             let sandboxd = published.context(format_args!(

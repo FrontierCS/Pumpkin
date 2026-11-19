@@ -171,8 +171,8 @@ impl<'r, H: Host> Run<'r, H> {
     ///
     /// # Errors
     ///
-    /// Stops once a signal comes. Fails if `started` fails, if the run is still going at its hard
-    /// end, or if a model provider's refusal or failure could have changed the result.
+    /// Stops on a signal. Fails if a private provider lacks a listener, `started` fails, the run is
+    /// live at its hard end, or a model provider's refusal or failure could affect the result.
     pub fn execute(
         self,
         sandboxd: &Path,
