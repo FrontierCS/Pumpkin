@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use runtime::{CallOf, CallStart, Place, RouteEntry};
+use runtime::{CallOf, CallStart, CallerName, Place, RouteEntry};
 use schema::ir::{self, Name};
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 
 /// The model upstream, which every role with a route reaches: an end of edges, but no role.
@@ -52,9 +53,9 @@ pub(super) struct Talk {
     pub(super) runners: BTreeMap<u64, String>,
     work: BTreeMap<u64, Vec<Work>>,
     /// The times at which each lane's model requests were answered.
-    pub(super) answered: BTreeMap<String, Vec<f64>>,
+    pub(super) answered: BTreeMap<CallerName, Vec<f64>>,
     /// The times of the answers in `answered` that failed or were not forwarded.
-    pub(super) failed: BTreeMap<String, Vec<f64>>,
+    pub(super) failed: BTreeMap<CallerName, Vec<f64>>,
     reading: Reading,
 }
 
@@ -143,10 +144,10 @@ impl Talk {
         self.event(at, &record["event"]);
     }
 
-    fn role(&self, caller: &str) -> Option<String> {
-        match caller.strip_prefix("job-") {
-            Some(job) => self.reading.jobs.get(&job.parse().ok()?).cloned(),
-            None => (caller == "agent").then(|| self.reading.agent.clone()),
+    fn role(&self, caller: CallerName) -> Option<String> {
+        match caller {
+            CallerName::Agent => Some(self.reading.agent.clone()),
+            CallerName::Job(job) => self.reading.jobs.get(&job).cloned(),
         }
     }
 
@@ -175,11 +176,11 @@ impl Talk {
         let lease = action["lease"].as_u64();
         match (action["kind"].as_str().unwrap_or_default(), lease) {
             ("start_lease", Some(lease)) => {
-                let holder = action["holder"]
-                    .as_str()
-                    .and_then(|holder| self.role(holder));
-                let grant = action["grant"].as_str().unwrap_or_default().to_owned();
+                let holder = CallerName::deserialize(&action["holder"])
+                    .ok()
+                    .and_then(|caller| self.role(caller));
                 let Some(holder) = holder else { return };
+                let grant = action["grant"].as_str().unwrap_or_default().to_owned();
                 let Some((runner, _)) = self.reading.granted.get(&(holder.clone(), grant)).cloned()
                 else {
                     return;
@@ -253,7 +254,7 @@ impl Talk {
             }
             ("model_answered", _) => {
                 // A record of a build that kept no exchanges names no caller.
-                let Some(caller) = event["caller"].as_str() else {
+                let Ok(caller) = CallerName::deserialize(&event["caller"]) else {
                     return;
                 };
                 let Some(role) = self.role(caller) else {
@@ -265,11 +266,10 @@ impl Talk {
                     kept["response"]["bytes"].as_u64(),
                 );
                 self.edge(&role, MODEL, "model request").add(sent, back);
-                let lane = caller.replace('-', " ");
                 if event["answer"]["kind"] != "forwarded" || !event["failed"].is_null() {
-                    self.failed.entry(lane.clone()).or_default().push(at);
+                    self.failed.entry(caller).or_default().push(at);
                 }
-                self.answered.entry(lane).or_default().push(at);
+                self.answered.entry(caller).or_default().push(at);
             }
             _ => {}
         }

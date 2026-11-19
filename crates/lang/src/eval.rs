@@ -582,8 +582,10 @@ impl<'l, 'h, L: Loader> Evaluation<'l, 'h, L> {
                     args,
                     at,
                 } => {
+                    let receiver = (receiver, value);
+                    let method = builtins::method(&receiver, name)?;
                     let call = self.arguments(scope, args, at)?;
-                    builtins::method(&(receiver, value), name, &call, &mut self.purpose)?
+                    method.call(name, &call, &mut self.purpose)?
                 }
                 Suffix::Index(index) => {
                     let key = self.eval(scope, index)?;

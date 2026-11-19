@@ -119,12 +119,11 @@ enum Body {
 impl Response {
     /// A `200 OK` with `value` as its body.
     pub(super) fn json(value: &serde_json::Value) -> Self {
-        Self {
-            status: Cow::Borrowed("200 OK"),
-            content_type: Cow::Borrowed("application/json; charset=utf-8"),
-            body: Body::Made(value.to_string().into_bytes()),
-            immutable: false,
-        }
+        Self::json_text(value.to_string())
+    }
+
+    pub(super) fn json_text(text: String) -> Self {
+        Self::bytes("application/json; charset=utf-8", text.into_bytes())
     }
 
     /// This response under another status.

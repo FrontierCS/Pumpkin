@@ -18,6 +18,7 @@
 //!
 //! A line's indentation counts only outside brackets, inside which lines join.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -32,7 +33,9 @@ pub(crate) struct Token {
 }
 
 pub(crate) enum TokenKind {
-    Name(String),
+    /// Its spelling is the source at the token's span, as in Zig's tokenizer:
+    /// <https://github.com/ziglang/zig/blob/6d44a6222d6eba600deb7f16c124bfa30628fb60/lib/std/zig/tokenizer.zig#L4-L11>.
+    Name,
     Int(i64),
     Float(f64),
     Str(Rc<str>),
@@ -44,7 +47,7 @@ pub(crate) enum TokenKind {
     Outdent,
     Eof,
     /// The first thing refused, which ends the tokens.
-    Error(String),
+    Error(Box<str>),
 }
 
 // Defines `$kind`, an enum of tokens each written as its text, with `text()` and `ALL`, the tokens
@@ -115,7 +118,7 @@ pub(crate) fn lex(file: FileId, text: &str) -> Vec<Token> {
         Err((start, message)) => {
             let span = lexer.span(start);
             lexer.tokens.push(Token {
-                kind: TokenKind::Error(message),
+                kind: TokenKind::Error(message.into_boxed_str()),
                 span,
             });
         }
@@ -175,7 +178,7 @@ impl Lexer<'_> {
                 self.number(start)?;
             } else if char == '\'' || char == '"' {
                 let value = self.string(start, char, false)?;
-                self.push(TokenKind::Str(value.into()), start);
+                self.push(TokenKind::Str(value), start);
             } else if char == '.'
                 && self.text[start + 1..].starts_with(|c: char| c.is_ascii_digit())
             {
@@ -282,7 +285,7 @@ impl Lexer<'_> {
             match word {
                 "r" => {
                     let value = self.string(start, quote, true)?;
-                    self.push(TokenKind::Str(value.into()), start);
+                    self.push(TokenKind::Str(value), start);
                     return Ok(());
                 }
                 "b" | "rb" | "br" => {
@@ -314,7 +317,7 @@ impl Lexer<'_> {
             };
             return Err((start, message));
         } else {
-            self.push(TokenKind::Name(word.to_string()), start);
+            self.push(TokenKind::Name, start);
         }
         Ok(())
     }
@@ -446,10 +449,11 @@ impl Lexer<'_> {
     }
 
     // Reads the string whose opening quote, `quote`, is next, and gives its value.
-    fn string(&mut self, start: usize, quote: char, raw: bool) -> Result<String, LexError> {
+    fn string(&mut self, start: usize, quote: char, raw: bool) -> Result<Rc<str>, LexError> {
         let three = if quote == '"' { "\"\"\"" } else { "'''" };
         let triple = self.text[self.pos..].starts_with(three);
-        self.pos += if triple { 3 } else { 1 };
+        let delimiter = if triple { three } else { &three[..1] };
+        self.pos += delimiter.len();
         let unclosed = || {
             let message = if triple {
                 format!("this string is not closed: end it with `{three}`")
@@ -461,18 +465,24 @@ impl Lexer<'_> {
             };
             (start, message)
         };
-        let mut value = String::new();
+        // Copy plain literals straight from the source, as starlark-rust does:
+        // https://github.com/facebook/starlark-rust/blob/85e33edead0189db7a8312005ae8175a30bf155c/starlark_syntax/src/lexer.rs#L363-L401
+        let contents = self.pos;
+        self.skip(|char| char != quote && !matches!(char, '\\' | '\r') && (triple || char != '\n'));
+        let prefix = &self.text[contents..self.pos];
+        if self.text[self.pos..].starts_with(delimiter) {
+            self.pos += delimiter.len();
+            return Ok(Rc::from(prefix));
+        }
+        let mut value = String::from(prefix);
         loop {
             let at = self.pos;
             match self.next() {
                 None => return Err(unclosed()),
                 Some(char) if char == quote => {
-                    if !triple {
-                        return Ok(value);
-                    }
-                    if self.text[at..].starts_with(three) {
-                        self.pos = at + three.len();
-                        return Ok(value);
+                    if self.text[at..].starts_with(delimiter) {
+                        self.pos = at + delimiter.len();
+                        return Ok(value.into());
                     }
                     value.push(char);
                 }
