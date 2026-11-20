@@ -1,27 +1,13 @@
 """The hypergraph team, its board and its final judge."""
 
 load("//submit.star", "submission")
-load("//team/bodies.star", "evaluate", "judge", "post", "read", "send")
+load("//team/board.star", "BOARD_GRANTS", "board")
+load("//team/bodies.star", "evaluate", "judge")
 
 SOURCE_BYTES = 64 * KiB
 PARTICIPANTS = ["alice", "bob"]
 USER = {"uid": 1000, "gid": 1000}
 TARGET_NEEDS = {"cpu_millis": 500, "memory_bytes": 256 * MiB}
-
-def _board(name, body, calls, help):
-    return {"name": name, "help": help, "job": {
-        "target": "board",
-        "body": body,
-        "payload_max_bytes": 2 * KiB,
-        "call_timeout_seconds": 10,
-        "calls": calls,
-    }}
-
-_BOARD = [
-    _board("post", post, 50, "Publish the file's nonempty UTF-8 text to the shared board. Returns its message id."),
-    _board("send", send, 50, "Send the file's nonempty UTF-8 text to another role's inbox. Returns its message id."),
-    _board("read", read, 100, "Read public posts from board or private messages from your inbox. Omit the file. Returns messages with id, from and text, and an after cursor for the next page."),
-]
 
 def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, evaluations = 0):
     """Runs Alice and Bob with access to the same board and judge.
@@ -53,21 +39,11 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
                 "image": agent_image,
                 "user": USER,
                 "needs": needs,
-                "runtime": {"agent": runtimes[role] | {"grants": draft + _BOARD + [submission("submit", SOURCE_BYTES)]}},
+                "runtime": {"agent": runtimes[role] | {"grants": draft + BOARD_GRANTS + [submission("submit", SOURCE_BYTES)]}},
             }
             for role in PARTICIPANTS
         ] + [
-            {
-                "name": "board",
-                "image": image("board/Dockerfile"),
-                "user": USER,
-                "needs": TARGET_NEEDS,
-                "runtime": {"target": {
-                    "lifetime": "work",
-                    "cwd": "/pumpkin/out",
-                    "env": ["TEAM_ROLES=" + " ".join(PARTICIPANTS)],
-                }},
-            },
+            board(PARTICIPANTS, USER),
         ] + [
             {
                 "name": target,

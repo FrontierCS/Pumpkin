@@ -1,48 +1,5 @@
 """Calls that drive the board and judge."""
 
-def _board(target, payload, op, args = []):
-    reply = target.capture(["python3", "/opt/team/board.py", op, target.caller()] + args, stdin = payload)
-    return json.decode(reply)
-
-def post(target: Target, payload: Payload):
-    """Publishes one message to the board.
-
-    Args:
-      target: the shared board.
-      payload: the caller's UTF-8 message.
-
-    Returns:
-      The message ID or a request error.
-    """
-    return _board(target, payload, "post")
-
-def send(target: Target, payload: Payload, to: str):
-    """Delivers one message to a teammate.
-
-    Args:
-      target: the shared board.
-      payload: the caller's UTF-8 message.
-      to: the recipient's role name.
-
-    Returns:
-      The message ID or a request error.
-    """
-    return _board(target, payload, "send", [to])
-
-def read(target: Target, payload: Payload, stream: str = "board", after: int = 0):
-    """Reads one page visible to the caller.
-
-    Args:
-      target: the shared board.
-      payload: empty.
-      stream: board for public posts or inbox for private messages.
-      after: the last message ID already read.
-
-    Returns:
-      Matching messages and the next cursor, or a request error.
-    """
-    return _board(target, payload, "read", [stream, str(after)])
-
 JUDGE = "/opt/team/judge.py"
 COMPILE = "sha256sum src/solution.cpp && exec g++ --std=c++17 src/solution.cpp --output solution"
 
