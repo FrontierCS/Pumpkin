@@ -946,6 +946,8 @@ fn examples() {
             exit status: Some(0)
             $ pumpkin check hello/task.star
             exit status: Some(0)
+            $ pumpkin check hypergraph/task.star
+            exit status: Some(0)
             $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
             exit status: Some(0)"#]],
     );
