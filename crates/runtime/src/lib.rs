@@ -43,6 +43,7 @@ mod record;
 mod relay;
 mod routes;
 mod sandbox;
+mod scoped;
 mod shared;
 mod sources;
 mod start;
@@ -253,6 +254,7 @@ impl<'r, H: Host> Run<'r, H> {
             starting: BTreeMap::new(),
             residents: BTreeMap::new(),
             unanswered: BTreeMap::new(),
+            waiting: BTreeMap::new(),
             next_op: 0,
             next_model_request: 0,
             held_at_lock: BTreeSet::new(),
@@ -308,7 +310,7 @@ impl Failure for Stopped {
 
 // A call: its thread's orders, and what the run knows of the role that runs it.
 struct Called {
-    orders: Sender<Message<OpReply>>,
+    orders: Sender<Message<crate::relay::Order>>,
     // By when what the call left is collected, as a time since the run started; its leases' too.
     collect: Duration,
     // The trees of the call's sandbox that its last op came with; a transfer takes them.
@@ -325,6 +327,7 @@ struct Called {
 enum Asked {
     Agent(AgentId, Unanswered),
     Job(JobId),
+    Body(JobId, scoped::Waiting),
 }
 
 struct Runtime<'r, H: Host> {
@@ -347,6 +350,7 @@ struct Runtime<'r, H: Host> {
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
+    waiting: BTreeMap<LeaseId, scoped::Waiter>,
     next_op: u64,
     next_model_request: u64,
     // The callers whose routes had no key refused when a submission was accepted for good.
@@ -471,7 +475,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     .collect::<Vec<_>>();
                 self.held_at_lock.extend(held);
             }
-            self.log.event(self.workflow(), at, &event, &actions)?;
+            let receipt = self.receipt(core, &event);
+            self.log
+                .event(self.workflow(), at, &event, &actions, receipt.is_some())?;
+            if let Some((job, reply)) = receipt {
+                self.answer_body(job, reply);
+            }
             // A route ends as the core stops allowing its model requests, the agent's at the work
             // phase's end, a call's at its timeout or its report, before the core's actions are
             // performed: its exchanges in flight then end while the agent's teardown, if the
@@ -630,7 +639,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         self.next_op += 1;
         let caller = match asked {
             Asked::Agent(id, _) => Caller::Agent(id),
-            Asked::Job(job) => Caller::Job(job),
+            Asked::Job(job) | Asked::Body(job, _) => Caller::Job(job),
         };
         self.unanswered.insert(op, asked);
         Event::OpArrived {
@@ -658,7 +667,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 continue;
             };
             let actions = core.handle(at, event.clone());
-            self.log.event(self.workflow(), at, &event, &actions)?;
+            self.log
+                .event(self.workflow(), at, &event, &actions, false)?;
             for action in actions {
                 match action {
                     Action::Reply { op, reply } => self.reply(op, reply, core)?,
@@ -736,6 +746,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                         command,
                         argv,
                         timeout,
+                        required_output: self.waiting.contains_key(&lease),
                     };
                     self.send_lease(lease, Message::Order(lease::Order::Run(run)));
                 }
@@ -793,9 +804,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         let (id, unanswered) = match asked {
             Asked::Agent(id, unanswered) => (id, unanswered),
+            Asked::Body(job, waiting) => return self.watch(core, job, waiting, reply),
             Asked::Job(job) => {
                 // A call whose thread has ended has no op left to answer.
-                let _ = self.call(job).orders.send(Message::Order(reply));
+                let _ = self
+                    .call(job)
+                    .orders
+                    .send(Message::Order(relay::Order::Sandbox(reply)));
                 return Ok(());
             }
         };

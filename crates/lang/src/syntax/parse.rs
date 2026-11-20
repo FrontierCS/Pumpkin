@@ -291,6 +291,7 @@ impl Parser<'_> {
             // https://github.com/facebook/buck2/blob/e3dc98f84acf5f70c40b857819556baa7ec9c929/app/buck2_build_api/src/interpreter/rule_defs/context.rs#L396-L398
             "Target" => Type::Hosted(Hosted::Target),
             "Run" => Type::Hosted(Hosted::Run),
+            "Runner" => Type::Hosted(Hosted::Runner(())),
             "Payload" => Type::Hosted(Hosted::Payload(())),
             "list" => {
                 let takes = "its elements' type: write `list[str]`";
@@ -310,7 +311,7 @@ impl Parser<'_> {
             text => {
                 let message = format!(
                     "`{text}` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, \
-                     `dict[…, …]`, `Target`, `Run` or `Payload`"
+                     `dict[…, …]`, `Target`, `Runner`, `Run` or `Payload`"
                 );
                 return Err(Fault::new(name.span, message));
             }

@@ -15,9 +15,9 @@
 //! stands for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by
 //! size and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
 //!
-//! A line that leads to an act, an event with actions or an `op_refused`, is synced with all before
-//! it ahead of the act; any other lasts with the next sync. The run's end syncs the log before
-//! `outcome.json`, so a crash cuts a lost run's log only after its last synced line.
+//! The runtime syncs a line and all preceding lines before acting on it, including delivering a
+//! runner receipt to a body. Other lines last with the next sync. The run's end syncs the log
+//! before `outcome.json`, so a crash cuts a lost run's log only after its last synced line.
 //!
 //! A reader takes a line only once it ends in a newline, skips an event or action `kind` it doesn't
 //! know, and counts any part it can't read so the operator can find it.
@@ -104,7 +104,7 @@ impl<'h, H: Host> Log<'h, H> {
             "unix_ns": nanos(unix.since_epoch()),
             "hard_end_ns": nanos(hard_end),
         });
-        self.decided(workflow, Duration::ZERO, event, actions)
+        self.decided(workflow, Duration::ZERO, event, actions, false)
     }
 
     pub(super) fn event(
@@ -113,8 +113,15 @@ impl<'h, H: Host> Log<'h, H> {
         observed: Duration,
         event: &Event,
         actions: &[Action],
+        delivers_receipt: bool,
     ) -> Result<(), String> {
-        self.decided(workflow, observed, event_json(event), actions)
+        self.decided(
+            workflow,
+            observed,
+            event_json(event),
+            actions,
+            delivers_receipt,
+        )
     }
 
     pub(super) fn refused(&mut self, caller: Caller, refused: &RefusedOp) -> Result<(), String> {
@@ -334,13 +341,14 @@ impl<'h, H: Host> Log<'h, H> {
         observed: Duration,
         event: Value,
         actions: &[Action],
+        delivers_receipt: bool,
     ) -> Result<(), String> {
         let actions: Vec<Value> = actions
             .iter()
             .map(|action| action_json(workflow, action))
             .collect();
         // A line whose actions the runtime carries out next lasts before it does.
-        let leads = !actions.is_empty();
+        let leads = delivers_receipt || !actions.is_empty();
         self.observed(observed, event, &actions)?;
         if leads { self.sync() } else { Ok(()) }
     }

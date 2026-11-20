@@ -479,6 +479,14 @@ pub enum CommandEnd {
     Unstarted,
 }
 
+/// A body callback's result for a started runner command with both recorded output streams.
+#[derive(Debug, Serialize)]
+pub struct RunnerOutput {
+    pub end: CommandEnd,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StatusJson {

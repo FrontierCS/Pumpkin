@@ -90,7 +90,7 @@ a sandbox. Every target must be reached. The final call has an exclusive call-li
 | `cwd` | the directory each command of the body's starts in |
 | `env` | `NAME=value` entries added to each command's environment |
 | `egress` | a call-lifetime sandbox's model route, open while its body runs |
-| `sessions` | the sessions a call-lifetime sandbox may open while its body runs, written as a grant of one is |
+| `sessions` | the body's runner grants, each with fresh limits per call. Commands in a call-lifetime sandbox can also use these grants through `sandboxctl`. |
 
 Each agent may name a given call-lifetime target from one job function. Different agents may
 run independent calls of the same target concurrently.
@@ -104,7 +104,8 @@ end, the driver collects the sandbox's output and deletes it before starting the
 The driver authenticates the calling agent and carries the body's inputs, commands and results.
 A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
 requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
-require a call-lifetime target.
+require a call-lifetime target. The trusted body can use `target.with_runner` on either
+lifetime. Its job holds the runner until deletion, and a work target stays busy until then.
 
 ### Runners
 
@@ -204,7 +205,7 @@ the text the record keeps. Its parameters, in order:
 4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
    give, each a JSON value that must fit its annotation. One that they don't give needs a default.
 
-The two handles' methods:
+Methods available to a body and its runner callbacks follow.
 
 | Method | What it does |
 | --- | --- |
@@ -212,9 +213,19 @@ The two handles' methods:
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
+| `target.with_runner(session, callback, ...)` | opens a fresh runner under the target's named session grant, calls `callback(runner, ...)` with the remaining positional arguments, then closes the runner and waits for deletion before returning the callback's value |
+| `runner.put(tree, to)` | copies the directory `tree` on the target into the runner at `to`, which must be new. Both paths are absolute. The copy counts as one grant operation |
+| `runner.run(argv, timeout_seconds = seconds)` | runs a command in that runner and waits for its recorded output. Its optional timeout is a positive number of seconds. The result holds `end`, `stdout_tail` and `stderr_tail` |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
 | `run.set_submission(payload)` | sets or replaces the caller’s submission |
 | `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
+
+A runner handle works only during its callback. A callback error also closes the runner.
+A runner command reports its own timeout as `"timed_out"` and an exit as
+`{"exited": {"code": n}}` or `{"exited": {"signal": n}}`. Its output fields hold at most
+21 KiB each, with invalid UTF-8 replaced. The record keeps the raw streams.
+A refused operation, failed copy, unstarted command, incomplete output collection or expired
+lease fails the body. A runner that cannot be deleted fails the run.
 
 A now function's body proposes these operations. When the body returns, the run applies them
 in order if they all pass validation. A refused operation leaves the state unchanged.
@@ -243,7 +254,7 @@ body unrun, as `examples/hello`'s `final` answers:
 
 ## From inside a sandbox
 
-An agent, or a target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
+An agent, or a call-lifetime target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
 directory first on each command's `PATH`, ahead of the path the role or image sets.
 `sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
 1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait

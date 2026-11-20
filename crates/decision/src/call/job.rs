@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use schema::ir::{Name, argument};
 use schema::sandbox::op::{CallReply, JobReply, OpReply, Remaining};
-use schema::workflow::{JobFunctionId, JobOf};
+use schema::workflow::{Holder, JobFunctionId, JobOf, TargetId};
 
 use crate::ops::fits;
 use crate::{Action, Caller, Core, PayloadRef};
@@ -47,21 +47,13 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        // A call has ended only once every lease it held has.
-        let holding = (self.jobs)
-            .of(JobOf::Function(id))
-            .any(|job| self.leases.holds(Caller::Job(job)));
         if let Some(service) = self.shared.get(&function.target) {
             if *service != crate::Availability::Available {
                 return Err(format!(
                     "`{name}` cannot run because its shared sandbox is unavailable"
                 ));
             }
-            if self
-                .jobs
-                .active_on(self.workflow, function.target)
-                .is_some()
-            {
+            if self.work_target_busy(function.target) {
                 return Ok(OpReply::Refused {
                     busy: true,
                     message: format!(
@@ -69,8 +61,12 @@ impl Core<'_> {
                     ),
                 });
             }
-        }
-        if usage.busy || holding {
+        } else if usage.busy
+            || self
+                .jobs
+                .of(JobOf::Function(id))
+                .any(|job| self.leases.holds(Caller::Job(job)))
+        {
             return Ok(OpReply::Refused {
                 busy: true,
                 message: format!(
@@ -99,6 +95,15 @@ impl Core<'_> {
             job: job.0,
             remaining,
         })))
+    }
+
+    fn work_target_busy(&self, target: TargetId) -> bool {
+        // A job can report its end while its runner still occupies this target's slot.
+        self.jobs.active_on(self.workflow, target).is_some()
+            || self
+                .leases
+                .active()
+                .any(|lease| self.workflow.session(lease.grant).holder == Holder::Target(target))
     }
 
     /// What job function `id` has left of its quotas.

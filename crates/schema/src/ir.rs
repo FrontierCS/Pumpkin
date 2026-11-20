@@ -254,8 +254,8 @@ pub struct TargetRuntime {
     /// The target's routes out, open while a call's body runs; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]
     pub egress: Egress,
-    /// The sessions the target may call while a call's body runs, which each call uses afresh;
-    /// absent, none.
+    /// The body's session grants, with fresh quotas per call. A call-lifetime sandbox's
+    /// commands may also use them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<NamedSession>,
 }

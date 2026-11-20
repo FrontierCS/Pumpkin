@@ -1934,8 +1934,12 @@ impl Served {
         self.files.by_path.insert(launch.stdout.to_string(), stdout);
         self.printed
             .insert(launch.stderr.to_string(), "worker diagnostic".to_owned());
-        let code = launch.argv.args()[0].parse().unwrap();
-        replies.push(exited(stream, code));
+        if launch.argv.args()[0] == "wait" {
+            self.running.insert(stream);
+        } else {
+            let code = launch.argv.args()[0].parse().unwrap();
+            replies.push(exited(stream, code));
+        }
     }
 
     fn answered(

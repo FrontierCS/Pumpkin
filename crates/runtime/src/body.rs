@@ -6,6 +6,7 @@
 //! exits, or at the call's end if the call is cut short while it runs. Fresh targets are frozen
 //! and collected as the body ends. A work-lifetime sandbox stays available until work ends.
 
+use core::num::NonZeroU64;
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -15,7 +16,10 @@ use std::{fs, io};
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
 use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
-use schema::sandbox::op::{CommandEnd, OpReply};
+use schema::sandbox::op::{
+    CommandEnd, CommandStatus, Last, LeaseStatusReply, RunnerOutput, SessionOp, TransferEnd,
+    TransferStatus,
+};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, Root, command_env, dir_mode, file_mode,
@@ -31,6 +35,7 @@ use crate::lease::command_dir;
 use crate::record::{Stored, reference};
 use crate::relay::{Relay, Waited};
 use crate::sandbox::{collect, collect_as};
+use crate::scoped::Waiting;
 use crate::{Clock, Entry, Host, Targeted};
 
 /// The evaluator of the workflow's bodies, which the driver gives the run. The run calls it on
@@ -96,6 +101,30 @@ pub trait RunState {
 /// The target of a job's call, as its body drives it. A method's `Err` is why it failed, which
 /// ends the call.
 pub trait Target {
+    /// Waits for a fresh runner to be ready and returns a lease number unique within this call.
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String>;
+
+    /// Copies the target's directory to a new directory on its runner.
+    fn runner_put(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
+    /// Waits for a started command's exit or timeout and both recorded output streams.
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String>;
+
+    /// Waits for deletion of the callback's runner.
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String>;
+
     /// The issuing agent's declared role name, or none in the final body.
     fn caller(&self) -> Option<&str>;
 
@@ -172,7 +201,7 @@ pub(crate) enum Ended {
 pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     call: &Call<'_>,
-    child: &mut Child<'_, H, OpReply>,
+    child: &mut Child<'_, H, crate::relay::Order>,
     session: &mut Session,
     stdin: &mut Stdin,
 ) -> Ended {
@@ -312,7 +341,7 @@ impl Stdin {
 /// The target of a body's call, on its child's session.
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
-    child: &'a mut Child<'r, H, OpReply>,
+    child: &'a mut Child<'r, H, crate::relay::Order>,
     session: &'a mut Session,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
@@ -346,6 +375,29 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             return Err(self.cut_short(Cut::TimedOut));
         }
         Ok(by)
+    }
+
+    fn scoped(
+        &mut self,
+        grant: &Name,
+        waiting: Waiting,
+        op: SessionOp,
+    ) -> Result<LeaseStatusReply, String> {
+        self.going()?;
+        let waited = self.relay.runner(
+            self.child,
+            self.call.job,
+            self.timeout,
+            self.session,
+            grant,
+            (waiting, op),
+        );
+        match self.timely(waited)? {
+            // A queued receipt can wake the body after its deadline, including the final close.
+            Waited::Finished(status) => self.going().map(|_| status),
+            Waited::Stopped => Err(self.cut_short(Cut::Stopped)),
+            Waited::TimedOut => Err(self.cut_short(Cut::TimedOut)),
+        }
     }
 
     /// Reports the timeout, if any, and returns why the method fails.
@@ -430,7 +482,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
                 .relay
                 .wait(self.child, self.call.job, until, process, self.session)?
             {
-                Waited::Exited(status) => return Ok(status),
+                Waited::Finished(status) => return Ok(status),
                 Waited::Stopped => {}
                 Waited::TimedOut => {
                     return Err("the shared call's command did not confirm its exit".to_owned());
@@ -518,7 +570,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let job = self.call.job;
         let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
         match waited {
-            Ok(Waited::Exited(status)) => {
+            Ok(Waited::Finished(status)) => {
                 self.running = None;
                 let end = CommandEnd::Exited(status);
                 self.log(Targeted::Ended { command, end });
@@ -543,6 +595,74 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 }
 
 impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
+        let op = SessionOp::Open {
+            instance_seconds: None,
+        };
+        self.scoped(grant, Waiting::Open, op)
+            .map(|ready| ready.lease)
+    }
+
+    fn runner_put(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        let op = SessionOp::Put {
+            lease,
+            tree,
+            to,
+            replace: false,
+        };
+        let status = self.scoped(grant, Waiting::Work, op)?;
+        let Some(Last::Transfer(TransferStatus { end: Some(end), .. })) = status.last else {
+            return Err("the runner's copy has no receipt".to_owned());
+        };
+        match end {
+            TransferEnd::Moved { .. } => Ok(()),
+            TransferEnd::Failed(reason) => Err(reason),
+        }
+    }
+
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String> {
+        let op = SessionOp::Run {
+            lease,
+            argv,
+            timeout_seconds,
+        };
+        let status = self.scoped(grant, Waiting::Work, op)?;
+        let Some(Last::Command(CommandStatus {
+            end: Some(end),
+            stdout,
+            stderr,
+            ..
+        })) = status.last
+        else {
+            return Err("the runner's command has no receipt".to_owned());
+        };
+        match end {
+            CommandEnd::Unstarted => Err(format!("the command did not start: {stderr}")),
+            CommandEnd::Exited(_) | CommandEnd::TimedOut => Ok(RunnerOutput {
+                end,
+                stdout_tail: stdout,
+                stderr_tail: stderr,
+            }),
+        }
+    }
+
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
+        self.scoped(grant, Waiting::Close, SessionOp::Close { lease })
+            .map(drop)
+    }
+
     fn put(&mut self, path: &AbsolutePath, input_slot: usize) -> Result<(), String> {
         let by = self.going()?;
         let Some((dir, name)) = path.split_last() else {

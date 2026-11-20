@@ -80,6 +80,7 @@ pub(super) enum Report {
         at: Duration,
         job: JobId,
         request: Request,
+        body: Option<crate::scoped::Waiting>,
         trees: Trees,
     },
     /// A model request that job `job`'s sandbox made, at the time `at` the thread took it, which
@@ -237,10 +238,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 at,
                 job,
                 request,
+                body,
                 trees,
             } => {
                 self.call(job).trees = Some(trees);
-                Ok(Some((at, self.op(Asked::Job(job), request))))
+                let asked = body.map_or(Asked::Job(job), |wait| Asked::Body(job, wait));
+                Ok(Some((at, self.op(asked, request))))
             }
             Report::Model { at, job, incoming } => {
                 let caller = Caller::Job(job);

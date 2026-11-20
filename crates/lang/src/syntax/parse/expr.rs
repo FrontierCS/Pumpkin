@@ -318,10 +318,12 @@ impl Parser<'_> {
         }
         let open = self.advance();
         self.nest(open)?;
+        let depth = self.depth;
         let (args, close) = self.arguments()?;
         let span = receiver.span.to(close);
         let kind = ExprKind::Method {
             receiver: Box::new(receiver),
+            depth,
             name: Box::new(name),
             args: Box::new(args),
         };

@@ -39,7 +39,7 @@ struct State {
     late_armed: bool,
     after_take: Option<fn()>,
     slow: VecDeque<SlowSync>,
-    failed: Option<u64>,
+    failed: Option<Synced>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
 }
@@ -109,8 +109,8 @@ impl SimHost {
         self
     }
 
-    /// Fails the first sync of the run log that holds its record numbered `record`.
-    pub(crate) fn failed_sync(self, record: u64) -> Self {
+    /// Fails the first sync that makes `record` last.
+    pub(crate) fn failed_sync(self, record: Synced) -> Self {
         stdx::unpoisoned(self.state.lock()).failed = Some(record);
         self
     }
@@ -155,10 +155,11 @@ impl Host for SimHost {
         {
             state.late_armed = true;
         }
-        let slow = state.slow.pop_front_if(|slow| match slow.record {
+        let reached = |record: &Synced| match *record {
             Synced::Seq(record) => lasts(record),
             Synced::Holding(file, text) => path.ends_with(file) && holds(text),
-        });
+        };
+        let slow = state.slow.pop_front_if(|slow| reached(&slow.record));
         let named = |name: &str| path.file_name() == Some(name.as_ref());
         let file = match &mut state.failed_file {
             Some((name, 0)) => named(name),
@@ -173,7 +174,7 @@ impl Host for SimHost {
         if file {
             state.failed_file = None;
         }
-        let failed = state.failed.take_if(|record| lasts(*record)).is_some() || file;
+        let failed = state.failed.take_if(|record| reached(record)).is_some() || file;
         let first = state.first.clone();
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.

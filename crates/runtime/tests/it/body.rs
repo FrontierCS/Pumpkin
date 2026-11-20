@@ -48,6 +48,7 @@ impl runtime::Bodies for Bodies<'_> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "capture" => capture(target, keywords),
+            "scoped" => scoped(target, keywords, 0),
             "check" => {
                 target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 let dir = keywords["dir"].as_str().unwrap();
@@ -140,6 +141,7 @@ impl runtime::Bodies for Bodies<'_> {
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
             }
+            "scoped" => scoped(target, keywords, submissions[0].1.unwrap()),
             "submissions" => {
                 assert_eq!(target.caller(), None);
                 let mut files = Map::new();
@@ -250,4 +252,27 @@ fn capture(
     let stdin = keywords["stdin"].as_bool().unwrap().then_some(0);
     let reply = target.capture(&argv, stdin)?;
     Ok(vec![(Name::from_static("reply"), json!(reply))])
+}
+
+fn scoped(
+    target: &mut dyn runtime::Target,
+    keywords: &Map<String, Value>,
+    input: usize,
+) -> Result<Vec<(Name, Value)>, String> {
+    let grant = Name::from_static("box");
+    let lease = target.runner_open(&grant)?;
+    let tree =
+        AbsolutePath::try_from(format!("/work/{}", target.caller().unwrap_or("src"))).unwrap();
+    target.put(
+        &tree.join(&schema::sandbox::RelativePath::from_static("source")),
+        input,
+    )?;
+    target.runner_put(&grant, lease, tree, AbsolutePath::from_static("/work/src"))?;
+    let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
+    let timeout = std::num::NonZeroU64::new(1);
+    let command = target.runner_run(&grant, lease, argv.clone(), timeout)?;
+    let refused = target.runner_run(&grant, lease, argv, timeout).unwrap_err();
+    assert!(refused.contains("no commands left"));
+    target.runner_close(&grant, lease)?;
+    Ok(vec![(Name::from_static("command"), json!(command))])
 }

@@ -6,7 +6,6 @@ use std::time::Duration;
 use decision::{CallResult, JobId};
 use gateway::Session;
 use schema::sandbox::OpPayloadLimit;
-use schema::sandbox::op::OpReply;
 use schema::workflow::Holder;
 
 use crate::Host;
@@ -23,7 +22,11 @@ pub(crate) struct Call<'r> {
     pub(crate) timeout: Duration,
 }
 
-pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Child<'_, H, OpReply>) {
+pub(crate) fn run<H: Host>(
+    call: Call<'_>,
+    bodies: &dyn Bodies,
+    child: &mut Child<'_, H, crate::relay::Order>,
+) {
     let holder = Holder::Target(call.of.target());
     // A target's ops carry no payload: it holds sessions alone.
     let ops = child
@@ -40,7 +43,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
 pub(crate) fn evaluate<H: Host>(
     call: Call<'_>,
     bodies: &dyn Bodies,
-    child: &mut Child<'_, H, OpReply>,
+    child: &mut Child<'_, H, crate::relay::Order>,
     session: &mut Session,
     stdin: &mut body::Stdin,
 ) -> End {

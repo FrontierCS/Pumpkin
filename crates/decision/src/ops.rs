@@ -492,6 +492,12 @@ impl Core<'_> {
         }
     }
 
+    /// The recorded state of an admitted lease, available only to its holder.
+    pub fn held_lease(&self, holder: Caller, lease: LeaseId) -> Option<LeaseStatusReply> {
+        let id = self.leases.find(lease.0)?;
+        (self.leases[id].holder == holder).then(|| self.lease_status(id))
+    }
+
     fn lease_status(&self, id: LeaseId) -> LeaseStatusReply {
         let lease = &self.leases[id];
         let (state, failure) = match &lease.state {
