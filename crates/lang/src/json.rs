@@ -431,20 +431,18 @@ impl Decoder<'_> {
     }
 
     fn code_unit(&mut self) -> Result<u16, Fault> {
-        let start = self.offset + 2;
-        let rest = &self.text.as_bytes()[start..];
-        let digits = rest
-            .iter()
-            .take(4)
-            .take_while(|byte| byte.is_ascii_hexdigit())
-            .count();
-        self.offset = start + digits;
-        if digits < 4 {
-            return Err(self.unexpected("a hexadecimal digit, as `\\u` takes four"));
+        self.offset += 2;
+        let mut unit = 0;
+        for _ in 0..4 {
+            let digit = match self.text.as_bytes().get(self.offset).copied() {
+                Some(byte @ b'0'..=b'9') => byte - b'0',
+                Some(byte @ b'a'..=b'f') => byte - b'a' + 10,
+                Some(byte @ b'A'..=b'F') => byte - b'A' + 10,
+                _ => return Err(self.unexpected("a hexadecimal digit, as `\\u` takes four")),
+            };
+            unit = (unit << 4) | u16::from(digit);
+            self.offset += 1;
         }
-        let Ok(unit) = u16::from_str_radix(&self.text[start..self.offset], 16) else {
-            unreachable!("four hexadecimal digits make a 16-bit unit, at most 0xffff")
-        };
         Ok(unit)
     }
 
