@@ -78,7 +78,7 @@ pub(crate) enum Kind {
     Builtin(Builtin),
     Image(ImageId),
     Module(Module),
-    Hosted(Hosted),
+    Hosted(Hosted<usize>),
 }
 
 /// An image that `image()` declares, by its place among its evaluation's.
@@ -396,24 +396,32 @@ pub(crate) enum Module {
 }
 
 /// A value that a call of a body makes for its host, and no name gives: the body's handle, or
-/// the payload. A call makes one handle and one payload, so a value equals each of its own kind.
+/// a payload. Each payload carries its slot in the call's inputs.
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Hosted {
+pub(crate) enum Hosted<P = ()> {
     /// A job's handle on the call's target.
     Target,
     /// A now function's handle on the run's state.
     Run,
     /// The call's payload, which only the host holds, so that a body passes it on but can't read
     /// it.
-    Payload,
+    Payload(P),
 }
 
-impl Hosted {
+impl<P> Hosted<P> {
+    pub(crate) fn ty(&self) -> Hosted {
+        match self {
+            Self::Target => Hosted::Target,
+            Self::Run => Hosted::Run,
+            Self::Payload(_) => Hosted::Payload(()),
+        }
+    }
+
     pub(crate) fn describe(self) -> &'static str {
         match self {
             Self::Target => "a `Target`",
             Self::Run => "a `Run`",
-            Self::Payload => "the payload",
+            Self::Payload(_) => "the payload",
         }
     }
 }

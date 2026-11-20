@@ -68,7 +68,7 @@ fn reaps() {
     write_docker_record(&scratch, UNREACHED, "recorded", Some(failed));
     write_record(&scratch, BAD_NAME, true, None);
     scratch.write("runs/notes/todo", "");
-    scratch.write(&format!("runs/{LOST}/sockets/agent/s"), "");
+    scratch.write(&format!("runs/{LOST}/sockets/agent-0/s"), "");
     let reap = |runs: &str| {
         let mut reap = scratch.pumpkin(&["reap", "--runs", runs]);
         reap.env("PATH", "");
@@ -191,7 +191,7 @@ esac
     write_docker_record(&scratch, UNFIT, "default", Some(failed));
     let path = write_docker(&scratch, &docker);
     let sandbox = json!({ "provider": "local", "id": container, "report": {} });
-    scratch.write(&format!("runs/{UNFIT}/agent/sandbox.json"), &sandbox);
+    scratch.write(&format!("runs/{UNFIT}/agents/agent/sandbox.json"), &sandbox);
     let mut reap = scratch.pumpkin(&["reap", "--runs", "runs"]);
     reap.env("PATH", &path);
     let reaped = ran(reap, &scratch.0, false);
@@ -283,7 +283,7 @@ esac
             "--config".to_owned(),
             config.display().to_string(),
         ];
-        let record = json!({ "record_version": "pumpkin.record/v0", "args": args });
+        let record = json!({ "record_version": "pumpkin.record/v1", "args": args });
         scratch.write(&format!("runs/{id}/record.json"), &record);
         let reports = providers.iter().map(|&name| {
             let report = match name {
@@ -296,7 +296,7 @@ esac
         scratch.write(&format!("runs/{id}/provider.json"), &provided);
     }
     let held = [
-        (SPREAD, "agent", "local", container.clone()),
+        (SPREAD, "agents/agent", "local", container.clone()),
         (SPREAD, "jobs/0", "aws", "i-00000000000000038".to_owned()),
         (CANCELLED, "jobs/0", "aws", "i-00000000000000039".to_owned()),
     ];

@@ -33,6 +33,7 @@ GPU_RUNNER = {
 }
 
 workflow(
+    deadline_seconds = DEADLINE,
     name = "examples/smoke",
     roles = [
         {
@@ -42,7 +43,6 @@ workflow(
             "needs": {"cpu_millis": 500, "memory_bytes": 512 * MiB},
             "runtime": {"agent": {
                 "command": {"argv": ["python3", "-u", "/opt/smoke/agent.py"] + (["hold"] if HOLD else []), "cwd": "/workspace"},
-                "deadline_seconds": DEADLINE,
                 "finalize_grace_seconds": 0,
                 "grants": [CPU_SESSION] + ([GPU_SESSION] if GPU_MODEL else []) + [{"name": "final", "now": {"body": submit, "payload_max_bytes": 64 * KiB}}],
             }},

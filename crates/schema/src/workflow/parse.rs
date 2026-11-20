@@ -12,13 +12,10 @@ use crate::sandbox::{MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES};
 
 impl Workflow {
     /// Parses `ir`: resolves its names to ids, and reports each rule it breaks
-    /// [at](super::ParseError::at) its place. The rules: one agent; names unique among roles and
-    /// among a role's grants; the agent's `dirs` and `files` give each path once, none below a
-    /// file; each limit of bytes is within the protocol's; each grant names a role of its kind
-    /// that no other grant of its kind names; an agent's runner has an image no target has; the
-    /// final call's target is one that no job function names; every runner is leased, and every
-    /// target called. A rule about parts that fail to resolve goes
-    /// unchecked, so fixing these errors may reveal others.
+    /// [at](super::ParseError::at) its place. Each reference names a role of the required kind,
+    /// and every role is reached. Agents have one work deadline and grant names local to each
+    /// holder. A rule about
+    /// parts that fail to resolve goes unchecked, so fixing these errors may reveal others.
     pub fn parse(ir: &ir::Workflow) -> Result<Self, ParseErrors> {
         Parser::default().workflow(ir)
     }
@@ -29,12 +26,14 @@ struct Parser<'ir> {
     errors: Errors,
     role_ids: BTreeMap<&'ir str, RoleId>,
     roles: Vec<Sandbox>,
-    agents: Vec<(JsonPointer, Agent, &'ir [ir::Grant])>,
+    agents: Vec<DeclaredAgent<'ir>>,
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     holders: Vec<Holding<'ir>>,
     /// Each job function's target, with the function's name, in the IR's order.
-    called: Vec<(RoleId, &'ir Name)>,
+    called: Vec<(TargetId, AgentId, &'ir Name)>,
+    job_functions: Vec<JobFunction>,
+    now_functions: Vec<NowFunction>,
 }
 
 /// A role that holds sessions, with each of them, its name and its place.
@@ -43,73 +42,49 @@ struct Holding<'ir> {
     sessions: Vec<(JsonPointer, &'ir Name, &'ir ir::Session)>,
 }
 
-type Grants = (
-    Result<Vec<JobFunction>, Reported>,
-    Result<Vec<NowFunction>, Reported>,
-);
+struct DeclaredAgent<'ir> {
+    at: JsonPointer,
+    agent: Agent,
+    runtime: &'ir ir::AgentRuntime,
+}
 
 impl<'ir> Parser<'ir> {
     fn workflow(mut self, ir: &'ir ir::Workflow) -> Result<Workflow, ParseErrors> {
-        let ir::Workflow {
-            ir_version: ir::IrVersion::V0,
-            name: _,
-            roles,
-            final_call,
-        } = ir;
-        self.roles(roles);
-        let agent = match self.first_agent() {
-            Ok((at, agent, grants)) => {
-                let list = at.token("grants");
-                let names = grants.iter().map(|grant| &grant.name);
-                (self.errors).unique(names, |index| list.token(index));
-                let sessions = grants.iter().enumerate();
-                let sessions = sessions.filter_map(|(index, grant)| match &grant.function {
-                    ir::Function::Session(session) => {
-                        Some((list.token(index).token("session"), &grant.name, session))
-                    }
-                    ir::Function::Job(_) | ir::Function::Now(_) => None,
-                });
-                // The agent's sessions come first, as [`Workflow::sessions`] says.
-                let holding = Holding {
-                    holder: Holder::Agent(agent.id),
-                    sessions: sessions.collect(),
-                };
-                self.holders.insert(0, holding);
-                let grants = self.grants(&at, agent.id, grants);
-                Ok((agent, grants))
-            }
-            Err(reported) => Err(reported),
-        };
+        self.roles(&ir.roles);
+        let agents = std::mem::take(&mut self.agents);
+        if agents.is_empty() {
+            self.errors.report(
+                JsonPointer::root().token("roles"),
+                "no role is an agent: declare an agent",
+            );
+        }
+        let target_holders = std::mem::take(&mut self.holders);
+        for DeclaredAgent { at, agent, runtime } in &agents {
+            self.grants(at, agent.id, &runtime.grants);
+        }
+        self.holders.extend(target_holders);
         // After the grants, since the final call's target is one that no job function names.
-        let target = self.final_target(&final_call.target);
-        // With no agent, it holds no grants, so no target is checked against job functions.
-        if agent.is_ok() {
+        let target = self.final_target(&ir.final_call.target);
+        if !agents.is_empty() {
             self.uncalled(target.as_ref().ok().copied());
         }
-        let final_call = self.final_call(final_call, target);
+        let final_call = self.final_call(&ir.final_call, target);
         let sessions = self.sessions();
-        let Self {
-            errors,
-            roles,
-            targets,
-            runners,
-            ..
-        } = self;
-        let parsed = agent.and_then(|(agent, (job_functions, now_functions))| {
-            let grants = (job_functions?, sessions?, now_functions?);
-            Ok((agent, grants, final_call?))
-        });
-        let (agent, grants, final_call) = errors.finish(parsed)?;
-        let (job_functions, sessions, now_functions) = grants;
+        let (final_call, sessions) = self
+            .errors
+            .finish(final_call.and_then(|call| Ok((call, sessions?))))?;
         Ok(Workflow {
             ir: ir.clone(),
-            roles,
-            agent,
-            targets,
-            runners,
-            job_functions,
+            roles: self.roles,
+            agents: agents
+                .into_iter()
+                .map(|decl| (decl.agent.id, decl.agent))
+                .collect(),
+            targets: self.targets,
+            runners: self.runners,
+            job_functions: self.job_functions,
             sessions,
-            now_functions,
+            now_functions: self.now_functions,
             final_call,
         })
     }
@@ -151,17 +126,16 @@ impl<'ir> Parser<'ir> {
         }
     }
 
-    fn agent(&mut self, at: JsonPointer, role: RoleId, agent: &'ir ir::AgentRuntime) {
+    fn agent(&mut self, at: JsonPointer, role: RoleId, runtime: &'ir ir::AgentRuntime) {
         let ir::AgentRuntime {
             command,
             dirs,
             files,
             stdin,
-            deadline_seconds,
             finalize_grace_seconds,
             egress,
-            grants,
-        } = agent;
+            grants: _,
+        } = runtime;
         self.agent_paths(&at, dirs, files);
         let model = egress.model.clone();
         let mut dirs = dirs.clone();
@@ -172,11 +146,10 @@ impl<'ir> Parser<'ir> {
             dirs,
             files: files.clone(),
             stdin: stdin.clone(),
-            deadline: Duration::from_secs(deadline_seconds.get()),
             finalize_grace: Duration::from_secs(*finalize_grace_seconds),
             model,
         };
-        self.agents.push((at, agent, grants));
+        self.agents.push(DeclaredAgent { at, agent, runtime });
     }
 
     fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
@@ -203,27 +176,6 @@ impl<'ir> Parser<'ir> {
             };
             self.errors.report(at(index).token("path"), message);
         }
-    }
-
-    fn first_agent(&mut self) -> Result<(JsonPointer, Agent, &'ir [ir::Grant]), Reported> {
-        let mut agents = std::mem::take(&mut self.agents).into_iter();
-        let Some(first) = agents.next() else {
-            return Err(self.errors.report(
-                JsonPointer::root().token("roles"),
-                "no role is an agent: a workflow has exactly one",
-            ));
-        };
-        let name = |agent: &Agent| &self.roles[agent.id.role().0].name;
-        for (_, other, _) in agents {
-            let message = format!(
-                "`{}` is a second agent, after `{}`: a workflow has exactly one",
-                name(&other),
-                name(&first.1)
-            );
-            let at = self.roles[other.id.role().0].at.token("runtime");
-            self.errors.report(at, message);
-        }
-        Ok(first)
     }
 
     /// Holds `sessions`, target `target`'s at `at`, for [`Self::sessions`] to parse.
@@ -257,24 +209,33 @@ impl<'ir> Parser<'ir> {
         self.targets.insert(role, target);
     }
 
-    fn grants(&mut self, at: &JsonPointer, holder: AgentId, grants: &'ir [ir::Grant]) -> Grants {
+    fn grants(&mut self, at: &JsonPointer, holder: AgentId, grants: &'ir [ir::Grant]) {
         let list = at.token("grants");
-        let mut job_functions = Vec::new();
-        let mut now_functions = Vec::new();
+        self.errors
+            .unique(grants.iter().map(|grant| &grant.name), |index| {
+                list.token(index)
+            });
+        let mut sessions = Vec::new();
         for (index, grant) in grants.iter().enumerate() {
             let at = place(&list, index, grant);
             match &grant.function {
                 ir::Function::Job(job) => {
-                    job_functions.push(self.job_function(&at, holder, &grant.name, job));
+                    if let Ok(job) = self.job_function(&at, holder, &grant.name, job) {
+                        self.job_functions.push(job);
+                    }
                 }
-                ir::Function::Session(_) => {}
+                ir::Function::Session(session) => sessions.push((at, &grant.name, session)),
                 ir::Function::Now(now) => {
-                    now_functions.push(self.now_function(&at, holder, &grant.name, now));
+                    if let Ok(now) = self.now_function(&at, holder, &grant.name, now) {
+                        self.now_functions.push(now);
+                    }
                 }
             }
         }
-        let job_functions = job_functions.into_iter().collect();
-        (job_functions, now_functions.into_iter().collect())
+        self.holders.push(Holding {
+            holder: Holder::Agent(holder),
+            sessions,
+        });
     }
 
     fn job_function(
@@ -296,9 +257,12 @@ impl<'ir> Parser<'ir> {
         let bounded = self.payload_bound(at, &format!("`{name}`'s"), *payload_max_bytes);
         let target_at = at.token("target");
         let target_id = self.call_target(&target_at, target, "a job's target")?;
-        // So that a target runs one call at a time, as its function does.
-        let shared = match self.caller(target_id) {
-            Some(first) => Err(self.errors.report(
+        let first = self
+            .called
+            .iter()
+            .find(|(target, agent, _)| *target == target_id && *agent == holder);
+        let shared = match first {
+            Some((_, _, first)) => Err(self.errors.report(
                 target_at,
                 format!(
                     "`{target}` is the target of job functions `{first}` and `{name}`: name each \
@@ -307,7 +271,7 @@ impl<'ir> Parser<'ir> {
             )),
             None => Ok(()),
         };
-        self.called.push((target_id.role(), name));
+        self.called.push((target_id, holder, name));
         shared.and(bounded).map(|payload_max_bytes| JobFunction {
             holder,
             name: name.clone(),
@@ -364,7 +328,11 @@ impl<'ir> Parser<'ir> {
             Ok(())
         };
         let runner_at = at.token("runner");
-        let first = (earlier.iter()).find(|(_, _, earlier)| earlier.runner == *runner);
+        let first = earlier.iter().find(|(other, _, earlier)| {
+            let different_agents =
+                matches!((holder, other), (Holder::Agent(a), Holder::Agent(b)) if a != *b);
+            earlier.runner == *runner && !different_agents
+        });
         let shared = match first {
             Some((first_holder, first, _)) => {
                 let holder_name = |held: &Holder| &self.roles[held.role().0].name;
@@ -444,7 +412,10 @@ impl<'ir> Parser<'ir> {
     fn uncalled(&mut self, final_target: Option<TargetId>) {
         let targets: Vec<RoleId> = self.targets.keys().copied().collect();
         for target in targets {
-            let called = self.called.iter().any(|(called, _)| *called == target);
+            let called = self
+                .called
+                .iter()
+                .any(|(called, _, _)| called.role() == target);
             if !called && final_target != Some(TargetId(target)) {
                 let name = &self.roles[target.0].name;
                 let message = format!(
@@ -524,19 +495,11 @@ impl<'ir> Parser<'ir> {
         Ok(TargetId(id))
     }
 
-    /// The job function whose target is `target`, if one's is.
-    fn caller(&self, target: TargetId) -> Option<&'ir Name> {
-        let mut called = self.called.iter();
-        called
-            .find(|(called, _)| *called == target.role())
-            .map(|(_, name)| *name)
-    }
-
     fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
         let at = JsonPointer::root().token("final").token("target");
         let id = self.call_target(&at, target, "the final call's target")?;
         // So that the final call, like a job, has its target to itself.
-        if let Some(function) = self.caller(id) {
+        if let Some((_, _, function)) = self.called.iter().find(|(target, _, _)| *target == id) {
             let message = format!(
                 "`{target}` is the final call's target and `{function}`'s: give the final call a \
                  role no job names"

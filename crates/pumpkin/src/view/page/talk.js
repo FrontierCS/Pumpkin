@@ -19,7 +19,7 @@ const PLACE_CHAR_PX = 7.3;
 
 /** @param {Lane} lane @param {Run} data */
 export function laneRole(lane, data) {
-  if (lane.kind === "agent") {
+  if (lane.kind === "agent" && !lane.role) {
     const agent = data.talk && data.talk.roles.find((role) => role.kind === "agent");
     return agent ? agent.name : null;
   }

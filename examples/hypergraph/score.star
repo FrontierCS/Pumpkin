@@ -13,3 +13,18 @@ def score(target: Target, payload: Payload) -> dict[str, int]:
     target.put("/pumpkin/in/payload/raw", payload)
     target.run(["python3", "/opt/hypergraph/judge.py", "/pumpkin/in/payload/raw", "/pumpkin/out/result.json"])
     return json.decode(target.get("/pumpkin/out/result.json"))
+
+def final_score(target: Target, submissions) -> dict[str, int]:
+    """Scores the agent's final submission.
+
+    Args:
+      target: the judge's sandbox.
+      submissions: each role's payload, or None if it is absent.
+
+    Returns:
+      The score, zero if the agent submitted nothing.
+    """
+    payload = submissions["agent"]
+    if payload == None:
+        return {"score": 0}
+    return score(target, payload)

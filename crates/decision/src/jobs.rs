@@ -4,8 +4,8 @@
 //! sandbox fails to start: that is the run's or its provider's failure, not the caller's, so the
 //! call is given back, as a lease that fails to start costs nothing. A job starts with its body.
 //! Its seconds run from its start to its body's end once its target is gone, to its stop at the
-//! timeout, to the job's failure, or to the core stopping it when the work phase ends, each as the
-//! runtime observed it. A call keeps its function, which [runs one call at a
+//! timeout, to the job's failure, or to the core stopping it when its caller's work ends, each as
+//! the runtime observed it. A call keeps its function, which [runs one call at a
 //! time](schema::ir::JobFunction), busy until its job has ended, once its outputs are collected and
 //! its sandbox destroyed, and every lease it held has ended, which the core reads from its leases.
 //!
@@ -137,7 +137,7 @@ impl State {
             Self::Queued => (Duration::ZERO, outcome),
             Self::Running { started } => (at.saturating_sub(started), outcome),
             // A stopped job ends as its report says, as after an exit: the core stops jobs only
-            // as the work phase ends, after which no status asks what came of them.
+            // as the caller's work ends, after which no status asks what came of them.
             Self::Ending { used, end } => match end {
                 End::TimedOut => (used, Err(Failure::Timeout)),
                 End::Stopped => (used, outcome),
@@ -180,9 +180,18 @@ impl Jobs {
 
     /// Stops every job that is queued or running at `now`, and returns them. A job whose
     /// command has already ended is left to finish collecting.
-    pub(super) fn stop_unfinished(&mut self, now: Duration) -> Vec<JobId> {
+    pub(super) fn stop_unfinished(
+        &mut self,
+        now: Duration,
+        owns: impl Fn(JobOf) -> bool,
+    ) -> Vec<JobId> {
         let mut stopped = Vec::new();
-        for (index, job) in self.0.iter_mut().enumerate() {
+        for (index, job) in self
+            .0
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, job)| owns(job.call))
+        {
             match job.state {
                 State::Queued | State::Running { .. } => {
                     job.state.ended(now, End::Stopped);

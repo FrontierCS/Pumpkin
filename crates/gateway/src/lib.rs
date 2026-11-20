@@ -35,11 +35,12 @@ use std::{fmt, fs};
 
 pub use meeting::{Dialer, GatewayAddress, GrantListener, Registration, Sockets, Unreached};
 pub use op::Op;
+pub use process::Process;
 use schema::ir::{AbsolutePath, GpuModel, Mode};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
+    Entry, ExitStatus, FromSandbox, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
     MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, pumpkin_dir,
     pumpkin_subdirs,
 };
@@ -47,6 +48,7 @@ use stdx::Deadline;
 
 mod meeting;
 mod op;
+mod process;
 mod trees;
 
 // Tells one session's handles from another's: `kill`, `reply` and `refuse` check it. Every
@@ -281,13 +283,6 @@ struct Responder {
     shared: Arc<Shared>,
 }
 
-/// A command started on a session, which names it on that session alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Process {
-    session: u64,
-    stream: u32,
-}
-
 impl Session {
     fn new(
         stream: Connection,
@@ -364,48 +359,6 @@ impl Session {
         by: Deadline,
     ) -> io::Result<()> {
         self.shared.put(dir, Root::Kept, entries, by)
-    }
-
-    /// Starts a command, whose exit arrives as an [`Arrival::Exited`] naming the [`Process`] this
-    /// returns.
-    pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
-        let (stream, replies) = self.shared.open(Route::Start, by)?;
-        let started = (self.shared)
-            .send(&ToSandbox::Start { stream, launch }, &[], by)
-            .and_then(|()| self.shared.done(&replies, by));
-        match started {
-            // The reader removes the command's route at its exit, which outlives this call.
-            Ok(()) => Ok(Process {
-                session: self.id,
-                stream,
-            }),
-            Err(error) => {
-                self.shared.close(stream);
-                Err(error)
-            }
-        }
-    }
-
-    /// Kills `process`'s group ([`ToSandbox::Kill`]), whose exit then arrives as any other's.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `process` was started on another session.
-    pub fn kill(&mut self, process: Process, by: Deadline) -> io::Result<()> {
-        let Process { session, stream } = process;
-        if session != self.id {
-            unreachable!(
-                "the command on stream {stream} was killed on a session other than the one it was \
-                 started on, though `kill`'s contract requires that one"
-            )
-        }
-        self.shared.request(
-            |request| ToSandbox::Kill {
-                stream: request,
-                command: stream,
-            },
-            by,
-        )
     }
 
     /// Kills the sandbox's processes that [`ToSandbox::Freeze`] names, so that nothing collected

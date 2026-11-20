@@ -27,9 +27,9 @@ pub struct NamedSession {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
-    /// The runner role, which no other session names. An agent's runner has an image that no
-    /// target has: a target's files are in its image alone, so a runner that it trusts with them
-    /// runs that image, and any other runner it leases may share the agent's runner's.
+    /// The runner role that each lease starts afresh. Distinct agents may lease the same runner
+    /// role. A target's session names a runner no other session names, and an agent's runner
+    /// has an image no target has.
     pub runner: Name,
     /// The most leases open at once, each until its runner is gone.
     pub instances: NonZeroU32,

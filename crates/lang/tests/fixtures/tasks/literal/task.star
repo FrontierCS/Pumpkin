@@ -10,6 +10,11 @@ UID, GID = 1000, \
     1000
 
 workflow(
+    # Floored in each sign, as Starlark's `//` and `%` are: each term in parentheses is
+    # an operation less what it gives, 0, so this is 5 hours.
+    deadline_seconds = 5 * 3600 + (7 // 2 - 3) + (-7 // 2 - -4) + (7 // -2 - -4)
+        + (-6 // 2 - -3) + (-7 % 3 - 2) + (7 % -4 - -1) + (6 % -3 - 0)
+        + ((-9223372036854775807 - 1) % -1 - 0),
     name = "neutral/literal",
     roles = [
         {
@@ -37,11 +42,6 @@ joined\n',
                 # A string joined to another.
                 "stdin": "Solve the task in /task/README.md, " + """then submit with "sandboxctl".
 """,
-                # Floored in each sign, as Starlark's `//` and `%` are: each term in parentheses is
-                # an operation less what it gives, 0, so this is 5 hours.
-                "deadline_seconds": 5 * 3600 + (7 // 2 - 3) + (-7 // 2 - -4) + (7 // -2 - -4)
-                    + (-6 // 2 - -3) + (-7 % 3 - 2) + (7 % -4 - -1) + (6 % -3 - 0)
-                    + ((-9223372036854775807 - 1) % -1 - 0),
                 "finalize_grace_seconds": 60,
                 "egress": {"model": [{"api": "responses", "models": ["model-large", "model-small"]}]},
                 "grants": [

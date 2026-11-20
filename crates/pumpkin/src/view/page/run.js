@@ -48,7 +48,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {string} state
  * @property {boolean} has_result
  * @property {string} verdict
- * @property {{ values: { name: string, value: any }[], after: string } | null} result the values a run that finished with a result shows, in their order, and how its work phase ended
+ * @property {{ values: { name: string, value: any }[] } | null} result the values a run that finished with a result shows, in the order the body returned them
  * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build
  * @property {Times | null} times
@@ -79,9 +79,9 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {{ input: number | null, output: number | null, cached: number | null }} tokens
  * @property {string[]} dropped_headers the request headers the route left behind, the first by name
  * @property {boolean} more_dropped_headers whether it left more than `dropped_headers`
- * @typedef {object} Lane a sandbox's lane: the agent's, a call's (`job <n>`) or a lease's
+ * @typedef {object} Lane a sandbox's lane: an agent's, a call's (`job <n>`) or a lease's
  * @property {string} lane
- * @property {string} [caller] the caller that the lane's trace is of, `agent` or `job-<n>`; none for a lease
+ * @property {string} [caller] the caller that the lane's trace is of, `agent-<n>` or `job-<n>`; none for a lease
  * @property {"agent" | "target" | "runner"} kind
  * @property {string | null} [role]
  * @property {{ function: string } | "final"} [of] whose body a call's lane calls: a job function's, by its name, or the final call's
@@ -571,19 +571,15 @@ function shownNumber(number) {
   return shown === "-0" ? "0" : shown;
 }
 
-// Draws the values that a run's result shows, in their order, each under its name, and how its
-// work phase ended above them. A value that is an object or a list folds under its name, as
-// JSON; the page reads no meaning into any value. Nothing for a run without a result.
+// The page displays objects and lists as folded JSON. The workflow gives the values meaning.
 /** @param {HTMLElement} node @param {Run["result"]} result */
 function drawResult(node, result) {
   if (!result) return fill(node);
   const scalar = (/** @type {any} */ value) => value === null || typeof value !== "object";
-  const ended = result.after.replace(/^after /, "");
   const values = result.values.filter(({ value }) => scalar(value));
   const objects = result.values.filter(({ value }) => !scalar(value));
   fill(
     node,
-    h("p", { class: "ended" }, ended.charAt(0).toUpperCase() + ended.slice(1) + "."),
     values.length
       ? h(
           "div",
@@ -672,7 +668,7 @@ function drawTraces(node, data) {
       h(
         "a",
         { href: "#/run/" + encodeURIComponent(data.id) + "/trace?caller=" + encodeURIComponent(lane.caller ?? ""), class: "kind " + lane.kind, title: "What " + lane.lane + " and the model said to each other: " + plural(lane.answers?.count ?? 0, "answer") },
-        lane.lane,
+        lane.kind === "agent" && lane.role ? lane.role : lane.lane,
       ),
     ),
   );

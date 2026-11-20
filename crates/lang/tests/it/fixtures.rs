@@ -103,6 +103,7 @@ fn tasks() {
         &expect![[r#"
             == tasks/judged/task.star: 2 of 66 prefixes evaluate
             {
+              "deadline_seconds": 18000,
               "final": {
                 "body": {
                   "def": "final_call",
@@ -112,7 +113,7 @@ fn tasks() {
                 "target": "final_judge",
                 "timeout_seconds": 120
               },
-              "ir_version": "pumpkin.ir/v0",
+              "ir_version": "pumpkin.ir/v1",
               "name": "neutral/judged-neutral",
               "roles": [
                 {
@@ -130,7 +131,6 @@ fn tasks() {
                         ],
                         "cwd": "/workspace"
                       },
-                      "deadline_seconds": 18000,
                       "egress": {
                         "model": [
                           {
@@ -237,8 +237,9 @@ fn tasks() {
               ]
             }
 
-            == tasks/literal/task.star: 2 of 658 prefixes evaluate
+            == tasks/literal/task.star: 2 of 652 prefixes evaluate
             {
+              "deadline_seconds": 18000,
               "final": {
                 "body": {
                   "def": "final_call",
@@ -248,7 +249,7 @@ fn tasks() {
                 "target": "final_judge",
                 "timeout_seconds": 120
               },
-              "ir_version": "pumpkin.ir/v0",
+              "ir_version": "pumpkin.ir/v1",
               "name": "neutral/literal",
               "roles": [
                 {
@@ -275,7 +276,6 @@ fn tasks() {
                         ],
                         "cwd": "/workspace"
                       },
-                      "deadline_seconds": 18000,
                       "dirs": [
                         {
                           "mode": "0700",
@@ -425,8 +425,9 @@ fn tasks() {
               ]
             }
 
-            == tasks/loaded/task.star: 2 of 86 prefixes evaluate
+            == tasks/loaded/task.star: 2 of 92 prefixes evaluate
             {
+              "deadline_seconds": 3600,
               "final": {
                 "body": {
                   "def": "final_call",
@@ -436,7 +437,7 @@ fn tasks() {
                 "target": "final_judge",
                 "timeout_seconds": 120
               },
-              "ir_version": "pumpkin.ir/v0",
+              "ir_version": "pumpkin.ir/v1",
               "name": "neutral/loaded",
               "roles": [
                 {
@@ -454,7 +455,6 @@ fn tasks() {
                         ],
                         "cwd": "/workspace"
                       },
-                      "deadline_seconds": 3600,
                       "finalize_grace_seconds": 0,
                       "grants": [
                         {

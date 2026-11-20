@@ -29,10 +29,10 @@ def vector(record, payload):
     return answer
 
 
-def model_replied(event):
+def model_replied(event, caller):
     return (
         event["kind"] == "model_answered"
-        and event["caller"] == "agent"
+        and event["caller"] == caller
         and event["answer"]["kind"] == "forwarded"
         and 200 <= event["upstream_status"] < 300
         and "failed" not in event
@@ -41,13 +41,20 @@ def model_replied(event):
 
 
 def verify(record):
-    if json.loads((record / "ir.json").read_bytes())["name"] != "examples/hypergraph":
+    ir = json.loads((record / "ir.json").read_bytes())
+    if ir["name"] != "examples/hypergraph":
         raise ValueError("expected the hypergraph workflow")
+    index = [role["name"] for role in ir["roles"]].index("agent")
+    caller = f"agent-{index}"
     outcome = json.loads((record / "outcome.json").read_bytes())
     if outcome["state"] != "finished":
         raise ValueError(f"run {outcome['state']}")
     usage = outcome["usage"]
-    sandboxes = [record / "agent", *record.glob("jobs/*"), *record.glob("leases/*")]
+    sandboxes = [
+        record / "agents" / "agent",
+        *record.glob("jobs/*"),
+        *record.glob("leases/*"),
+    ]
     if len(sandboxes) != sum(place["count"] for place in usage["sandboxes"]):
         raise ValueError("record is missing a sandbox")
     for sandbox in sandboxes:
@@ -57,10 +64,13 @@ def verify(record):
 
     with (record / "log.jsonl").open() as log:
         events = (line["event"] for line in map(json.loads, log) if "event" in line)
-        if not any(model_replied(event) for event in events):
+        if not any(model_replied(event, caller) for event in events):
             raise ValueError("no successful agent model response with output tokens")
 
-    end = outcome["work_end"]
+    (agent,) = outcome["agents"]
+    if agent["role"] != "agent":
+        raise ValueError("expected the agent role in the outcome")
+    end = agent["work_end"]
     if end not in (
         {"kind": "finalized"},
         {"kind": "agent_exited", "status": {"code": 0}},
@@ -69,9 +79,10 @@ def verify(record):
     verdict = outcome["verdict"]
     if verdict["kind"] != "returned":
         raise ValueError(f"judge has no result ({verdict['kind']})")
-    if not verdict["submission"]["finalized"]:
+    submission = agent["submission"]
+    if submission is None or not submission["finalized"]:
         raise ValueError("agent did not finalize its submission")
-    answer = vector(record, verdict["submission"]["payload"])
+    answer = vector(record, submission["payload"])
     score = int(answer == CORES)
     if verdict["result"]["values"] != [{"name": "score", "value": score}]:
         raise ValueError(

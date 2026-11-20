@@ -1034,10 +1034,10 @@ fn boot() {
             super::this_build()
         };
         let header =
-            json!({ "record_version": "pumpkin.record/v0", "pumpkin": writer, "args": args });
+            json!({ "record_version": "pumpkin.record/v1", "pumpkin": writer, "args": args });
         scratch.write(&format!("{record}/record.json"), &header);
         scratch.write(&format!("{record}/driver.pid"), "4242\n");
-        let ir = json!({ "roles": [{ "name": "agent", "image": image('a') }] });
+        let ir = json!({ "roles": [{ "name": "solver", "image": image('a') }] });
         scratch.write(&format!("{record}/ir.json"), &ir);
         let report = match provider {
             "local" => json!({ "context": "default" }),
@@ -1055,7 +1055,7 @@ fn boot() {
         if let Some(outcome) = outcome {
             scratch.write(&format!("{record}/outcome.json"), &outcome);
         }
-        scratch.write(&format!("{record}/agent/sandbox.json"), &sandbox);
+        scratch.write(&format!("{record}/agents/solver/sandbox.json"), &sandbox);
     }
     let foreign = format!("home/.pumpkin/runs/{}/record.json", id_ago(1, "0e000001"));
     scratch.write(
@@ -1103,7 +1103,7 @@ fn boot() {
               <lost>
             aws --version
             aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
-            <clean>'s outcome.json: {"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            <clean>'s outcome.json: {"agents":[{"role":"solver","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]}}}
             <local>'s outcome.json: {
               "reason": "its driver ended without an outcome",
               "state": "failed"
@@ -1378,7 +1378,7 @@ fn keys_on_standard_input() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.8 KiB
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2009,7 +2009,7 @@ fn send_by_content() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 10 of the task's files: sending 2.9 KiB
+            pumpkin: controller `alice` lacks all 10 of the task's files: sending 3.0 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2094,14 +2094,14 @@ fn send_refused_partial() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.8 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since it was hashed: send the task again
             the calls: serve
             the store holds it: false; its partial: false
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 6 of the task's 7 files: sending 1.3 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2380,15 +2380,15 @@ fn sends_from_a_repository_with_a_native_name() {
         &sent,
         &[],
         &expect![[r#"
-        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-        exit status: Some(0)
-        pumpkin: run <id> goes to controller `alice`
-        pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.8 KiB
-        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-        pumpkin: to follow it: pumpkin wait <id>
-        pumpkin: to stop it: pumpkin cancel <id>
-        printed:
-          <id>"#]],
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: run <id> goes to controller `alice`
+            pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
+            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+            pumpkin: to follow it: pumpkin wait <id>
+            pumpkin: to stop it: pumpkin cancel <id>
+            printed:
+              <id>"#]],
     );
 }
 
@@ -2477,13 +2477,13 @@ fn send_changed_file() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(1)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.8 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: <scratch>/repo/stand-in/notes changed since the task was hashed: send the task again
             the calls: serve
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 6 of the task's 7 files: sending 1.3 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2676,7 +2676,7 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let args = ["stand-in/task.star"];
     scratch.write(
         &format!("{record}/record.json"),
-        &json!({ "record_version": "pumpkin.record/v0", "args": args }),
+        &json!({ "record_version": "pumpkin.record/v1", "args": args }),
     );
     scratch.write(&format!("{record}/driver.pid"), "4242\n");
     scratch.write(&format!("{record}/outcome.json"), &returned(1.0));
@@ -2795,7 +2795,7 @@ fn cancel_copies_the_record_when_reaping_fails() {
     let id = id_ago(0, "0c000008");
     scratch.write(&format!("home/jobs/{id}/log"), "");
     write_record(&scratch, &id, true, None);
-    scratch.write(&format!("runs/{id}/agent/sandbox.json"), "{}");
+    scratch.write(&format!("runs/{id}/agents/agent/sandbox.json"), "{}");
     move_runs(&scratch, "home/.pumpkin/runs");
     let cancel = on_client(&scratch, &client, &["cancel", &id])
         .output()
@@ -2824,7 +2824,7 @@ fn reap_by_writer() {
     let other = id_ago(0, "0e000002");
     let old = id_ago(0, "0e000003");
     let record =
-        json!({"record_version":"pumpkin.record/v0","pumpkin":super::this_build(),"args":[]});
+        json!({"record_version":"pumpkin.record/v1","pumpkin":super::this_build(),"args":[]});
     scratch.write(&format!("{made}/{own}/record.json"), &record);
     scratch.write(&format!("{made}/{own}/driver.pid"), "4242\n");
     scratch.write(
@@ -3023,17 +3023,12 @@ fn follow_repeats_no_milestone() {
     connect(&scratch, &client);
     served(&scratch);
     let id = id_ago(0, "0f000005");
-    let start = super::logged(1, json!({ "kind": "agent_started" }), json!([]));
-    let end = super::logged(
-        2,
-        json!({ "kind": "agent_exited", "status": { "code": 0 } }),
-        json!([{ "kind": "tear_down_agent" }]),
-    );
+    let [work, agent] = super::started_work(1);
     let dir = write_run(
         &scratch,
         &id,
         asked(&id, 30),
-        &[start, end],
+        &[work, agent, super::agent_exited(2)],
         None,
         &lease_places(Prices::Nothing),
     );
@@ -3044,7 +3039,7 @@ fn follow_repeats_no_milestone() {
     let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
     let first = format!("following run {id}: ending this command does not stop it");
     let _ = calls(&scratch);
-    let started = "   0:01 the agent started on aws/judge";
+    let started = "   0:01 solver started on aws/judge";
     let cut = hello + named_bytes(&id) + said_bytes(&first) + said_bytes(started) + 3;
     let root = scratch.0.display();
     // Cut in the next milestone. The run ends before the next link opens.
@@ -3074,7 +3069,7 @@ fn follow_repeats_no_milestone() {
         .lines()
         .filter(|line| {
             line.contains("ending this command")
-                || line.contains("the agent started on")
+                || line.contains(started)
                 || line.contains("0:02 the work phase ended")
                 || line.contains("attempt 2 of 7")
         })
@@ -3085,7 +3080,7 @@ fn follow_repeats_no_milestone() {
         &[(&id, "<id>")],
         &expect![[r#"
             pumpkin: following run <id>: ending this command does not stop it
-            pumpkin:    0:01 the agent started on aws/judge
+            pumpkin:    0:01 solver started on aws/judge
             pumpkin: controller `alice` didn't answer: ended within the answer: following job <id> again now, attempt 2 of 7
             pumpkin:    0:02 the work phase ended"#]],
     );
@@ -3290,10 +3285,10 @@ fn follow_prints_the_outcome() {
         &[(id.as_str(), "<id>")],
         &expect![[r#"
             $ pumpkin wait <id>
-            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}); its record is <scratch>/repo/.pumpkin/runs/<id>
             printed: nothing
             $ pumpkin wait --outcome <id>
-            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}), after the work phase ended when the agent exited with status 0; its record is <scratch>/repo/.pumpkin/runs/<id>
+            pumpkin: run <id> finished with a result (score=1 metrics={"solved":3}); its record is <scratch>/repo/.pumpkin/runs/<id>
             printed: the copy's outcome.json"#]],
     );
 }
@@ -3339,7 +3334,7 @@ fn follow_copies_another_writers_record() {
             exit status: 1; copied the record: true
               pumpkin: <scratch>/repo/.pumpkin/runs/<id>/record.json: EOF while parsing an object at line 1 column 1
             exit status: 1; copied the record: false
-              pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs/<id>/record.json holds record_version "another form": expected "pumpkin.record/v0", which this `pumpkin` reads"#]],
+              pumpkin: controller `alice` refused: <scratch>/home/.pumpkin/runs/<id>/record.json holds record_version "another form": expected "pumpkin.record/v1", which this `pumpkin` reads"#]],
     );
 }
 
@@ -4397,14 +4392,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 309222, end: 309222
+            next: 309485, end: 309485
             GET /api/runs
             HTTP/1.1 200 OK
-            "<live>" "agent"
+            "<live>" "work"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 309222"#]],
+            state: "finished", end: 309485"#]],
     );
 }
 
@@ -4435,7 +4430,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "controller `alice` didn't answer: ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 309222, end: 309222"#]],
+            next: 309485, end: 309485"#]],
     );
 }
 
@@ -4524,7 +4519,7 @@ fn view_asks_ec2_once_no_link_opens() {
             "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1: : fix what `aws` reports"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309222"#]],
+            end: 309485"#]],
     );
 }
 
@@ -4589,11 +4584,11 @@ fn view_installs_its_serve_there() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309222
+            end: 309485
             the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309222
+            end: 309485
             the calls: none
             the install: buildifier 555, pumpkin 555
             its files:

@@ -196,7 +196,9 @@ impl Type {
             | (Self::Int, Kind::Int(_))
             | (Self::Float, Kind::Float(_))
             | (Self::Str, Kind::Str(_)) => None,
-            (Self::Hosted(hosted), Kind::Hosted(made)) => (made != hosted).then_some(Misfit::Whole),
+            (Self::Hosted(hosted), Kind::Hosted(made)) => {
+                (made.ty() != *hosted).then_some(Misfit::Whole)
+            }
             (Self::List(element), Kind::List(elements)) => {
                 (elements.iter()).find_map(|value| element.held(value, Part::Element))
             }
@@ -273,7 +275,7 @@ impl Type {
             }
             Self::Hosted(Hosted::Target) => String::from("`Target`s"),
             Self::Hosted(Hosted::Run) => String::from("`Run`s"),
-            Self::Hosted(Hosted::Payload) => String::from("payloads"),
+            Self::Hosted(Hosted::Payload(())) => String::from("payloads"),
         }
     }
 }

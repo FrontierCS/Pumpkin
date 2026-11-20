@@ -2,7 +2,7 @@
 
 def submit(run: Run, payload: Payload, finalize: bool = False):
     """Selects `payload`, replacing the last, and, if `finalize`, also ends the agent's work."""
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}

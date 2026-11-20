@@ -153,7 +153,8 @@ pub(super) fn budgets(progress: &Progress, ir: &ir::Workflow) -> Vec<String> {
     let lines = entries.filter_map(|(agent, name, entry)| {
         let budget = entry.budget.as_ref()?;
         let spent = if agent {
-            Spent::of(progress.agent.model.as_ref()?, entry, prices)
+            let agent = progress.agents.values().find(|agent| agent.role == name)?;
+            Spent::of(agent.model.as_ref()?, entry, prices)
         } else {
             let own = (progress.calls.iter()).filter(|call| call.role.as_deref() == Some(name));
             own.fold(Spent::default(), |spent, call| {

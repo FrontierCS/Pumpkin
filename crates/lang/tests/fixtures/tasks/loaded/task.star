@@ -9,6 +9,7 @@ load(
 )
 
 workflow(
+    deadline_seconds = 3600,
     name = "neutral/loaded",
     roles = [
         AGENT,

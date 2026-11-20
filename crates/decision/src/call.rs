@@ -26,7 +26,7 @@ impl Core<'_> {
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
         match self.held(working, function)? {
-            Held::Job(id, deadline) => self.job(id, payload, arguments, deadline, then),
+            Held::Job(id) => self.job(id, payload, arguments, working.end(), then),
             held @ Held::Session(_) => Err(held.misnamed(function, "a function")),
             Held::Now(..) => unreachable!(
                 "`{function}`'s call came as a call of no now function, though the runtime makes \

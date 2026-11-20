@@ -189,7 +189,10 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
     let _ = writeln!(entry);
     let _ = writeln!(entry, "agent = {function}(");
     let _ = writeln!(entry, "    BASE,");
-    for (keyword, _) in &arguments {
+    for (keyword, _) in arguments
+        .iter()
+        .filter(|(key, _)| *key != "deadline_seconds")
+    {
         let _ = writeln!(entry, "    {keyword} = {},", keyword.to_uppercase());
     }
     let _ = writeln!(entry, ")");
@@ -200,13 +203,14 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
 /// The task's library of its now function, which the entry's workflow grants the agent.
 const SUBMIT: &str = r#"
 def submit(run: Run, payload: Payload):
-    run.select(payload)
+    run.set_submission(payload)
     return {}
 "#;
 
 const WORKFLOW: &str = r#"
 workflow(
     name = "harness",
+    deadline_seconds = DEADLINE_SECONDS,
     roles = [
         {
             "name": "agent",
@@ -229,8 +233,8 @@ workflow(
 
 /// The file that the entry loads the final call's body from.
 const FINAL_CALL: &str = r#"
-def final_call(target: Target, payload: Payload):
-    target.put("/pumpkin/in/payload", payload)
+def final_call(target: Target, submissions):
+    target.put("/pumpkin/in/payload", submissions["agent"])
     target.run(["true"])
     return {}
 "#;
@@ -261,7 +265,7 @@ fn agent<'w>(workflow: &'w Workflow, case: &[&str]) -> (&'w ir::Role, &'w AgentR
     let ir::Runtime::Agent(runtime) = &agent.runtime else {
         panic!("the first role is the agent");
     };
-    assert_eq!(runtime.deadline_seconds.to_string(), case[4]);
+    assert_eq!(workflow.ir().deadline_seconds.to_string(), case[4]);
     assert_eq!(runtime.finalize_grace_seconds.to_string(), case[5]);
     (agent, runtime)
 }
@@ -358,7 +362,6 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
         dirs,
         files,
         stdin: _,
-        deadline_seconds: _,
         finalize_grace_seconds: _,
         egress: _,
         grants: _,
