@@ -1187,6 +1187,7 @@ fn refused_calls() {
                 ctl call train --seconds 5 huge
                 ctl call submit huge --arg finalize
                 ctl call submit huge --arg a=1 --arg a=2
+                ctl call gpu.open --wait 1
                 ctl call gpu.open --arg a=1
                 ctl status 1
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
@@ -1229,13 +1230,15 @@ fn refused_calls() {
             $ sandboxctl status soon: exit 1
               sandboxctl: `soon` is not a job: name one by the number a call returned
             $ sandboxctl call train: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
+              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call train --seconds 5 huge: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
+              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call submit huge --arg finalize: exit 1
               sandboxctl: `--arg finalize` has no `=`: give it as `--arg <name>=<value>`
             $ sandboxctl call submit huge --arg a=1 --arg a=2: exit 1
               sandboxctl: `--arg a=2` names an arg given already: give each arg once
+            $ sandboxctl call gpu.open --wait 1: exit 1
+              sandboxctl: a session's `open` takes no `--wait`: give its own words and flags
             $ sandboxctl call gpu.open --arg a=1: exit 1
               sandboxctl: a session's `open` takes no `--arg`: give its own words and flags
             $ sandboxctl status 1: exit 0
@@ -1268,6 +1271,8 @@ fn turns() {
                 $ctl status 4 & sent $!; kill $!; wait $! 2>/dev/null
                 echo "the caller of status 4, which left as it waited its turn: exit $?"
                 printf ledger > payload && cp payload swapped
+                stalled=$($ctl call train payload --wait 1 2>&1)
+                echo "waiting on the held connection: exit $?: $stalled"
                 $ctl status 2 > 2.out 2>&1 & second=$!
                 $ctl status 3 > 3.out 2>&1 & third=$!
                 $ctl call train swapped > swapped.out 2>&1 & fourth=$!
@@ -1310,6 +1315,7 @@ fn turns() {
             Code(0)
             the caller of status 1, which left with its op in flight: exit 143
             the caller of status 4, which left as it waited its turn: exit 143
+            waiting on the held connection: exit 124: sandboxctl: wait expired before the reply: the call may have started
             status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a call returned"}
             call train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
@@ -1669,7 +1675,7 @@ fn status(job: u64, remaining: Remaining) -> OpReply {
         }
         _ => {
             let message = format!("there is no job {job}: name one a call returned");
-            return OpReply::Refused { message };
+            return OpReply::refused(message);
         }
     };
     OpReply::Status(StatusReply {

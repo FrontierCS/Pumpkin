@@ -7,6 +7,7 @@
 //! | --- | --- | --- |
 //! | `sandboxctl ops` | [`OpCall::Ops`] | [`OpsReply`] |
 //! | `sandboxctl call <function> <file>` | [`OpCall::Call`] | [`CallReply`] |
+//! | `sandboxctl call <function> <file> --wait <seconds>` | [`OpCall::Call`], [`OpCall::Status`] | [`NowReply`] or [`StatusReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
 //! | `sandboxctl call <session>.run <lease> [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
@@ -153,7 +154,20 @@ pub enum OpReply {
     /// The owner refused the op, and did nothing, for the reason given.
     Refused {
         message: String,
+        /// True if the caller can retry this uncharged call once the current call ends.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
     },
+}
+
+impl OpReply {
+    /// Refuses the op without inviting the caller to retry.
+    pub fn refused(message: String) -> Self {
+        Self::Refused {
+            message,
+            busy: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

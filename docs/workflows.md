@@ -238,8 +238,9 @@ body unrun, as `examples/hello`'s `final` answers:
 An agent, or a target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
 directory first on each command's `PATH`, ahead of the path the role or image sets.
 `sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
-1 for a refused op, or 2 for the status of a job that gave no result. `sandboxctl --help` gives
-each command's arguments, and the `schema` crate's `sandbox::op` module each reply's fields.
+1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait
+expires. `sandboxctl --help` gives each command's arguments, and the `schema` crate's
+`sandbox::op` module each reply's fields.
 The replies below come from `examples/hello` with its agent changed to try each, and its `count`
 grant given `"calls": 2` and `"cumulative_seconds": 120`.
 
@@ -266,6 +267,13 @@ what the body `returned`, or `errored`, with a `failure` whose `code` is `call_t
 {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":119}}
 ```
 
+`sandboxctl call <function> <file> --wait <seconds>` waits for the result. Give a positive
+number of seconds for admission and completion together. The command retries an uncharged
+busy refusal, then polls the admitted job and prints its terminal status. A now function
+returns its usual reply. On timeout the command exits with 124 and reports the job number
+if it received one. An admitted job continues to run. If the connection fails before the
+admission reply arrives, the call may already have started.
+
 Once a job has ended, `model_requests_over_budget` says how many of its target's model requests a
 spent model budget barred, if any. `hello`'s target makes none; a job whose target's budget ran out
 shows:
@@ -291,15 +299,16 @@ the ends of the command's output; and `close <lease>` ends it.
 A refusal says why, and what to do instead. Each of these is a real reply:
 
 ```json
-{"kind":"refused","message":"`count` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged"}
+{"kind":"refused","message":"`count` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged","busy":true}
 {"kind":"refused","message":"you have no job 7: ask about a job that one of your calls returned"}
 {"kind":"refused","message":"the work was ended: make no more ops"}
 ```
 
 ## How a call is bounded
 
-Before a call runs, the run checks its payload against the function's `payload_max_bytes` and
-refuses an empty one, and checks the function's `calls` and `cumulative_seconds`. A job's body may
+A job or now function's payload may be empty and must fit its `payload_max_bytes`. A saved
+submission must also fit the final call's payload limit. A job function's `calls` and
+`cumulative_seconds` bound the jobs it can start. A job's body may
 drive its target until `call_timeout_seconds` have passed since the target started, or less if the
 function's cumulative time or the work phase ends first; then the command the body runs is ended,
 or its next method fails, and the job is `errored` with `call_timeout`. Each file a body gets

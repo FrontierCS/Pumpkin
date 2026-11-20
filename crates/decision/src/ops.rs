@@ -96,7 +96,7 @@ impl Core<'_> {
         let mut then = Vec::new();
         let reply =
             (self.working(caller)).and_then(|working| self.take(&working, request, &mut then));
-        let reply = reply.unwrap_or_else(|message| OpReply::Refused { message });
+        let reply = reply.unwrap_or_else(OpReply::refused);
         actions.push(Action::Reply { op, reply });
         actions.append(&mut then);
     }

@@ -49,6 +49,7 @@ mod model;
 mod ops;
 mod session;
 mod sys;
+mod until;
 
 mod flags {
     #![expect(

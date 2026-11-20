@@ -484,7 +484,7 @@ fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
             (next_op(arrivals), process)
         });
     let message = "from another session".to_owned();
-    let elsewhere = panicked(|| other.reply(mine, OpReply::Refused { message }, hung()));
+    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), hung()));
     let own = outcome(other.reply(own, no_grants(), hung()));
     let refused = match next(&others) {
         Some(Arrival::Refused(refused)) => refused,
@@ -512,7 +512,7 @@ fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
         let op = next_op(arrivals);
         lines.push(outcome(session.reply(
             op,
-            OpReply::Refused { message },
+            OpReply::refused(message),
             hung(),
         )));
     }
@@ -1280,10 +1280,15 @@ fn stopped() {
 fn hellos() {
     check(
         |dir| {
-            let cases: [(&str, Opening, Deadline); 14] = [
+            let cases: [(&str, Opening, Deadline); 15] = [
                 (
                     "this version",
                     |c| frame::write(c, &hello(None), &[]).unwrap(),
+                    hung(),
+                ),
+                (
+                    "a v0 sandboxd",
+                    |c| frame::write(c, &json!({ "version": 0 }), &[]).unwrap(),
                     hung(),
                 ),
                 (
@@ -1382,10 +1387,11 @@ fn hellos() {
         },
         &expect![[r#"
             this version: heard {"type":"accepted"}; ok
-            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`
+            a v0 sandboxd: heard {"message":"sandboxd speaks sandbox protocol 0: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 0: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 1's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 1's form: unknown field `later`, expected one of `version`, `grant`, `gpus`
             this version, with a grant: heard {"message":"the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there","type":"refused"}; InvalidData: the gateway refused the session: the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there
-            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does
             a length a byte over a hello's, and nothing more: heard {"message":"the hello is 1025 bytes: a hello holds at most 1024","type":"refused"}; InvalidData: the gateway refused the session: the hello is 1025 bytes: a hello holds at most 1024
             this version, with a body: heard {"message":"the hello has a 1-byte body: a hello has none","type":"refused"}; InvalidData: the gateway refused the session: the hello has a 1-byte body: a hello has none
             a reply, not a hello: heard {"message":"the session's first frame is no hello: missing field `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: missing field `version`: open the session with one
@@ -1677,8 +1683,8 @@ fn registrations() {
         },
         &expect![[r#"
             no grant: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}
-            a later version: {"message":"sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
-            a field this version lacks: {"message":"the hello isn't of sandbox protocol 0's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}
+            a later version: {"message":"sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
+            a field this version lacks: {"message":"the hello isn't of sandbox protocol 1's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}
             a grant it didn't issue: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
             an accept by a passed deadline: TimedOut: no sandbox presented the registration grant by the deadline: expected the sandbox it was issued for to present it while the deadline lasts
               its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
@@ -1759,7 +1765,7 @@ fn dials() {
         &expect![[r#"
             a sandbox that listens once a dial has failed: Ok(()); it heard its grant: true
             a hello with a grant: Err("InvalidData: the gateway refused the session: the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there"); it heard Some(Refused { message: "the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there" })
-            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 1: expected 0, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
+            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 2: expected 1, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
             nothing listening: Err("TimedOut: the gateway didn't reach the sandbox at localhost:$PORT by the deadline: its last dial failed: dialing localhost:$PORT failed: Connection refused (os error 111): expected its sandboxd to listen there while the deadline lasts")
             a certificate the dialer doesn't trust: Err("InvalidData: the gateway can't trust the sandbox's endpoint localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `localhost`, with a certificate trusted for it"); Err(InvalidData)
             stopped: Err("Other: the accept was stopped before the gateway reached the sandbox at localhost:$PORT: expected its sandboxd to listen there before the stop")"#]],
