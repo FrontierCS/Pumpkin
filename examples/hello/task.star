@@ -7,16 +7,15 @@ load("//hello/final.star", "final_call")
 load("//submit.star", "submit")
 
 IMAGE = image("Dockerfile")
-SANDBOXCTL = "/.pumpkin/bin/sandboxctl"
 
 # Calls `count`, prints the job's status once it has ended, and submits the greeting.
 AGENT = """
 echo hello > greeting
-SANDBOXCTL call count greeting
-while SANDBOXCTL status 0 | grep -q -E '"state":"(queued|running)"'; do sleep 1; done
-SANDBOXCTL status 0
-SANDBOXCTL call final greeting --arg finalize=true
-""".replace("SANDBOXCTL", SANDBOXCTL)
+sandboxctl call count greeting
+while sandboxctl status 0 | grep -q -E '"state":"(queued|running)"'; do sleep 1; done
+sandboxctl status 0
+sandboxctl call final greeting --arg finalize=true
+"""
 
 workflow(
     deadline_seconds = 300,

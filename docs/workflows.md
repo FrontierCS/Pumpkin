@@ -233,10 +233,11 @@ body unrun, as `examples/hello`'s `final` answers:
 
 ## From inside a sandbox
 
-A role's code makes ops with `sandboxctl`, at `/.pumpkin/bin/sandboxctl` in the agent's sandbox,
-and in a target's that holds sessions. It prints the reply as one line of JSON, whose `kind` names it, and
-exits 0, 1 for a refused op, or 2 for the status of a job that gave no result; `sandboxctl --help`
-gives each command's arguments, and the `schema` crate's `sandbox::op` module each reply's fields.
+An agent, or a target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
+directory first on each command's `PATH`, ahead of the path the role or image sets.
+`sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
+1 for a refused op, or 2 for the status of a job that gave no result. `sandboxctl --help` gives
+each command's arguments, and the `schema` crate's `sandbox::op` module each reply's fields.
 The replies below come from `examples/hello` with its agent changed to try each, and its `count`
 grant given `"calls": 2` and `"cumulative_seconds": 120`.
 

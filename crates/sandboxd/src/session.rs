@@ -86,7 +86,8 @@ pub(crate) fn serve(gateway: &Gateway, serve_ops: bool, serve_model: bool) -> Re
         let served = model.serve(sender.clone());
         served.context("serving the model endpoint failed")?;
     }
-    let commands = Commands::start_reaping(sender.clone()).context("starting the reaper failed")?;
+    let commands =
+        Commands::start_reaping(sender.clone(), serve_ops).context("starting the reaper failed")?;
     let mut session = Session {
         sender,
         commands,
