@@ -137,8 +137,8 @@ workflow decides the agent's feedback. The status reply's types hold nothing els
 **Architecture Invariant:** before the final call starts, the driver confirms deletion of every
 work sandbox it claimed, including shared targets and lease runners. Work ends at the common
 deadline or once every agent has ended its work. The final body
-receives every agent role's last submission, an opaque payload or `None`. Its calls to `put`
-determine which payloads enter the target and where they go.
+receives every agent role's last submission, an opaque payload or `None`. The body sends a selected payload
+to a file with `put` or to a command’s standard input with `capture`.
 
 A target with work lifetime has one sandbox across its work-phase grants. The core admits one complete
 body at a time across all those grants. The runtime supplies the caller’s role from its session.

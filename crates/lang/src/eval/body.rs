@@ -26,7 +26,7 @@ use schema::ir::{self, AbsolutePath, Argv};
 
 use super::call::refusal_inside;
 use super::{Evaluation, Purpose};
-use crate::builtins::{Call, Takes, origin, positional, string};
+use crate::builtins::{Call, Takes, origin, place, positional, string};
 use crate::problem::{Fault, Problem, count, list};
 use crate::syntax::{Def, Misfit, Name, Type};
 use crate::value::{self, Budget, FileId, Function, Hosted, Key, Span, Text, Value};
@@ -82,6 +82,10 @@ pub trait Target {
 
     /// Runs `argv`, and waits for it to end, whatever its exit status.
     fn run(&mut self, argv: &Argv) -> Result<(), String>;
+
+    /// Runs `argv` with the optional payload slot as stdin. Returns its complete UTF-8 stdout
+    /// on success. The call charges the returned text to its evaluation budget.
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String>;
 
     /// The text of the file at `path`, all of it: the call charges it to the bytes of its
     /// [`Bounds`](crate::Bounds) once it is returned, so a text longer than they have left ends
@@ -523,6 +527,7 @@ impl Hosted<usize> {
         match self {
             Self::Target => Ok(&[
                 ("caller", Method::Target(caller)),
+                ("capture", Method::Target(capture)),
                 ("get", Method::Target(get)),
                 ("put", Method::Target(put)),
                 ("run", Method::Target(run)),
@@ -531,7 +536,9 @@ impl Hosted<usize> {
                 ("end_work", Method::Run(end_work)),
                 ("set_submission", Method::Run(set_submission)),
             ]),
-            Self::Payload(_) => Err("pass it to a `Target`'s `put` or a `Run`'s `set_submission`"),
+            Self::Payload(_) => {
+                Err("pass it to `target.put`, `target.capture` as stdin, or `run.set_submission`")
+            }
         }
     }
 }
@@ -594,15 +601,49 @@ fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
 
 fn run(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [argv] = positional::<1>(&name.text, Takes::exactly(1), call)?;
+    let argv = command_argv(name, argv.0, &argv.1)?;
+    target
+        .run(&argv)
+        .map_err(|message| Fault::new(call.at, message))?;
+    Ok(value::Kind::None)
+}
+
+fn capture(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+    let given = place(&name.text, &["argv", "stdin"], 1, call)?;
+    let argv = given[0]
+        .as_ref()
+        .ok_or_else(|| Fault::new(call.at, "`capture` needs argv: give it a list of strings"))?;
+    let argv = command_argv(name, argv.span, argv)?;
+    let stdin = match given[1].as_ref() {
+        None => None,
+        Some(value) => match value.kind {
+            value::Kind::None => None,
+            value::Kind::Hosted(Hosted::Payload(slot)) => Some(slot),
+            _ => {
+                return Err(Fault::new(
+                    value.span,
+                    "`capture` takes a payload or None as stdin",
+                ));
+            }
+        },
+    };
+    let text = target
+        .capture(&argv, stdin)
+        .map_err(|message| Fault::new(call.at, message))?;
+    Ok(value::Kind::Str(Text::new(&text, call.at, call.budget)?))
+}
+
+fn command_argv(name: &Name, at: Span, argv: &Value) -> Result<Argv, Fault> {
     let refused = |what: &Value| {
         let message = format!(
-            "`run` can't run {}: give it a list of strings",
+            "`{}` can't run {}: give it a list of strings",
+            name.text,
             what.kind.describe()
         );
-        origin(Fault::new(argv.0, message), "the argument", what)
+        origin(Fault::new(at, message), "the argument", what)
     };
-    let value::Kind::List(items) = &argv.1.kind else {
-        return Err(refused(&argv.1));
+    let value::Kind::List(items) = &argv.kind else {
+        return Err(refused(argv));
     };
     let mut words = Vec::with_capacity(items.len());
     for item in items.iter() {
@@ -611,12 +652,7 @@ fn run(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
         };
         words.push(String::from(&**text));
     }
-    let argv = Argv::try_from(words)
-        .map_err(|problem| origin(Fault::new(argv.0, problem), "the argument", &argv.1))?;
-    target
-        .run(&argv)
-        .map_err(|message| Fault::new(call.at, message))?;
-    Ok(value::Kind::None)
+    Argv::try_from(words).map_err(|problem| origin(Fault::new(at, problem), "the argument", argv))
 }
 
 fn caller(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {

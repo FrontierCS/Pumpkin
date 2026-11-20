@@ -36,5 +36,5 @@ def score(payload, expected):
 
 if __name__ == "__main__":
     graph = json.loads(Path(__file__).with_name("graph.json").read_bytes())
-    result = score(Path(sys.argv[1]).read_bytes(), core_numbers(graph))
-    Path(sys.argv[2]).write_text(json.dumps({"score": result}) + "\n")
+    result = score(sys.stdin.buffer.read(), core_numbers(graph))
+    print(json.dumps({"score": result}))

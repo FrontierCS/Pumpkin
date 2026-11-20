@@ -37,6 +37,12 @@ impl lang::Target for Logged {
         Ok(())
     }
 
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
+        self.0
+            .push(format!("capture {} with stdin {stdin:?}", argv.program()));
+        Ok(RESULT.1.to_owned())
+    }
+
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String> {
         self.0.push(format!("get {path}"));
         if path.as_str() == RESULT.0 {
@@ -166,6 +172,25 @@ fn check_within(
         }
     });
     expect.assert_eq(&shown);
+}
+
+#[test]
+fn captures_stdout_with_the_selected_input() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def judge(target: Target, submissions):
+    return {name: json.decode(target.capture(["worker"], stdin = submission))["raw_score"] for name, submission in submissions.items()}
+"#,
+        &expect![[r#"
+            capture worker with stdin Some(1)
+            capture worker with stdin None
+            capture worker with stdin Some(0)
+            returns z=43.12 a=43.12 b=43.12"#]],
+    );
 }
 
 #[test]
@@ -551,7 +576,7 @@ def train_call(target, payload):
     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
-            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `get`, `put`, `run`
+            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
                 2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5
@@ -598,7 +623,7 @@ def submit(run, payload):
     return payload.read()
 "#,
         &expect![[r#"
-            lib/submit.star:2:20: the payload has no method `read`: pass it to a `Target`'s `put` or a `Run`'s `set_submission`
+            lib/submit.star:2:20: the payload has no method `read`: pass it to `target.put`, `target.capture` as stdin, or `run.set_submission`
                 2 |     return payload.read()
                   |                    ^^^^
                 the receiver, the payload, is made at lib/submit.star:1:5

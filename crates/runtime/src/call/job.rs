@@ -33,7 +33,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         .any(|(_, grant)| grant.holder == holder)
         .then_some(OpPayloadLimit::NONE);
     crate::child::run(child, ops, |child, session| {
-        evaluate(call, bodies, child, session)
+        evaluate(call, bodies, child, session, &mut body::Stdin::default())
     });
 }
 
@@ -42,6 +42,7 @@ pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     child: &mut Child<'_, H, OpReply>,
     session: &mut Session,
+    stdin: &mut body::Stdin,
 ) -> End {
     let Call {
         job,
@@ -58,7 +59,7 @@ pub(crate) fn evaluate<H: Host>(
         inputs,
         timeout,
     };
-    let end = match body::evaluate(bodies, &call, child, session) {
+    let end = match body::evaluate(bodies, &call, child, session, stdin) {
         Ended::Returned(returned) => CallResult::returned_by(returned),
         Ended::Failed(reason) => Err(reason),
         Ended::TimedOut => Err("the call's timeout passed".to_owned()),

@@ -10,9 +10,7 @@ def score(target: Target, payload: Payload) -> dict[str, int]:
     Returns:
       A score of one for an exact vector and zero otherwise.
     """
-    target.put("/pumpkin/in/payload/raw", payload)
-    target.run(["python3", "/opt/hypergraph/judge.py", "/pumpkin/in/payload/raw", "/pumpkin/out/result.json"])
-    return json.decode(target.get("/pumpkin/out/result.json"))
+    return json.decode(target.capture(["python3", "/opt/hypergraph/judge.py"], stdin = payload))
 
 def final_score(target: Target, submissions) -> dict[str, int]:
     """Scores the agent's final submission.

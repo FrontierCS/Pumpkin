@@ -7,17 +7,19 @@
 //! and collected as the body ends. A work-lifetime sandbox stays available until work ends.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::{fs, io};
 
-use decision::{Event, JobId};
+use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
 use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
 use schema::sandbox::op::{CommandEnd, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, command_env, dir_mode, file_mode, log_dir,
-    out_dir, pumpkin_dir,
+    ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, Root, command_env, dir_mode, file_mode,
+    log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{self, Final, JobFunction, TargetId};
 use serde_json::{Map, Value};
@@ -54,7 +56,7 @@ pub trait Bodies: Sync {
     ) -> Result<Vec<(Name, Value)>, String>;
 
     /// Calls the final body with one entry per agent, in role order. Each submission names
-    /// an input slot for [`Target::put`] on this call.
+    /// an input slot for [`Target::put`] or [`Target::capture`] on this call.
     ///
     /// # Errors
     ///
@@ -102,6 +104,10 @@ pub trait Target {
 
     /// Runs `argv`, and waits for it to end, whatever its exit status.
     fn run(&mut self, argv: &Argv) -> Result<(), String>;
+
+    /// Runs `argv` with the optional input slot as stdin. Returns its complete UTF-8 stdout,
+    /// at most [`RESULT_MAX_BYTES`], on exit code zero.
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String>;
 
     /// The text of the file at `path`.
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String>;
@@ -168,6 +174,7 @@ pub(crate) fn evaluate<H: Host>(
     call: &Call<'_>,
     child: &mut Child<'_, H, OpReply>,
     session: &mut Session,
+    stdin: &mut Stdin,
 ) -> Ended {
     let resident = call.target.lifetime == TargetLifetime::Work;
     if !resident && child.stopped() {
@@ -184,6 +191,7 @@ pub(crate) fn evaluate<H: Host>(
         relay: Relay::default(),
         cut: None,
         running: None,
+        stdin,
         runs_count: 0,
         gets_count: 0,
     };
@@ -248,6 +256,59 @@ impl Cut {
     }
 }
 
+/// The input directory on one sandbox, reused only by its serialized calls.
+#[derive(Default)]
+pub(crate) enum Stdin {
+    #[default]
+    Unused,
+    Empty,
+    Staged,
+}
+
+impl Stdin {
+    const DIR: AbsolutePath = AbsolutePath::from_static("/pumpkin/.stdin");
+
+    fn put(
+        &mut self,
+        session: &Session,
+        bytes: &[u8],
+        by: Deadline,
+    ) -> Result<AbsolutePath, String> {
+        let trees = session.trees();
+        let dir = Self::DIR;
+        if matches!(self, Self::Unused) {
+            trees
+                .put(&dir, Root::New, [], by)
+                .context("reserving the command's stdin directory failed")?;
+            *self = Self::Empty;
+        }
+        let root = if matches!(self, Self::Empty) {
+            Root::Kept
+        } else {
+            Root::Replaced
+        };
+        let name = const { RelativePath::from_static("input") };
+        let path = dir.join(&name);
+        // Even a failed put can leave a partial file.
+        *self = Self::Staged;
+        trees
+            .put(&dir, root, [Put::File(name, file_mode(), bytes)], by)
+            .context("staging the command's stdin failed")?;
+        Ok(path)
+    }
+
+    fn clear(&mut self, session: &Session, by: Deadline) -> Result<(), String> {
+        if matches!(self, Self::Staged) {
+            session
+                .trees()
+                .put(&Self::DIR, Root::Replaced, [], by)
+                .context("clearing the shared call's stdin failed")?;
+            *self = Self::Empty;
+        }
+        Ok(())
+    }
+}
+
 /// The target of a body's call, on its child's session.
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
@@ -259,6 +320,7 @@ struct OnTarget<'a, 'c, 'r, H: Host> {
     /// What cut the call short, after which every method fails.
     cut: Option<Cut>,
     running: Option<(u64, Process)>,
+    stdin: &'a mut Stdin,
     /// The commands run so far.
     runs_count: u64,
     /// The files got so far, which number their directories in the record.
@@ -310,40 +372,35 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         self.child.log(Entry::Target(self.call.job, targeted, at));
     }
 
-    /// Collects the command's output into the job's directory of the record, by `by`, or
-    /// notes why it couldn't: a call doesn't fail for want of its log.
-    fn collect_output(&mut self, command: u64, by: Deadline) {
+    /// The recorded output directory, only once the whole command log has arrived.
+    fn collect_output(&mut self, command: u64, by: Deadline) -> Result<PathBuf, String> {
         let dir = self.output_dir(command);
-        let into = self.child.dir.join(log_dir().as_str());
-        let collected = fs::create_dir_all(&into).map_err(|error| error.to_string());
-        let collected = collected.and_then(|()| {
-            collect_as(
-                self.session,
-                &dir,
-                &self.child.dir.join(command_dir(command).as_str()),
-                by,
-            )
-        });
-        if let Err(error) = collected {
+        let logs = self.child.dir.join(log_dir().as_str());
+        let into = self.child.dir.join(command_dir(command).as_str());
+        let collected = fs::create_dir_all(&logs)
+            .context(logs.display())
+            .and_then(|()| collect_as(self.session, &dir, &into, by));
+        if let Err(error) = &collected {
             let job = self.call.job.0;
             self.child
                 .note(format!("job {job}'s {dir} is incomplete: {error}"));
         }
+        collected.map(|()| into)
     }
 
     /// Stops and accounts for the active client before releasing this shared sandbox to another
     /// job. An unconfirmed stop or closed session makes the target unavailable.
     fn release(&mut self) -> Result<(), String> {
+        let until = self
+            .child
+            .clock
+            .now()
+            .saturating_add(self.call.timeout)
+            .min(self.child.deadlines.collect);
+        let by = deadline(&self.child.clock, until);
         if let Some((command, process)) = self.running {
-            let until = self
-                .child
-                .clock
-                .now()
-                .saturating_add(self.call.timeout)
-                .min(self.child.deadlines.collect);
-            let by = deadline(&self.child.clock, until);
             let stopped = self.stop_client(process, until, by);
-            self.collect_output(command, by);
+            let _ = self.collect_output(command, by);
             let status = stopped?;
             let end = if matches!(self.cut, Some(Cut::TimedOut)) {
                 CommandEnd::TimedOut
@@ -352,6 +409,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             };
             self.log(Targeted::Ended { command, end });
         }
+        self.stdin.clear(self.session, by)?;
         match self.session.ended() {
             Some(reason) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
@@ -396,10 +454,79 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         if self.cut.is_some()
             && let Some((command, _)) = self.running
         {
-            self.collect_output(command, by);
+            let _ = self.collect_output(command, by);
         }
         if let Err(error) = collect(self.session, &out_dir(), &self.child.dir, by) {
             (self.child).note(format!("job {job}'s out is incomplete: {error}"));
+        }
+    }
+
+    fn input(&self, slot: usize) -> Result<&Stored, String> {
+        self.call
+            .inputs
+            .get(slot)
+            .ok_or_else(|| format!("this call has no input in slot {slot}"))
+    }
+
+    fn stage_stdin(
+        &mut self,
+        slot: usize,
+        by: Deadline,
+    ) -> Result<(AbsolutePath, PayloadRef), String> {
+        let input = self.input(slot)?;
+        let bytes = input.read()?;
+        let supplied = input.reference.clone();
+        let put = self.stdin.put(self.session, &bytes, by);
+        Ok((self.timely(put)?, supplied))
+    }
+
+    fn command(&mut self, argv: &Argv, input: Option<usize>) -> Result<(u64, ExitStatus), String> {
+        let by = self.going()?;
+        let target = self.call.target;
+        let command = self.runs_count;
+        let dir = self.output_dir(command);
+        self.runs_count += 1;
+        let put = if target.lifetime == TargetLifetime::Work {
+            self.session.put(&pumpkin_dir().join(&dir), [], by)
+        } else {
+            self.session
+                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by)
+        };
+        self.timely(put.context(format_args!("making {dir} failed")))?;
+        let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
+        let (stdin, supplied) = input
+            .map(|slot| self.stage_stdin(slot, by))
+            .transpose()?
+            .unzip();
+        let launch = Launch {
+            argv: argv.clone(),
+            env: command_env(&target.env),
+            cwd: target.cwd.clone(),
+            stdin,
+            stdout: output(const { RelativePath::from_static("command.stdout") }),
+            stderr: output(const { RelativePath::from_static("command.stderr") }),
+        };
+        let started = self.session.start(launch, by);
+        let process = self.timely(started.context("the command didn't start"))?;
+        self.running = Some((command, process));
+        let argv = argv.clone();
+        self.log(Targeted::Run {
+            command,
+            argv,
+            stdin: supplied,
+        });
+        let job = self.call.job;
+        let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
+        match waited {
+            Ok(Waited::Exited(status)) => {
+                self.running = None;
+                let end = CommandEnd::Exited(status);
+                self.log(Targeted::Ended { command, end });
+                Ok((command, status))
+            }
+            Ok(Waited::TimedOut) => Err(self.cut_short(Cut::TimedOut)),
+            Ok(Waited::Stopped) => Err(self.cut_short(Cut::Stopped)),
+            Err(reason) => Err(format!("the target's session ended: {reason}")),
         }
     }
 
@@ -421,12 +548,7 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         let Some((dir, name)) = path.split_last() else {
             return Err("`/` is the sandbox's root: name a file's path".to_owned());
         };
-        let input = self
-            .call
-            .inputs
-            .get(input_slot)
-            .ok_or_else(|| format!("this call has no input in slot {input_slot}"))?;
-        let payload = input.read()?;
+        let payload = self.input(input_slot)?.read()?;
         let put = self
             .session
             .put(&dir, [Put::File(name, file_mode(), &payload)], by);
@@ -455,46 +577,38 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
     }
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {
-        let by = self.going()?;
-        let target = self.call.target;
-        let command = self.runs_count;
-        let dir = self.output_dir(command);
-        self.runs_count += 1;
-        let put = if target.lifetime == TargetLifetime::Work {
-            self.session.put(&pumpkin_dir().join(&dir), [], by)
-        } else {
-            self.session
-                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by)
-        };
-        self.timely(put.context(format_args!("making {dir} failed")))?;
-        let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
-        let launch = Launch {
-            argv: argv.clone(),
-            env: command_env(&target.env),
-            cwd: target.cwd.clone(),
-            stdin: None,
-            stdout: output(const { RelativePath::from_static("command.stdout") }),
-            stderr: output(const { RelativePath::from_static("command.stderr") }),
-        };
-        let started = self.session.start(launch, by);
-        let process = self.timely(started.context("the command didn't start"))?;
-        self.running = Some((command, process));
-        let argv = argv.clone();
-        self.log(Targeted::Run { command, argv });
-        let job = self.call.job;
-        let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
-        match waited {
-            Ok(Waited::Exited(status)) => {
-                self.running = None;
-                let end = CommandEnd::Exited(status);
-                self.log(Targeted::Ended { command, end });
-                self.collect_output(command, deadline(&self.child.clock, self.timeout));
-                Ok(())
+        let (command, _) = self.command(argv, None)?;
+        let _ = self.collect_output(command, deadline(&self.child.clock, self.timeout));
+        Ok(())
+    }
+
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
+        let (command, status) = self.command(argv, stdin)?;
+        let log = self.collect_output(command, deadline(&self.child.clock, self.timeout));
+        match status {
+            ExitStatus::Code(0) => {}
+            ExitStatus::Code(code) => {
+                return Err(format!("command {command} exited with code {code}"));
             }
-            Ok(Waited::TimedOut) => Err(self.cut_short(Cut::TimedOut)),
-            Ok(Waited::Stopped) => Err(self.cut_short(Cut::Stopped)),
-            Err(reason) => Err(format!("the target's session ended: {reason}")),
+            ExitStatus::Signal(signal) => {
+                return Err(format!("command {command} ended by signal {signal}"));
+            }
         }
+        let stdout = self.timely(log)?.join("command.stdout");
+        let file = fs::File::open(&stdout).context(stdout.display())?;
+        let mut bytes = Vec::new();
+        file.take(RESULT_MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context(format_args!("reading command {command}'s stdout failed"))?;
+        if bytes.len() as u64 > RESULT_MAX_BYTES {
+            return Err(format!(
+                "command {command}'s stdout exceeds the capture limit of {RESULT_MAX_BYTES} bytes"
+            ));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("command {command}'s stdout is not UTF-8 text"))?;
+        self.going()?;
+        Ok(text)
     }
 
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String> {
