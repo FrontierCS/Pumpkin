@@ -215,6 +215,7 @@ Methods available to a body and its runner callbacks follow.
 | `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
 | `target.with_runner(session, callback, ...)` | opens a fresh runner under the target's named session grant, calls `callback(runner, ...)` with the remaining positional arguments, then closes the runner and waits for deletion before returning the callback's value |
 | `runner.put(tree, to)` | copies the directory `tree` on the target into the runner at `to`, which must be new. Both paths are absolute. The copy counts as one grant operation |
+| `runner.get(from, to)` | copies a file or directory from the runner into a new directory on the target. A file keeps its basename. Both paths are absolute. The copy counts as one grant operation and uses the session's per-copy byte limit |
 | `runner.run(argv, timeout_seconds = seconds)` | runs a command in that runner and waits for its recorded output. Its optional timeout is a positive number of seconds. The result holds `end`, `stdout_tail` and `stderr_tail` |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
 | `run.set_submission(payload)` | sets or replaces the caller’s submission |
@@ -226,6 +227,18 @@ A runner command reports its own timeout as `"timed_out"` and an exit as
 21 KiB each, with invalid UTF-8 replaced. The record keeps the raw streams.
 A refused operation, failed copy, unstarted command, incomplete output collection or expired
 lease fails the body. A runner that cannot be deleted fails the run.
+
+A body can call `target.with_runner("judge", _grade, target, argv)` when its judge command
+writes `/work/result.json`. The destination directory `/work/feedback` must be new on the target.
+
+```python
+def _grade(runner, target, argv):
+    result = runner.run(argv)
+    if result["end"] != {"exited": {"code": 0}}:
+        fail("judge failed")
+    runner.get("/work/result.json", "/work/feedback")
+    return json.decode(target.get("/work/feedback/result.json"))
+```
 
 A now function's body proposes these operations. When the body returns, the run applies them
 in order if they all pass validation. A refused operation leaves the state unchanged.

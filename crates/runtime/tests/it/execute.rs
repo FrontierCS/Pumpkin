@@ -4721,14 +4721,14 @@ fn op_arriving_before_launch_confirmation_can_set_submission() {
 }
 
 fn scoped_runner(argv: &[&str]) -> Value {
-    let mut ir = held_lease_workflow(&["ops", "call submit 6 finalize=true"], &["exit", "0"]);
+    let mut ir = held_lease_workflow(&["ops", "call submit binary finalize=true"], &["exit", "0"]);
     let grants = ir["roles"][1]["runtime"]["target"]
         .as_object_mut()
         .unwrap()
         .remove("sessions")
         .unwrap();
     ir["roles"][2]["runtime"]["target"]["sessions"] = grants;
-    ir["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(2);
+    ir["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(3);
     ir["final"]["body"]["def"] = json!("scoped");
     ir["final"]["keywords"] = json!({ "argv": argv });
     ir
@@ -4746,7 +4746,7 @@ fn work_target_bodies_run_separate_leases_for_each_callers_job() {
         &["worker", "0"],
     );
     ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
-    ir["roles"][1]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(2);
+    ir["roles"][1]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(3);
     let agent = &mut ir["roles"][0];
     agent["name"] = json!("alpha");
     agent["runtime"]["agent"]["grants"][0]["job"]["body"]["def"] = json!("scoped");
@@ -4793,6 +4793,10 @@ fn body_waits_for_its_numbered_work_and_deletion() {
     assert_eq!(command["end"], json!({"exited":{"code":7}}));
     assert_eq!(command["stdout_tail"], "absent");
     assert_eq!(command["stderr_tail"], "worker diagnostic");
+    assert_eq!(
+        fs::read(record.join("jobs/0/out/final/source")).unwrap(),
+        [0, 255, 1]
+    );
     assert_eq!(
         fs::read(record.join("leases/0/log/1/command.stderr")).unwrap(),
         b"worker diagnostic"

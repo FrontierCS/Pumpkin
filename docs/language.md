@@ -140,7 +140,7 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 | Handle | Methods |
 | --- | --- |
 | `Target`, a job's or the final call's target | `caller()`, `put(path, payload)`, `run(argv)`, `capture(argv, stdin = payload)`, `get(path)`, `with_runner(session, callback, ...)` |
-| `Runner`, the lease passed to a callback | `put(tree, to)`, `run(argv, timeout_seconds = seconds)` |
+| `Runner`, the lease passed to a callback | `put(tree, to)`, `get(from, to)`, `run(argv, timeout_seconds = seconds)` |
 | `Run`, the calling agent’s state | `set_submission(payload)`, `end_work()` |
 | `Payload`, an opaque file supplied to the call | passed to `put`, to `capture` as stdin, or to `set_submission` |
 

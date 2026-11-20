@@ -203,6 +203,15 @@ impl lang::Target for Driven<'_> {
     ) -> Result<(), String> {
         self.0.runner_put(grant, lease, tree, to)
     }
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.runner_get(grant, lease, from, to)
+    }
     fn runner_run(
         &mut self,
         grant: &Name,

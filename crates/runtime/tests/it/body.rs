@@ -271,6 +271,17 @@ fn scoped(
     let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
     let timeout = std::num::NonZeroU64::new(1);
     let command = target.runner_run(&grant, lease, argv.clone(), timeout)?;
+    let received = AbsolutePath::try_from(format!(
+        "/pumpkin/out/{}",
+        target.caller().unwrap_or("final")
+    ))
+    .unwrap();
+    target.runner_get(
+        &grant,
+        lease,
+        AbsolutePath::from_static("/work/src/source"),
+        received,
+    )?;
     let refused = target.runner_run(&grant, lease, argv, timeout).unwrap_err();
     assert!(refused.contains("no commands left"));
     target.runner_close(&grant, lease)?;

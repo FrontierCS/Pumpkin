@@ -88,6 +88,15 @@ pub trait Target {
         to: AbsolutePath,
     ) -> Result<(), String>;
 
+    /// Copies the runner's file or tree into a new directory on the target.
+    fn runner_get(
+        &mut self,
+        grant: &ir::Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
     /// Waits for a started command's exit or timeout and both recorded output streams.
     fn runner_run(
         &mut self,
@@ -562,6 +571,7 @@ impl Hosted<usize, u64> {
                 ("with_runner", Method::WithRunner),
             ]),
             Self::Runner(_) => Ok(&[
+                ("get", Method::Runner(super::runner::RunnerMethod::Get)),
                 ("put", Method::Runner(super::runner::RunnerMethod::Put)),
                 ("run", Method::Runner(super::runner::RunnerMethod::Run)),
             ]),
@@ -589,7 +599,7 @@ impl Method {
             Self::WithRunner => return evaluation.with_runner(call, depth),
             Self::Runner(method) => {
                 let Hosted::Runner(lease) = handle else {
-                    unreachable!("only a Runner lists the runner's run and put methods")
+                    unreachable!("only a Runner lists a runner method")
                 };
                 return evaluation.runner_method(lease, method, name, call);
             }
