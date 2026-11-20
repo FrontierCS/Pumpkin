@@ -18,7 +18,7 @@ impl OpsReply {
             text.push('\n');
             match grant {
                 Grant::Job(job) => {
-                    usage(&mut text, &job.name, &job.arguments, true);
+                    usage(&mut text, &job.name, &job.arguments);
                     description(&mut text, &job.help);
                     let _ = write!(
                         text,
@@ -34,7 +34,7 @@ impl OpsReply {
                     text.push('\n');
                 }
                 Grant::Now(now) => {
-                    usage(&mut text, &now.name, &now.arguments, false);
+                    usage(&mut text, &now.name, &now.arguments);
                     description(&mut text, &now.help);
                     let _ = writeln!(
                         text,
@@ -105,7 +105,7 @@ fn description(text: &mut String, help: &str) {
     }
 }
 
-fn usage(text: &mut String, name: &Name, arguments: &BTreeMap<Name, Argument>, job: bool) {
+fn usage(text: &mut String, name: &Name, arguments: &BTreeMap<Name, Argument>) {
     let _ = write!(text, "sandboxctl call {name} [FILE]");
     let mut defaults = String::new();
     for (name, arg) in arguments {
@@ -121,9 +121,6 @@ fn usage(text: &mut String, name: &Name, arguments: &BTreeMap<Name, Argument>, j
             let _ = write!(text, " --arg {name}={kind}");
         }
     }
-    if job {
-        text.push_str(" [--wait SECONDS]");
-    }
-    text.push('\n');
+    text.push_str(" [--wait SECONDS]\n");
     text.push_str(&defaults);
 }

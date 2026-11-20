@@ -2560,6 +2560,7 @@ fn holders_leasing(ir: &mut Value) {
             "transfer_bytes": 4096,
         } });
         if holder == 1 {
+            grant["help"] = json!("Compile the draft in a fresh runner.");
             grant["session"]["commands"] = json!(2);
         }
         ir["roles"][holder]["runtime"]["target"]["sessions"] = json!([grant]);
@@ -2712,7 +2713,7 @@ fn target_leases() {
               refuse op 2: the call has ended: make no more ops
             2000 call_started 0
             2100 @0 ops
-              reply to op 3: {"kind":"ops","role":"trainer","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
+              reply to op 3: {"kind":"ops","role":"trainer","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","help":"Compile the draft in a fresh runner.","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
             2200 @0 box.open
               reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 0 of box for job 0, as instance 0, started by 52000
