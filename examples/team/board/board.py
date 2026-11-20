@@ -14,17 +14,13 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def answer(messages, roles, caller, request):
-    if caller not in roles or not isinstance(request, dict):
-        raise ValueError("unknown caller or invalid request")
-    op = request.get("op")
-    if op == "read" and request.keys() == {"op", "stream", "after"}:
-        stream, after = request["stream"], request["after"]
-        if (
-            stream not in ("board", "inbox")
-            or type(after) is not int
-            or not 0 <= after <= len(messages)
-        ):
+def answer(messages, roles, caller, op, args, text):
+    if caller not in roles:
+        raise ValueError("unknown caller")
+    if op == "read":
+        stream, cursor = args
+        after = int(cursor)
+        if stream not in ("board", "inbox") or not 0 <= after <= len(messages):
             raise ValueError(
                 "read needs board or inbox and a cursor returned by the service (initially 0)"
             )
@@ -40,18 +36,17 @@ def answer(messages, roles, caller, request):
                     break
                 page = trial
         return page
-    if op == "post" and request.keys() == {"op", "text"}:
+    if op == "post":
         fields = {}
-    elif op == "send" and request.keys() == {"op", "to", "text"}:
-        recipient = request["to"]
+    elif op == "send":
+        (recipient,) = args
         if recipient not in roles or recipient == caller:
             raise ValueError("send needs a different named recipient")
         fields = {"to": recipient}
     else:
         raise ValueError("unexpected operation or fields")
-    text = request["text"]
-    if not isinstance(text, str) or not 0 < len(text.encode("utf-8")) <= 2048:
-        raise ValueError("message must be 1 to 2048 UTF-8 bytes")
+    if not text:
+        raise ValueError("message is empty")
     ident = len(messages) + 1
     messages.append({"id": ident, "from": caller, **fields, "text": text})
     return {"id": ident}
@@ -60,19 +55,19 @@ def answer(messages, roles, caller, request):
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
-            caller, request = json.loads(self.rfile.readline())
-            reply = answer(self.server.messages, self.server.roles, caller, request)
+            request = json.loads(self.rfile.readline())
+            reply = answer(self.server.messages, self.server.roles, *request)
         except (ValueError, RecursionError) as exc:
             reply = {"error": str(exc)}
         self.wfile.write(encode(reply) + b"\n")
 
 
-def call(caller):
+def call(op, caller, *args):
     try:
-        request = json.load(sys.stdin.buffer)
-        wire = encode([caller, request]) + b"\n"
-    except (ValueError, RecursionError) as exc:
-        return {"error": str(exc)}
+        text = sys.stdin.buffer.read().decode("utf-8")
+    except UnicodeDecodeError:
+        return {"error": "message must be UTF-8 text"}
+    wire = encode([caller, op, args, text]) + b"\n"
     with socket.socket(socket.AF_UNIX) as client:
         # The first body can start before the service has bound its socket.
         until = time.monotonic() + 3
@@ -96,4 +91,4 @@ if __name__ == "__main__":
             service.messages = []
             service.serve_forever()
     else:
-        sys.stdout.buffer.write(encode(call(sys.argv[2])))
+        sys.stdout.buffer.write(encode(call(*sys.argv[1:])))

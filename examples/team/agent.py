@@ -6,20 +6,31 @@ import sys
 import time
 from pathlib import Path
 
-from client import board, ctl
-
 SOLVER = Path("/opt/team/solver")
 SOURCE = Path("solution.cpp")
 
 
-def select(role, path, finalize):
-    reply = ctl(
-        "call",
-        "select_" + role,
-        str(path),
-        "--arg",
-        f"finalize={str(finalize).lower()}",
+def call(grant, *args):
+    reply = subprocess.run(
+        ["sandboxctl", "call", grant, *args],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if not reply.stdout:
+        raise RuntimeError(reply.stderr)
+    return json.loads(reply.stdout)
+
+
+def board(grant, *args):
+    reply = call(grant, *args, "--wait", "15")
+    if reply.get("state") != "completed":
+        raise RuntimeError(reply)
+    return reply["returned"]
+
+
+def select(path, finalize):
+    reply = call("submit", str(path), "--arg", f"finalize={str(finalize).lower()}")
     if reply.get("returned", {}).get("state") != ("accepted" if finalize else "stored"):
         raise RuntimeError(reply)
 
@@ -48,20 +59,24 @@ def main(role, omit):
     subprocess.run(
         ["g++", "--std=c++17", str(SOURCE), "--output", "solution"], check=True
     )
-    if ctl("call", "select_" + peer, str(SOURCE))["kind"] != "refused":
-        raise RuntimeError("peer's selection grant was accepted")
+    if call("submit", str(SOURCE), "--arg", "role=" + peer)["kind"] != "refused":
+        raise RuntimeError("submit accepted a role override")
     if role == "alice":
-        if "error" not in board(op="post", text="test", **{"from": peer}):
-            raise RuntimeError("board accepted a forged sender")
         if omit != "all":
-            select(role, SOLVER / "main.cpp", False)
+            select(SOLVER / "main.cpp", False)
         graph = {"vertices": 4, "edges": [[0, 1, 2], [0, 1, 2]]}
         graph["cores"] = solve(graph["vertices"], graph["edges"])
-        receipt = board(op="post", text=json.dumps(graph))
+        Path("message").write_text(json.dumps(graph))
+        if (
+            call("post", "message", "--arg", "from=" + peer, "--wait", "15")["kind"]
+            != "refused"
+        ):
+            raise RuntimeError("board accepted a forged sender")
+        receipt = board("post", "message")
     else:
         until = time.monotonic() + 40
         while time.monotonic() < until:
-            page = board(op="read", stream="board", after=0)
+            page = board("read")
             if page["messages"]:
                 break
             time.sleep(0.25)
@@ -72,15 +87,12 @@ def main(role, omit):
         cores = solve(graph["vertices"], graph["edges"])
         if first["from"] != peer or cores != graph["cores"]:
             raise ValueError(first)
-        receipt = board(
-            op="send",
-            to=peer,
-            text=json.dumps({"checked": first["id"], "cores": cores}),
-        )
+        Path("message").write_text(json.dumps({"checked": first["id"], "cores": cores}))
+        receipt = board("send", "message", "--arg", "to=" + peer)
     if "id" not in receipt:
         raise RuntimeError(receipt)
     if omit not in {role, "all"}:
-        select(role, SOURCE, True)
+        select(SOURCE, True)
 
 
 if __name__ == "__main__":
