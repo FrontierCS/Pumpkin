@@ -220,17 +220,19 @@ fn run(flags: flags::Sandboxctl) -> Result<OpReply, (u8, String)> {
                 format!("{error}: run sandboxctl in a sandbox that serves ops"),
             )
         })?;
-    exchange(connection, &call, &body).map_err(|message| (1, message))
+    exchange(connection, &call, &body)
+        .and_then(|answer| answer)
+        .map_err(|message| (1, message))
 }
 
 fn exchange(
     mut connection: impl io::Read + io::Write,
     call: &OpCall,
     body: &[u8],
-) -> Result<OpReply, String> {
+) -> Result<Result<OpReply, String>, String> {
     frame::write(&mut connection, call, body).context("the op could not be sent to sandboxd")?;
     match frame::read::<Result<OpReply, String>>(&mut connection) {
-        Ok(Some((answer, _))) => answer,
+        Ok(Some((answer, _))) => Ok(answer),
         Ok(None) => Err(UNANSWERED.to_owned()),
         Err(error) => Err(error).context("sandboxd's answer can't be read"),
     }
