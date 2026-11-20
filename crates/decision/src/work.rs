@@ -110,8 +110,8 @@ impl Core<'_> {
                 {
                     if !self.shared.is_empty() {
                         for (target, service) in &mut self.shared {
-                            if *service != crate::Service::Stopping {
-                                *service = crate::Service::Stopping;
+                            if *service != crate::Availability::Stopping {
+                                *service = crate::Availability::Stopping;
                                 actions.push(Action::TearDownShared { target: *target });
                             }
                         }

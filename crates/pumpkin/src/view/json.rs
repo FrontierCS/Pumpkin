@@ -274,8 +274,8 @@ fn sandbox(sandbox: &runtime::Sandbox) -> Value {
 fn shared_lanes(progress: &Progress) -> impl Iterator<Item = Value> {
     progress.shared.iter().map(|(index, service)| {
         json!({
-            "lane": format!("shared {index}"), "kind": "shared", "role": service.role,
-            "sandbox": sandbox(&service.sandbox), "said": progress::service_line(service),
+            "lane": format!("shared {index}"), "kind": "target", "lifetime": "work", "role": service.role,
+            "sandbox": sandbox(&service.sandbox), "said": progress::work_target_line(service),
         })
     })
 }
