@@ -331,6 +331,38 @@ impl<'de> Deserialize<'de> for SandboxName {
     }
 }
 
+pub(super) enum Unstarted {
+    Uncreated(String),
+    Created {
+        which: Which,
+        id: SandboxId,
+        reason: String,
+    },
+}
+
+impl From<String> for Unstarted {
+    fn from(reason: String) -> Self {
+        Self::Uncreated(reason)
+    }
+}
+
+impl Unstarted {
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Uncreated(reason) | Self::Created { reason, .. } => reason,
+        }
+    }
+
+    /// Returns the start failure with console evidence. An error also means that deletion
+    /// or its record failed, so this instance cannot acknowledge the work teardown.
+    pub(super) fn dispose(self, sandboxes: &Sandboxes<'_, impl Host>) -> Result<String, String> {
+        match self {
+            Self::Uncreated(reason) => Ok(reason),
+            Self::Created { which, id, reason } => sandboxes.unstarted(which, &id, &reason),
+        }
+    }
+}
+
 /// A sandbox whose session is up, to be deleted through [`Sandboxes::delete`].
 pub(super) struct Started {
     which: Which,
@@ -448,13 +480,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Creates the sandbox of `which`, waits until `by` for its session, and sets it up. The
-    /// session sends what it receives, wrapped by `wrap`, to `arrivals`. `ops` is the largest op
-    /// payload the session takes, or none for a session that takes no ops; `hard_end` bounds how
-    /// long the sandbox may live should the run's driver die.
-    ///
-    /// A sandbox that was created but didn't start is deleted before this fails, and the error
-    /// adds the end of its console, if the provider could read it.
+    /// Starts a child's session. A failed creation is disposed before the child reports its end.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
@@ -464,6 +490,31 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, String> {
+        self.attempt(which, ops, by, hard_end, arrivals, wrap)
+            .map_err(|failure| match failure.dispose(self) {
+                Ok(reason) => reason,
+                Err(reason) => {
+                    if self.workflow().final_call().selections() {
+                        let _ = self
+                            .logged
+                            .send(Input::Child(super::Report::Undeleted(reason.clone())));
+                    }
+                    reason
+                }
+            })
+    }
+
+    /// Creates and registers a sandbox by its startup bound. On failure the caller owns
+    /// disposal, so it can release prepared peers before a console read or deletion.
+    pub(super) fn attempt<T: Send + 'static>(
+        &self,
+        which: Which,
+        ops: Option<OpPayloadLimit>,
+        by: Deadline,
+        hard_end: UnixTime,
+        arrivals: Sender<T>,
+        wrap: impl Fn(Arrival) -> T + Send + 'static,
+    ) -> Result<Started, Unstarted> {
         let name = which.name(self.workflow());
         let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
@@ -498,7 +549,11 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         // Listed before the write's failure is looked at, as `unstarted` finds it there.
         stdx::unpoisoned(self.created.lock()).push(made);
         if let Err(error) = recorded {
-            return Err(self.unstarted(which, &id, &error));
+            return Err(Unstarted::Created {
+                which,
+                id,
+                reason: error,
+            });
         }
         let looks = Looks::new();
         // The wait ends at once for a signal, and for a sandbox that its provider lists as
@@ -524,7 +579,11 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         });
         match session {
             Ok(session) => Ok(Started { which, id, session }),
-            Err(error) => Err(self.unstarted(which, &id, &error)),
+            Err(error) => Err(Unstarted::Created {
+                which,
+                id,
+                reason: error,
+            }),
         }
     }
 
@@ -562,7 +621,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     // Deletes a sandbox that didn't start. The message is `error` with the sandbox's console and
     // the failure of the delete or of its record, if any.
-    fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> String {
+    fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> Result<String, String> {
         let provider = self.provider(which);
         let mut parts = vec![format!("sandbox {}: {error}", id.as_str())];
         match provider.console(&self.run, id) {
@@ -578,11 +637,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let (logged, recorded) =
             self.record_deletes(self.on(which), std::slice::from_ref(id), &deleted);
         self.send(logged);
+        let disposed = deleted.is_ok() && recorded.is_ok();
         if let Err(error) = deleted {
             parts.push(format!("deleting it failed: {error}"));
         }
         parts.extend(recorded.err());
-        parts.join("; ")
+        let reason = parts.join("; ");
+        if disposed { Ok(reason) } else { Err(reason) }
     }
 
     pub(super) fn workflow(&self) -> &'p Workflow {

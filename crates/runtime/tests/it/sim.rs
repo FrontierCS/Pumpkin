@@ -59,6 +59,8 @@ pub(crate) const MUTE: &str = "/sim/mute";
 
 /// A sandbox that never dials, and lasts until it is deleted.
 pub(crate) const HUNG: &str = "/sim/hung";
+pub(crate) const HUNG_LAST: &str = "/sim/hung-last";
+pub(crate) const HUNG_REFUSED: &str = "/sim/hung-refused";
 
 /// A sandbox that never dials, and that its provider's list leaves out once it has ended.
 pub(crate) const VANISHING: &str = "/sim/vanishing";
@@ -952,7 +954,7 @@ impl Faults {
         } else {
             Made::Named
         };
-        let dialing = if unlistable || names(HUNG) {
+        let dialing = if unlistable || names(HUNG) || names(HUNG_LAST) || names(HUNG_REFUSED) {
             Dialing::Hung
         } else if lost || vanishing || names(MUTE) {
             Dialing::Mute
@@ -962,14 +964,14 @@ impl Faults {
         let refusals = if names(UNDELETABLE) {
             u32::MAX
         } else {
-            u32::from(names(REFUSED_ONCE))
+            u32::from(names(REFUSED_ONCE) || names(HUNG_REFUSED))
         };
         Self {
             made,
             dialing,
             listing,
             refusals,
-            last: names(LAST),
+            last: names(LAST) || names(HUNG_LAST),
             freezing: if names(SCRIBBLED) {
                 Freezing::Scribbler
             } else if names(UNFREEZABLE) {
@@ -1075,7 +1077,10 @@ enum Step {
         less: Option<u64>,
     },
     /// A `status` or a session's `status` made until its reply gives `state`.
-    Await { call: OpCall, state: String },
+    Await {
+        call: OpCall,
+        state: String,
+    },
     /// A model request, whose response's part or end the next step waits for.
     Model {
         model: String,
@@ -1088,6 +1093,7 @@ enum Step {
     Sleep(u64),
     /// The `<kind>` of `await_log <kind>`.
     Logged(String),
+    File(String),
     /// The command's exit with 0.
     Exit,
     /// The answer to the collects of a `held` directory.
@@ -1218,10 +1224,13 @@ impl Caller {
                     thread::sleep(Duration::from_secs(seconds));
                     continue;
                 }
+                Some(Step::File(path)) => {
+                    let record = self.record.as_ref().unwrap();
+                    await_file(&record.join(path));
+                    continue;
+                }
                 Some(Step::Logged(kind)) => {
-                    let Some(record) = &self.record else {
-                        panic!("`await_log` reads the run's record, which `Sim::records` names")
-                    };
+                    let record = self.record.as_ref().unwrap();
                     logged(record, &format!(r#""kind":"{kind}""#));
                     continue;
                 }
@@ -1489,6 +1498,7 @@ fn step(arg: &str) -> Step {
             return model_step(kind, model, &words[2..]);
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
+        ["await_file", path] => return Step::File((*path).to_owned()),
         ["await_log", kind] => return Step::Logged((*kind).to_owned()),
         ["exit"] => return Step::Exit,
         ["release"] => return Step::Release,
@@ -1527,6 +1537,18 @@ fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
         said: said.into_iter().map(str::to_owned).collect(),
         fields,
         wait,
+    }
+}
+
+fn await_file(path: &Path) {
+    let by = Deadline::after(LAST_WAITS);
+    while !path.exists() {
+        assert!(
+            by.remaining().is_some(),
+            "no recorded file {}",
+            path.display()
+        );
+        thread::sleep(AWAIT_POLL);
     }
 }
 

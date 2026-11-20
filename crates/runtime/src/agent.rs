@@ -1,9 +1,10 @@
 //! The agent's sandbox, which runs the agent's IR command, once its directories, files and
 //! standard input are in place, and whose session takes its ops.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Scope};
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use schema::workflow::{self, AgentId, Workflow};
 use stdx::{Context, Deadline};
 
 use super::log::Entry;
-use super::sandbox::{Sandboxes, Started, Which, collect, launch};
+use super::sandbox::{Sandboxes, Started, Unstarted, Which, collect, launch};
 use super::{Clock, Host, Inbox, Input, Report, Runtime, deadline, failed_also, record};
 
 /// The agent's sandbox, from when it starts until it is deleted.
@@ -40,13 +41,11 @@ impl Agent {
         hard_end: UnixTime,
         inbox: Sender<Input>,
         clock: impl Clock,
-    ) -> Result<(Self, Result<Launch, String>), String> {
+    ) -> Result<(Self, Result<Launch, String>), Unstarted> {
         let id = agent.id;
         let ops = Some(op_payload_limit(sandboxes.workflow(), id));
         let wrap = move |arrival| Input::Agent(id, clock.now(), arrival);
-        let mut sandbox = sandboxes
-            .start(Which::Agent(id), ops, by, hard_end, inbox, wrap)
-            .context("the agent's sandbox didn't start")?;
+        let mut sandbox = sandboxes.attempt(Which::Agent(id), ops, by, hard_end, inbox, wrap)?;
         let launch = put(&mut sandbox.session, agent, by).map(|stdin| Launch {
             stdin,
             ..launch(&agent.command)
@@ -144,8 +143,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
         let Some(mut agent) = self.agents.remove(&id) else {
             if team {
-                self.pending
-                    .push_back((self.clock.now(), Event::AgentTornDown { agent: id }));
+                let _ = self.inbox.sender().send(Input::Child(Report::Event(
+                    self.clock.now(),
+                    Event::AgentTornDown { agent: id },
+                )));
             }
             return self
                 .log
@@ -161,8 +162,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 .map(Entry::Note)
                 .collect::<Vec<_>>();
             let collected = record::collected(&dir);
+            let subject = if team {
+                format!("agent `{}`", sandboxes.workflow().sandbox(id.role()).name)
+            } else {
+                "the agent".to_owned()
+            };
             logged.push(Entry::Note(format!(
-                "collected from the agent's sandbox: {collected}"
+                "collected from {subject}'s sandbox: {collected}"
             )));
             logged.push(Entry::AgentCollected(id));
             logged
@@ -201,136 +207,171 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
     pub(super) fn start_agents<'s>(&mut self, scope: &'s Scope<'s, 'r>) -> Result<(), String> {
         let workflow = self.workflow();
-        for agent in workflow.agents() {
-            self.serve(decision::Caller::Agent(agent.id));
-        }
         let sandboxes = self.sandboxes;
         let hard_end = self.unix_hard_end;
-        let placed = self.placed;
-        let prepare = |agent: &workflow::Agent, clock: H::Clock, inbox| {
-            Agent::prepare(
-                sandboxes,
-                agent,
-                deadline(&clock, placed.startup(agent.id.role())),
-                hard_end,
-                inbox,
-                clock,
-            )
-        };
-        let prepared = together(workflow.agents().map(|agent| {
+        let (notices, ready) = mpsc::channel();
+        let mut gates = BTreeMap::new();
+        let mut startup = Duration::ZERO;
+        for role in workflow.agents() {
+            let id = role.id;
+            self.serve(decision::Caller::Agent(id));
             let clock = self.clock.clone();
             let inbox = self.inbox.sender();
-            (agent.id, move || prepare(agent, clock, inbox))
-        }));
-        let released = self.clock.now();
-        let startup = workflow
-            .agents()
-            .map(|agent| placed.startup(agent.id.role()))
-            .max()
-            .unwrap_or_default();
-        let team = workflow.final_call().selections();
-        let launch_end = if team {
-            self.pending.push_back((released, Event::WorkStarted));
-            // A late or failed setup can't take another prepared member's chance to launch, or
-            // extend its work clock. The driver serves the rest while a launch awaits its reply.
-            released
-                .min(startup)
-                .saturating_add(workflow.work_deadline())
-        } else {
-            startup
-        };
-        for (id, prepared) in prepared {
-            let (agent, launch) = match prepared
-                .context("starting the agent's setup thread")
-                .and_then(|r| r)
-            {
-                Ok((agent, Ok(launch))) => (agent, launch),
-                Ok((agent, Err(reason))) => {
-                    self.agents.insert(id, agent);
-                    self.pending
-                        .push_back((released, Event::AgentFailed { agent: id, reason }));
-                    continue;
-                }
-                Err(reason) => {
-                    self.pending
-                        .push_back((released, Event::AgentFailed { agent: id, reason }));
-                    continue;
-                }
+            let bound = self.placed.startup(id.role());
+            let by = deadline(&clock, bound);
+            let prepare = move || Agent::prepare(sandboxes, role, by, hard_end, inbox, clock);
+            if !workflow.final_call().selections() {
+                let (agent, result) = match prepare() {
+                    Ok((agent, launch)) => agent.launch(launch, by),
+                    Err(failure) => {
+                        let reason = failure.dispose(sandboxes).unwrap_or_else(|reason| reason);
+                        (
+                            None,
+                            Err(format!("the agent's sandbox didn't start: {reason}")),
+                        )
+                    }
+                };
+                self.agents.extend(agent.map(|agent| (id, agent)));
+                let event = result.map_or_else(
+                    |reason| Event::AgentFailed { agent: id, reason },
+                    |()| Event::WorkStarted,
+                );
+                self.pending.push_back((self.clock.now(), event));
+                return Ok(());
+            }
+            startup = startup.max(bound);
+            self.starting.insert(id, Starting::default());
+            let (release, gate) = mpsc::channel();
+            let worker = Worker {
+                id,
+                clock: self.clock.clone(),
+                notices: notices.clone(),
+                inbox: self.inbox.sender(),
+                gate,
             };
-            let by = launch_end.min(released.saturating_add(placed.startup(id.role())));
-            self.launch_agent(scope, id, agent, launch, by)?;
+            thread::Builder::new()
+                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes))
+                .context("starting the agent's setup thread")?;
+            gates.insert(id, release);
         }
+        drop(notices);
+        self.release_agents(startup, gates, &ready);
         Ok(())
     }
 
-    fn launch_agent<'s>(
+    fn release_agents(
         &mut self,
-        scope: &'s Scope<'s, 'r>,
-        id: AgentId,
-        mut agent: Agent,
-        launch: Launch,
-        launch_end: Duration,
-    ) -> Result<(), String> {
-        let clock = self.clock.clone();
-        let launch = move || {
-            let result = agent
-                .sandbox
-                .session
-                .start(launch, deadline(&clock, launch_end))
-                .context("the agent's command didn't start")
-                .map(|process| agent.process = Some(process));
-            (agent, clock.now(), result)
-        };
-        if self.workflow().final_call().selections() {
-            let inbox = self.inbox.sender();
-            self.starting.insert(id, Starting::default());
-            thread::Builder::new()
-                .spawn_scoped(scope, move || {
-                    let (agent, at, result) = launch();
-                    let _ = inbox.send(Input::Launched(id, at, Box::new(agent), result));
-                })
-                .context("starting the agent's launch thread")?;
-        } else {
-            let (agent, at, result) = launch();
-            self.agents.insert(id, agent);
-            let event = match result {
-                Ok(()) => Event::WorkStarted,
-                Err(reason) => Event::AgentFailed { agent: id, reason },
+        startup: Duration,
+        mut gates: BTreeMap<AgentId, Sender<Duration>>,
+        ready: &Receiver<(AgentId, Result<(), String>)>,
+    ) {
+        let by = deadline(&self.clock, startup);
+        let mut releases = Vec::new();
+        let mut failures = Vec::new();
+        while !gates.is_empty() {
+            let Some(left) = by.remaining() else { break };
+            let Ok((id, status)) = ready.recv_timeout(left) else {
+                break;
             };
-            self.pending.push_back((at, event));
+            if let Some(release) = gates.remove(&id) {
+                match status {
+                    Ok(()) => releases.push((id, release)),
+                    Err(reason) => failures.push((id, reason)),
+                }
+            }
         }
-        Ok(())
+        let at = self.clock.now();
+        self.pending.push_back((at, Event::WorkStarted));
+        failures.extend(gates.into_keys().map(|id| {
+            (
+                id,
+                "the agent's setup missed the startup deadline".to_owned(),
+            )
+        }));
+        self.pending.extend(
+            failures
+                .into_iter()
+                .map(|(agent, reason)| (at, Event::AgentFailed { agent, reason })),
+        );
+        let end = at
+            .min(startup)
+            .saturating_add(self.workflow().work_deadline());
+        for (id, release) in releases {
+            let _ = release.send(end.min(at.saturating_add(self.placed.startup(id.role()))));
+        }
     }
 }
 
-// Each startup step finishes for all members before the next. A singleton runs directly on the
-// driver thread and a team gets one result for every member, even if a thread couldn't start.
-fn together<T: Send, F: FnOnce() -> T + Send>(
-    mut work: impl ExactSizeIterator<Item = (AgentId, F)>,
-) -> Vec<(AgentId, io::Result<T>)> {
-    if work.len() == 1 {
-        return work
-            .next()
-            .map(|(id, run)| (id, Ok(run())))
-            .into_iter()
-            .collect();
-    }
-    thread::scope(|scope| {
-        let workers: Vec<_> = work
-            .map(|(id, run)| (id, thread::Builder::new().spawn_scoped(scope, run)))
-            .collect();
-        workers
-            .into_iter()
-            .map(|(id, worker)| {
-                let result = worker.map(|worker| {
-                    worker
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                });
-                (id, result)
+impl Agent {
+    fn launch(
+        mut self,
+        launch: Result<Launch, String>,
+        by: Deadline,
+    ) -> (Option<Self>, Result<(), String>) {
+        let result = launch
+            .and_then(|launch| {
+                self.sandbox
+                    .session
+                    .start(launch, by)
+                    .context("the agent's command didn't start")
             })
-            .collect()
-    })
+            .map(|process| self.process = Some(process));
+        (Some(self), result)
+    }
+}
+
+struct Worker<C> {
+    id: AgentId,
+    clock: C,
+    notices: Sender<(AgentId, Result<(), String>)>,
+    inbox: Sender<Input>,
+    gate: Receiver<Duration>,
+}
+
+impl<C: Clock> Worker<C> {
+    fn start(
+        self,
+        prepared: Result<(Agent, Result<Launch, String>), Unstarted>,
+        sandboxes: &Sandboxes<'_, impl Host>,
+    ) {
+        let id = self.id;
+        let (agent, result) = match prepared {
+            Ok((agent, Ok(launch))) => {
+                let _ = self.notices.send((id, Ok(())));
+                match self.gate.recv() {
+                    Ok(end) => agent.launch(Ok(launch), deadline(&self.clock, end)),
+                    Err(_) => (
+                        Some(agent),
+                        Err("the agent's setup missed the startup deadline".to_owned()),
+                    ),
+                }
+            }
+            Ok((agent, Err(reason))) => {
+                let _ = self.notices.send((id, Err(reason.clone())));
+                (Some(agent), Err(reason))
+            }
+            Err(failure) => {
+                let reason = format!("the agent's sandbox didn't start: {}", failure.reason());
+                let _ = self.notices.send((id, Err(reason)));
+                match failure.dispose(sandboxes) {
+                    Ok(detail) => (
+                        None,
+                        Err(format!("the agent's sandbox didn't start: {detail}")),
+                    ),
+                    Err(reason) => {
+                        let _ = self.inbox.send(Input::Child(Report::Undeleted(reason)));
+                        return;
+                    }
+                }
+            }
+        };
+        let _ = self.inbox.send(Input::Launched(
+            id,
+            self.clock.now(),
+            agent.map(Box::new),
+            result,
+        ));
+    }
 }
 
 /// Puts `agent`'s directories and files in its sandbox, at `/`, then its standard input's text,

@@ -363,7 +363,7 @@ struct Runtime<'r, H: Host> {
 }
 
 enum Input {
-    Launched(AgentId, Duration, Box<Agent>, Result<(), String>),
+    Launched(AgentId, Duration, Option<Box<Agent>>, Result<(), String>),
     Agent(AgentId, Duration, Arrival),
     Child(Report),
     Logged(Entry),
@@ -526,9 +526,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             // come after the tick, an event then counting at the tick's time, as the core's
             // clock doesn't go back. Each due tick ends a phase or the run, so the input held
             // goes on after it.
-            if input.reached().is_some_and(|reached| reached >= due) {
+            if let Some(reached) = input.reached().filter(|at| *at >= due) {
+                let now = self.clock.now();
                 self.held = Some(input);
-                return Ok((self.clock.now(), Event::Tick));
+                // A busy driver may hold a peer's timely op behind an earlier grace expiry.
+                // Advance only to that expiry before dispatching the older observation.
+                return Ok((if reached < now { due } else { now }, Event::Tick));
             }
             if let Some(event) = self.arrived(Some(scope), core, input)? {
                 return Ok(event);
@@ -544,7 +547,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<Option<(Duration, Event)>, String> {
         let (id, at, arrival) = match input {
             Input::Launched(id, at, agent, result) => {
-                self.agents.insert(id, *agent);
+                self.agents.extend(agent.map(|agent| (id, *agent)));
                 if let Some(starting) = self.starting.remove(&id) {
                     self.arrivals.extend(
                         starting
@@ -553,6 +556,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                             .map(|(at, arrival)| Input::Agent(id, at, arrival)),
                     );
                     if starting.tear_down {
+                        if let Err(reason) = result {
+                            self.log.note(&format!(
+                                "agent `{}`: {reason}",
+                                self.workflow().sandbox(id.role()).name
+                            ))?;
+                        }
                         if let Some(scope) = scope {
                             self.tear_down_agent(scope, id)?;
                         }

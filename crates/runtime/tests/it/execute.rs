@@ -4423,10 +4423,11 @@ fn team_workflow(argv: &[&str]) -> Value {
     ir
 }
 
-fn run_team(
+fn execute_team(
+    host: &impl Host,
     ir: Value,
     dir: &TestDir,
-) -> (PathBuf, Vec<decision::MemberOutcome>, decision::CallResult) {
+) -> (PathBuf, Result<Outcome, runtime::Stopped>) {
     let ir = serde_json::from_value(ir).unwrap();
     let sim = Sim::with_startup(2);
     let placed = placed(&ir, sim.ready()).unwrap();
@@ -4441,45 +4442,38 @@ fn run_team(
     let prices = prices();
     let (models, recorded) = kept(&placed, &servings, &prices);
     let tag = new_id(SystemTime::now()).unwrap();
-    let run = Run::prepare(
-        &System,
-        placed,
-        on,
-        dir.path(),
-        tag.clone(),
-        models,
-        recorded,
-    )
-    .unwrap();
+    let run = Run::prepare(host, placed, on, dir.path(), tag.clone(), models, recorded).unwrap();
     let record = run.dir().to_owned();
     sim.records(&record);
-    let outcome = run
-        .execute(
-            Path::new(SANDBOXD),
-            None,
-            &Dialer::new(test_support::edge::client()),
-            &Bodies { record: &record },
-            || Ok(()),
-        )
-        .unwrap();
-    let Outcome::Team {
-        members,
-        result: Ok(result),
-    } = outcome
-    else {
-        panic!("expected the aggregate judge to return, got {outcome:?}")
-    };
-    assert_eq!(
-        members
-            .iter()
-            .map(|member| member.agent)
-            .collect::<Vec<_>>(),
-        ids
+    let outcome = run.execute(
+        Path::new(SANDBOXD),
+        None,
+        &Dialer::new(test_support::edge::client()),
+        &Bodies { record: &record },
+        || Ok(()),
     );
+    if let Ok(Outcome::Team { members, .. }) = &outcome {
+        assert_eq!(members.iter().map(|m| m.agent).collect::<Vec<_>>(), ids);
+    }
     assert!(sim.list(&tag).unwrap().is_empty());
     if let Some(upstream) = upstream {
         upstream.stop();
     }
+    (record, outcome)
+}
+
+fn run_team(
+    ir: Value,
+    dir: &TestDir,
+) -> (PathBuf, Vec<decision::MemberOutcome>, decision::CallResult) {
+    let (record, outcome) = execute_team(&System, ir, dir);
+    let Ok(Outcome::Team {
+        members,
+        result: Ok(result),
+    }) = outcome
+    else {
+        panic!("expected aggregate judge to return: {outcome:?}")
+    };
     (record, members, result)
 }
 
@@ -4489,7 +4483,7 @@ fn teams_stage_only_their_members_selections_after_partial_start_failure() {
     let roles = ir["roles"].as_array_mut().unwrap();
     let mut broken = roles[0].clone();
     broken["name"] = json!("broken");
-    broken["image"] = json!(sim::image(HUNG).as_str());
+    broken["image"] = json!(sim::image(sim::HUNG_LAST).as_str());
     let mut beta = roles[0].clone();
     beta["name"] = json!("beta");
     beta["runtime"]["agent"]["command"]["argv"] = json!([
@@ -4542,6 +4536,76 @@ fn teams_stage_only_their_members_selections_after_partial_start_failure() {
 }
 
 #[test]
+fn a_due_grace_does_not_advance_past_another_members_queued_submission() {
+    const STORING_ALPHA: &str =
+        "payloads/.8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8.partial";
+    let mut ir = team_workflow(&["ops", "await_log ops", "call submit alpha finalize=true"]);
+    let roles = ir["roles"].as_array_mut().unwrap();
+    roles[0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
+    let mut beta = roles[0].clone();
+    beta["name"] = json!("beta");
+    beta["runtime"]["agent"]["command"]["argv"] = json!([
+        "ops",
+        "ops",
+        format!("await_file {STORING_ALPHA}"),
+        "call submit beta"
+    ]);
+    roles.push(beta);
+
+    // Alpha finalizes at 0. While the driver stores its selection, beta submits at 2. The
+    // driver resumes at 31, past alpha's grace at 1 and the team's common deadline at 30.
+    let host = SimHost::new()
+        .slow_sync(SlowSync {
+            record: Synced::Holding("log.jsonl", r#""kind":"now""#),
+            at: Duration::from_secs(2),
+            queued: 0,
+        })
+        .slow_sync(SlowSync {
+            record: Synced::Holding(STORING_ALPHA, "alpha"),
+            at: Duration::from_secs(31),
+            queued: 1,
+        });
+    let dir = TestDir::new();
+    let (record, outcome) = execute_team(&host, ir, &dir);
+    let Ok(Outcome::Team { members, .. }) = outcome else {
+        panic!("team failed: {outcome:?}")
+    };
+    assert!(matches!(members[0].work_end, decision::WorkEnd::Finalized));
+    assert_eq!(members[1].submission.as_ref().unwrap().payload.size, 4);
+    let log = read_log(&record);
+    let queued = log
+        .iter()
+        .find(|line| {
+            line["event"]["caller"] == "agent-3" && line["event"]["request"]["kind"] == "now"
+        })
+        .unwrap();
+    assert_eq!(queued["observed_ns"], "2000000000");
+}
+
+#[test]
+fn team_cannot_judge_while_an_unstarted_agents_deletion_is_unconfirmed() {
+    let mut ir = team_workflow(&["ops", "call submit binary finalize=true"]);
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let mut broken = roles[0].clone();
+    broken["name"] = json!("broken");
+    broken["image"] = json!(sim::image(sim::HUNG_REFUSED).as_str());
+    roles.push(broken);
+    let dir = TestDir::new();
+    let (record, outcome) = execute_team(&System, ir, &dir);
+    assert!(
+        outcome
+            .unwrap_err()
+            .to_string()
+            .contains("deleting it failed")
+    );
+    assert!(read_log(&record).iter().all(|line| {
+        !line["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|act| act["kind"] == "start_final_call"))
+    }));
+}
+
+#[test]
 fn teams_judge_all_missing_and_keep_each_members_model_failure_and_usage() {
     let mut ir = routed(team_workflow(&["ops", "model m-large expired"]));
     let roles = ir["roles"].as_array_mut().unwrap();
@@ -4571,6 +4635,7 @@ fn teams_judge_all_missing_and_keep_each_members_model_failure_and_usage() {
         .unwrap()
         .progress
         .unwrap();
+    assert_eq!(progress.agents.len(), 2);
     let usage = |id| {
         progress.agents[&runtime::CallerName::Member(id)]
             .model

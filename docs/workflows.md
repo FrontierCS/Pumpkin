@@ -167,7 +167,9 @@ JSON array in agent declaration order. Each entry names the role and its selecti
 
 A present selection is staged at its path with its original bytes. The digest is its SHA-256
 and `payload_max_bytes` bounds each selection. A missing selection has no file. The final body
-runs even when all selections are missing and supplies the workflow's scoring rule.
+runs even when all selections are missing and supplies the workflow's scoring rule. The selected files and the judge's other
+`/pumpkin` files share that filesystem's 1 GiB capacity and the target's memory limit.
+Size the total inputs accordingly.
 
 ## Bodies
 
