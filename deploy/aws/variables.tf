@@ -39,12 +39,13 @@ variable "modal_workspace" {
 # `usd_per_hour` is what its instance type costs an hour in the region, as AWS's pricing page
 # gives it.
 variable "classes" {
-  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars."
+  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars, and its instances' root volume, in GiB, which is `root_volume_gib` without it."
   type = map(object({
-    instance_type = string
-    cpu_features  = set(string)
-    cpu_model     = optional(string)
-    usd_per_hour  = optional(number)
+    instance_type   = string
+    cpu_features    = set(string)
+    cpu_model       = optional(string)
+    usd_per_hour    = optional(number)
+    root_volume_gib = optional(number)
   }))
   default = {
     # Targets of up to 8 CPUs (AMD EPYC 7R13, Zen 3).
@@ -72,7 +73,7 @@ variable "classes" {
 }
 
 variable "root_volume_gib" {
-  description = "The root volume of every sandbox's instance, in GiB, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' 45 GB images."
+  description = "The root volume of a sandbox's instance, in GiB, for a class that gives none, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' 45 GB images."
   type        = number
   default     = 100
 }
