@@ -32,8 +32,9 @@ python3 examples/team/verify.py ".pumpkin/runs/$team"
 
 The checker requires successful Responses output for each agent, a post from Alice that Bob
 reads and acknowledges, both agents' selection calls, one judge result and four sandbox deletion
-receipts. It reports the scores earned by the selected predictions. A wrong prediction can
-therefore yield a successful check and a lower score.
+receipts. It reports the scores earned by the selected predictions. A wrong integer prediction can
+yield a successful check and a lower score. An answer with malformed JSON or the wrong row
+names fails the check.
 
 ## Run the scripted reference
 

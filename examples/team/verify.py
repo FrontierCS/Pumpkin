@@ -37,14 +37,15 @@ def grade(raw):
         or not answer.keys() <= ANSWERS.keys()
         or any(type(value) is not int for value in answer.values())
     ):
-        return "invalid", 0
-    return "scored", sum(answer.get(name) == value for name, value in ANSWERS.items())
+        return "invalid", 0, None
+    score = sum(answer.get(name) == value for name, value in ANSWERS.items())
+    return "scored", score, answer
 
 
 def check_scores(record, members, verdict, selected, codex, omit):
     if [member["role"] for member in members] != ROLES:
         raise ValueError("expected Alice and Bob in declaration order")
-    rows = []
+    rows, malformed = [], []
     for member in members:
         role, submission = member["role"], member["submission"]
         missing = omit in {role, "all"}
@@ -70,11 +71,12 @@ def check_scores(record, members, verdict, selected, codex, omit):
                     f"{role} did not finalize its own selection ({member['work_end']})"
                 )
             raw = payload(record, submission["payload"])
-            status, score = grade(raw)
-            if not codex:
-                wanted = {"amber": 4} if role == "alice" else ANSWERS
-                if json.loads(raw) != wanted or status != "scored":
-                    raise ValueError(f"unexpected reference selection for {role}")
+            status, score, answer = grade(raw)
+            wanted = {"amber": 4} if role == "alice" else ANSWERS
+            if answer is None or answer.keys() != wanted.keys():
+                malformed.append(role)
+            elif not codex and answer != wanted:
+                raise ValueError(f"unexpected reference selection for {role}")
         rows.append({"role": role, "status": status, "score": score})
     scores = [row["score"] for row in rows]
     best = max((s for s in scores if s is not None), default=None)
@@ -83,9 +85,13 @@ def check_scores(record, members, verdict, selected, codex, omit):
     result = {f["name"]: f["value"] for f in verdict["result"]["values"]}
     if result != {"score": best, "roles": rows}:
         raise ValueError(f"judge result disagrees with selected answers: {result}")
-    print(
-        f"{record.name}: individual scores {scores}, best {best}, four sandboxes deleted"
-    )
+    for row in rows:
+        print(f"{row['role']}: {row['status']}, score {row['score']}")
+    print(f"{record.name}: best {best}, four sandboxes deleted")
+    if malformed:
+        raise ValueError(
+            f"malformed solver submission for {', '.join(malformed)}: expected the assigned row names and integer predictions"
+        )
 
 
 def verify(record, omit):

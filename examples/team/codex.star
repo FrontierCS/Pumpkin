@@ -16,12 +16,16 @@ your lowercase role name).
 ASSIGNMENTS = {
     "alice": """You are alice. Compute amber from [3,4], offset -1. Post your prediction to
 the board before you finalize using {"op":"post","text":"..."} with your row and value in text.
-Check that the board returns an id. Select your amber answer. Bob can read it after you finish.
+Check that the board returns an id. The required answer.json template is {"amber": A}.
+Replace A with your computed integer, keeping the literal key "amber". Finalize this file with
+select_alice. Bob can read your post after you finish.
 """,
     "bob": """You are bob. Read Alice's amber prediction with {"op":"read","stream":"board","after":0}.
 If messages is empty, wait two seconds and read again. Check her arithmetic: amber has row [3,4]
 and offset -1. Acknowledge the message you read with {"op":"send","to":"alice","text":"Checked message N"}
-where N is its numeric id. Compute blue from [2,5], offset 1. Select your own answer for both rows.
+where N is its numeric id. Compute blue from [2,5], offset 1. The required answer.json template
+is {"amber": A, "blue": B}. Replace A with your checked amber integer and B with your blue
+integer, keeping both literal keys. Finalize this file with select_bob.
 """,
 }
 
