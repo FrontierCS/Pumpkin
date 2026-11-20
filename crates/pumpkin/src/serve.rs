@@ -81,14 +81,8 @@ fn requests(
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home.join(crate::job::runs()));
     while arrives(input)? {
-        let ask = match frame::read::<Ask>(input) {
-            Ok(Some((ask, body))) if body.is_empty() => ask,
-            Ok(Some((_, body))) => {
-                return invalid_request(
-                    output,
-                    format!("a request has a {}-byte body", body.len()),
-                );
-            }
+        let ask = match request_head(input) {
+            Ok(Some(ask)) => ask,
             Ok(None) => break,
             Err(error) => return invalid_request(output, error),
         };
@@ -107,6 +101,13 @@ fn requests(
             Ask::Put(put) => match receive_put(home, &put, input) {
                 Ok(Ok(answer)) => frame::write(output, &answer, &[]),
                 Ok(Err(message)) => link::refuse(output, message),
+                Err(error) => match error.kind() {
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => break,
+                    _ => return invalid_request(output, error),
+                },
+            },
+            Ask::Puts { blobs } => match receive_group(home, &blobs, input) {
+                Ok(answers) => output.write_all(&answers).and_then(|()| output.flush()),
                 Err(error) => match error.kind() {
                     io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => break,
                     _ => return invalid_request(output, error),
@@ -147,6 +148,17 @@ fn requests(
     Ok(ExitCode::SUCCESS)
 }
 
+fn request_head(input: &mut impl io::Read) -> io::Result<Option<Ask>> {
+    match frame::read::<Ask>(input)? {
+        None => Ok(None),
+        Some((ask, body)) if body.is_empty() => Ok(Some(ask)),
+        Some((_, body)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a request has a {}-byte body", body.len()),
+        )),
+    }
+}
+
 fn invalid_request(
     output: &mut impl Write,
     error: impl std::fmt::Display,
@@ -182,6 +194,30 @@ fn receive_put(
     );
     parts.finish()?;
     Ok(stored)
+}
+
+fn receive_group(
+    home: &Path,
+    puts: &[link::store::Put],
+    input: &mut impl io::Read,
+) -> io::Result<Vec<u8>> {
+    link::store::check_group(puts)?;
+    // A refusal can fill the return pipe while the client is still writing the group's bodies.
+    let mut answers = Vec::new();
+    let mut failed = false;
+    for put in puts {
+        if failed {
+            link::store::Parts::new(input, put.body_bytes()?).finish()?;
+        } else {
+            let stored = receive_put(home, put, input)?;
+            failed = !matches!(stored, Ok(PutAnswer::Stored));
+            match stored {
+                Ok(answer) => frame::write(&mut answers, &answer, &[])?,
+                Err(error) => link::refuse(&mut answers, error)?,
+            }
+        }
+    }
+    Ok(answers)
 }
 
 // The client may leave at any frame, including while an answer is still streaming.

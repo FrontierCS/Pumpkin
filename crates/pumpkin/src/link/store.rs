@@ -1,4 +1,7 @@
-//! A store query and one blob's resumable upload. Only a frame at a time crosses in memory.
+//! A store query and resumable uploads. Small whole blobs may share one request, as in Bazel's
+//! `BatchUpdateBlobs`
+//! (<https://github.com/bazelbuild/remote-apis/blob/c2c07e3d718d3d490a4958344d9c3e47de0bfaf3/build/bazel/remote/execution/v2/remote_execution.proto#L365-L388>).
+//! A group gets a `Stored` per blob in order, up to its first failure, which ends its answers.
 
 use std::io::{self, Cursor, Read, Write};
 use std::process::ChildStdin;
@@ -62,6 +65,44 @@ impl Request for Lacks {
         }
         Ok(blobs)
     }
+}
+
+const GROUP_BLOBS: usize = 8;
+// A small write in OpenSSH's SFTP client:
+// https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sftp-client.c#L60
+const SMALL_BYTES: u64 = 32 * 1024;
+
+fn small(from: u64, size_bytes: u64) -> bool {
+    from == 0 && size_bytes <= SMALL_BYTES
+}
+
+pub(crate) fn groups(mut missing: &[Missing]) -> impl Iterator<Item = &[Missing]> {
+    std::iter::from_fn(move || {
+        missing.first()?;
+        let count = missing
+            .iter()
+            .take(GROUP_BLOBS)
+            .take_while(|blob| small(blob.held_bytes, blob.size_bytes))
+            .count()
+            .max(1);
+        let (group, rest) = missing.split_at(count);
+        missing = rest;
+        Some(group)
+    })
+}
+
+pub(crate) fn check_group(blobs: &[Put]) -> io::Result<()> {
+    if !(2..=GROUP_BLOBS).contains(&blobs.len())
+        || !blobs.iter().all(|blob| small(blob.from, blob.size_bytes))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a group holds 2 to {GROUP_BLOBS} whole blobs of at most {SMALL_BYTES} bytes each"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,15 +188,24 @@ impl<R: Read> Read for Parts<'_, R> {
 }
 
 impl Link {
-    pub(crate) fn put(
+    /// Sends the group. Read one `put_answer` per input until its first failure.
+    pub(crate) fn send_puts(
         &mut self,
-        request: Put,
-        mut source: impl Read,
+        inputs: Vec<(&Missing, Box<dyn Read + '_>)>,
         mut progress: impl FnMut(u64),
-    ) -> Result<Result<PutAnswer, String>, Unanswered> {
-        let mut left = request
-            .body_bytes()
-            .map_err(|error| Unanswered::Failed(error.to_string()))?;
+    ) -> Result<(), Unanswered> {
+        let put = |blob: &Missing| Put {
+            digest: blob.digest.clone(),
+            from: blob.held_bytes,
+            size_bytes: blob.size_bytes,
+        };
+        let ask = match inputs.as_slice() {
+            [] => return Ok(()),
+            [(one, _)] => Ask::Put(put(one)),
+            group => Ask::Puts {
+                blobs: group.iter().map(|(blob, _)| put(blob)).collect(),
+            },
+        };
         let mut pipe = Pipe(&mut self.stdin);
         let failed = |error: io::Error| match error.kind() {
             io::ErrorKind::BrokenPipe => {
@@ -163,21 +213,29 @@ impl Link {
             }
             _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
         };
-        frame::write(&mut pipe, &Ask::Put(request), &[]).map_err(failed)?;
-        let capacity = usize::try_from(left)
-            .unwrap_or(usize::MAX)
-            .min(MAX_BODY_BYTES);
-        let mut buffer = vec![0; capacity];
-        while left > 0 {
-            let size = usize::try_from(left.min(MAX_BODY_BYTES as u64)).unwrap_or(MAX_BODY_BYTES);
-            let part = &mut buffer[..size];
-            source.read_exact(part).map_err(|error| Unanswered::Failed(format!(
-                "the file changed or could not be read while it was sent: {error}: send the task again"
-            )))?;
-            frame::write(&mut pipe, &Part, part).map_err(failed)?;
-            left -= size as u64;
-            progress(size as u64);
+        frame::write(&mut pipe, &ask, &[]).map_err(failed)?;
+        for (blob, mut source) in inputs {
+            let mut left = blob.size_bytes - blob.held_bytes;
+            let capacity = usize::try_from(left)
+                .unwrap_or(usize::MAX)
+                .min(MAX_BODY_BYTES);
+            let mut buffer = vec![0; capacity];
+            while left > 0 {
+                let size =
+                    usize::try_from(left.min(MAX_BODY_BYTES as u64)).unwrap_or(MAX_BODY_BYTES);
+                let part = &mut buffer[..size];
+                source.read_exact(part).map_err(|error| Unanswered::Failed(format!(
+                    "the file changed or could not be read while it was sent: {error}: send the task again"
+                )))?;
+                frame::write(&mut pipe, &Part, part).map_err(failed)?;
+                left -= size as u64;
+                progress(size as u64);
+            }
         }
+        Ok(())
+    }
+
+    pub(crate) fn put_answer(&mut self) -> Result<Result<PutAnswer, String>, Unanswered> {
         match self.received("the upload's answer")? {
             Head::Answered(answer) => Ok(Ok(answer)),
             Head::Refused { message } => Ok(Err(message)),
