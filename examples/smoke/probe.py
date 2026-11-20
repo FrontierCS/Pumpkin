@@ -16,7 +16,10 @@ TIMEOUT_SECONDS = 5
 
 
 def line(sandbox, check, ok, seen):
-    print("{} {}: {} ({})".format(sandbox, check, "ok" if ok else "FAILED", seen), flush=True)
+    print(
+        "{} {}: {} ({})".format(sandbox, check, "ok" if ok else "FAILED", seen),
+        flush=True,
+    )
 
 
 def connects(address):
@@ -32,7 +35,7 @@ def sandboxd():
     """The arguments of `sandboxd`, the sandbox's supervisor, as its process shows them."""
     for pid in filter(str.isdigit, os.listdir("/proc")):
         try:
-            with open("/proc/{}/cmdline".format(pid), "rb") as file:
+            with open(f"/proc/{pid}/cmdline", "rb") as file:
                 words = file.read().decode(errors="replace").split("\0")
         except OSError:
             continue
@@ -45,14 +48,26 @@ def gateway(sandbox, words):
     if words is None:
         line(sandbox, "gateway", False, "no sandboxd process found")
     elif "--listen" in words:
-        line(sandbox, "gateway", True, "sandboxd listens at {}, and the gateway dialed it".format(words[0]))
+        line(
+            sandbox,
+            "gateway",
+            True,
+            f"sandboxd listens at {words[0]}, and the gateway dialed it",
+        )
     elif words[0].startswith("/"):
         # A socket that the gateway removes once a sandbox has dialed it.
-        line(sandbox, "gateway", True, "sandboxd dialed the gateway's socket {}".format(words[0]))
+        line(
+            sandbox, "gateway", True, f"sandboxd dialed the gateway's socket {words[0]}"
+        )
     else:
         host, _, port = words[0].rpartition(":")
         error = connects((host, int(port)))
-        line(sandbox, "gateway", error is None, "connect {}: {}".format(words[0], error or "opened"))
+        line(
+            sandbox,
+            "gateway",
+            error is None,
+            "connect {}: {}".format(words[0], error or "opened"),
+        )
 
 
 def main():
@@ -60,16 +75,16 @@ def main():
     words = sandboxd()
     listens = words is not None and "--listen" in words
     uid = os.getuid()
-    line(sandbox, "user", uid != 0, "uid {}".format(uid))
+    line(sandbox, "user", uid != 0, f"uid {uid}")
     for check, address in (("metadata", METADATA), ("public", PUBLIC)):
         error = connects(address)
         seen = "connect {}:{}: {}".format(*address, error or "opened")
         line(sandbox, check, error is not None, seen)
     try:
         found = socket.getaddrinfo(NAME, 443)
-        line(sandbox, "dns", listens, "{} resolved to {}".format(NAME, found[0][4][0]))
+        line(sandbox, "dns", listens, f"{NAME} resolved to {found[0][4][0]}")
     except OSError as error:
-        line(sandbox, "dns", not listens, "{}: {}".format(NAME, error))
+        line(sandbox, "dns", not listens, f"{NAME}: {error}")
     gateway(sandbox, words)
 
 

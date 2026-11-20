@@ -64,8 +64,9 @@ context = "default"
 [providers.local.docker]
 ```
 
-Each task is an entry file, `task.star`. `examples/hello` ships in this repository, needs no model,
-and runs once `./pumpkin` and `.pumpkinversion` sit beside `examples/`. From that directory:
+Each task is an entry file, `task.star`. The [examples](examples/README.md) start with
+`examples/hello`, which needs no model and runs once `./pumpkin` and `.pumpkinversion` sit beside
+`examples/`. From that directory:
 
 ```console
 $ ./pumpkin check examples/hello/task.star
