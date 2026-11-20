@@ -183,8 +183,10 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .span.starting { opacity: 0.4; }
 .span.open { border-right: 2px dashed var(--bg); }
 .work { position: absolute; top: 5px; height: 4px; background: var(--on-bar); min-width: 1px; }
+.work.call { top: 3px; height: 8px; min-width: 3px; padding: 0; border: 0; }
+.work.call:hover, .work.call:focus-visible, .work.call.lit { background: var(--mark-bar); z-index: 1; }
 .work.failed { background: var(--fail-bar); outline: 1px solid var(--bg); }
-.tick { position: absolute; top: 0; height: 14px; width: 1px; background: var(--model); }
+.tick { position: absolute; top: 0; height: 14px; width: 1px; background: var(--model); pointer-events: none; }
 .tick.failed { width: 2px; background: var(--fail-bar); }
 .window { position: absolute; top: 0; bottom: 0; background: var(--select); opacity: 0.6; pointer-events: none; }
 .now { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--live); }
