@@ -24,6 +24,7 @@ use xshell::{Cmd, Shell, cmd};
 mod diff;
 mod figure;
 mod live;
+mod op_stats;
 mod page;
 mod settings;
 mod star;
@@ -94,6 +95,15 @@ mod flags {
                 optional --lost
             }
 
+            /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
+            /// bytes of matching lines, including their newlines, and the full log size.
+            cmd op-stats {
+                /// The run's record directory.
+                required run_dir: PathBuf
+                /// Only count requests with this caller name in the record, such as `job-17`.
+                optional --caller name: String
+            }
+
             /// Builds the static sandboxd that every sandbox runs, and beside it the static
             /// ec2-boot that the EC2 provider's image of it holds too, and prints sandboxd's path.
             cmd sandboxd {}
@@ -154,6 +164,7 @@ mod flags {
         Ci(Ci),
         Figures(Figures),
         Live(Live),
+        OpStats(OpStats),
         Sandboxd(Sandboxd),
         Install(Install),
         Mutants(Mutants),
@@ -178,6 +189,13 @@ mod flags {
 
         pub gpu_model: Option<String>,
         pub lost: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct OpStats {
+        pub run_dir: PathBuf,
+
+        pub caller: Option<String>,
     }
 
     #[derive(Debug)]
@@ -273,6 +291,9 @@ fn try_main() -> Result<()> {
                 );
             }
             live::smoke(&cargo, provider, gpu_model.as_deref(), lost)
+        }
+        flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
+            op_stats::report(&run_dir, caller.as_deref())
         }
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
             println!("{}", sandboxd(&cargo)?.display());
