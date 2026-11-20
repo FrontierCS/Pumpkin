@@ -117,7 +117,7 @@ Every file can use these, besides Starlark's:
 
 | Name | What it is |
 | --- | --- |
-| `workflow(*, name, roles, final)` | the workflow, which [Workflows](workflows.md) describes; called once |
+| `workflow(*, name, roles, final, deadline_seconds = None)` | the workflow, which [Workflows](workflows.md) describes; called once |
 | `arg(name, type, *, default)` | the value of `--arg <name>=<value>`, read as `type`, `str`, `int` or `bool`; without a `default`, it must be given |
 | `image(recipe, *, context, mount, target, args, contexts)` | the image that the Dockerfile `recipe` builds; its value names it in a role |
 | `package_name()` | the entry file's directory below the root, such as `tasks/bench` |

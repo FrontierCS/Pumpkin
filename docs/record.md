@@ -93,6 +93,14 @@ both in nanoseconds written as strings, and the model requests and tokens.
 
 [Workflows](workflows.md) says what the log keeps of each call.
 
+In a team record, `agents/<role>/` holds each agent's sandbox record and collected output.
+Log entries identify agent callers by their index in the workflow's role list (`agent-<n>`).
+Jobs and leases keep their run-wide numbers. For a finished team, `outcome.json` lists
+`members` in declaration order. Each has a role name, a work-end reason, and either its own
+submission (payload digest, size and finalization flag) or a JSON `null` submission. The
+separate verdict gives the single final call's result. The run log identifies both the selected
+files and the manifest delivered to the judge.
+
 ## Model exchanges
 
 `model/` keeps every exchange as the route saw it pass: each request as it went upstream, or as

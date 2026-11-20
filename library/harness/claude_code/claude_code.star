@@ -47,7 +47,7 @@ def claude_code(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
+        deadline_seconds = None,
         finalize_grace_seconds,
         max_output_tokens):
     """An agent role's `image` and `runtime`, for Claude Code on `model` at `effort`.

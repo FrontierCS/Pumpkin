@@ -143,7 +143,7 @@ def codex(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
+        deadline_seconds = None,
         finalize_grace_seconds,
         tools):
     """An agent role's `image` and `runtime`, for Codex on `model` at `effort`.

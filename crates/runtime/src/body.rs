@@ -116,6 +116,7 @@ pub(crate) struct Call<'c> {
     pub(crate) target: &'c workflow::Target,
     pub(crate) of: &'c Of<'c>,
     pub(crate) payload: Stored,
+    pub(crate) staged: Vec<(AbsolutePath, Stored)>,
     /// The longest the body may drive the target, from its start.
     pub(crate) timeout: Duration,
 }
@@ -178,7 +179,11 @@ pub(crate) fn evaluate<H: Host>(
         runs_count: 0,
         gets_count: 0,
     };
-    let returned = match call.of {
+    let staged = call
+        .staged
+        .iter()
+        .try_for_each(|(path, stored)| target.put_stored(path, stored));
+    let returned = staged.and_then(|()| match call.of {
         Of::Function {
             function,
             arguments,
@@ -186,7 +191,7 @@ pub(crate) fn evaluate<H: Host>(
         Of::Final(final_call) => {
             bodies.final_call(&final_call.body, &final_call.keywords, &mut target)
         }
-    };
+    });
     target.end();
     match (target.cut, returned) {
         (Some((Cut::TimedOut, _)), _) => Ended::TimedOut,
@@ -317,13 +322,13 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     }
 }
 
-impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
+impl<H: Host> OnTarget<'_, '_, '_, H> {
+    fn put_stored(&mut self, path: &AbsolutePath, stored: &Stored) -> Result<(), String> {
         let by = self.going()?;
         let Some((dir, name)) = path.split_last() else {
             return Err("`/` is the sandbox's root: name a file's path".to_owned());
         };
-        let payload = self.call.payload.read()?;
+        let payload = stored.read()?;
         let put = self
             .session
             .put(&dir, [Put::File(name, file_mode(), &payload)], by);
@@ -335,6 +340,12 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
             put,
         });
         Ok(())
+    }
+}
+
+impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
+    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
+        self.put_stored(path, &self.call.payload)
     }
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {

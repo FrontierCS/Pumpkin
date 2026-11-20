@@ -38,7 +38,7 @@ use provider::UnixTime;
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
-use schema::workflow::Workflow;
+use schema::workflow::{AgentId, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
@@ -73,10 +73,16 @@ pub(super) struct Log<'h, H: Host> {
     seq: u64,
     host: &'h H,
     clock: H::Clock,
+    team: bool,
 }
 
 impl<'h, H: Host> Log<'h, H> {
-    pub(super) fn create(host: &'h H, clock: H::Clock, dir: &Path) -> Result<Self, String> {
+    pub(super) fn create(
+        host: &'h H,
+        clock: H::Clock,
+        dir: &Path,
+        workflow: &Workflow,
+    ) -> Result<Self, String> {
         let path = dir.join("log.jsonl");
         let file = OpenOptions::new()
             .append(true)
@@ -91,6 +97,7 @@ impl<'h, H: Host> Log<'h, H> {
             seq: 0,
             host,
             clock,
+            team: workflow.final_call().selections(),
         })
     }
 
@@ -116,18 +123,21 @@ impl<'h, H: Host> Log<'h, H> {
         event: &Event,
         actions: &[Action],
     ) -> Result<(), String> {
-        self.decided(workflow, observed, event_json(event), actions)
+        self.decided(workflow, observed, event_json(event, self.team), actions)
     }
 
-    pub(super) fn refused(&mut self, refused: &RefusedOp) -> Result<(), String> {
+    pub(super) fn refused(&mut self, caller: Caller, refused: &RefusedOp) -> Result<(), String> {
         let mut request = json!(refused.call());
         let (size, over) = (refused.size(), refused.payload_limit().bytes());
         request["payload"] = json!({ "size": size, "over": over });
-        let event = json!({
+        let mut event = json!({
             "kind": "op_refused",
             "request": request,
             "message": refused.message(),
         });
+        if self.team {
+            event["caller"] = json!(logged::CallerName::of(caller, true));
+        }
         self.told(event)?;
         // The refusal is sent next, an act that no action lists.
         self.sync()
@@ -220,7 +230,7 @@ impl<'h, H: Host> Log<'h, H> {
         };
         let mut event = json!({
             "kind": "model_answered",
-            "caller": logged::CallerName::from(caller),
+            "caller": logged::CallerName::of(caller, self.team),
             "request": request,
             "upstream_status": upstream_status,
             "answer": answer,
@@ -260,11 +270,17 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
-            Entry::AgentCollected => self.told(json!({ "kind": "agent_collected" })),
+            Entry::AgentCollected(id) => self.told(member_event("agent_collected", id, self.team)),
+            Entry::AgentLaunched(id, at) => {
+                self.observed(at, member_event("agent_started", id, true), &[])
+            }
+            Entry::FinalManifest(job, payload) => self.told(json!({
+                "kind": "final_manifest", "job": job.0, "payload": payload_json(&payload),
+            })),
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
-                    "caller": logged::CallerName::from(caller),
+                    "caller": logged::CallerName::of(caller, self.team),
                     "request": request,
                 });
                 self.observed(started, event, &[])
@@ -370,7 +386,9 @@ pub(super) enum Entry {
     Note(String),
     /// The agent's sandbox frozen and what it left collected, as `agent_collected`: the run is
     /// done with it.
-    AgentCollected,
+    AgentCollected(AgentId),
+    AgentLaunched(AgentId, Duration),
+    FinalManifest(JobId, PayloadRef),
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
@@ -450,11 +468,34 @@ pub(super) fn nanos(duration: Duration) -> String {
         .to_string()
 }
 
-fn event_json(event: &Event) -> Value {
+fn member_event(kind: &str, agent: AgentId, team: bool) -> Value {
+    let mut event = json!({ "kind": kind });
+    if team {
+        event["caller"] = json!(logged::CallerName::Member(agent.role().index()));
+    }
+    event
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per decision event, as in action_json"
+)]
+fn event_json(event: &Event, team: bool) -> Value {
     match event {
-        Event::AgentStarted => json!({ "kind": "agent_started" }),
-        Event::AgentExited { status } => json!({ "kind": "agent_exited", "status": status }),
-        Event::AgentFailed { reason } => json!({ "kind": "agent_failed", "reason": reason }),
+        Event::WorkStarted => {
+            json!({ "kind": if team { "work_started" } else { "agent_started" } })
+        }
+        Event::AgentTornDown { agent } => member_event("agent_torn_down", *agent, team),
+        Event::AgentExited { agent, status } => {
+            let mut event = member_event("agent_exited", *agent, team);
+            event["status"] = json!(status);
+            event
+        }
+        Event::AgentFailed { agent, reason } => {
+            let mut event = member_event("agent_failed", *agent, team);
+            event["reason"] = json!(reason);
+            event
+        }
         Event::OpArrived {
             op,
             caller,
@@ -462,7 +503,7 @@ fn event_json(event: &Event) -> Value {
         } => json!({
             "kind": "op_arrived",
             "op": op.0,
-            "caller": logged::CallerName::from(*caller),
+            "caller": logged::CallerName::of(*caller, team),
             "request": request_json(request),
         }),
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
@@ -471,24 +512,20 @@ fn event_json(event: &Event) -> Value {
             job,
             result,
             model_requests_over_budget,
-        } => {
-            let mut json = json!({
-                "kind": "call_returned",
-                "job": job.0,
-                "returned": shown_json(result.values()),
-            });
-            over_budget(&mut json, *model_requests_over_budget);
-            json
-        }
+        } => with_budget_count(
+            json!({
+                "kind": "call_returned", "job": job.0, "returned": shown_json(result.values()),
+            }),
+            *model_requests_over_budget,
+        ),
         Event::CallFailed {
             job,
             reason,
             model_requests_over_budget,
-        } => {
-            let mut json = json!({ "kind": "call_failed", "job": job.0, "reason": reason });
-            over_budget(&mut json, *model_requests_over_budget);
-            json
-        }
+        } => with_budget_count(
+            json!({ "kind": "call_failed", "job": job.0, "reason": reason }),
+            *model_requests_over_budget,
+        ),
         Event::LeaseReady { lease } => json!({ "kind": "lease_ready", "lease": lease.0 }),
         Event::CommandEnded {
             lease,
@@ -522,10 +559,11 @@ fn event_json(event: &Event) -> Value {
 }
 
 // Gives a call's end `event` its count of model requests over budget, if it has one.
-fn over_budget(event: &mut Value, model_requests_over_budget: Option<NonZeroU64>) {
+fn with_budget_count(mut event: Value, model_requests_over_budget: Option<NonZeroU64>) -> Value {
     if let Some(count) = model_requests_over_budget {
         event["model_requests_over_budget"] = json!(count);
     }
+    event
 }
 
 // A now function's evaluation: its effects and what it returned, or why it gave neither.
@@ -630,7 +668,9 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
-        Action::StartAgent => json!({ "kind": "start_agent" }),
+        Action::StartAgents => {
+            json!({ "kind": if workflow.final_call().selections() { "start_agents" } else { "start_agent" } })
+        }
         Action::Reply { op: _, reply } => {
             // A poll's reply says how a job or a lease stood, which the job's and the lease's own
             // events in the log say too.
@@ -651,23 +691,38 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             // The call's request holds them, as its caller gave them.
             arguments: _,
             timeout,
-        } => json!({
-            "kind": "start_call",
-            "job": job.0,
-            "grant": workflow.job_function(*function).name,
-            "payload": payload_json(payload),
-            "timeout_ns": nanos(*timeout),
-        }),
+        } => {
+            let grant = workflow.job_function(*function);
+            let mut action = json!({
+                "kind": "start_call",
+                "job": job.0,
+                "grant": grant.name,
+                "payload": payload_json(payload),
+                "timeout_ns": nanos(*timeout),
+            });
+            if workflow.final_call().selections() {
+                action["caller"] = json!(logged::CallerName::Member(grant.holder.role().index()));
+            }
+            action
+        }
         Action::StartFinalCall {
             job,
-            payload,
+            input,
             timeout,
-        } => json!({
-            "kind": "start_final_call",
-            "job": job.0,
-            "payload": payload_json(payload),
-            "timeout_ns": nanos(*timeout),
-        }),
+        } => {
+            let mut action =
+                json!({ "kind": "start_final_call", "job": job.0, "timeout_ns": nanos(*timeout) });
+            match input {
+                decision::FinalInput::Payload(payload) => action["payload"] = payload_json(payload),
+                decision::FinalInput::Selections(members) => {
+                    let members: Vec<_> = members.iter().map(|(agent, selection)| {
+                        json!({"role": workflow.sandbox(agent.role()).name, "selection": selection.as_ref().map(payload_json)})
+                    }).collect();
+                    action["selections"] = json!(members);
+                }
+            }
+            action
+        }
         Action::StopCall { job } => json!({ "kind": "stop_call", "job": job.0 }),
         Action::StartLease {
             lease,
@@ -678,7 +733,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         } => json!({
             "kind": "start_lease",
             "lease": lease.0,
-            "holder": logged::CallerName::from(*holder),
+            "holder": logged::CallerName::of(*holder, workflow.final_call().selections()),
             "grant": workflow.session(*grant).name.as_str(),
             "instance": instance,
             "start_by_ns": nanos(*start_by),
@@ -715,7 +770,11 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             })
         }
         Action::CloseLease { lease } => json!({ "kind": "close_lease", "lease": lease.0 }),
-        Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
+        Action::TearDownAgent { agent } => member_event(
+            "tear_down_agent",
+            *agent,
+            workflow.final_call().selections(),
+        ),
         // `outcome.json` holds the outcome.
         Action::Finish { outcome: _ } => json!({ "kind": "finish" }),
         Action::Abandon => json!({ "kind": "abandon" }),
@@ -723,8 +782,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
 }
 
 /// How a run ended, for `outcome.json`, in the form of [`outcome::Ended`].
-pub(super) fn outcome_json(ended: &Result<Outcome, Stopped>) -> Value {
-    json!(outcome::Ended::from(ended))
+pub(super) fn outcome_json(workflow: &Workflow, ended: &Result<Outcome, Stopped>) -> Value {
+    json!(outcome::Ended::of(workflow, ended))
 }
 
 /// `values` in order, each as `{"name": …, "value": …}`.

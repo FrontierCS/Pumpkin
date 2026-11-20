@@ -14,7 +14,7 @@
 //!   lacks.
 //! - `log.jsonl`, the run log (`log`); `payloads/<digest>`, the payload of each op the core
 //!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
-//! - `agent/`, `jobs/<n>/` and `leases/<n>/`, a sandbox each, with its `sandbox.json`: `provider`,
+//! - `agent/` or `agents/<role>/`, `jobs/<n>/` and `leases/<n>/`, each with its `sandbox.json`:
 //!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once tried; its `out/`,
 //!   `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
@@ -634,7 +634,7 @@ impl Record {
     /// order.
     pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
         let mut dirs = vec![PathBuf::from("agent")];
-        for of in ["jobs", "leases"] {
+        for of in ["agents", "jobs", "leases"] {
             let path = self.dir.join(of);
             match fs::read_dir(&path) {
                 Ok(entries) => {

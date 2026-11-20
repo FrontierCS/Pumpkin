@@ -103,8 +103,8 @@ impl End {
     /// The end of `which`'s child, failed for `reason`.
     pub(super) fn failed(which: Which, reason: String) -> Self {
         match which {
-            Which::Agent(_) => Self::Event(Event::AgentFailed { reason }),
-            Which::Call(job, _) => Self::Call(job, Err(reason)),
+            Which::Agent(agent) => Self::Event(Event::AgentFailed { agent, reason }),
+            Which::Call(job, ..) => Self::Call(job, Err(reason)),
             Which::Lease(lease, ..) => Self::Event(Event::LeaseFailed { lease, reason }),
         }
     }

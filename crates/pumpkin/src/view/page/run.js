@@ -52,6 +52,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build
  * @property {Times | null} times
+ * @property {Member[]} [members] the team's members in declared order after judging
  * @property {Lane[] | null} lanes
  * @property {Talk | null} talk
  * @property {ModelUse | null} model
@@ -79,6 +80,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {{ input: number | null, output: number | null, cached: number | null }} tokens
  * @property {string[]} dropped_headers the request headers the route left behind, the first by name
  * @property {boolean} more_dropped_headers whether it left more than `dropped_headers`
+ * @typedef {{ role: string, work_end: { kind: string, reason?: string, status?: any }, submission: { payload: { size: number, digest: string }, finalized: boolean } | null, route_failure?: string }} Member
  * @typedef {object} Lane a sandbox's lane: the agent's, a call's (`job <n>`) or a lease's
  * @property {string} lane
  * @property {string} [caller] the caller that the lane's trace is of, `agent` or `job-<n>`; none for a lease
@@ -136,6 +138,7 @@ export async function runView(id) {
   const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
   const verdict = h("div", { class: "verdict" });
   const result = h("div", { class: "result" });
+  const members = h("div", { class: "result" });
   const facts = h("div", { class: "facts" });
   const dropped = h("div", { class: "dropped" });
   const again = h("div", { class: "again" });
@@ -168,7 +171,7 @@ export async function runView(id) {
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
   fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(verdict, result, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
+  show(verdict, result, members, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -280,6 +283,7 @@ export async function runView(id) {
     const data = /** @type {Run} */ (state.data);
     fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : data.verdict));
     drawOnce(result, data.result, () => drawResult(result, data.result));
+    drawOnce(members, data.members, () => drawMembers(members, data.members || []));
     drawFacts(facts, data);
     const headers = data.model ? data.model.dropped_headers : [];
     drawOnce(dropped, [headers, data.model?.more_dropped_headers], () => drawDropped(dropped, headers, !!data.model?.more_dropped_headers));
@@ -600,6 +604,19 @@ function drawResult(node, result) {
   );
 }
 
+/** @param {HTMLElement} node @param {Member[]} members */
+function drawMembers(node, members) {
+  if (!members.length) return fill(node);
+  const cells = members.map((member) => {
+    const { role, submission, work_end, route_failure } = member;
+    const end = work_end.reason ?? (work_end.status ? JSON.stringify(work_end.status) : work_end.kind);
+    const selected = submission ? bytes(submission.payload.size) : "No selection";
+    return h("div", { class: "kv" }, h("span", { class: "k" }, role), h("span", { class: "v", title: submission?.payload.digest }, selected),
+      h("span", { class: "hint" }, end.replaceAll("_", " ")), route_failure ? h("span", { class: "hint" }, "Model route failed: " + route_failure) : null);
+  });
+  fill(node, h("div", { class: "values" }, cells));
+}
+
 // The request headers that the route left behind, folded under their count.
 /** @param {HTMLElement} node @param {string[]} headers @param {boolean} more */
 function drawDropped(node, headers, more) {
@@ -672,7 +689,7 @@ function drawTraces(node, data) {
       h(
         "a",
         { href: "#/run/" + encodeURIComponent(data.id) + "/trace?caller=" + encodeURIComponent(lane.caller ?? ""), class: "kind " + lane.kind, title: "What " + lane.lane + " and the model said to each other: " + plural(lane.answers?.count ?? 0, "answer") },
-        lane.lane,
+        lane.kind === "agent" && lane.role ? lane.role : lane.lane,
       ),
     ),
   );

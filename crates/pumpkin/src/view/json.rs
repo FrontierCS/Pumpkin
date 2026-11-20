@@ -140,11 +140,16 @@ fn how(ending: &Ending) -> String {
 /// The reply for one run: its state and verdict, times, lanes, talk, model use, cost and log end.
 ///
 /// `again` adds the command that starts the run over.
-pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
+pub(super) fn run_json(
+    held: &Held,
+    named: Option<&str>,
+    again: bool,
+) -> Result<Value, runtime::ReadError> {
     let record = &held.record;
     let id = record.id();
     let readout = &held.readout;
-    let summary = progress::summary_of(record, readout);
+    let members = progress::members(record, readout)?;
+    let summary = progress::summary_of(record, readout, &members);
     let Readout { progress, unread } = readout;
     let now = crate::unix_now();
     let listed = Listed::of(
@@ -209,13 +214,16 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "end": held.fold.taken(),
         "log_epoch": held.log_epoch,
     });
+    if !members.is_empty() {
+        run["members"] = json!(members);
+    }
     if again {
         run["again"] = match controller::here(record, None) {
             Ok(args) => json!({ "command": next::run_again(&args) }),
             Err(error) => json!({ "error": error }),
         };
     }
-    run
+    Ok(run)
 }
 
 fn cost_json(cost: &Cost) -> Value {
@@ -261,18 +269,19 @@ fn model_json(model: &ModelUse) -> Value {
     })
 }
 
+fn sandbox(sandbox: &runtime::Sandbox) -> Value {
+    json!({
+        "place": progress::placed(sandbox),
+        "asked": sandbox.asked.as_secs_f64(),
+        "started": sandbox.started.map(|at| at.as_secs_f64()),
+        "gone": sandbox.gone.map(|at| at.as_secs_f64()),
+        "deleted": sandbox.deleted,
+    })
+}
+
 fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
-    let sandbox = |sandbox: &runtime::Sandbox| {
-        json!({
-            "place": progress::placed(sandbox),
-            "asked": sandbox.asked.as_secs_f64(),
-            "started": sandbox.started.map(|at| at.as_secs_f64()),
-            "gone": sandbox.gone.map(|at| at.as_secs_f64()),
-            "deleted": sandbox.deleted,
-        })
-    };
     let answered = |caller: CallerName, json: &mut Value| {
         let answered = talk.and_then(|talk| talk.answered.get(&caller));
         let failed = talk.and_then(|talk| talk.failed.get(&caller));
@@ -285,14 +294,21 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         json["answered"] = json!(answered);
         json["failed"] = json!(failed);
     };
-    let mut agent = json!({
-        "lane": "agent",
-        "caller": CallerName::Agent,
-        "kind": "agent",
-        "sandbox": sandbox(&progress.agent.sandbox),
-        "said": progress::agent_line(progress),
+    let agents = progress.agents.iter().map(|(&caller, agent)| {
+        let mut lane = json!({
+            "lane": progress::caller_lane(caller),
+            "caller": caller,
+            "kind": "agent",
+            "sandbox": sandbox(&agent.sandbox),
+            "said": progress::agent_line(caller, agent, progress.work_end),
+        });
+        if matches!(caller, CallerName::Member(_)) {
+            lane["role"] = json!(agent.role);
+            lane["model"] = json!(agent.model.as_ref().map(model_json));
+        }
+        answered(caller, &mut lane);
+        lane
     });
-    answered(CallerName::Agent, &mut agent);
     let calls = (progress.calls.iter()).map(|call| {
         let caller = CallerName::Job(call.job);
         let mut lane_json = json!({
@@ -305,6 +321,9 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "said": progress::called(call),
             "model": model_json(&call.model),
         });
+        if let Some(holder @ CallerName::Member(_)) = call.caller {
+            lane_json["holder"] = json!(progress::caller_lane(holder));
+        }
         answered(caller, &mut lane_json);
         ((call.sandbox.asked, call.sandbox.asked), lane_json)
     });
@@ -314,7 +333,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "kind": "runner",
             "role": talk.and_then(|talk| talk.runners.get(&lease.lease)),
             "grant": lease.grant,
-            "holder": lease.holder.map_or("agent".to_owned(), |job| format!("job {job}")),
+            "holder": progress::caller_lane(lease.holder),
             "sandbox": sandbox(&lease.sandbox),
             "said": progress::leased(lease, now),
             "work": talk.map(|talk| talk.work_json(lease.lease)),
@@ -323,7 +342,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     });
     let mut children: Vec<((Duration, Duration), Value)> = calls.chain(leases).collect();
     children.sort_by_key(|(begun, _)| *begun);
-    std::iter::once(agent)
+    agents
         .chain(children.into_iter().map(|(_, lane)| lane))
         .collect()
 }

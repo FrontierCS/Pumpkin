@@ -28,7 +28,7 @@ def qwen_code(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
+        deadline_seconds = None,
         finalize_grace_seconds,
         max_output_tokens,
         context_tokens,

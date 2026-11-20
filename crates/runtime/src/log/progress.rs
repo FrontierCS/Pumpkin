@@ -46,7 +46,9 @@ pub struct Progress {
     pub deadline: Option<Duration>,
     /// When the latest line read was written.
     pub last: Duration,
-    pub agent: AgentSpan,
+    pub agents: BTreeMap<logged::CallerName, AgentSpan>,
+    /// When the agents began work on their common clock.
+    pub work_started: Option<Duration>,
     /// Each call, in the order the log started them.
     pub calls: Vec<CallSpan>,
     /// Each lease, in the order the log started them.
@@ -137,6 +139,9 @@ pub struct Sandbox {
 /// The agent: its sandbox, its command's end, and its model requests.
 #[derive(Clone, Debug, Default)]
 pub struct AgentSpan {
+    pub role: String,
+    /// When the driver began tearing down this member.
+    pub work_end: Option<Duration>,
     pub sandbox: Sandbox,
     /// When, and how, its command ended.
     pub end: Option<(Duration, AgentEnd)>,
@@ -161,8 +166,8 @@ pub struct LeaseSpan {
     pub lease: u64,
     /// The grant that gave it, by name.
     pub grant: String,
-    /// The call that holds it, by `job`; `None` if the agent does.
-    pub holder: Option<u64>,
+    /// The agent or job that owns the lease.
+    pub holder: logged::CallerName,
     pub sandbox: Sandbox,
     /// How long it may last: its grant's `instance_seconds`, or less if its open asked for less.
     pub ready_for: Option<Duration>,
@@ -351,27 +356,41 @@ pub(super) fn readout(
     let Reading {
         started: _,
         last,
-        mut agent,
+        mut agents,
+        work_started,
         calls,
         leases,
         model,
         work_end,
         end,
     } = reading;
-    agent.sandbox = Sandbox {
-        started: agent.sandbox.started,
-        gone: agent.sandbox.gone,
-        deleted: deleted(&dir.join("agent"))?,
-        gpus: agent.sandbox.gpus.take(),
-        ..roles.sandbox(Some(&roles.agent_role), Duration::ZERO)
-    };
-    agent.model = agent.model.or(roles.routed.then(ModelUse::default));
+    for (caller, role) in &roles.agents {
+        let agent = agents.entry(*caller).or_default();
+        let path = match caller {
+            logged::CallerName::Agent => dir.join("agent"),
+            logged::CallerName::Member(_) => dir.join("agents").join(&role.name),
+            logged::CallerName::Job(_) => continue,
+        };
+        agent.role.clone_from(&role.name);
+        agent.sandbox = Sandbox {
+            started: agent.sandbox.started,
+            gone: agent.sandbox.gone,
+            deleted: deleted(&path)?,
+            gpus: agent.sandbox.gpus.take(),
+            ..roles.sandbox(Some(&role.name), Duration::ZERO)
+        };
+        agent.model = agent
+            .model
+            .take()
+            .or_else(|| role.routed.then(ModelUse::default));
+    }
     let mut progress = Progress {
         started,
         hard_end,
         deadline: roles.deadline,
         last,
-        agent,
+        agents,
+        work_started,
         calls,
         leases,
         model,
@@ -425,7 +444,8 @@ fn deleted(dir: &Path) -> Result<Option<bool>, ReadError> {
 pub(super) struct Reading {
     started: Option<(UnixTime, Duration)>,
     last: Duration,
-    agent: AgentSpan,
+    agents: BTreeMap<logged::CallerName, AgentSpan>,
+    work_started: Option<Duration>,
     calls: Vec<CallSpan>,
     leases: Vec<LeaseSpan>,
     model: ModelUse,
@@ -445,7 +465,7 @@ impl Reading {
         let closed = if matches!(request, Some(logged::Request::LeaseClose)) {
             Closed::Asked
         } else if (line.actions.iter())
-            .any(|action| matches!(action, logged::Action::TearDownAgent))
+            .any(|action| matches!(action, logged::Action::TearDownAgent { .. }))
         {
             Closed::WorkEnded
         } else {
@@ -473,7 +493,11 @@ impl Reading {
         if let Some(note) = &line.note
             && note.starts_with("collected from the agent's sandbox")
         {
-            self.agent.sandbox.gone = Some(at);
+            self.agents
+                .entry(logged::CallerName::Agent)
+                .or_default()
+                .sandbox
+                .gone = Some(at);
         }
         for action in &line.actions {
             if let logged::Action::RunCommand { lease } | logged::Action::Transfer { lease } =
@@ -498,15 +522,24 @@ impl Reading {
                 unix_ns,
                 hard_end_ns,
             } => self.started = hard_end_ns.map(|hard_end| (*unix_ns, hard_end)),
-            logged::Event::AgentStarted => self.agent.sandbox.started = Some(at),
-            logged::Event::AgentExited { status } => {
-                self.agent.end = Some((at, AgentEnd::Exited(*status)));
+            logged::Event::WorkStarted => self.work_started = Some(at),
+            logged::Event::AgentStarted { caller } => {
+                self.agents.entry(*caller).or_default().sandbox.started = Some(at);
+                if *caller == logged::CallerName::Agent {
+                    self.work_started = Some(at);
+                }
             }
-            logged::Event::AgentFailed { reason } => {
-                self.agent.end = Some((at, AgentEnd::Failed(reason.clone())));
-                self.agent.sandbox.gone.get_or_insert(at);
+            logged::Event::AgentExited { caller, status } => {
+                self.agents.entry(*caller).or_default().end = Some((at, AgentEnd::Exited(*status)));
             }
-            logged::Event::AgentCollected => self.agent.sandbox.gone = Some(at),
+            logged::Event::AgentFailed { caller, reason } => {
+                let agent = self.agents.entry(*caller).or_default();
+                agent.end = Some((at, AgentEnd::Failed(reason.clone())));
+                agent.sandbox.gone.get_or_insert(at);
+            }
+            logged::Event::AgentCollected { caller } => {
+                self.agents.entry(*caller).or_default().sandbox.gone = Some(at);
+            }
             logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {
                     call.sandbox.started = Some(at);
@@ -574,10 +607,8 @@ impl Reading {
             }
             logged::Event::ModelRequestStarted { caller, request } => {
                 self.model.in_flight.insert(*request, at);
-                if let logged::CallerName::Job(job) = caller
-                    && let Some(call) = self.call(*job)
-                {
-                    call.model.in_flight.insert(*request, at);
+                if let Some(model) = self.model_of(*caller) {
+                    model.in_flight.insert(*request, at);
                 }
             }
             logged::Event::ModelAnswered {
@@ -604,16 +635,8 @@ impl Reading {
                 };
                 self.model.take(at, &answered);
                 // The caller's own, which the run's count too.
-                match caller {
-                    Some(logged::CallerName::Agent) => {
-                        self.agent.model.get_or_insert_default().take(at, &answered);
-                    }
-                    Some(logged::CallerName::Job(job)) => {
-                        if let Some(call) = self.call(*job) {
-                            call.model.take(at, &answered);
-                        }
-                    }
-                    None => {}
+                if let Some(model) = caller.and_then(|caller| self.model_of(caller)) {
+                    model.take(at, &answered);
                 }
             }
             logged::Event::SandboxGpus { sandbox, gpus } => {
@@ -642,9 +665,35 @@ impl Reading {
 impl Reading {
     fn named(&mut self, name: SandboxName) -> Option<&mut Sandbox> {
         match name {
-            SandboxName::Agent => Some(&mut self.agent.sandbox),
+            SandboxName::Agent => Some(
+                &mut self
+                    .agents
+                    .entry(logged::CallerName::Agent)
+                    .or_default()
+                    .sandbox,
+            ),
+            SandboxName::Member(role) => Some(
+                &mut self
+                    .agents
+                    .entry(logged::CallerName::Member(role))
+                    .or_default()
+                    .sandbox,
+            ),
             SandboxName::Job(job) => self.call(job).map(|call| &mut call.sandbox),
             SandboxName::Lease(lease) => self.lease(lease).map(|lease| &mut lease.sandbox),
+        }
+    }
+
+    fn model_of(&mut self, caller: logged::CallerName) -> Option<&mut ModelUse> {
+        match caller {
+            logged::CallerName::Job(job) => self.call(job).map(|call| &mut call.model),
+            agent => Some(
+                self.agents
+                    .entry(agent)
+                    .or_default()
+                    .model
+                    .get_or_insert_default(),
+            ),
         }
     }
 
@@ -668,25 +717,36 @@ impl Reading {
         match action {
             logged::Action::StartCall {
                 job,
+                caller,
                 grant,
                 payload: _,
                 timeout_ns,
             } => {
-                let key = (roles.agent_role.clone(), grant.clone());
-                let granted = roles.grants.get(&key).cloned().unwrap_or_default();
+                let granted = roles
+                    .agent_name(*caller)
+                    .and_then(|role| roles.grants.get(&(role.to_owned(), grant.clone())))
+                    .cloned()
+                    .unwrap_or_default();
                 let (of, role) = (CallOf::Function(grant.clone()), granted.role);
                 let sandbox = roles.sandbox(role.as_deref(), at);
-                (self.calls).push(CallSpan::new(*job, of, role, sandbox, *timeout_ns));
+                (self.calls).push(CallSpan::new(
+                    *job,
+                    Some(*caller),
+                    of,
+                    role,
+                    sandbox,
+                    *timeout_ns,
+                ));
             }
             logged::Action::StartFinalCall {
                 job,
-                payload: _,
+                input: _,
                 timeout_ns,
             } => {
                 let role = roles.final_target.clone();
                 let sandbox = roles.sandbox(role.as_deref(), at);
                 let of = CallOf::Final;
-                (self.calls).push(CallSpan::new(*job, of, role, sandbox, *timeout_ns));
+                (self.calls).push(CallSpan::new(*job, None, of, role, sandbox, *timeout_ns));
             }
             logged::Action::StopCall { job } => {
                 if let Some(call) = self.call(*job) {
@@ -701,15 +761,15 @@ impl Reading {
             logged::Action::CloseLease { lease } => {
                 if let Some(lease) = self.lease(*lease) {
                     let closed = match lease.holder {
-                        Some(holder) if ended == Some(holder) => Closed::CallEnded,
+                        logged::CallerName::Job(holder) if ended == Some(holder) => {
+                            Closed::CallEnded
+                        }
                         _ => closed,
                     };
                     lease.closed.get_or_insert((at, closed));
                 }
             }
-            logged::Action::TearDownAgent => {
-                self.work_end.get_or_insert(at);
-            }
+            logged::Action::TearDownAgent { caller } => self.end_member_work(*caller, at, roles),
             logged::Action::Finish | logged::Action::Abandon => self.end = Some(at),
             // Its work is its op's request's, which `take` reads.
             logged::Action::RunCommand { .. }
@@ -717,6 +777,21 @@ impl Reading {
             | logged::Action::StartAgent
             | logged::Action::Reply
             | logged::Action::Unknown => {}
+        }
+    }
+
+    fn end_member_work(&mut self, caller: logged::CallerName, at: Duration, roles: &Roles) {
+        self.agents
+            .entry(caller)
+            .or_default()
+            .work_end
+            .get_or_insert(at);
+        if roles.agents.keys().all(|id| {
+            self.agents
+                .get(id)
+                .is_some_and(|agent| agent.work_end.is_some())
+        }) {
+            self.work_end.get_or_insert(at);
         }
     }
 
@@ -728,15 +803,12 @@ impl Reading {
         grant: &str,
         roles: &Roles,
     ) {
-        let holder = match holder {
-            Some(logged::CallerName::Job(job)) => Some(job),
-            Some(logged::CallerName::Agent) | None => None,
-        };
-        let call = holder.and_then(|holder| self.calls.iter().find(|call| call.job == holder));
-        let role = match call {
-            Some(call) => call.role.clone().unwrap_or_default(),
-            None => roles.agent_role.clone(),
-        };
+        let holder = holder.unwrap_or_default();
+        let role = match holder {
+            logged::CallerName::Job(job) => self.call(job).and_then(|call| call.role.clone()),
+            caller => roles.agents.get(&caller).map(|role| role.name.clone()),
+        }
+        .unwrap_or_default();
         let granted = roles.grants.get(&(role, grant.to_owned())).cloned();
         let Grant { role, ready_for } = granted.unwrap_or_default();
         self.leases.push(LeaseSpan {

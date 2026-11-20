@@ -42,7 +42,7 @@ use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, Ses
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
 use super::{
-    Action, Caller, Core, Direction, JobId, LeaseId, OpId, Outcome, PayloadRef, Phase, Request,
+    Action, Caller, Core, Direction, JobId, LeaseId, Member, OpId, PayloadRef, Phase, Request,
     WorkEnd,
 };
 
@@ -125,16 +125,20 @@ impl Core<'_> {
                         call,
                         timeout,
                         state: State::Running { started },
-                    }) => Ok(Working::Job {
-                        job,
-                        role: match *call {
+                    }) => {
+                        let body_end = started.saturating_add(*timeout);
+                        let (role, end) = match *call {
                             JobOf::Function(function) => {
-                                self.workflow.job_function(function).target.role()
+                                let function = self.workflow.job_function(function);
+                                (
+                                    function.target.role(),
+                                    self.agent_due(function.holder).min(body_end),
+                                )
                             }
-                            JobOf::Final => self.workflow.final_call().target.role(),
-                        },
-                        end: started.saturating_add(*timeout),
-                    }),
+                            JobOf::Final => (self.workflow.final_call().target.role(), body_end),
+                        };
+                        Ok(Working::Job { job, role, end })
+                    }
                     Some(Job {
                         state: State::Queued | State::Ending { .. } | State::Ended { .. },
                         ..
@@ -142,20 +146,18 @@ impl Core<'_> {
                     | None => Err("the call has ended: make no more ops".to_owned()),
                 };
             }
-            (Phase::Work { deadline, latest }, Caller::Agent(id)) => {
-                return Ok(Working::Agent {
-                    id,
-                    deadline: *deadline,
-                    latest: latest.clone(),
-                });
-            }
-            (Phase::Finalized { .. }, Caller::Agent(_)) => &WorkEnd::Finalized,
-            (
-                Phase::Teardown { work_end, .. }
-                | Phase::Final { work_end, .. }
-                | Phase::Finished(Outcome { work_end, .. }),
-                Caller::Agent(_),
-            ) => work_end,
+            (_, Caller::Agent(id)) => match self.members.get(&id) {
+                Some(Member::Working(latest)) => {
+                    return Ok(Working::Agent {
+                        id,
+                        deadline: self.phase_due(),
+                        latest: latest.clone(),
+                    });
+                }
+                Some(Member::Grace { .. }) => &WorkEnd::Finalized,
+                Some(Member::Ended { outcome, .. }) => &outcome.work_end,
+                None => return Err("this agent is outside the workflow: make no ops".to_owned()),
+            },
         };
         match work_end {
             WorkEnd::Finalized => Err("the work was ended: make no more ops".to_owned()),

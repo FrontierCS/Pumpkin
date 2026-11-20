@@ -768,7 +768,7 @@ impl View {
     fn run_json(&mut self, id: &RunTag) -> Result<Value, Failed> {
         let (named, again) = (self.named.clone(), self.again);
         let held = self.held(id)?;
-        Ok(run_json(held, named.as_deref(), again))
+        Ok(run_json(held, named.as_deref(), again)?)
     }
 
     /// What run `id`'s log gained past byte `log`, a byte that a reply of `log_epoch` gave: `end`
@@ -795,7 +795,7 @@ impl View {
             window_json(held, from)?
         };
         reply["live"] = json!(live);
-        reply["run"] = run_json(held, named.as_deref(), again);
+        reply["run"] = run_json(held, named.as_deref(), again)?;
         Ok(reply)
     }
 

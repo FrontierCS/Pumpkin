@@ -134,6 +134,32 @@ impl runtime::Bodies for Bodies<'_> {
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
             }
+            "selections" => {
+                let path = AbsolutePath::from_static("/work/manifest.json");
+                target.put(&path)?;
+                let manifest: Value = serde_json::from_str(&target.get(&path)?).unwrap();
+                let mut files = Map::new();
+                for entry in manifest.as_array().unwrap() {
+                    let role = entry["role"].as_str().unwrap();
+                    let Some(path) = entry["selection"]["path"].as_str() else {
+                        continue;
+                    };
+                    // Read the staged bytes through the sandbox, including non-UTF-8 selections.
+                    target.run(&argv(&["bytes", path]))?;
+                    let command = files.len();
+                    let stdout =
+                        AbsolutePath::try_from(format!("/pumpkin/log/{command}/command.stdout"))
+                            .unwrap();
+                    files.insert(
+                        role.to_owned(),
+                        serde_json::from_str(&target.get(&stdout)?).unwrap(),
+                    );
+                }
+                Ok(vec![
+                    (Name::from_static("manifest"), manifest),
+                    (Name::from_static("files"), json!(files)),
+                ])
+            }
             "routed" => {
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
                 let score = raw_score(target)?;

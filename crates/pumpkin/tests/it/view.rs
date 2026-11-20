@@ -246,6 +246,112 @@ fn write_served(scratch: &Scratch) -> File {
     driver
 }
 
+fn write_team(scratch: &Scratch, id: &str) {
+    let mut ir = super::lease_task();
+    ir["ir_version"] = json!("pumpkin.ir/v1");
+    let runtime = &mut ir["roles"][0]["runtime"]["agent"];
+    ir["deadline_seconds"] = runtime
+        .as_object_mut()
+        .unwrap()
+        .remove("deadline_seconds")
+        .unwrap();
+    ir["final"]["input"] = json!("selections");
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("peer");
+    peer["runtime"]["agent"]["grants"][0]["job"]["target"] = json!("tester");
+    let mut target = ir["roles"][1].clone();
+    target["name"] = json!("tester");
+    target["runtime"]["target"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sessions");
+    ir["roles"].as_array_mut().unwrap().extend([peer, target]);
+    let selected = super::payload();
+    let final_call = json!({"kind":"start_final_call","job":2,"timeout_ns":"3000000000",
+        "selections":[{"role":"solver","selection":null},{"role":"peer","selection":selected}]});
+    let call = |caller, job| {
+        json!({"kind":"start_call","grant":"train","caller":caller,"job":job,
+        "payload":selected,"timeout_ns":"3000000000"})
+    };
+    let log = [
+        logged(1, json!({"kind":"work_started"}), json!([])),
+        logged(
+            2,
+            json!({"kind":"tick"}),
+            json!([call("agent-0", 0), call("agent-6", 1)]),
+        ),
+        logged(3, json!({"kind":"tick"}), json!([final_call])),
+        logged(4, json!({"kind":"tick"}), json!([{"kind":"finish"}])),
+    ];
+    let outcome = json!({"state":"finished","members":[
+        {"role":"solver","work_end":{"kind":"deadline"},"submission":null},
+        {"role":"peer","work_end":{"kind":"finalized"},"submission":super::submission()}
+    ],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]}}});
+    write_run(
+        scratch,
+        id,
+        asked(id, 1),
+        &log,
+        Some(outcome),
+        &lease_places(Prices::Nothing),
+    );
+    scratch.write(&format!("runs/{id}/ir.json"), &ir);
+}
+
+#[test]
+fn team_roles() {
+    let scratch = Scratch::new();
+    let id = SERVED_ENDED;
+    write_team(&scratch, id);
+    let served = Served::start(&scratch);
+    let path = format!("/api/runs/{id}");
+    let run = served.get(&path);
+    let lanes = run["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| json!([lane["caller"], lane["role"], lane["holder"]]))
+        .collect::<Vec<_>>();
+    let edges = run["talk"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| json!([edge["from"], edge["to"], edge["kind"], edge["bytes"]]))
+        .collect::<Vec<_>>();
+    let summary = run["summary"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("selected,") || line.contains("no selection,"))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let traces = ["agent", "agent-0", "agent-6", "agent-1", "agent-06"].map(|caller| {
+        let (status, _) = served.get_with(&format!("{path}/trace/{caller}/ops"), &[]);
+        format!("{caller}: {status}")
+    });
+    let text = format!(
+        "lanes {}\nedges {}\nsummary {summary:?}\n{}",
+        json!(lanes),
+        json!(edges),
+        traces.join("\n")
+    );
+    check(
+        &scratch,
+        [Step::Ran(text)],
+        false,
+        &[],
+        &expect![[r#"
+        lanes [["agent-0","solver",null],["agent-6","peer",null],["job-0","trainer","agent 0"],["job-1","tester","agent 6"],["job-2","scorer",null]]
+        edges [["peer","scorer","final call",3],["peer","tester","job call",3],["solver","trainer","job call",3]]
+        summary ["no selection, deadline", "selected, finalized"]
+        agent: HTTP/1.1 404 Not Found
+        agent-0: HTTP/1.1 200 OK
+        agent-6: HTTP/1.1 200 OK
+        agent-1: HTTP/1.1 404 Not Found
+        agent-06: HTTP/1.1 400 Bad Request"#]],
+    );
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1906,13 +2012,13 @@ fn traces_a_caller() {
             item 0: HTTP/1.1 200 OK
             {"content":[{"text":"list the files","type":"input_text"}],"role":"user","type":"message"}
             trace/someone/steps: HTTP/1.1 400 Bad Request
-            {"error":"`someone` is no caller: expected `agent` or `job-<n>`"}
+            {"error":"`someone` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
             trace/job-01/steps: HTTP/1.1 400 Bad Request
-            {"error":"`job-01` is no caller: expected `agent` or `job-<n>`"}
+            {"error":"`job-01` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
             trace/job-99/steps: HTTP/1.1 404 Not Found
-            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
+            {"error":"run <id>'s log names no job 99: name an agent or a job of the run"}
             trace/job-99/ops: HTTP/1.1 404 Not Found
-            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
+            {"error":"run <id>'s log names no job 99: name an agent or a job of the run"}
             trace/agent/entries?from=0&to=5&kind=tool: HTTP/1.1 400 Bad Request
             {"error":"`kind` is no entry's kind: unknown variant `tool`, expected one of `system`, `user`, `assistant`, `reasoning`, `call`, `output`, `other`, `unread`"}
             item/abc: HTTP/1.1 400 Bad Request

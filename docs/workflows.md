@@ -12,12 +12,13 @@ chosen elsewhere.
 ## The entry file
 
 A task is an entry file below a root, the nearest directory at or above it that holds a
-`PUMPKIN.star`. The entry file makes one `workflow()` call, with three keyword arguments:
+`PUMPKIN.star`. The entry file makes one `workflow()` call, with these keyword arguments:
 
 | Key | What it is |
 | --- | --- |
 | `name` | what `pumpkin ls` and the page show: 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/` |
-| `roles` | the run's roles, exactly one of them an agent |
+| `roles` | the run's roles in declaration order, including at least one agent |
+| `deadline_seconds` | how long all agents may work, from their start or, at the latest, when the longest agent startup bound has passed since the run started |
 | `final` | the final call, which gives the run its result |
 
 `workflow()` is called once, while the entry file's own statements run; the files it loads give it
@@ -57,22 +58,23 @@ bad/zero/task.star:3:14: `cpu_millis` can't be `0`: expected a positive int
     the IR's /roles/1/needs/cpu_millis
 ```
 
-### The agent
+### Agents
 
-The one role that works on the task. Its sandbox starts first, and its command runs once.
+Each agent works in its own sandbox and runs its command once. Agents may differ in resources,
+command, model route and grants. They work under one deadline.
 
 | Key | What it is |
 | --- | --- |
 | `command` | `{"argv": [...], "cwd": …, "env": [...]}`: the whole command line, as the image's entrypoint is not used; the directory it starts in; and `NAME=value` entries added to the image's environment, which may be left out |
-| `deadline_seconds` | how long the work phase may last, counted once the sandbox and its command have started or, at the latest, once its class's `startup_seconds` have passed since the run's start |
+| `deadline_seconds` | a single agent may give the work deadline here when the workflow omits it |
 | `finalize_grace_seconds` | how long the agent may keep running once a call has ended its work, its ops refused meanwhile; 0 ends the work in that call's step |
 | `dirs`, `files` | directories (`{"path", "mode"}`) and text files (`{"path", "mode", "content"}`) made before the command starts, as the role's user, with modes written as `"0644"` |
 | `stdin` | the text the command reads on its standard input; absent, it reads nothing |
 | `egress` | its routes out: `{"model": [...]}`, a model route ([models](models.md)) |
 | `grants` | the functions it may call |
 
-The work phase ends when the command exits, when the grace after an `end_work()` runs out, or at
-the deadline, whichever comes first. Like every sandbox, the agent's has `/pumpkin`, which holds
+Each agent ends when its command exits, when its grace after an `end_work()` runs out, or at
+the shared deadline, whichever comes first. Its peers can keep working. Like every sandbox, the agent's has `/pumpkin`, which holds
 Pumpkin's own files: `in/`, which holds its `stdin`, `out/`, which is collected into the record
 when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A path of `dirs` or
 `files` below `/pumpkin` or `/.pumpkin` is refused.
@@ -81,8 +83,8 @@ when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A 
 
 A role that a function's body drives: each call of the job function that names it, and the final
 call if it names it, starts a fresh sandbox of it, which runs no command of its own and ends with
-the call. Each target is named by one job function or by the final call, and by no other: a target
-that nothing names is refused, so that every role of a workflow is reached.
+the call. Each agent may name a given target from one job function. A target used by the final
+call is exclusive to it. Every target must be reached.
 
 | Key | What it is |
 | --- | --- |
@@ -93,8 +95,9 @@ that nothing names is refused, so that every role of a workflow is reached.
 
 ### Runners
 
-A sandbox that a session leases for its holder, which sends it commands and copies. Each runner is
-named by one session. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
+A sandbox that a session leases for its holder, which sends it commands and copies. Distinct
+agents may lease the same runner role. Every lease starts its own sandbox. A target's session
+names a runner no other session names. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
 runner of an agent's session has an image that no target has, so that the agent never runs what a
 target's image holds.
 
@@ -108,7 +111,7 @@ is refused, and so is a grant with none.
 
 | Key | What it is |
 | --- | --- |
-| `target` | the target that each call starts afresh, which no other job function names |
+| `target` | the target that each call starts afresh |
 | `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
 | `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
 | `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
@@ -116,7 +119,7 @@ is refused, and so is a grant with none.
 | `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
 | `call_timeout_seconds` | each call's timeout, counted from its target's start |
 
-A job function runs one call at a time. A call ends with its timeout, with the function's
+An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
 cumulative time, or with the work phase, whichever comes first.
 
 ### A now function
@@ -133,7 +136,7 @@ asked of it.
 
 | Key | What it is |
 | --- | --- |
-| `runner` | the runner that each lease starts afresh, which no other session names |
+| `runner` | the runner that each lease starts afresh |
 | `instances` | the most leases open at once |
 | `instance_seconds` | the most time each lease may last, from when its runner is ready |
 | `cumulative_seconds` | the most time its leases may last in all, each open lease counting; left out, no bound |
@@ -148,12 +151,23 @@ bounds each call afresh.
 
 `final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which
 may be left out, `payload_max_bytes`, at most 64 MiB, and `timeout_seconds`, counted from its
-target's start. The final call runs once the agent's sandbox and every call and lease it made have
-ended: its body drives a fresh sandbox of the target, as a job's body does, with the last payload
-selected. The dict it returns is the run's
-result: each entry is a value the run shows, in the body's order, as `pumpkin wait`, `pumpkin ls`
-and the page show `score=6 lines=1`. A run with nothing selected makes no final call; a run whose
-final call fails or times out finishes without a result, and `pumpkin wait` exits 3 for both.
+target's start. The body drives a fresh sandbox once all agents, calls and leases have ended.
+The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
+as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
+
+A single agent may omit `final.input`. Its last selected payload then goes directly to the body.
+If it selects nothing the run skips the final call and `pumpkin wait` exits 3.
+
+Set `"input": "selections"` for a team. A single agent may use it too. The body receives a UTF-8
+JSON array in agent declaration order. Each entry names the role and its selection. For example:
+
+```json
+[{"role":"alice","selection":{"path":"/pumpkin/in/selections/alice","bytes":2,"digest":"sha256:8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4"}},{"role":"bob","selection":null}]
+```
+
+A present selection is staged at its path with its original bytes. The digest is its SHA-256
+and `payload_max_bytes` bounds each selection. A missing selection has no file. The final body
+runs even when all selections are missing and supplies the workflow's scoring rule.
 
 ## Bodies
 
@@ -298,10 +312,10 @@ column; a problem in how the parts fit is said with its place in the IR. Among t
 - a key the IR doesn't take, or a value its type refuses, as above, a kind that holds what it
   can't among them;
 - a function defined in the entry file;
-- a workflow with no agent, or with two;
+- a workflow with no agent, conflicting deadlines, or several agents and a scalar final;
 - a name that names no role, or a role of another kind than its place takes;
-- a target that two job functions name, or that a job function and the final call both name, and
-  a runner that two sessions name;
+- a target that two grants of one agent name or that a job and the final call both name;
+- a runner that two sessions name unless their holders are distinct agents;
 - a target or a runner that nothing names;
 - an agent's runner whose image a target has;
 - a payload or transfer bound past the protocol's.
@@ -311,7 +325,7 @@ Each in the words `check` says it:
 ```text
 `egress` is no field of `runner`: expected one of `cwd`, `env`
 a function defined in an entry file is not in Pumpkin's Starlark: define it in a library, and load it
-`helper` is a second agent, after `agent`: a workflow has exactly one
+the final call has several agents' selections: give it `input = "selections"`
 `agent` is an agent: name a target as the final call's target
 `final_judge` is the final call's target and `check`'s: give the final call a role no job names
 `gpu` is a runner that no session names: name it from one

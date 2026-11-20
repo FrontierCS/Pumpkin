@@ -7,12 +7,14 @@ use schema::ir::Name;
 use serde::{Deserialize as _, Serialize};
 use serde_json::Value;
 
-use super::logged::Action;
+use super::logged::{Action, CallerName, FinalPayload};
 use super::progress::{ModelUse, Sandbox};
 
 /// A call: the final call, which judges the selection, or the agent's call of a job function.
 #[derive(Clone, Debug)]
 pub struct CallSpan {
+    /// The agent that requested the job, absent for the final call.
+    pub caller: Option<CallerName>,
     /// Its number in the run.
     pub job: u64,
     pub of: CallOf,
@@ -36,6 +38,7 @@ impl CallSpan {
     /// The span of job `job`, which calls `of`, started on `role`'s `sandbox`.
     pub(super) fn new(
         job: u64,
+        caller: Option<CallerName>,
         of: CallOf,
         role: Option<String>,
         sandbox: Sandbox,
@@ -43,6 +46,7 @@ impl CallSpan {
     ) -> Self {
         Self {
             job,
+            caller,
             of,
             role,
             sandbox,
@@ -78,6 +82,8 @@ pub enum CallOf {
 /// A call's start, as an action of the log's says it.
 #[derive(Clone, Debug)]
 pub struct CallStart {
+    /// The agent that requested the job, absent for the final call.
+    pub caller: Option<CallerName>,
     pub job: u64,
     pub of: CallOf,
     /// The size of the call's payload.
@@ -87,23 +93,35 @@ pub struct CallStart {
 impl CallStart {
     /// The call's start that `action`, an action of a line of the log's, is, if it reads as one.
     pub fn read(action: &Value) -> Option<Self> {
-        let start = |job, of, payload: super::logged::Payload| Self {
-            job,
-            of,
-            payload_bytes: payload.size,
-        };
         match Action::deserialize(action).ok()? {
             Action::StartCall {
                 job,
+                caller,
                 grant,
                 payload,
-                timeout_ns: _,
-            } => Some(start(job, CallOf::Function(grant), payload)),
-            Action::StartFinalCall {
+                ..
+            } => Some(Self {
+                caller: Some(caller),
                 job,
-                payload,
-                timeout_ns: _,
-            } => Some(start(job, CallOf::Final, payload)),
+                of: CallOf::Function(grant),
+                payload_bytes: payload.size,
+            }),
+            Action::StartFinalCall { job, input, .. } => {
+                let bytes = match input {
+                    FinalPayload::Single { payload } => payload.size,
+                    FinalPayload::Team { selections } => selections
+                        .iter()
+                        .filter_map(|member| member.selection.as_ref())
+                        .map(|selected| selected.size)
+                        .fold(0, u64::saturating_add),
+                };
+                Some(Self {
+                    caller: None,
+                    job,
+                    of: CallOf::Final,
+                    payload_bytes: bytes,
+                })
+            }
             Action::StartAgent
             | Action::Reply
             | Action::StopCall { .. }
@@ -111,7 +129,7 @@ impl CallStart {
             | Action::RunCommand { .. }
             | Action::Transfer { .. }
             | Action::CloseLease { .. }
-            | Action::TearDownAgent
+            | Action::TearDownAgent { .. }
             | Action::Finish
             | Action::Abandon
             | Action::Unknown => None,

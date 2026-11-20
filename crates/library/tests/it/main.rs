@@ -261,7 +261,7 @@ fn agent<'w>(workflow: &'w Workflow, case: &[&str]) -> (&'w ir::Role, &'w AgentR
     let ir::Runtime::Agent(runtime) = &agent.runtime else {
         panic!("the first role is the agent");
     };
-    assert_eq!(runtime.deadline_seconds.to_string(), case[4]);
+    assert_eq!(runtime.deadline_seconds.unwrap().to_string(), case[4]);
     assert_eq!(runtime.finalize_grace_seconds.to_string(), case[5]);
     (agent, runtime)
 }

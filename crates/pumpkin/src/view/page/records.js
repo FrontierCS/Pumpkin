@@ -43,7 +43,7 @@ export function lanesOf(record) {
   const event = /** @type {Record<string, any>} */ (record.event || {});
   const caller = event.caller;
   if (typeof caller === "string") lanes.add(caller.replace("-", " "));
-  if (["agent_started", "agent_exited", "agent_failed", "agent_collected"].includes(event.kind)) lanes.add("agent");
+  if (!caller && ["agent_started", "agent_exited", "agent_failed", "agent_collected"].includes(event.kind)) lanes.add("agent");
   if (event.job !== undefined) lanes.add("job " + event.job);
   if (event.lease !== undefined) lanes.add("lease " + event.lease);
   if (event.sandbox) lanes.add(String(event.sandbox).replace("-", " "));
@@ -53,7 +53,9 @@ export function lanesOf(record) {
   for (const action of record.actions || []) {
     if (action.lease !== undefined) lanes.add("lease " + action.lease);
     if (action.job !== undefined) lanes.add("job " + action.job);
-    if (action.kind === "start_agent" || action.kind === "tear_down_agent") lanes.add("agent");
+    if (action.caller) lanes.add(String(action.caller).replace("-", " "));
+    if (action.holder) lanes.add(String(action.holder).replace("-", " "));
+    if (!action.caller && (action.kind === "start_agent" || action.kind === "tear_down_agent")) lanes.add("agent");
   }
   return lanes;
 }

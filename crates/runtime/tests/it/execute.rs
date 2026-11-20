@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::ops::RangeInclusive;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1381,7 +1381,7 @@ fn unstarted() {
     let ir = workflow(&["exit", "0"]);
     let parsed: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let placed = placed(&parsed, Sim::new().ready()).unwrap();
-    let startup = placed.startup(placed.workflow().agent().id.role());
+    let startup = placed.startup(placed.workflow().agents().next().unwrap().id.role());
     let begun = Instant::now();
     let on = |name, sandboxd| {
         executed(
@@ -4408,8 +4408,186 @@ fn lease_starts_by_its_holders_end() {
     );
 }
 
+fn team_workflow(argv: &[&str]) -> Value {
+    let mut ir = ops_workflow(argv, 30);
+    ir["ir_version"] = json!("pumpkin.ir/v1");
+    ir["deadline_seconds"] = json!(30);
+    ir["final"]["input"] = json!("selections");
+    ir["final"]["body"]["def"] = json!("selections");
+    let alpha = &mut ir["roles"][0];
+    alpha["name"] = json!("alpha");
+    alpha["runtime"]["agent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("deadline_seconds");
+    ir
+}
+
+fn run_team(
+    ir: Value,
+    dir: &TestDir,
+) -> (PathBuf, Vec<decision::MemberOutcome>, decision::CallResult) {
+    let ir = serde_json::from_value(ir).unwrap();
+    let sim = Sim::with_startup(2);
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let ids = placed
+        .workflow()
+        .agents()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let on = providers_of(&placed, |_| &sim);
+    let upstream = model_routed(&ir).then(StandIn::start);
+    let servings = StandIn::servings(upstream.as_ref(), placed.workflow(), dir.path());
+    let prices = prices();
+    let (models, recorded) = kept(&placed, &servings, &prices);
+    let tag = new_id(SystemTime::now()).unwrap();
+    let run = Run::prepare(
+        &System,
+        placed,
+        on,
+        dir.path(),
+        tag.clone(),
+        models,
+        recorded,
+    )
+    .unwrap();
+    let record = run.dir().to_owned();
+    sim.records(&record);
+    let outcome = run
+        .execute(
+            Path::new(SANDBOXD),
+            None,
+            &Dialer::new(test_support::edge::client()),
+            &Bodies { record: &record },
+            || Ok(()),
+        )
+        .unwrap();
+    let Outcome::Team {
+        members,
+        result: Ok(result),
+    } = outcome
+    else {
+        panic!("expected the aggregate judge to return, got {outcome:?}")
+    };
+    assert_eq!(
+        members
+            .iter()
+            .map(|member| member.agent)
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert!(sim.list(&tag).unwrap().is_empty());
+    if let Some(upstream) = upstream {
+        upstream.stop();
+    }
+    (record, members, result)
+}
+
+#[test]
+fn teams_stage_only_their_members_selections_after_partial_start_failure() {
+    let mut ir = team_workflow(&["ops", "call train 1", "call submit binary finalize=true"]);
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let mut broken = roles[0].clone();
+    broken["name"] = json!("broken");
+    broken["image"] = json!(sim::image(HUNG).as_str());
+    let mut beta = roles[0].clone();
+    beta["name"] = json!("beta");
+    beta["runtime"]["agent"]["command"]["argv"] = json!([
+        "ops",
+        "ops",
+        "await_log start_call",
+        "status 0",
+        "call submit beta finalize=true"
+    ]);
+    roles.extend([broken, beta]);
+    let dir = TestDir::new();
+    let (record, members, result) = run_team(ir, &dir);
+    assert!(members[0].submission.as_ref().unwrap().finalized);
+    assert!(matches!(
+        members[1].work_end,
+        decision::WorkEnd::AgentFailed(_)
+    ));
+    assert!(members[1].submission.is_none());
+    assert!(members[2].submission.as_ref().unwrap().finalized);
+    let [(manifest, rows), (files, bytes)] = result.values() else {
+        panic!("unexpected final result {result:?}")
+    };
+    assert_eq!(manifest.as_str(), "manifest");
+    assert_eq!(rows[0]["role"], "alpha");
+    assert_eq!(rows[0]["selection"]["path"], "/pumpkin/in/selections/alpha");
+    assert_eq!(rows[0]["selection"]["bytes"], 3);
+    assert_eq!(rows[1], json!({"role":"broken", "selection":null}));
+    assert_eq!(rows[2]["role"], "beta");
+    assert_eq!(rows[2]["selection"]["bytes"], 4);
+    assert_eq!(files.as_str(), "files");
+    assert_eq!(bytes, &json!({"alpha":[0,255,1], "beta":[98,101,116,97]}));
+    let log = read_log(&record);
+    let status = log
+        .iter()
+        .find(|line| line.pointer("/event/request/kind") == Some(&json!("status")))
+        .unwrap();
+    assert_eq!(status["event"]["caller"], "agent-4");
+    assert_eq!(status["actions"][0]["reply"]["kind"], "refused");
+    assert_eq!(
+        log.iter()
+            .filter(|line| line["event"]["kind"] == "final_manifest")
+            .count(),
+        1
+    );
+    for role in ["alpha", "broken", "beta"] {
+        let sandbox = fs::read(record.join("agents").join(role).join("sandbox.json")).unwrap();
+        let sandbox: Value = serde_json::from_slice(&sandbox).unwrap();
+        assert_eq!(sandbox["delete"]["state"], "deleted");
+    }
+}
+
+#[test]
+fn teams_judge_all_missing_and_keep_each_members_model_failure_and_usage() {
+    let mut ir = routed(team_workflow(&["ops", "model m-large expired"]));
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let mut beta = roles[0].clone();
+    beta["name"] = json!("beta");
+    beta["runtime"]["agent"]["command"]["argv"] = json!(["ops", "model m-large 7"]);
+    roles.push(beta);
+    let dir = TestDir::new();
+    let (record, members, result) = run_team(ir, &dir);
+    let [alpha, beta] = members.as_slice() else {
+        panic!("expected both members")
+    };
+    assert!(alpha.route_failure.as_ref().unwrap().contains("401"));
+    assert!(beta.route_failure.is_none());
+    assert!(members.iter().all(|member| member.submission.is_none()));
+    let [(.., manifest), (.., files)] = result.values() else {
+        panic!("expected a manifest and files")
+    };
+    assert_eq!(
+        manifest,
+        &json!([{"role":"alpha","selection":null},{"role":"beta","selection":null}])
+    );
+    assert_eq!(files, &json!({}));
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
+    let usage = |id| {
+        progress.agents[&runtime::CallerName::Member(id)]
+            .model
+            .as_ref()
+            .unwrap()
+    };
+    assert_eq!(usage(0).requests, 1);
+    assert_eq!(usage(3).requests, 1);
+    assert_eq!(usage(0).answers.get("refused"), Some(&1));
+    assert_eq!(usage(3).answers.get("200"), Some(&1));
+}
+
 fn finished(outcome: &Outcome) -> String {
-    match &outcome.verdict {
+    let Outcome::Single { verdict, .. } = outcome else {
+        panic!("expected a scalar final");
+    };
+    match verdict {
         Verdict::Returned { result, .. } => {
             let values = result.values().iter();
             let values: Vec<String> = values

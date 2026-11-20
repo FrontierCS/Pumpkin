@@ -96,12 +96,17 @@ impl Talk {
                 grants.push(json!({ "from": role.name, "to": target, "kind": kind }));
             }
         }
-        // The agent makes the final call.
-        let agent = roles
-            .iter()
-            .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)));
-        if let Some(agent) = agent {
-            grants.push(json!({ "from": agent.name, "to": final_target, "kind": "final" }));
+        let mut agents = BTreeMap::new();
+        for (index, role) in roles.iter().enumerate() {
+            if matches!(role.runtime, ir::Runtime::Agent(_)) {
+                let caller = if ir.final_call.input.is_some() {
+                    CallerName::Member(index)
+                } else {
+                    CallerName::Agent
+                };
+                agents.insert(caller, role.name.to_string());
+                grants.push(json!({ "from": role.name, "to": final_target, "kind": "final" }));
+            }
         }
         let routes = |role: &ir::Role| {
             routes.map(|routes| {
@@ -121,10 +126,7 @@ impl Talk {
             answered: BTreeMap::new(),
             failed: BTreeMap::new(),
             reading: Reading {
-                agent: (roles.iter())
-                    .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)))
-                    .map(|role| role.name.to_string())
-                    .unwrap_or_default(),
+                agents,
                 final_target: final_target.to_owned(),
                 granted,
                 jobs: BTreeMap::new(),
@@ -146,7 +148,7 @@ impl Talk {
 
     fn role(&self, caller: CallerName) -> Option<String> {
         match caller {
-            CallerName::Agent => Some(self.reading.agent.clone()),
+            CallerName::Agent | CallerName::Member(_) => self.reading.agents.get(&caller).cloned(),
             CallerName::Job(job) => self.reading.jobs.get(&job).cloned(),
         }
     }
@@ -158,7 +160,7 @@ impl Talk {
 }
 
 struct Reading {
-    agent: String,
+    agents: BTreeMap<CallerName, String>,
     final_target: String,
     /// Each grant's role, by its holder and name, and how the page names a call of it.
     granted: BTreeMap<(String, String), (String, &'static str)>,
@@ -170,7 +172,7 @@ struct Reading {
 impl Talk {
     fn action(&mut self, at: f64, action: &Value, request: &Value) {
         if let Some(start) = CallStart::read(action) {
-            self.call_started(start);
+            self.call_started(start, action);
             return;
         }
         let lease = action["lease"].as_u64();
@@ -214,22 +216,43 @@ impl Talk {
         }
     }
 
-    fn call_started(&mut self, start: CallStart) {
+    fn call_started(&mut self, start: CallStart, action: &Value) {
         let CallStart {
             job,
             of,
+            caller,
             payload_bytes,
         } = start;
-        let called = match of {
+        let role = match of {
             CallOf::Function(grant) => {
-                let grant = (self.reading.agent.clone(), grant);
-                self.reading.granted.get(&grant).cloned()
+                let Some(from) = caller.and_then(|caller| self.role(caller)) else {
+                    return;
+                };
+                let Some((to, kind)) = self.reading.granted.get(&(from.clone(), grant)).cloned()
+                else {
+                    return;
+                };
+                self.edge(&from, &to, kind).add(Some(payload_bytes), None);
+                to
             }
-            CallOf::Final => Some((self.reading.final_target.clone(), "final call")),
+            CallOf::Final => {
+                let to = self.reading.final_target.clone();
+                if let Some(members) = action["selections"].as_array() {
+                    for member in members {
+                        if let (Some(from), Some(bytes)) = (
+                            member["role"].as_str(),
+                            member["selection"]["size"].as_u64(),
+                        ) {
+                            self.edge(from, &to, "final call").add(Some(bytes), None);
+                        }
+                    }
+                } else if let Some(from) = self.role(CallerName::Agent) {
+                    self.edge(&from, &to, "final call")
+                        .add(Some(payload_bytes), None);
+                }
+                to
+            }
         };
-        let Some((role, kind)) = called else { return };
-        self.edge(&self.reading.agent.clone(), &role, kind)
-            .add(Some(payload_bytes), None);
         self.reading.jobs.insert(job, role);
     }
 

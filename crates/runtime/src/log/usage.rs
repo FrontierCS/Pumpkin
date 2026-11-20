@@ -21,7 +21,9 @@ impl Progress {
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
         let calls = self.calls.iter().map(|call| &call.sandbox);
         let leases = self.leases.iter().map(|lease| &lease.sandbox);
-        std::iter::once(&self.agent.sandbox)
+        self.agents
+            .values()
+            .map(|agent| &agent.sandbox)
             .chain(calls)
             .chain(leases)
     }

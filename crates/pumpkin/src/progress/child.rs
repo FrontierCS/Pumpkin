@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use runtime::{CallEnd, CallOf, CallSpan, Closed, Direction, LeaseSpan, Work};
+use runtime::{CallEnd, CallOf, CallSpan, CallerName, Closed, Direction, LeaseSpan, Work};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, TransferEnd};
 
@@ -12,7 +12,13 @@ use super::{placed, result, span};
 
 pub(super) fn call_name(call: &CallSpan) -> String {
     match &call.of {
-        CallOf::Function(function) => format!("{function} job {}", call.job),
+        CallOf::Function(function) => {
+            let mut name = format!("{function} job {}", call.job);
+            if let Some(caller @ CallerName::Member(_)) = call.caller {
+                let _ = write!(name, " of {}", super::caller_lane(caller));
+            }
+            name
+        }
         CallOf::Final => format!("final call job {}", call.job),
     }
 }
@@ -93,8 +99,10 @@ pub(crate) fn leased(lease: &LeaseSpan, now: Duration) -> String {
 pub(super) fn lease_name(lease: &LeaseSpan) -> String {
     let name = format!("{} lease {}", lease.grant, lease.lease);
     match lease.holder {
-        Some(job) => format!("{name} of job {job}"),
-        None => name,
+        CallerName::Job(_) | CallerName::Member(_) => {
+            format!("{name} of {}", super::caller_lane(lease.holder))
+        }
+        CallerName::Agent => name,
     }
 }
 

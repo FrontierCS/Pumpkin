@@ -103,14 +103,25 @@ pub(super) enum Event {
         #[serde(default, deserialize_with = "optional_nanos")]
         hard_end_ns: Option<Duration>,
     },
-    AgentStarted,
+    WorkStarted,
+    AgentStarted {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
+    },
     AgentExited {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
         status: ExitStatus,
     },
     AgentFailed {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
         reason: String,
     },
-    AgentCollected,
+    AgentCollected {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
+    },
     OpArrived {
         request: Request,
     },
@@ -185,10 +196,11 @@ impl Event {
         match self {
             Self::OpArrived { request } => Some(request),
             Self::RunStarted { .. }
-            | Self::AgentStarted
+            | Self::WorkStarted
+            | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
-            | Self::AgentCollected
+            | Self::AgentCollected { .. }
             | Self::OpRefused
             | Self::CallStarted { .. }
             | Self::CallTimedOut { .. }
@@ -215,10 +227,11 @@ impl Event {
             | Self::CallReturned { job, .. }
             | Self::CallFailed { job, .. } => Some(*job),
             Self::RunStarted { .. }
-            | Self::AgentStarted
+            | Self::WorkStarted
+            | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
-            | Self::AgentCollected
+            | Self::AgentCollected { .. }
             | Self::OpArrived { .. }
             | Self::OpRefused
             | Self::LeaseReady { .. }
@@ -342,11 +355,25 @@ pub(super) struct Payload {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum FinalPayload {
+    Single { payload: Payload },
+    Team { selections: Vec<MemberPayload> },
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct MemberPayload {
+    pub(super) selection: Option<Payload>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Action {
     StartAgent,
     Reply,
     StartCall {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
         job: u64,
         grant: String,
         payload: Payload,
@@ -355,7 +382,8 @@ pub(super) enum Action {
     },
     StartFinalCall {
         job: u64,
-        payload: Payload,
+        #[serde(flatten)]
+        input: FinalPayload,
         #[serde(deserialize_with = "nanos")]
         timeout_ns: Duration,
     },
@@ -376,7 +404,10 @@ pub(super) enum Action {
     CloseLease {
         lease: u64,
     },
-    TearDownAgent,
+    TearDownAgent {
+        #[serde(default, deserialize_with = "agent")]
+        caller: CallerName,
+    },
     Finish,
     Abandon,
     #[serde(other)]
@@ -395,7 +426,7 @@ impl Action {
             | Self::RunCommand { .. }
             | Self::Transfer { .. }
             | Self::CloseLease { .. }
-            | Self::TearDownAgent
+            | Self::TearDownAgent { .. }
             | Self::Finish
             | Self::Abandon
             | Self::Unknown => None,
@@ -414,16 +445,19 @@ pub enum Direction {
     Get,
 }
 
-/// Who a model request or a lease belongs to, written and read as `agent` or `job-<n>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A caller in a record: the singleton agent, an agent at its role index, or a job.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CallerName {
+    #[default]
     Agent,
+    Member(usize),
     Job(u64),
 }
 
-impl From<decision::Caller> for CallerName {
-    fn from(caller: decision::Caller) -> Self {
+impl CallerName {
+    pub(super) fn of(caller: decision::Caller, team: bool) -> Self {
         match caller {
+            decision::Caller::Agent(id) if team => Self::Member(id.role().index()),
             decision::Caller::Agent(_) => Self::Agent,
             decision::Caller::Job(job) => Self::Job(job.0),
         }
@@ -434,6 +468,7 @@ impl From<CallerName> for SandboxName {
     fn from(caller: CallerName) -> Self {
         match caller {
             CallerName::Agent => Self::Agent,
+            CallerName::Member(role) => Self::Member(role),
             CallerName::Job(job) => Self::Job(job),
         }
     }
@@ -455,11 +490,20 @@ impl<'de> Deserialize<'de> for CallerName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match SandboxName::deserialize(deserializer)? {
             SandboxName::Agent => Ok(Self::Agent),
+            SandboxName::Member(role) => Ok(Self::Member(role)),
             SandboxName::Job(job) => Ok(Self::Job(job)),
             SandboxName::Lease(lease) => Err(D::Error::custom(format_args!(
                 "lease-{lease} is no caller: expected `agent` or `job-<n>`"
             ))),
         }
+    }
+}
+
+fn agent<'de, D: Deserializer<'de>>(deserializer: D) -> Result<CallerName, D::Error> {
+    let caller = CallerName::deserialize(deserializer)?;
+    match caller {
+        CallerName::Agent | CallerName::Member(_) => Ok(caller),
+        CallerName::Job(_) => Err(D::Error::custom("expected an agent caller")),
     }
 }
 

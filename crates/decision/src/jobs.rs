@@ -180,9 +180,18 @@ impl Jobs {
 
     /// Stops every job that is queued or running at `now`, and returns them. A job whose
     /// command has already ended is left to finish collecting.
-    pub(super) fn stop_unfinished(&mut self, now: Duration) -> Vec<JobId> {
+    pub(super) fn stop_unfinished(
+        &mut self,
+        now: Duration,
+        owns: impl Fn(JobOf) -> bool,
+    ) -> Vec<JobId> {
         let mut stopped = Vec::new();
-        for (index, job) in self.0.iter_mut().enumerate() {
+        for (index, job) in self
+            .0
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, job)| owns(job.call))
+        {
             match job.state {
                 State::Queued | State::Running { .. } => {
                     job.state.ended(now, End::Stopped);

@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use decision::{CallResult, JobId};
+use schema::ir::AbsolutePath;
 use schema::sandbox::OpPayloadLimit;
 use schema::sandbox::op::OpReply;
 use schema::workflow::Holder;
@@ -18,6 +19,7 @@ pub(crate) struct Call<'r> {
     pub(crate) job: JobId,
     pub(crate) of: Of<'r>,
     pub(crate) payload: Stored,
+    pub(crate) staged: Vec<(AbsolutePath, Stored)>,
     /// The longest the body may drive the target.
     pub(crate) timeout: Duration,
 }
@@ -27,6 +29,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         job,
         of,
         payload,
+        staged,
         timeout,
     } = call;
     let target = of.target();
@@ -41,6 +44,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         target: workflow.target(target),
         of: &of,
         payload,
+        staged,
         timeout,
     };
     crate::child::run(child, ops, |child, session| {

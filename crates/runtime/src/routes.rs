@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
-use decision::{Caller, Core, Outcome};
+use decision::{Caller, Core, Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Bar};
 use schema::ir::{Api, Name};
-use schema::workflow::RoleId;
+use schema::workflow::{AgentId, RoleId};
 
 use crate::budget::Budget;
 use crate::host::deadline;
@@ -149,30 +149,74 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    // Fails the run for a route whose upstream refused its key, unless the refusal came after the
-    // selection was locked on a route that served before it, and for a failure of the agent's last
-    // request.
-    pub(crate) fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
-        // A refusal heard after the lock can't change the result: the agent's or a call's whose
-        // answer the agent can't act on. The final call starts after the lock, so a
-        // refusal on its route always fails the run.
-        for (caller, served) in &self.served {
-            if let Some(name) = served.key_refused_by()
-                && !self.held_at_lock.contains(caller)
+    pub(crate) fn owner(&self, caller: Caller) -> Option<AgentId> {
+        match caller {
+            Caller::Agent(agent) => Some(agent),
+            Caller::Job(job) => self.jobs.get(&job).and_then(|call| call.owner),
+        }
+    }
+
+    // A work route's failure belongs to its member. A failure of the final target, or of a
+    // legacy scalar run's work route, still fails the run.
+    pub(crate) fn routes_held(&self, outcome: &mut Result<Outcome, Stopped>) -> Result<(), String> {
+        for (&caller, served) in &self.served {
+            let Some(name) = served
+                .key_refused_by()
+                .filter(|_| !self.held_at_lock.contains(&caller))
+            else {
+                continue;
+            };
+            let route = match caller {
+                Caller::Agent(_) => "the agent's".to_owned(),
+                Caller::Job(job) => format!("job {}'s", job.0),
+            };
+            let reason = format!(
+                "the upstream `{name}` refused its key, with a 401, which ended {route} \
+                                  model route: give it a key that it takes, and run again"
+            );
+            if let Ok(Outcome::Team { members, .. }) = outcome
+                && let Some(member) = members
+                    .iter_mut()
+                    .find(|m| Some(m.agent) == self.owner(caller))
             {
-                let route = match caller {
-                    Caller::Agent(_) => "the agent's".to_owned(),
-                    Caller::Job(job) => format!("job {}'s", job.0),
-                };
-                return Err(format!(
-                    "the upstream `{name}` refused its key, with a 401, which ended {route} \
-                     model route: give it a key that it takes, and run again"
-                ));
+                member.route_failure.get_or_insert(reason);
+            } else {
+                return Err(reason);
             }
         }
-        match self.served.get(&Caller::Agent(self.workflow().agent().id)) {
-            Some(agent) => agent.failed_last(outcome),
-            None => Ok(()),
+        match outcome {
+            Ok(Outcome::Team { members, .. }) => {
+                for member in members {
+                    let finalized = member.submission.as_ref().is_some_and(|s| s.finalized);
+                    if member.route_failure.is_none()
+                        && matches!(member.work_end, WorkEnd::AgentExited(_))
+                        && !finalized
+                        && let Some(route) = self.served.get(&Caller::Agent(member.agent))
+                    {
+                        member.route_failure = route.failed_last().err();
+                    }
+                }
+            }
+            Ok(Outcome::Single {
+                work_end: WorkEnd::AgentExited(_),
+                verdict,
+            }) => {
+                let finalized = match verdict {
+                    Verdict::NoSubmission => false,
+                    Verdict::Returned { submission, .. } | Verdict::NoResult { submission, .. } => {
+                        submission.finalized
+                    }
+                };
+                if !finalized {
+                    for (caller, route) in &self.served {
+                        if matches!(caller, Caller::Agent(_)) {
+                            route.failed_last()?;
+                        }
+                    }
+                }
+            }
+            Ok(Outcome::Single { .. }) | Err(_) => {}
         }
+        Ok(())
     }
 }

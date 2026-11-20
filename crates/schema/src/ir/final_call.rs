@@ -18,6 +18,9 @@ pub struct Final {
     /// The target that the call starts, which no job function names.
     pub target: Name,
     pub body: FinalBody,
+    /// Absent, the selected payload of the sole agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<FinalInput>,
     /// The keyword arguments that the call passes the body, by the keyword-only parameter each
     /// names; absent, none.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -28,6 +31,14 @@ pub struct Final {
     pub payload_max_bytes: NonZeroU64,
     /// The call's timeout, counted from its target's start.
     pub timeout_seconds: NonZeroU64,
+}
+
+/// The input that the driver supplies to the final body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalInput {
+    /// A JSON manifest naming every agent and the file staged for each present selection.
+    Selections,
 }
 
 /// The final call's body: a `def` of a file of the workflow's, as a [`Body`](super::Body) is,

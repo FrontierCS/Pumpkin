@@ -155,7 +155,7 @@ fn agent_servings(
     url: &str,
     models: Option<&[&str]>,
 ) -> ByRole<Vec<Serving>> {
-    let agent = workflow.agent().id.role();
+    let agent = workflow.agents().next().unwrap().id.role();
     let servings = workflow.by_role(|(role, _)| {
         let served = models.filter(|_| role == agent).into_iter();
         Ok::<_, Infallible>(served.map(|models| serving(dir, url, models)).collect())
@@ -270,6 +270,34 @@ fn prepare() {
             record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
             refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"#]],
+    );
+}
+
+#[test]
+fn reserves_the_leases_of_every_concurrent_target_instance() {
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    ir["ir_version"] = "pumpkin.ir/v1".into();
+    ir["deadline_seconds"] = 30.into();
+    ir["final"]["input"] = "selections".into();
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let agent = roles[0]["runtime"]["agent"].as_object_mut().unwrap();
+    agent.remove("deadline_seconds");
+    agent.remove("egress");
+    let mut peer = roles[0].clone();
+    peer["name"] = "peer".into();
+    let mut runner = roles[1].clone();
+    runner["name"] = "box".into();
+    runner["runtime"] = serde_json::json!({"runner":{"cwd":"/work"}});
+    let mut session = lease("box");
+    session["session"]["instances"] = 64.into();
+    roles[1]["runtime"]["target"]["sessions"] = serde_json::json!([session]);
+    roles.extend([peer, runner]);
+
+    check(
+        [(0, ir, None)],
+        &expect![
+            "refused: reserving on provider `simulated`: the run needs 1056 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"
+        ],
     );
 }
 
@@ -612,8 +640,13 @@ fn reads_other_builds_lines() {
         log.push('\n');
         fs::write(record.join("log.jsonl"), log).unwrap();
         let readout = Record::open(&record).unwrap().progress().unwrap();
-        let progress = (readout.progress)
-            .map(|progress| (progress.last, progress.agent.sandbox.started, progress.end));
+        let progress = (readout.progress).map(|progress| {
+            (
+                progress.last,
+                progress.agents[&runtime::CallerName::Agent].sandbox.started,
+                progress.end,
+            )
+        });
         read.push(format!("{progress:?} {:?}", readout.unread));
     }
     expect![[r#"
@@ -654,7 +687,9 @@ fn reads_agent_end() {
         log.push('\n');
         fs::write(record.join("log.jsonl"), log).unwrap();
         let progress = Record::open(&record).unwrap().progress().unwrap().progress;
-        let gone = progress.unwrap().agent.sandbox.gone;
+        let gone = progress.unwrap().agents[&runtime::CallerName::Agent]
+            .sandbox
+            .gone;
         read.push(format!("{name}: gone {gone:?}"));
     }
     expect![[r#"

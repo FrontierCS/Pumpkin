@@ -1443,6 +1443,7 @@ fn step(arg: &str) -> Step {
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
         Ok(size) => vec![b'x'; size],
+        Err(_) if words[2] == "binary" => vec![0, 255, 1],
         Err(_) => words[2].as_bytes().to_vec(),
     };
     let (call, payload, less) = match words[..] {
@@ -1853,6 +1854,13 @@ impl Served {
                 }
                 let text = (lines.into_values()).collect::<Vec<_>>().join("\n");
                 self.printed.insert(launch.stdout.to_string(), text);
+                let status = ExitStatus::Code(0);
+                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+            }
+            "bytes" => {
+                let bytes = self.files.by_path.get(&launch.argv.args()[0]);
+                self.printed
+                    .insert(launch.stdout.to_string(), json!(bytes).to_string());
                 let status = ExitStatus::Code(0);
                 replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
             }

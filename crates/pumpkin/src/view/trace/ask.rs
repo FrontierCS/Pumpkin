@@ -95,7 +95,7 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
             .filter(|parsed| parsed.to_string() == caller);
         parsed.ok_or_else(|| {
             bad(format!(
-                "`{caller}` is no caller: expected `agent` or `job-<n>`"
+                "`{caller}` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"
             ))
         })
     };
@@ -397,24 +397,35 @@ impl Trace {
 /// `caller`, refused unless it is the agent, or a job that run `id`'s log, held as `held`, names:
 /// as a call it started, or as the caller of a model request or an op.
 fn known(id: &provider::RunTag, held: &Held, caller: CallerName) -> Result<CallerName, Failed> {
-    let CallerName::Job(job) = caller else {
-        return Ok(caller);
+    let progress = held.readout.progress.as_ref();
+    let named = match caller {
+        // Logs predating progress supported the singleton agent.
+        CallerName::Agent => progress.is_none_or(|progress| progress.agents.contains_key(&caller)),
+        CallerName::Member(_) => {
+            progress.is_some_and(|progress| progress.agents.contains_key(&caller))
+        }
+        CallerName::Job(job) => {
+            progress.is_some_and(|progress| progress.calls.iter().any(|call| call.job == job))
+                || held
+                    .exchanges
+                    .by_request
+                    .values()
+                    .any(|said| said.caller == caller)
+                || held.ops.names(caller)
+        }
     };
-    let mut calls = (held.readout.progress.iter()).flat_map(|progress| &progress.calls);
-    // A log of a build that wrote no hard end has no progress, so no calls, but its requests
-    // and ops still name their callers.
-    let named = calls.any(|call| call.job == job)
-        || held
-            .exchanges
-            .by_request
-            .values()
-            .any(|said| said.caller == caller)
-        || held.ops.names(caller);
     if !named {
-        return Err(Failed::NotFound(format!(
-            "run {}'s log names no job {job}: name `agent`, or a job of the run",
-            id.as_str()
-        )));
+        let reason = match caller {
+            CallerName::Job(job) => format!(
+                "run {}'s log names no job {job}: name an agent or a job of the run",
+                id.as_str()
+            ),
+            CallerName::Agent | CallerName::Member(_) => format!(
+                "run {} has no caller `{caller}`: name one of its agents or jobs",
+                id.as_str()
+            ),
+        };
+        return Err(Failed::NotFound(reason));
     }
     Ok(caller)
 }

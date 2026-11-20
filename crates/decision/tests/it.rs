@@ -12,7 +12,8 @@
 //! - `<session>.open [<seconds>]`, `.run <lease> <seconds>|- <argv>...`, `.put <lease> <tree> <to>
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
-//! - any op after `@<job>`, from that job's call instead;
+//! - an event after `@<role>`, from that agent, or an op after `@<job>`, from that call;
+//! - `agent_torn_down`, the end of a member's asynchronous teardown in selections mode;
 //! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
 //!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
 //!   barred `n` of the call's model requests over budget;
@@ -35,8 +36,8 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use decision::{
-    Action, CallResult, Caller, Core, Direction, Effect, Evaluated, Event, JobId, LeaseId, OpId,
-    Outcome, PayloadRef, Request, Submission, Unevaluated, Verdict, WorkEnd,
+    Action, CallResult, Caller, Core, Direction, Effect, Evaluated, Event, FinalInput, JobId,
+    LeaseId, OpId, Outcome, PayloadRef, Request, Submission, Unevaluated, Verdict, WorkEnd,
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
@@ -66,7 +67,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut run = Run {
         workflow: placed.workflow(),
         ops: 0,
-        caller: Caller::Agent(placed.workflow().agent().id),
+        caller: Caller::Agent(placed.workflow().agents().next().unwrap().id),
         jobs: BTreeMap::new(),
         tick_due: None,
         transcript: String::new(),
@@ -80,8 +81,8 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     {
         if let Some(asked) = line.strip_suffix(" model") {
             let (at, caller) = match asked.split_once(" @") {
-                Some((at, job)) => (at, Caller::Job(JobId(job.parse().unwrap()))),
-                None => (asked, Caller::Agent(run.workflow.agent().id)),
+                Some((at, job)) => (at, run.named_caller(job)),
+                None => (asked, run.default_caller()),
             };
             let at = Duration::from_millis(at.parse().unwrap());
             let allowed = if core.model_requests_allowed(caller, at) {
@@ -93,7 +94,8 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         } else {
             let (at, event) = line.split_once(' ').unwrap();
             let event = run.event(event);
-            let actions = core.handle(Duration::from_millis(at.parse().unwrap()), event);
+            let at = Duration::from_millis(at.parse().unwrap());
+            let actions = core.handle(at, event);
             run.note(line, &actions, core.tick_due());
         }
     }
@@ -180,13 +182,30 @@ fn call_event(words: &[&str]) -> Event {
 }
 
 impl Run<'_> {
+    fn named_caller(&self, name: &str) -> Caller {
+        if let Ok(number) = name.parse() {
+            Caller::Job(JobId(number))
+        } else {
+            let agent = self
+                .workflow
+                .agents()
+                .find(|agent| self.workflow.sandbox(agent.id.role()).name.as_str() == name)
+                .unwrap();
+            Caller::Agent(agent.id)
+        }
+    }
+
+    fn default_caller(&self) -> Caller {
+        Caller::Agent(self.workflow.agents().next().unwrap().id)
+    }
+
     fn event(&mut self, event: &str) -> Event {
         let (caller, event) = match event.strip_prefix('@') {
             Some(called) => {
                 let (job, event) = called.split_once(' ').unwrap();
-                (Caller::Job(JobId(job.parse().unwrap())), event)
+                (self.named_caller(job), event)
             }
-            None => (Caller::Agent(self.workflow.agent().id), event),
+            None => (self.default_caller(), event),
         };
         self.caller = caller;
         let words: Vec<&str> = event.splitn(3, ' ').collect();
@@ -196,12 +215,19 @@ impl Run<'_> {
             let op = session_op(op, &words);
             return self.op(Request::Session { grant, op });
         }
+        let agent = || match caller {
+            Caller::Agent(agent) => agent,
+            Caller::Job(_) => panic!("a job cannot send a member event"),
+        };
         match words[0] {
-            "agent_started" => Event::AgentStarted,
+            "agent_started" => Event::WorkStarted,
+            "agent_torn_down" => Event::AgentTornDown { agent: agent() },
             "agent_exited" => Event::AgentExited {
+                agent: agent(),
                 status: code(words[1]),
             },
             "agent_failed" => Event::AgentFailed {
+                agent: agent(),
                 reason: words[1..].join(" "),
             },
             "ops" => self.op(Request::Ops),
@@ -298,7 +324,10 @@ impl Run<'_> {
     #[expect(clippy::too_many_lines, reason = "one arm per action")]
     fn action(&mut self, action: &Action) -> String {
         match action {
-            Action::StartAgent => "start the agent".to_owned(),
+            Action::StartAgents if self.workflow.agents().len() > 1 => {
+                "start the agents".to_owned()
+            }
+            Action::StartAgents => "start the agent".to_owned(),
             Action::Reply {
                 op: OpId(op),
                 reply:
@@ -317,11 +346,24 @@ impl Run<'_> {
             } => format!("refuse op {op}: {message}"),
             Action::StartFinalCall {
                 job,
-                payload,
+                input,
                 timeout,
             } => {
                 self.jobs.insert(*job, JobOf::Final);
-                let payload = payload_name(payload);
+                let payload = match input {
+                    FinalInput::Payload(payload) => payload_name(payload),
+                    FinalInput::Selections(selections) => selections
+                        .iter()
+                        .map(|(agent, selection)| {
+                            let name = &self.workflow.sandbox(agent.role()).name;
+                            let selection = selection
+                                .as_ref()
+                                .map_or_else(|| "missing".to_owned(), payload_name);
+                            format!("{name}={selection}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
                 format!(
                     "start call {} of final on {payload}, with a timeout of {timeout:?}",
                     job.0
@@ -381,8 +423,13 @@ impl Run<'_> {
                 max_bytes,
             } => transfer_text((*lease, *holder), *transfer, direction, *max_bytes),
             Action::CloseLease { lease } => format!("close lease {}", lease.0),
-            Action::TearDownAgent => "tear down the agent".to_owned(),
-            Action::Finish { outcome } => format!("finish: {}", outcome_text(outcome)),
+            Action::TearDownAgent { agent } if self.workflow.agents().len() > 1 => {
+                format!("tear down {}", self.workflow.sandbox(agent.role()).name)
+            }
+            Action::TearDownAgent { .. } => "tear down the agent".to_owned(),
+            Action::Finish { outcome } => {
+                format!("finish: {}", outcome_text(outcome, self.workflow))
+            }
             Action::Abandon => "abandon the run at its hard end".to_owned(),
         }
     }
@@ -523,14 +570,33 @@ fn payload_name(payload: &PayloadRef) -> String {
     format!("op {op}'s payload of {} bytes", payload.size)
 }
 
-fn outcome_text(outcome: &Outcome) -> String {
-    let work_end = match &outcome.work_end {
+fn outcome_text(outcome: &Outcome, workflow: &Workflow) -> String {
+    let (work_end, verdict) = match outcome {
+        Outcome::Single { work_end, verdict } => (work_end, verdict),
+        Outcome::Team { members, result } => {
+            let rows = members
+                .iter()
+                .map(|member| {
+                    let name = &workflow.sandbox(member.agent.role()).name;
+                    let selection = member
+                        .submission
+                        .as_ref()
+                        .map_or_else(|| "missing".to_owned(), submission_text);
+                    format!("{name}: {:?}, {selection}", member.work_end)
+                })
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let result = result.as_ref().map(decision::CallResult::returned);
+            return format!("{rows}\n  team result {result:?}");
+        }
+    };
+    let work_end = match work_end {
         WorkEnd::Deadline => "the deadline".to_owned(),
         WorkEnd::Finalized => "a finalize".to_owned(),
         WorkEnd::AgentExited(status) => format!("the agent's exit, {status:?}"),
         WorkEnd::AgentFailed(reason) => format!("the agent's failure, {reason}"),
     };
-    let verdict = match &outcome.verdict {
+    let verdict = match verdict {
         Verdict::NoSubmission => "no submission".to_owned(),
         Verdict::Returned { submission, result } => {
             let values = result.values().iter();
@@ -2825,6 +2891,215 @@ fn abandoned_final_call_leases() {
             151003 call_returned 0 score=7
             151004 lease_ended 0
             151005 lease_ended 1
+        "#]],
+    );
+}
+
+fn team(ir: &mut Value) {
+    holders_leasing(ir);
+    ir["ir_version"] = json!("pumpkin.ir/v1");
+    ir["deadline_seconds"] = json!(20);
+    ir["final"]["input"] = json!("selections");
+    let zoe = &mut ir["roles"][0];
+    zoe["name"] = json!("zoe");
+    zoe["runtime"]["agent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("deadline_seconds");
+    zoe["runtime"]["agent"]["finalize_grace_seconds"] = json!(3);
+    let mut bob = zoe.clone();
+    bob["name"] = json!("bob");
+    bob["runtime"]["agent"]["finalize_grace_seconds"] = json!(10);
+    ir["roles"].as_array_mut().unwrap().push(bob);
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn members_work_until_their_own_end() {
+    check(
+        team,
+        r#"
+        100 agent_started
+        200 @zoe call train 12
+        201 @bob call train 22
+        204 call_started 0
+        205 call_started 1
+        210 @0 box.open
+        211 @1 box.open
+        220 @zoe gpu.open
+        225 @bob status 0
+        226 @bob gpu.close 2
+        230 @zoe now submit 12 select end_work
+        235 @zoe now submit 15 select
+        300 @zoe model
+        3230 @0 model
+        3230 @1 model
+        3230 tick
+        3240 @zoe model
+        3250 @bob model
+        3260 @bob status 1
+        3200 @zoe agent_exited 0
+        3300 @bob now submit 31 select
+        3400 @bob agent_exited 0
+        3500 @bob agent_torn_down
+        3600 call_failed 0 stopped
+        3601 call_failed 1 stopped
+        3700 lease_ended 0
+        3701 lease_ended 1
+        3702 lease_ended 2
+        3800 @zoe agent_torn_down
+        3900 call_returned 2 score=1
+    "#,
+        &expect![[r#"
+            start
+              start the agents
+              (tick due at 30000)
+            100 agent_started
+              (tick due at 20100)
+            200 @zoe call train 12
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 12 bytes, with a timeout of 19.9s
+            201 @bob call train 22
+              reply to op 2: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+              start call 1 of train on op 2's payload of 22 bytes, with a timeout of 19.899s
+            204 call_started 0
+            205 call_started 1
+            210 @0 box.open
+              reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 0 of box for job 0, as instance 0, started by 20100
+            211 @1 box.open
+              reply to op 4: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 1 of box for job 1, as instance 0, started by 20100
+            220 @zoe gpu.open
+              reply to op 5: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 2 of gpu, as instance 0, started by 20100
+            225 @bob status 0
+              refuse op 6: you have no job 0: ask about a job that one of your calls returned
+            226 @bob gpu.close 2
+              refuse op 7: you have no lease 2: name one that `gpu.open` returned
+            230 @zoe now submit 12 select end_work
+              reply to op 8: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
+              (tick due at 3230)
+            235 @zoe now submit 15 select
+              refuse op 9: the work was ended: make no more ops
+            300 @zoe model
+              model requests allowed
+            3230 @0 model
+              model requests refused
+            3230 @1 model
+              model requests allowed
+            3230 tick
+              stop call 0
+              close lease 0
+              close lease 2
+              tear down zoe
+              (tick due at 20100)
+            3240 @zoe model
+              model requests refused
+            3250 @bob model
+              model requests allowed
+            3260 @bob status 1
+              reply to op 10: {"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}
+            3200 @zoe agent_exited 0
+            3300 @bob now submit 31 select
+              reply to op 11: {"kind":"call","returned":{"state":"done"},"remaining_seconds":16}
+            3400 @bob agent_exited 0
+              stop call 1
+              close lease 1
+              tear down bob
+              (tick due at 180000)
+            3500 @bob agent_torn_down
+            3600 call_failed 0 stopped
+            3601 call_failed 1 stopped
+            3700 lease_ended 0
+            3701 lease_ended 1
+            3702 lease_ended 2
+            3800 @zoe agent_torn_down
+              start call 2 of final on zoe=op 8's payload of 12 bytes, bob=op 11's payload of 31 bytes, with a timeout of 120s
+            3900 call_returned 2 score=1
+              finish: zoe: Finalized, the finalized submission, op 8's payload of 12 bytes,
+              bob: AgentExited(Code(0)), the stored submission, op 11's payload of 31 bytes,
+              team result Ok(Returned({"score": Number(1)}))
+        "#]],
+    );
+}
+
+#[test]
+fn common_deadline_wins_a_tie() {
+    check(
+        |ir| {
+            team(ir);
+            let bob = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+            bob["needs"]["cpu_model"] = json!("slow");
+        },
+        r#"
+        35000 agent_started
+        47000 @zoe now submit 2 select end_work
+        49999 @bob model
+        50000 @zoe agent_exited 0
+        49999 @bob now submit 1 select
+        50100 @zoe agent_torn_down
+        50200 @bob agent_torn_down
+        50500 call_failed 0 judge failed
+    "#,
+        &expect![[r#"
+            start
+              start the agents
+              (tick due at 50000)
+            35000 agent_started
+            47000 @zoe now submit 2 select end_work
+              reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
+            49999 @bob model
+              model requests allowed
+            50000 @zoe agent_exited 0
+              tear down zoe
+              tear down bob
+              (tick due at 220000)
+            49999 @bob now submit 1 select
+              refuse op 2: the work phase has ended: make no more ops
+            50100 @zoe agent_torn_down
+            50200 @bob agent_torn_down
+              start call 0 of final on zoe=op 1's payload of 2 bytes, bob=missing, with a timeout of 120s
+            50500 call_failed 0 judge failed
+              finish: zoe: Deadline, the finalized submission, op 1's payload of 2 bytes,
+              bob: Deadline, missing
+              team result Err(Error("judge failed"))
+        "#]],
+    );
+}
+
+#[test]
+fn all_missing_members_are_judged() {
+    check(
+        team,
+        r#"
+        50 @bob agent_failed could not start
+        60 @bob agent_torn_down
+        100 agent_started
+        150 @zoe agent_exited 0
+        150 @bob agent_exited 0
+        200 @zoe agent_torn_down
+        250 call_returned 0 score=null
+    "#,
+        &expect![[r#"
+            start
+              start the agents
+              (tick due at 30000)
+            50 @bob agent_failed could not start
+              tear down bob
+            60 @bob agent_torn_down
+            100 agent_started
+              (tick due at 20100)
+            150 @zoe agent_exited 0
+              tear down zoe
+              (tick due at 180000)
+            150 @bob agent_exited 0
+            200 @zoe agent_torn_down
+              start call 0 of final on zoe=missing, bob=missing, with a timeout of 120s
+            250 call_returned 0 score=null
+              finish: zoe: AgentExited(Code(0)), missing
+              bob: AgentFailed("could not start"), missing
+              team result Ok(Returned({"score": Null}))
         "#]],
     );
 }

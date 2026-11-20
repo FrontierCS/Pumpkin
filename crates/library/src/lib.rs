@@ -14,7 +14,7 @@
 //! - `effort`: how hard the model reasons, one of the values the harness's file lists.
 //! - `workspace`: the absolute path the harness works in, which holds its home.
 //! - `prompt`: the task the harness works on, a string.
-//! - `deadline_seconds`: how long the work phase may last, a positive int.
+//! - `deadline_seconds`: the work phase's duration in seconds, omitted when the workflow gives it.
 //! - `finalize_grace_seconds`: how long the harness may keep running after a call ends its work.
 //! - `max_output_tokens`: how many tokens one of the model's answers may hold, a positive int.
 //! - `context_tokens`: how many tokens the model's context window holds, a positive int.

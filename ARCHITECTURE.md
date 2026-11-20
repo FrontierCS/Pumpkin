@@ -7,15 +7,14 @@ search.
 
 ## Bird's-eye view
 
-Pumpkin runs workflows in which an AI agent works on a task and a final call judges what it
-submits. The agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses
+Pumpkin runs workflows in which one or more agents work on a task. A final call judges their
+submissions. The agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses
 whatever it can reach to finish its task or raise its result. Pumpkin's job is to give each part
 of a run exactly what the workflow grants it and nothing more, to bound what a run spends in time
 and money, and to keep a record of the run that no sandbox can alter.
 
-A workflow is data, the workflow IR. It names its roles, one agent, the targets its calls start
-and the runners its sessions lease; the grants each role holds, such as the agent's job functions,
-its sessions and its now functions; each role's model route; and the final call, a body that runs
+A workflow is data, the workflow IR. It declares the agent roles, targets for calls, and runners
+for leases, the grants each role holds, each role's model route, and the final call, a body that runs
 on the selection in a fresh sandbox of its target, and whose return is the run's result. A task's
 source, in Pumpkin's workflow language, a subset of Starlark, evaluates to that IR and to the
 images its roles run. The IR is the only input the runtime reads, and the bodies of its functions
@@ -135,9 +134,10 @@ identifies the caller by the agent role or job registered for that session and s
 how many of its target's model requests a budget barred, and what its body returns, so the
 workflow decides the agent's feedback. The status reply's types hold nothing else.
 
-**Architecture Invariant:** the final call starts only once the agent's sandbox, its jobs and
-every lease that they held have ended, so nothing the agent started runs while its submission is
-judged. The core's phases (`Teardown`, then `Final`) hold this.
+**Architecture Invariant:** the final call starts once the work sandboxes and their leases have been torn
+down. Each agent locks its own submission. A team judge receives one manifest entry per agent
+(including missing selections), and only the files named by present entries. The core admits
+the final call once, after the common deadline or after every member has ended work.
 
 ### `crates/recipe`
 

@@ -7,13 +7,15 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
-use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
-use schema::ir::{ArgumentValue, Name};
+use decision::{Caller, Core, FinalInput, JobId, LeaseId, PayloadRef};
+use schema::ir::{AbsolutePath, ArgumentValue, Name};
+use schema::sandbox::RelativePath;
 use schema::sandbox::op::OpReply;
-use schema::workflow::{JobFunctionId, RoleId, SessionId};
+use schema::workflow::{JobFunctionId, SessionId};
 use stdx::Context;
 
 use crate::child::{Child, Deadlines, End, Message};
+use crate::record::{Stored, reference};
 use crate::sandbox::Which;
 use crate::{Called, Clock, Host, Inbox, Input, Runtime, body, call, lease};
 
@@ -27,6 +29,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         (payload, arguments): (&PayloadRef, BTreeMap<Name, ArgumentValue>),
         timeout: Duration,
     ) -> Result<(), String> {
+        let instance = self.sandboxes.capacity.functions[&function];
         let function = self.workflow().job_function(function);
         let role = function.target.role();
         // A call ends with the work phase, which ends by the core's next act of its own, and what
@@ -46,16 +49,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 arguments,
             },
             payload: self.payloads.stored(payload),
+            staged: Vec::new(),
             timeout,
         };
-        self.start_body(scope, call, deadlines)
+        self.start_body(scope, call, deadlines, instance)
     }
 
     pub(crate) fn start_final_call<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         job: JobId,
-        payload: &PayloadRef,
+        input: FinalInput,
         timeout: Duration,
     ) -> Result<(), String> {
         let final_call = self.workflow().final_call();
@@ -70,13 +74,46 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             startup,
             collect: self.hard_end(),
         };
+        let mut staged = Vec::new();
+        let payload = match input {
+            FinalInput::Payload(payload) => self.payloads.stored(&payload),
+            FinalInput::Selections(selections) => {
+                let manifest = self.selections(&selections, &mut staged);
+                let bytes = serde_json::to_vec(&manifest)
+                    .context("encoding the final selections manifest")?;
+                let payload = reference(&bytes);
+                self.payloads.store(&bytes, &payload)?;
+                self.log
+                    .entry(crate::Entry::FinalManifest(job, payload.clone()))?;
+                self.payloads.stored(&payload)
+            }
+        };
         let call = call::job::Call {
             job,
             of: body::Of::Final(final_call),
-            payload: self.payloads.stored(payload),
+            payload,
+            staged,
             timeout,
         };
-        self.start_body(scope, call, deadlines)
+        self.start_body(scope, call, deadlines, 0)
+    }
+
+    fn selections(
+        &self,
+        selections: &[(schema::workflow::AgentId, Option<PayloadRef>)],
+        staged: &mut Vec<(AbsolutePath, Stored)>,
+    ) -> Vec<serde_json::Value> {
+        let dir = const { AbsolutePath::from_static("/pumpkin/in/selections") };
+        selections.iter().map(|(agent, selected)| {
+            let role = &self.workflow().sandbox(agent.role()).name;
+            let selection = selected.as_ref().map(|selected| {
+                let path = dir.join(&RelativePath::from(role));
+                let entry = serde_json::json!({"path": path, "bytes": selected.size, "digest": selected.digest});
+                staged.push((path, self.payloads.stored(selected)));
+                entry
+            });
+            serde_json::json!({"role": role, "selection": selection})
+        }).collect()
     }
 
     /// Starts `call` on a fresh sandbox of its target, on a thread of its own.
@@ -85,35 +122,31 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         call: call::job::Call<'r>,
         deadlines: Deadlines,
+        instance: u32,
     ) -> Result<(), String> {
         let (job, target) = (call.job, call.of.target());
+        let owner = match &call.of {
+            body::Of::Function { function, .. } => Some(function.holder),
+            body::Of::Final(_) => None,
+        };
         let bodies = self.bodies;
         let run = move |mut child: Child<'r, H, OpReply>| {
             call::job::run(call, bodies, &mut child);
         };
         let stack = Some(bodies.stack_bytes());
-        let which = Which::Call(job, target);
+        let which = Which::Call(job, target, instance);
         let orders = self.start_child(scope, which, deadlines, stack, run)?;
-        self.called(job, orders, deadlines, target.role());
-        Ok(())
-    }
-
-    /// Keeps job `job`'s call, started on `role`'s sandbox with `orders` into its inbox.
-    fn called(
-        &mut self,
-        job: JobId,
-        orders: Sender<Message<OpReply>>,
-        deadlines: Deadlines,
-        role: RoleId,
-    ) {
         let called = Called {
             orders,
             collect: deadlines.collect,
             trees: None,
-            role,
+            role: target.role(),
+            instance,
+            owner,
             model_requests_over_budget: 0,
         };
         self.jobs.insert(job, called);
+        Ok(())
     }
 
     pub(crate) fn start_lease<'s>(
@@ -123,7 +156,16 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         (lease, instance, start_by): (LeaseId, u32, Duration),
         (holder, grant): (Caller, SessionId),
     ) -> Result<(), String> {
-        let runner_id = self.workflow().session(grant).runner;
+        let session = self.workflow().session(grant);
+        let runner_id = session.runner;
+        let holder_instance = match holder {
+            Caller::Agent(_) => 0,
+            Caller::Job(job) => self.call(job).instance,
+        };
+        // Capacity reserved this complete range, including every slot of every holder instance.
+        let instance = self.sandboxes.capacity.sessions[&grant]
+            + holder_instance * session.instances.get()
+            + instance;
         let runner = self.workflow().runner(runner_id);
         let (start, collect) = match holder {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of
@@ -163,7 +205,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         stack_bytes: Option<usize>,
         run: impl FnOnce(Child<'r, H, O>) + Send + 's,
     ) -> Result<Sender<Message<O>>, String> {
-        let dir = self.dir.join(which.record_dir());
+        let dir = self.dir.join(which.record_dir(self.workflow()));
         let parent = dir.parent().unwrap_or(self.dir);
         fs::create_dir_all(parent).context(parent.display())?;
         fs::create_dir(&dir).context(dir.display())?;
@@ -179,7 +221,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             inbox,
             reports: self.inbox.sender(),
         };
-        let mut builder = thread::Builder::new().name(which.name().to_string());
+        let mut builder = thread::Builder::new().name(which.name(self.workflow()).to_string());
         if let Some(bytes) = stack_bytes {
             builder = builder.stack_size(bytes);
         }

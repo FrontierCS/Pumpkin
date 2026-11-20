@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
-use std::{fmt, io, iter};
+use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
@@ -28,7 +28,8 @@ use schema::sandbox::{
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
-    AgentId, ByProvider, ByRole, Holder, Placed, RoleId, RunnerId, TargetId, Workflow,
+    AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
+    Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
@@ -44,44 +45,99 @@ const PUMPKIN: Limits = Limits {
     entries: ENTRIES,
 };
 
-/// The roles that `provider` hosts, in the phases that [`Provider::reserve`] takes: the work
-/// phase's roles (the agent, the target of each job function, and the runner of each session that
-/// the others hold), then the final call's (its target and the runners it holds). The second
-/// starts only once the first has ended. A phase with no role on `provider` is left out.
-pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
-    let workflow = placed.workflow();
-    let target = workflow.final_call().target;
-    let runners = |last: bool| {
-        (workflow.sessions())
-            .filter(move |(_, grant)| (grant.holder == Holder::Target(target)) == last)
-            .map(|(_, grant)| grant.runner.role())
-    };
-    let agent = iter::once(workflow.agent().id.role());
-    let targets = (workflow.job_functions()).map(|(_, function)| function.target.role());
-    let work: Vec<RoleId> = (agent.chain(targets)).chain(runners(false)).collect();
-    let last: Vec<RoleId> = iter::once(target.role()).chain(runners(true)).collect();
-    let on = |roles: Vec<RoleId>| -> Vec<Role> {
-        (roles.into_iter())
-            .filter(|&role| placed.placement(role).provider == *provider)
-            .map(|role| provider_role(workflow, role))
-            .collect()
-    };
-    [on(work), on(last)]
-        .into_iter()
-        .filter(|phase| !phase.is_empty())
-        .collect()
+/// The simultaneous instances reserved in each phase. Each function owns one slot of its
+/// target; each session owns a range of runner slots for every instance of its holder.
+pub(super) struct Capacity {
+    work: BTreeMap<RoleId, NonZeroU32>,
+    final_phase: BTreeMap<RoleId, NonZeroU32>,
+    pub(super) functions: BTreeMap<JobFunctionId, u32>,
+    pub(super) sessions: BTreeMap<SessionId, u32>,
 }
 
-// A runner's sandboxes run at once as many as its grant opens leases at once, and any other
-// role's, one.
-fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
+impl Capacity {
+    pub(super) fn of(workflow: &Workflow) -> Result<Self, String> {
+        let mut work = BTreeMap::new();
+        let mut final_phase = BTreeMap::new();
+        let final_role = workflow.final_call().target.role();
+        final_phase.insert(final_role, NonZeroU32::MIN);
+        for agent in workflow.agents() {
+            work.insert(agent.id.role(), NonZeroU32::MIN);
+        }
+        let overflow = |role| {
+            format!(
+                "role `{}` needs more than {} simultaneous sandboxes: reduce its grants",
+                workflow.sandbox(role).name,
+                u32::MAX
+            )
+        };
+        let reserve = |phase: &mut BTreeMap<_, NonZeroU32>, role, count: u32| {
+            let first = phase.get(&role).map_or(0, |count| count.get());
+            let total = first
+                .checked_add(count)
+                .and_then(NonZeroU32::new)
+                .ok_or_else(|| overflow(role))?;
+            phase.insert(role, total);
+            Ok::<_, String>(first)
+        };
+        let mut functions = BTreeMap::new();
+        for (id, function) in workflow.job_functions() {
+            functions.insert(id, reserve(&mut work, function.target.role(), 1)?);
+        }
+        let mut sessions = BTreeMap::new();
+        for (id, grant) in workflow.sessions() {
+            let holder = grant.holder.role();
+            let runner = grant.runner.role();
+            let phase = if holder == final_role {
+                &mut final_phase
+            } else {
+                &mut work
+            };
+            let count = phase[&holder]
+                .get()
+                .checked_mul(grant.instances.get())
+                .ok_or_else(|| overflow(runner))?;
+            sessions.insert(id, reserve(phase, runner, count)?);
+        }
+        Ok(Self {
+            work,
+            final_phase,
+            functions,
+            sessions,
+        })
+    }
+
+    pub(super) fn phases(&self, placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
+        [&self.work, &self.final_phase]
+            .into_iter()
+            .map(|phase| {
+                phase
+                    .iter()
+                    .filter(|(role, _)| placed.placement(**role).provider == *provider)
+                    .map(|(&role, &instances)| provider_role(placed.workflow(), role, instances))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|phase| !phase.is_empty())
+            .collect()
+    }
+
+    fn instances(&self, role: RoleId) -> NonZeroU32 {
+        self.work
+            .get(&role)
+            .into_iter()
+            .chain(self.final_phase.get(&role))
+            .copied()
+            .max()
+            .unwrap_or(NonZeroU32::MIN)
+    }
+}
+
+fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Role {
     let sandbox = workflow.sandbox(role);
-    let leased = (workflow.sessions()).find(|(_, grant)| grant.runner.role() == role);
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,
         resources: sandbox.needs.resources(),
-        instances: leased.map_or(NonZeroU32::MIN, |(_, grant)| grant.instances),
+        instances,
     }
 }
 
@@ -95,6 +151,7 @@ pub(super) struct Published<'p> {
 /// Starts, records and deletes the sandboxes of one run.
 pub(super) struct Sandboxes<'p, H: Host> {
     run: RunTag,
+    pub(super) capacity: &'p Capacity,
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
@@ -114,6 +171,7 @@ struct Made<'p> {
     on: &'p Name,
     id: SandboxId,
     which: Which,
+    deleted: bool,
     gpus: Option<Vec<GpuModel>>,
 }
 
@@ -162,7 +220,7 @@ impl Meets<'_> {
 #[derive(Clone, Copy)]
 pub(super) enum Which {
     Agent(AgentId),
-    Call(JobId, TargetId),
+    Call(JobId, TargetId, u32),
     Lease(LeaseId, RunnerId, u32),
 }
 
@@ -170,22 +228,25 @@ impl Which {
     fn role(self) -> RoleId {
         match self {
             Self::Agent(agent) => agent.role(),
-            Self::Call(_, target) => target.role(),
+            Self::Call(_, target, _) => target.role(),
             Self::Lease(_, runner, _) => runner.role(),
         }
     }
 
     fn instance(self) -> u32 {
         match self {
-            Self::Agent(_) | Self::Call(..) => 0,
-            Self::Lease(_, _, instance) => instance,
+            Self::Agent(_) => 0,
+            Self::Call(_, _, instance) | Self::Lease(_, _, instance) => instance,
         }
     }
 
-    pub(super) fn record_dir(self) -> String {
+    pub(super) fn record_dir(self, workflow: &Workflow) -> String {
         match self {
+            Self::Agent(agent) if workflow.final_call().selections() => {
+                format!("agents/{}", workflow.sandbox(agent.role()).name)
+            }
             Self::Agent(_) => "agent".to_owned(),
-            Self::Call(job, _) => format!("jobs/{}", job.0),
+            Self::Call(job, ..) => format!("jobs/{}", job.0),
             Self::Lease(lease, ..) => format!("leases/{}", lease.0),
         }
     }
@@ -200,19 +261,19 @@ impl Which {
 
     /// The sandbox's name, which no other sandbox of its run has: `agent`, `job-<n>` or
     /// `lease-<n>`.
-    pub(super) fn name(self) -> Name {
+    pub(super) fn name(self, workflow: &Workflow) -> Name {
         let name = match self {
-            Self::Agent(_) => SandboxName::Agent,
-            Self::Call(job, _) => SandboxName::Job(job.0),
+            Self::Agent(agent) => SandboxName::of_agent(workflow, agent),
+            Self::Call(job, ..) => SandboxName::Job(job.0),
             Self::Lease(lease, ..) => SandboxName::Lease(lease.0),
         };
         // A `Name` made of such parts, which couldn't fail, would be a `pub` item of the schema
         // for this one caller.
         let Ok(name) = Name::try_from(name.to_string()) else {
             unreachable!(
-                "a sandbox's name within its run is no name, though `agent`, and `job-` and \
-                 `lease-` with a number's digits, are names: a letter, then letters, digits and \
-                 `-`, 24 at most"
+                "a sandbox's name within its run is no name, though it is `agent` or a prefix \
+                 `agent-`, `job-`, or `lease-` and decimal digits, at most 26 characters of \
+                 the 64 that a name allows"
             )
         };
         name
@@ -223,14 +284,26 @@ impl Which {
 /// A sandbox's name within its run, as [`Which::name`] makes it.
 pub(super) enum SandboxName {
     Agent,
+    Member(usize),
     Job(u64),
     Lease(u64),
+}
+
+impl SandboxName {
+    pub(super) fn of_agent(workflow: &Workflow, agent: AgentId) -> Self {
+        if workflow.final_call().selections() {
+            Self::Member(agent.role().index())
+        } else {
+            Self::Agent
+        }
+    }
 }
 
 impl fmt::Display for SandboxName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Agent => f.write_str("agent"),
+            Self::Member(index) => write!(f, "agent-{index}"),
             Self::Job(job) => write!(f, "job-{job}"),
             Self::Lease(lease) => write!(f, "lease-{lease}"),
         }
@@ -243,6 +316,8 @@ impl<'de> Deserialize<'de> for SandboxName {
         let numbered = |prefix: &str| name.strip_prefix(prefix)?.parse().ok();
         if name == "agent" {
             Ok(Self::Agent)
+        } else if let Some(index) = name.strip_prefix("agent-").and_then(|n| n.parse().ok()) {
+            Ok(Self::Member(index))
         } else if let Some(job) = numbered("job-") {
             Ok(Self::Job(job))
         } else if let Some(lease) = numbered("lease-") {
@@ -342,6 +417,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         published: Published<'p>,
         run: RunTag,
         placed: &'p Placed,
+        capacity: &'p Capacity,
         record: &'p Path,
         host: &'p H,
         logged: Sender<Input>,
@@ -359,6 +435,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             });
         Self {
             run,
+            capacity,
             placed,
             providers,
             images,
@@ -387,7 +464,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
     ) -> Result<Started, String> {
-        let name = which.name();
+        let name = which.name(self.workflow());
         let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
@@ -399,7 +476,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let create = Create {
             run: self.run.clone(),
             name,
-            role: provider_role(self.workflow(), role),
+            role: provider_role(self.workflow(), role, self.capacity.instances(role)),
             instance: which.instance(),
             class: placement.class.clone(),
             image: self.images.get(role).clone(),
@@ -414,6 +491,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             on: &placement.provider,
             id: id.clone(),
             which,
+            deleted: false,
             gpus: None,
         };
         let recorded = self.write_sandbox(&made, None);
@@ -462,7 +540,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             .collect();
         // Written once the lock is let go, so that no other thread waits on the record's syncs.
         drop(created);
-        let saw = log::Entry::Gpus(which.name(), gpus.to_vec());
+        let saw = log::Entry::Gpus(which.name(self.workflow()), gpus.to_vec());
         // The loop's inbox outlives every thread that starts a sandbox.
         let _ = self.logged.send(Input::Logged(saw));
         let failures: Vec<String> = (made.iter())
@@ -544,8 +622,9 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             id,
             which,
             gpus,
+            ..
         } = made;
-        let dir = self.record.join(which.record_dir());
+        let dir = self.record.join(which.record_dir(self.workflow()));
         record::write_sandbox(self.host, &dir, on, id, gpus.as_deref(), deleted)
     }
 
@@ -558,18 +637,24 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         ids: &[SandboxId],
         deleted: &Result<(), Undeleted>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
-        let created = stdx::unpoisoned(self.created.lock());
-        let made = (created.iter()).filter(|made| made.on == on && ids.contains(&made.id));
-        // Written once the lock is let go, so that no other thread waits on the record's syncs.
-        let made: Vec<Made<'_>> = made.map(Made::clone).collect();
-        drop(created);
         let undeleted = deleted.as_ref().err();
         let failed = |id: &SandboxId| undeleted.and_then(|undeleted| undeleted.why(id));
+        let mut created = stdx::unpoisoned(self.created.lock());
+        let made: Vec<_> = created
+            .iter_mut()
+            .filter(|made| made.on == on && ids.contains(&made.id))
+            .map(|made| {
+                made.deleted = failed(&made.id).is_none();
+                made.clone()
+            })
+            .collect();
+        // File syncs don't hold the lock shared by concurrent creates and deletes.
+        drop(created);
         let mut logged = Vec::new();
         for id in ids.iter().filter(|id| failed(id).is_none()) {
             let made = made.iter().find(|made| made.id == *id);
             let deleted = Deleted {
-                sandbox: made.map(|made| made.which.name()),
+                sandbox: made.map(|made| made.which.name(self.workflow())),
                 provider: on.clone(),
                 id: id.clone(),
             };
@@ -608,7 +693,12 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             self.send(logged);
             recorded
         };
-        let (_, failed) = sweep(providers, &self.run, &[], record);
+        let remaining: Vec<_> = stdx::unpoisoned(self.created.lock())
+            .iter()
+            .filter(|made| !made.deleted)
+            .map(|made| (made.on.clone(), made.id.clone()))
+            .collect();
+        let (_, failed) = sweep(providers, &self.run, &remaining, record);
         failed.map_or(Ok(()), Err)
     }
 }

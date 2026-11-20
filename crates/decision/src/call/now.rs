@@ -9,11 +9,11 @@ use core::time::Duration;
 
 use schema::ir::Name;
 use schema::sandbox::op::{CallReply, NowReply, OpReply};
-use schema::workflow::NowFunctionId;
+use schema::workflow::{AgentId, NowFunctionId};
 
 use crate::jobs::BODY_FAILED;
 use crate::ops::{Held, Working, fits};
-use crate::{Action, Core, Effect, Evaluated, PayloadRef, Phase, Unevaluated, WorkEnd};
+use crate::{Action, Core, Effect, Evaluated, Member, PayloadRef, Unevaluated, WorkEnd};
 
 impl Core<'_> {
     /// The reply to the call of the now function `function` with `payload`, by `working`, whose
@@ -27,17 +27,14 @@ impl Core<'_> {
         then: &mut Vec<Action>,
     ) -> Result<OpReply, String> {
         let (id, deadline, latest) = self.now_function(working, function)?;
-        fits(
-            function,
-            payload,
-            self.workflow.now_function(id).payload_max_bytes,
-        )?;
+        let grant = self.workflow.now_function(id);
+        fits(function, payload, grant.payload_max_bytes)?;
         let Evaluated { effects, returned } =
             evaluated.map_err(|unevaluated| match unevaluated {
                 Unevaluated::Unread(words) => words,
                 Unevaluated::Failed(_) => BODY_FAILED.to_owned(),
             })?;
-        let end = self.apply(&effects, payload, latest, deadline, then)?;
+        let end = self.apply(grant.holder, &effects, payload, latest, deadline, then)?;
         Ok(OpReply::Call(CallReply::Now(NowReply {
             returned: returned.returned(),
             remaining_seconds: self.seconds_left(end),
@@ -70,6 +67,7 @@ impl Core<'_> {
     /// The first effect refused, with every effect unapplied.
     fn apply(
         &mut self,
+        agent: AgentId,
         effects: &[Effect],
         payload: &PayloadRef,
         mut latest: Option<PayloadRef>,
@@ -103,24 +101,14 @@ impl Core<'_> {
         // Ops are taken only while the agent works (`working`): the phase goes on with the
         // selection, or ending the work locks it.
         let Some(selected) = locked else {
-            self.phase = Phase::Work { latest, deadline };
+            self.members.insert(agent, Member::Working(latest));
             return Ok(deadline);
         };
-        let grace = self.workflow.agent().finalize_grace;
-        let grace_end = self.now.saturating_add(grace);
-        // A tie goes to the deadline, which names the end.
-        let (end, work_end) = if grace_end < deadline {
-            (grace_end, WorkEnd::Finalized)
-        } else {
-            (deadline, WorkEnd::Deadline)
-        };
-        self.phase = Phase::Finalized {
-            payload: selected,
-            end,
-            work_end,
-        };
+        let grace = self.workflow.agent_by_id(agent).finalize_grace;
+        let end = self.now.saturating_add(grace).min(deadline);
+        self.members.insert(agent, Member::Grace { selected, end });
         if grace.is_zero() {
-            self.end_work(WorkEnd::Finalized, then);
+            self.end_work(agent, WorkEnd::Finalized, then);
         }
         Ok(end)
     }

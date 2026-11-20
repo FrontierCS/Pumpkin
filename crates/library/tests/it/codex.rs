@@ -102,6 +102,32 @@ fn cases() -> Vec<[&'static str; 7]> {
 }
 
 #[test]
+fn workflow_deadline() {
+    let task = entry("codex", &OWN)
+        .replace("    deadline_seconds = DEADLINE_SECONDS,\n", "")
+        .replace(
+            "workflow(\n",
+            "workflow(\n    deadline_seconds = DEADLINE_SECONDS,\n",
+        )
+        .replace("final = {", "final = {\"input\": \"selections\", ");
+    let (workflow, _) = evaluated(&task, &args(&OWN, &cases()[0])).unwrap();
+    let ir = workflow.ir();
+    let ir::Runtime::Agent(runtime) = &ir.roles[0].runtime else {
+        panic!("the harness gives the agent runtime");
+    };
+    assert!(runtime.deadline_seconds.is_none());
+    check(
+        &format!(
+            "{:?} {:?} {:?}",
+            ir.ir_version,
+            workflow.work_deadline(),
+            ir.final_call.input
+        ),
+        &expect!["V1 60s Some(Selections)"],
+    );
+}
+
+#[test]
 #[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
 fn roles() {
     check_roles(
