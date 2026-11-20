@@ -22,10 +22,10 @@ keeps you working. Exchange your test on the board before asking the evaluator t
 You can call the board with python3 /opt/team/client.py followed by one JSON request as an
 argument, or in Python: import sys, json; sys.path.insert(0, '/opt/team'); from client import board.
 
-Run sandboxctl call eval solution.cpp and poll sandboxctl status JOB
-until completed. Two is the full score. You have at most two evaluations and fifteen minutes in
-all. When you have a full score, or after your second evaluation at any score, finalize your best
-evaluated source immediately with your role's final command. A partial score counts.
+Run sandboxctl call eval solution.cpp --wait 900 for the draft score. Two is the full
+score. You have at most two evaluations and fifteen minutes in all. When you have a full score,
+or after your second evaluation at any score, finalize your best evaluated source immediately
+with your role's final command. A partial score counts.
 """
 
 ASSIGNMENTS = {
