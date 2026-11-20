@@ -47,10 +47,6 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        // A call has ended only once every lease it held has.
-        let holding = (self.jobs)
-            .of(JobOf::Function(id))
-            .any(|job| self.leases.holds(Caller::Job(job)));
         if let Some(service) = self.shared.get(&function.target) {
             if *service != crate::Availability::Available {
                 return Err(format!(
@@ -65,8 +61,12 @@ impl Core<'_> {
                     ),
                 });
             }
-        }
-        if usage.busy || holding {
+        } else if usage.busy
+            || self
+                .jobs
+                .of(JobOf::Function(id))
+                .any(|job| self.leases.holds(Caller::Job(job)))
+        {
             return Ok(OpReply::Refused {
                 busy: true,
                 message: format!(
