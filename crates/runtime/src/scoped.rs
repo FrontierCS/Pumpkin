@@ -3,7 +3,7 @@
 //! the event that finished it. A sandbox sharing the job can have a gateway op outstanding too.
 
 use decision::{Caller, Core, Event, JobId, LeaseId};
-use schema::sandbox::op::{Last, LeaseState, LeaseStatusReply, OpReply, SessionOp};
+use schema::sandbox::op::{Last, LeaseState, LeaseStatusReply, OpReply};
 
 use crate::child::Message;
 use crate::{Host, Runtime, relay};
@@ -13,18 +13,6 @@ pub(super) enum Waiting {
     Open,
     Work,
     Close,
-    Status,
-}
-
-impl Waiting {
-    pub(super) fn for_op(op: &SessionOp) -> Self {
-        match op {
-            SessionOp::Open { .. } => Self::Open,
-            SessionOp::Run { .. } | SessionOp::Put { .. } | SessionOp::Get { .. } => Self::Work,
-            SessionOp::Close { .. } => Self::Close,
-            SessionOp::Status { .. } => Self::Status,
-        }
-    }
 }
 
 pub(super) struct Waiter {
@@ -47,11 +35,7 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(());
             }
             OpReply::Lease(accepted) => LeaseId(accepted.lease),
-            OpReply::LeaseStatus(status) => {
-                self.answer_body(job, Ok(status));
-                return Ok(());
-            }
-            OpReply::Ops(_) | OpReply::Call(_) | OpReply::Status(_) => {
+            OpReply::Ops(_) | OpReply::Call(_) | OpReply::Status(_) | OpReply::LeaseStatus(_) => {
                 return Err(
                     "the core replied to a body session operation with another kind of reply"
                         .to_owned(),
@@ -79,18 +63,20 @@ impl<H: Host> Runtime<'_, H> {
         Ok(())
     }
 
-    pub(super) fn wake(&mut self, core: &Core<'_>, event: &Event) {
+    pub(super) fn receipt(
+        &mut self,
+        core: &Core<'_>,
+        event: &Event,
+    ) -> Option<(JobId, Result<LeaseStatusReply, String>)> {
         let lease = match event {
             Event::LeaseReady { lease }
             | Event::LeaseEnded { lease }
             | Event::LeaseFailed { lease, .. }
             | Event::CommandEnded { lease, .. }
             | Event::TransferEnded { lease, .. } => *lease,
-            _ => return,
+            _ => return None,
         };
-        let Some(waiter) = self.waiting.get(&lease) else {
-            return;
-        };
+        let waiter = self.waiting.get(&lease)?;
         let job = waiter.job;
         let result = match event {
             Event::LeaseFailed { reason, .. } => Some(Err(reason.clone())),
@@ -98,13 +84,12 @@ impl<H: Host> Runtime<'_, H> {
                 .held_lease(Caller::Job(job), lease)
                 .and_then(|status| waiter.completed(status)),
         };
-        if let Some(result) = result {
-            self.waiting.remove(&lease);
-            self.answer_body(job, result);
-        }
+        let receipt = result?;
+        self.waiting.remove(&lease);
+        Some((job, receipt))
     }
 
-    fn answer_body(&mut self, job: JobId, result: Result<LeaseStatusReply, String>) {
+    pub(super) fn answer_body(&mut self, job: JobId, result: Result<LeaseStatusReply, String>) {
         let _ = self
             .call(job)
             .orders
@@ -129,7 +114,6 @@ impl Waiter {
                     }
             }
             Waiting::Close => status.state == LeaseState::Closed,
-            Waiting::Status => true,
         };
         if ready {
             Some(Ok(status))

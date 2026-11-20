@@ -3,9 +3,11 @@
 //! the same function, whatever changed on disk since.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use lang::{Args, Body, BodyKind, Bounds, Host, Label, Loader, Problems};
 use schema::ir::{self, AbsolutePath, Argv, Name};
+use schema::sandbox::op::RunnerOutput;
 use schema::workflow::Workflow;
 use serde_json::{Map, Value};
 
@@ -189,12 +191,29 @@ impl lang::Run for Proposing<'_> {
 struct Driven<'t>(&'t mut dyn runtime::Target);
 
 impl lang::Target for Driven<'_> {
-    fn runner(
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
+        self.0.runner_open(grant)
+    }
+    fn runner_put(
         &mut self,
         grant: &Name,
-        op: schema::sandbox::op::SessionOp,
-    ) -> Result<schema::sandbox::op::LeaseStatusReply, String> {
-        self.0.runner(grant, op)
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.runner_put(grant, lease, tree, to)
+    }
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String> {
+        self.0.runner_run(grant, lease, argv, timeout_seconds)
+    }
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
+        self.0.runner_close(grant, lease)
     }
 
     fn caller(&self) -> Option<&str> {

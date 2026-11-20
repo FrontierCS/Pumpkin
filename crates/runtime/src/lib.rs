@@ -475,8 +475,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     .collect::<Vec<_>>();
                 self.held_at_lock.extend(held);
             }
-            self.log.event(self.workflow(), at, &event, &actions)?;
-            self.wake(core, &event);
+            let receipt = self.receipt(core, &event);
+            self.log
+                .event(self.workflow(), at, &event, &actions, receipt.is_some())?;
+            if let Some((job, reply)) = receipt {
+                self.answer_body(job, reply);
+            }
             // A route ends as the core stops allowing its model requests, the agent's at the work
             // phase's end, a call's at its timeout or its report, before the core's actions are
             // performed: its exchanges in flight then end while the agent's teardown, if the
@@ -663,7 +667,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 continue;
             };
             let actions = core.handle(at, event.clone());
-            self.log.event(self.workflow(), at, &event, &actions)?;
+            self.log
+                .event(self.workflow(), at, &event, &actions, false)?;
             for action in actions {
                 match action {
                     Action::Reply { op, reply } => self.reply(op, reply, core)?,

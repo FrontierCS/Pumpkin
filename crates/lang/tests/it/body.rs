@@ -3,10 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
 use lang::{Args, Body, BodyKind, Bounds, Host, Label};
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name};
+use schema::sandbox::ExitStatus;
+use schema::sandbox::op::{CommandEnd, RunnerOutput};
 use serde_json::{Value, json};
 
 use crate::{Case, Sources, files, on_stack};
@@ -22,57 +25,47 @@ const RESULT: (&str, &str) = (
 struct Logged(Vec<String>);
 
 impl lang::Target for Logged {
-    fn runner(
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
+        let lease = self.0.len() as u64;
+        self.0.push(format!("{grant} open"));
+        Ok(lease)
+    }
+
+    fn runner_put(
         &mut self,
         grant: &Name,
-        op: schema::sandbox::op::SessionOp,
-    ) -> Result<schema::sandbox::op::LeaseStatusReply, String> {
-        use schema::sandbox::ExitStatus;
-        use schema::sandbox::op::{
-            CommandEnd, CommandStatus, Last, LeaseRemaining, LeaseState, LeaseStatusReply,
-            SessionOp, TransferEnd, TransferStatus,
-        };
-        let lease = self.0.len() as u64;
-        self.0.push(format!("{grant} {op:?}"));
-        let (state, last) = match op {
-            SessionOp::Open { .. } => (LeaseState::Ready, None),
-            SessionOp::Close { .. } => (LeaseState::Closed, None),
-            SessionOp::Put { .. } => (
-                LeaseState::Ready,
-                Some(Last::Transfer(TransferStatus {
-                    transfer: 0,
-                    end: Some(TransferEnd::Moved {
-                        entries: 1,
-                        bytes: 2,
-                    }),
-                })),
-            ),
-            SessionOp::Run { .. } => (
-                LeaseState::Ready,
-                Some(Last::Command(CommandStatus {
-                    command: 1,
-                    end: Some(CommandEnd::Exited(ExitStatus::Code(7))),
-                    stdout: "answer".into(),
-                    stderr: "diagnostic".into(),
-                })),
-            ),
-            _ => return Err("the test host refused the operation".to_owned()),
-        };
-        Ok(LeaseStatusReply {
-            lease,
-            state,
-            elapsed_seconds: 0,
-            busy_seconds: 0,
-            idle_seconds: 0,
-            failure: None,
-            last,
-            remaining: LeaseRemaining {
-                instances: 0,
-                instance_seconds: 10,
-                cumulative_seconds: None,
-                commands: None,
-            },
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.push(format!("{grant} {lease} put {tree} at {to}"));
+        Ok(())
+    }
+
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String> {
+        self.0.push(format!(
+            "{grant} {lease} run {} with timeout {timeout_seconds:?}",
+            argv.program()
+        ));
+        Ok(RunnerOutput {
+            end: CommandEnd::Exited(ExitStatus::Code(7)),
+            stdout_tail: "answer".into(),
+            stderr_tail: "diagnostic".into(),
         })
+    }
+
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
+        self.0.push(format!("{grant} close {lease}"));
+        if grant.as_str() == "lost" {
+            return Err("lost contact with the runner".to_owned());
+        }
+        Ok(())
     }
 
     fn caller(&self) -> Option<&str> {
@@ -242,11 +235,36 @@ def judge(target: Target, payload: Payload):
     return target.with_runner("cpp", check, "/source")
 "#,
         &expect![[r#"
-            cpp Open { instance_seconds: None }
-            cpp Put { lease: 0, tree: AbsolutePath("/source"), to: AbsolutePath("/work/src"), replace: false }
-            cpp Run { lease: 0, argv: Argv { program: "compile", args: [] }, timeout_seconds: Some(2) }
-            cpp Close { lease: 0 }
+            cpp open
+            cpp 0 put /source at /work/src
+            cpp 0 run compile with timeout Some(2)
+            cpp close 0
             returns end={"exited":{"code":7}} stderr_tail="diagnostic" stdout_tail="answer""#]],
+    );
+}
+
+#[test]
+fn callback_error_survives_a_failed_close() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner):
+    return fail("invalid checker data")
+def judge(target, submissions):
+    return target.with_runner("lost", check)
+"#,
+        &expect![[r#"
+            lost open
+            lost close 0
+            score.star:2:12: fail: invalid checker data
+                2 |     return fail("invalid checker data")
+                  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `check()`, called at score.star:4:12
+                closing the runner also failed: lost contact with the runner
+                in `judge()`, called at score.star:3:5"#]],
     );
 }
 
@@ -267,15 +285,15 @@ def judge(target: Target, submissions):
     return target.with_runner("cpp", run_with, earlier)
 "#,
         &expect![[r#"
-    cpp Open { instance_seconds: None }
-    cpp Close { lease: 0 }
-    cpp Open { instance_seconds: None }
-    cpp Close { lease: 2 }
-    score.star:4:12: the runner's callback has ended: use a runner within its callback
-        4 |     return earlier.run(["outside"])
-          |            ^^^^^^^^^^^^^^^^^^^^^^^^
-        in `run_with()`, called at score.star:7:12
-        in `judge()`, called at score.star:5:5"#]],
+            cpp open
+            cpp close 0
+            cpp open
+            cpp close 2
+            score.star:4:12: the runner's callback has ended: use a runner within its callback
+                4 |     return earlier.run(["outside"])
+                  |            ^^^^^^^^^^^^^^^^^^^^^^^^
+                in `run_with()`, called at score.star:7:12
+                in `judge()`, called at score.star:5:5"#]],
     );
 }
 

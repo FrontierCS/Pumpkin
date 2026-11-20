@@ -2723,7 +2723,7 @@ fn setup_started_past_its_deadline() {
 #[test]
 fn sync_fails() {
     check(
-        &SimHost::new().failed_sync(2),
+        &SimHost::new().failed_sync(Synced::Seq(2)),
         "sync-fails",
         &[(PROVIDER, &Sim::new())],
         &ops_workflow(&["ops", "ops", "exit"], 30),
@@ -4737,8 +4737,8 @@ fn body_waits_for_its_numbered_work_and_deletion() {
     let (record, _, result) = judged(scoped_runner(&["worker", "7"]), &dir);
     let command = &result.values()[0].1;
     assert_eq!(command["end"], json!({"exited":{"code":7}}));
-    assert_eq!(command["stdout"], "absent");
-    assert_eq!(command["stderr"], "worker diagnostic");
+    assert_eq!(command["stdout_tail"], "absent");
+    assert_eq!(command["stderr_tail"], "worker diagnostic");
     assert_eq!(
         fs::read(record.join("leases/0/log/1/command.stderr")).unwrap(),
         b"worker diagnostic"
@@ -4769,8 +4769,51 @@ fn runner_command_timeout_returns_its_collected_output() {
     let (_, _, result) = judged(scoped_runner(&["worker", "wait"]), &dir);
     let command = &result.values()[0].1;
     assert_eq!(command["end"], "timed_out");
-    assert_eq!(command["stdout"], "absent");
-    assert_eq!(command["stderr"], "worker diagnostic");
+    assert_eq!(command["stdout_tail"], "absent");
+    assert_eq!(command["stderr_tail"], "worker diagnostic");
+}
+
+#[test]
+fn a_body_cannot_act_on_an_unsynced_runner_receipt() {
+    let dir = TestDir::new();
+    let host = SimHost::new().failed_sync(Synced::Holding("log.jsonl", r#""kind":"lease_ready""#));
+    let (record, outcome) = execute_agents(&host, 2, scoped_runner(&["worker", "0"]), &dir, None);
+    let Err(runtime::Stopped::Failed(reason)) = outcome else {
+        panic!("expected a failed sync: {outcome:?}")
+    };
+    assert!(reason.contains("the simulated host's sync failed"));
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "lease_ready")
+    );
+    assert!(log.iter().all(|line| line["event"]["kind"] != "target_put"));
+}
+
+#[test]
+fn a_close_receipt_at_the_parent_deadline_times_out_the_body() {
+    let dir = TestDir::new();
+    let mut ir = scoped_runner(&["worker", "0"]);
+    ir["final"]["timeout_seconds"] = json!(10);
+    let host = SimHost::new().slow_sync(SlowSync {
+        record: Synced::Holding("leases/0/.sandbox.json.partial", DELETED),
+        queued: 0,
+        at: Duration::from_secs(10),
+    });
+    let (record, outcome) = execute_agents(&host, 2, ir, &dir, None);
+    assert!(matches!(
+        outcome.unwrap().result,
+        Err(decision::Failure::Timeout)
+    ));
+    let log = read_log(&record);
+    let observed = |kind| {
+        log.iter()
+            .find(|line| line["event"]["kind"] == kind)
+            .unwrap()["observed_ns"]
+            .clone()
+    };
+    assert_eq!(observed("lease_ended"), "10000000000");
+    assert_eq!(observed("call_timed_out"), "10000000000");
 }
 
 #[test]

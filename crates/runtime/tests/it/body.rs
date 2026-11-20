@@ -258,43 +258,19 @@ fn scoped(
     keywords: &Map<String, Value>,
     submission: Option<usize>,
 ) -> Result<Vec<(Name, Value)>, String> {
-    use schema::sandbox::op::{Last, SessionOp};
     let grant = Name::from_static("box");
+    let lease = target.runner_open(&grant)?;
     let tree = AbsolutePath::from_static("/work/src");
     target.put(
         &AbsolutePath::from_static("/work/src/source"),
         submission.unwrap(),
     )?;
-    let opened = target.runner(
-        &grant,
-        SessionOp::Open {
-            instance_seconds: None,
-        },
-    )?;
-    let lease = opened.lease;
-    let copied = target.runner(
-        &grant,
-        SessionOp::Put {
-            lease,
-            tree,
-            to: AbsolutePath::from_static("/work/src"),
-            replace: false,
-        },
-    )?;
-    assert_eq!(copied.remaining.commands, Some(1));
-    let run = SessionOp::Run {
-        lease,
-        argv: serde_json::from_value(keywords["argv"].clone()).unwrap(),
-        timeout_seconds: std::num::NonZeroU64::new(1),
-    };
-    let ran = target.runner(&grant, run.clone())?;
-    let Some(Last::Command(command)) = ran.last else {
-        panic!("no command receipt")
-    };
-    assert_eq!(command.command, 1);
-    assert_eq!(ran.remaining.commands, Some(0));
-    let refused = target.runner(&grant, run).unwrap_err();
+    target.runner_put(&grant, lease, tree, AbsolutePath::from_static("/work/src"))?;
+    let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
+    let timeout = std::num::NonZeroU64::new(1);
+    let command = target.runner_run(&grant, lease, argv.clone(), timeout)?;
+    let refused = target.runner_run(&grant, lease, argv, timeout).unwrap_err();
     assert!(refused.contains("no commands left"));
-    target.runner(&grant, SessionOp::Close { lease })?;
+    target.runner_close(&grant, lease)?;
     Ok(vec![(Name::from_static("command"), json!(command))])
 }

@@ -7,14 +7,13 @@ use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 use schema::ir;
-use schema::sandbox::op::{CommandEnd, Last, LeaseStatusReply, SessionOp, TransferEnd};
 
-use super::body::{Host, absolute, command_argv};
+use super::body::{Host, Target, absolute, command_argv};
 use super::{Evaluation, Purpose};
 use crate::builtins::{Call, Takes, place, positional, string};
 use crate::problem::Fault;
 use crate::syntax::Name;
-use crate::value::{Hosted, Kind, Span, Value};
+use crate::value::{Hosted, Kind, Value};
 use crate::{Loader, json};
 
 #[derive(Clone, Copy)]
@@ -24,18 +23,11 @@ pub(crate) enum RunnerMethod {
 }
 
 impl<L: Loader> Evaluation<'_, '_, L> {
-    fn operate(
-        &mut self,
-        grant: &ir::Name,
-        op: SessionOp,
-        at: Span,
-    ) -> Result<LeaseStatusReply, Fault> {
+    fn runner_target(&mut self) -> &mut dyn Target {
         let Purpose::Call(Host::Job(target) | Host::Final(target, _)) = &mut self.purpose else {
             unreachable!("only a job or final body receives a Target on which to open a runner")
         };
-        target
-            .runner(grant, op)
-            .map_err(|message| Fault::new(at, message))
+        *target
     }
 
     pub(super) fn with_runner(&mut self, call: &Call<'_>, depth: usize) -> Result<Value, Fault> {
@@ -60,14 +52,10 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                 "the runner's callback must be a function",
             ));
         };
-        let opened = self.operate(
-            &grant,
-            SessionOp::Open {
-                instance_seconds: None,
-            },
-            at,
-        )?;
-        let lease = opened.lease;
+        let lease = self
+            .runner_target()
+            .runner_open(&grant)
+            .map_err(|why| Fault::new(at, why))?;
         self.runners.insert(lease, grant.clone());
         let runner = Value {
             kind: Kind::Hosted(Hosted::Runner(lease)),
@@ -79,8 +67,13 @@ impl<L: Loader> Evaluation<'_, '_, L> {
         let callback = Call::of(at, positional, Vec::new(), call.budget);
         let returned = self.function(function, &callback, depth);
         self.runners.remove(&lease);
-        self.operate(&grant, SessionOp::Close { lease }, at)?;
-        returned
+        match (returned, self.runner_target().runner_close(&grant, lease)) {
+            (returned, Ok(())) => returned,
+            (Ok(_), Err(why)) => Err(Fault::new(at, why)),
+            (Err(fault), Err(why)) => {
+                Err(fault.note(format!("closing the runner also failed: {why}"), None))
+            }
+        }
     }
 
     pub(super) fn runner_method(
@@ -102,23 +95,13 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                 let [tree, to] = positional::<2>(&name.text, Takes::exactly(2), call)?;
                 let tree = absolute("the target's source directory", tree)?;
                 let to = absolute("the runner's destination directory", to)?;
-                let op = SessionOp::Put {
-                    lease,
-                    tree,
-                    to,
-                    replace: false,
-                };
-                match self.operate(&grant, op, at)?.last {
-                    Some(Last::Transfer(transfer)) => match transfer.end {
-                        Some(TransferEnd::Moved { .. }) => Ok(Value {
-                            kind: Kind::None,
-                            span: at,
-                        }),
-                        Some(TransferEnd::Failed(reason)) => Err(Fault::new(at, reason)),
-                        None => Err(Fault::new(at, "the runner's copy has no receipt")),
-                    },
-                    _ => Err(Fault::new(at, "the runner's copy has no receipt")),
-                }
+                self.runner_target()
+                    .runner_put(&grant, lease, tree, to)
+                    .map_err(|why| Fault::new(at, why))?;
+                Ok(Value {
+                    kind: Kind::None,
+                    span: at,
+                })
             }
             RunnerMethod::Run => {
                 let given = place(&name.text, &["argv", "timeout_seconds"], 1, call)?;
@@ -127,30 +110,11 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                 };
                 let argv = command_argv(name, argv.span, argv)?;
                 let timeout_seconds = given[1].as_ref().map(seconds).transpose()?;
-                let op = SessionOp::Run {
-                    lease,
-                    argv,
-                    timeout_seconds,
-                };
-                let Some(Last::Command(command)) = self.operate(&grant, op, at)?.last else {
-                    return Err(Fault::new(at, "the runner's command has no receipt"));
-                };
-                let end = match command.end {
-                    Some(CommandEnd::Unstarted) => {
-                        return Err(Fault::new(
-                            at,
-                            format!("the command did not start: {}", command.stderr),
-                        ));
-                    }
-                    Some(end) => end,
-                    None => return Err(Fault::new(at, "the runner's command has no receipt")),
-                };
-                let result = serde_json::json!({
-                    "end": end,
-                    "stdout_tail": command.stdout,
-                    "stderr_tail": command.stderr,
-                });
-                json::value_of(&result, at, call.budget)
+                let output = self
+                    .runner_target()
+                    .runner_run(&grant, lease, argv, timeout_seconds)
+                    .map_err(|why| Fault::new(at, why))?;
+                json::value_of(&serde_json::json!(output), at, call.budget)
             }
         }
     }

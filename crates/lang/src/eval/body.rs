@@ -21,8 +21,10 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use schema::ir::{self, AbsolutePath, Argv};
+use schema::sandbox::op::RunnerOutput;
 
 use super::call::refusal_inside;
 use super::{Evaluation, Purpose};
@@ -74,13 +76,29 @@ impl Host<'_> {
 /// What a job's body drives through its `Target`: the call's target. A method's `Err` is why it
 /// failed, which ends the call with that message.
 pub trait Target {
-    /// Runs an operation on the named grant and waits for its receipt. Each open returns
-    /// a fresh lease number for the lifetime of this evaluation.
-    fn runner(
+    /// Waits for a fresh runner to be ready and returns a lease number unique within this call.
+    fn runner_open(&mut self, grant: &ir::Name) -> Result<u64, String>;
+
+    /// Copies the target's directory to a new directory on its runner.
+    fn runner_put(
         &mut self,
         grant: &ir::Name,
-        op: schema::sandbox::op::SessionOp,
-    ) -> Result<schema::sandbox::op::LeaseStatusReply, String>;
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
+    /// Waits for a started command's exit or timeout and both recorded output streams.
+    fn runner_run(
+        &mut self,
+        grant: &ir::Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String>;
+
+    /// Waits for deletion of the callback's runner.
+    fn runner_close(&mut self, grant: &ir::Name, lease: u64) -> Result<(), String>;
 
     /// The issuing agent role for a job, or none for the final call.
     fn caller(&self) -> Option<&str>;

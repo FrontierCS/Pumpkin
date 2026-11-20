@@ -70,9 +70,8 @@ impl Relay {
         timeout: Duration,
         session: &mut Session,
         grant: &Name,
-        op: SessionOp,
+        (waiting, op): (crate::scoped::Waiting, SessionOp),
     ) -> Result<Waited<LeaseStatusReply>, String> {
-        let body = Some(crate::scoped::Waiting::for_op(&op));
         child.report(Report::Op {
             at: child.clock.now(),
             job,
@@ -80,7 +79,7 @@ impl Relay {
                 grant: grant.clone(),
                 op,
             },
-            body,
+            body: Some(waiting),
             trees: session.trees(),
         });
         self.until(child, job, timeout, session, |arrival| match arrival {
