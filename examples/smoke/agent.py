@@ -7,7 +7,6 @@ import subprocess
 import sys
 import time
 
-CTL = "/.pumpkin/bin/sandboxctl"
 PROBE = ["python3", "-u", "/opt/smoke/probe.py"]
 # How long a lease's runner may take to be ready, and its probe to run: the provider's startup
 # bounds the first, and the probe's own timeouts, a few seconds each, the second.
@@ -16,7 +15,9 @@ RUN_SECONDS = 120
 
 
 def ctl(*args):
-    done = subprocess.run([CTL, *args], check=False, capture_output=True, text=True)
+    done = subprocess.run(
+        ["sandboxctl", *args], check=False, capture_output=True, text=True
+    )
     try:
         return json.loads(done.stdout)
     except ValueError:

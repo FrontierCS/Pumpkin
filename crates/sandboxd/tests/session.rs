@@ -399,7 +399,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -414,7 +414,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -429,7 +429,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -450,10 +450,13 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} in $(pwd)"
+        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} path=$PATH in $(pwd)"
         echo warning >&2
         exit 3"#;
-    let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
+    let launch = sandbox.sh(
+        script,
+        &["HOME=/pumpkin/home", "MODE=train", "PATH=/usr/bin:/bin"],
+    );
     let command = sandbox.session.start(launch, hung()).unwrap();
     let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
     let mut lines = vec![format!("exited: {exited:?}")];

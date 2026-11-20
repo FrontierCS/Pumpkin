@@ -184,7 +184,8 @@ pub const SANDBOXD_PATH: &str = "/.pumpkin/sandboxd";
 /// Where `sandboxctl` is in a sandbox whose role makes ops, `/.pumpkin/bin/sandboxctl`.
 ///
 /// Every provider presents `sandboxd`'s binary there, for the role's user to execute, under the
-/// file name that makes it run as `sandboxctl`. [`op`] gives what its commands print.
+/// file name that makes it run as `sandboxctl`. Its directory comes first on the role's `PATH`.
+/// [`op`] gives what its commands print.
 pub const SANDBOXCTL_PATH: &str = "/.pumpkin/bin/sandboxctl";
 
 /// The control socket, where `sandboxd` serves ops in a sandbox whose role makes ops,

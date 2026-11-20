@@ -30,7 +30,7 @@ use provider::{
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources, User};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -968,7 +968,58 @@ fn mute_sandboxd(dir: &Path) -> PathBuf {
 }
 
 const CTL: &str = r#"
-    ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
+    ctl() { out=$(sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn sandboxctl_on_path() {
+    check(
+        "ops-path",
+        |fixture| {
+            let sandbox = fixture.try_start(
+                &fixture.run,
+                "ops",
+                &fixture.sandboxd,
+                &image(),
+                Some(OpPayloadLimit::NONE),
+                false,
+            );
+            let mut sandbox = sandbox.unwrap();
+            let executable = Mode::new(0o755);
+            let put = [
+                Put::File(relative("sandboxctl"), executable, b"#!/bin/sh\nexit 99\n"),
+                Put::File(
+                    relative("caller"),
+                    executable,
+                    b"#!/bin/sh\nexec sandboxctl ops\n",
+                ),
+            ];
+            let home = "/pumpkin/home";
+            sandbox.session().put(&absolute(home), put, hung()).unwrap();
+            let mut lines = Vec::new();
+            for (program, cwd, path) in [
+                ("sandboxctl", "/workspace", "PATH=/pumpkin/home"),
+                ("caller", "/workspace", "PATH=/pumpkin/home"),
+                ("caller", home, "PATH="),
+            ] {
+                let launch = Launch {
+                    argv: Argv::try_from([program, "ops"].map(str::to_owned).to_vec()).unwrap(),
+                    cwd: absolute(cwd),
+                    env: Env::try_from(vec![EnvVar::try_from(path.to_owned()).unwrap()]).unwrap(),
+                    ..launch(1, "")
+                };
+                let process = sandbox.session().start(launch, hung()).unwrap();
+                let (status, asked) = serve(&mut sandbox, process, &[]);
+                lines.push(format!("{path} {program} in {cwd}: {status:?}, {asked:?}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            PATH=/pumpkin/home sandboxctl in /workspace: Code(0), ["ops"]
+            PATH=/pumpkin/home caller in /workspace: Code(0), ["ops"]
+            PATH= caller in /pumpkin/home: Code(0), ["ops"]"#]],
+    );
+}
 
 // `sandboxd` closes the control socket's directory to all but the role's user, and `sandboxctl` is
 // read-only, so writing it fails the last command.
