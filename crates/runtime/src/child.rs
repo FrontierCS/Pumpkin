@@ -205,16 +205,16 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         match report {
             Report::Event(at, Event::SharedFailed { target, reason }) => {
                 let event = self
-                    .services
+                    .residents
                     .get_mut(&target)
-                    .and_then(|service| service.fail(target, reason));
+                    .and_then(|resident| resident.fail(target, reason));
                 Ok(event.map(|event| (at, event)))
             }
             Report::Event(at, event) => Ok(Some((at, event))),
             Report::CallEnded { at, job, mut end } => {
                 let target = self.call(job).target;
-                if let Some(service) = self.services.get_mut(&target) {
-                    service.finish(job, &mut end);
+                if let Some(resident) = self.residents.get_mut(&target) {
+                    resident.finish(job, &mut end);
                 }
                 // Whole for every bar the target heard: the route reports a bar before its client
                 // hears it, so before the call can end on it, into this inbox, which keeps order.

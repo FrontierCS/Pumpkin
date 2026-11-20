@@ -215,10 +215,9 @@ impl Run<'_> {
 
     fn shared_target(&self, name: &str) -> schema::workflow::TargetId {
         self.workflow
-            .shared_targets()
-            .find(|(id, _)| self.workflow.sandbox(id.role()).name.as_str() == name)
+            .work_targets()
+            .find(|id| self.workflow.sandbox(id.role()).name.as_str() == name)
             .unwrap()
-            .0
     }
 
     fn event(&mut self, event: &str) -> Event {
@@ -1174,8 +1173,7 @@ fn shared_failure_after_abandon_leaves_the_call_to_teardown() {
     check(
         |ir| {
             ir["deadline_seconds"] = json!(60);
-            ir["roles"][1]["runtime"] =
-                json!({"shared": {"command": {"argv": ["server"], "cwd": "/"}, "cwd": "/"}});
+            ir["roles"][1]["runtime"] = json!({"target": {"lifetime": "work", "cwd": "/"}});
         },
         r"
         0 work_started
@@ -3215,7 +3213,7 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
             let roles = ir["roles"].as_array_mut().unwrap();
             let mut board = roles[1].clone();
             board["name"] = json!("board");
-            board["runtime"] = json!({"shared":{"cwd":"/","command":{"argv":["board"],"cwd":"/"}}});
+            board["runtime"] = json!({"target":{"lifetime":"work","cwd":"/"}});
             for role in &mut *roles {
                 if let Some(grants) = role["runtime"]
                     .get_mut("agent")

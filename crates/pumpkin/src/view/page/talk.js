@@ -43,7 +43,7 @@ export function drawTalk(node, data, lit, picked, pick) {
   const { roles, edges } = data.talk;
   const grants = data.talk.grants || [];
   /** @type {Record<string, number>} */
-  const order = { agent: 0, target: 1, shared: 1, runner: 2 };
+  const order = { agent: 0, target: 1, runner: 2 };
   const shown = roles.map((role, index) => ({ ...role, index }));
   if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === MODEL)) {
     shown.push({ name: MODEL, kind: "model", place: "The route's upstream", routed: false, final_target: false, routes: [], index: roles.length });

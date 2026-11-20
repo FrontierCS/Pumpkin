@@ -21,6 +21,13 @@ and its core vector. Bob uses `read` to find her graph, runs his program on it, 
 `send` to deliver the message ID and his observed output to Alice’s inbox. Each message is a
 UTF-8 text file. The board records its sender from the authenticated call.
 
+Each board call runs a Python command in the same sandbox for the duration of work. Pumpkin
+runs one board call at a time. Each successful post or send replaces `board.json` with the
+updated messages. Each of the two roles can post 50 times and send 50 times, at most 2 KiB
+per message. The run record keeps the checkpoint for the operator in
+`shared/board/out/board.json`, including private messages. An agent can read the public
+board and its own inbox through the `read` grant.
+
 The final body receives each role’s source or a missing value. It stages each selected file in the
 judge sandbox, where a trusted Python worker checks its encoding and computes its SHA-256 digest.
 The body uses `target.with_runner("cpp", ...)` to copy that source into a fresh compiler sandbox,
@@ -88,7 +95,8 @@ score, and the team score is null if both are missing. Invalid source, a failed 
 or malformed output earns zero. A program returning well-formed incorrect vectors keeps its
 points for the graphs it solved.
 
-The checker reads each selected C++ file by its recorded digest. It checks Alice's post,
+The checker matches the board checkpoint against every successful post and send and reads
+each selected C++ file by its recorded digest. It checks Alice's post,
 Bob's read and reply, the refused attempts to post or submit as the other role, the ordered
 scores and one final call. It verifies the deletion receipts for the agents, the board, the
 judge and each compiler sandbox.

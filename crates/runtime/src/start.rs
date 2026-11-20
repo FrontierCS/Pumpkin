@@ -126,7 +126,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         } else {
             let child = self.child(which, deadlines)?;
             let orders = child.inbox.sender();
-            self.services
+            self.residents
                 .get_mut(&target)
                 .ok_or_else(|| "the shared role has no worker".to_owned())?
                 .call(call, child)?;

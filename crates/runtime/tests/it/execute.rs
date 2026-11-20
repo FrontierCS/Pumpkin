@@ -324,7 +324,7 @@ fn model_routed(ir: &ir::Workflow) -> bool {
     ir.roles.iter().any(|role| match &role.runtime {
         ir::Runtime::Agent(agent) => agent.egress.model.is_some(),
         ir::Runtime::Target(target) => target.egress.model.is_some(),
-        ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => false,
+        ir::Runtime::Runner(_) => false,
     })
 }
 
@@ -4866,7 +4866,7 @@ fn missing_runner_evidence_fails_the_call() {
 
 #[test]
 fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notices() {
-    let mut ir = shared_workflow(&["ops", "call submit 6 finalize=true"], &["slow"], "board");
+    let mut ir = work_target_workflow(&["ops", "call submit 6 finalize=true"], "board");
     let mut peer = ir["roles"][0].clone();
     peer["name"] = json!("beta");
     ir["roles"].as_array_mut().unwrap().push(peer);
@@ -5101,25 +5101,21 @@ fn finished(outcome: &Outcome) -> String {
     }
 }
 
-fn shared_workflow(agent: &[&str], server: &[&str], body: &str) -> Value {
+fn work_target_workflow(agent: &[&str], body: &str) -> Value {
     let mut ir = submissions_workflow(agent);
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["body"]["def"] = json!(body);
-    ir["roles"][1]["runtime"] = json!({"shared": {
-        "command": {"argv":server,"cwd":"/work"}, "cwd":"/work",
-    }});
+    ir["roles"][1]["runtime"] = json!({"target": {"lifetime":"work", "cwd":"/work"}});
     ir
 }
 
-#[test]
-fn shared_calls_keep_the_service_and_collect_each_call_once() {
-    let mut ir = shared_workflow(
+fn work_and_call_targets() -> Value {
+    let mut ir = work_target_workflow(
         &[
             "ops",
             "call train forged",
             "await 0 completed",
             "call submit a finalize=true",
         ],
-        &["slow"],
         "board",
     );
     let mut beta = ir["roles"][0].clone();
@@ -5129,11 +5125,28 @@ fn shared_calls_keep_the_service_and_collect_each_call_once() {
         "await_log agent_collected",
         "call train beta",
         "await 1 completed",
+        "call fresh beta",
+        "await 2 errored",
         "call submit b finalize=true"
     ]);
-    ir["roles"].as_array_mut().unwrap().push(beta);
+    let mut fresh = ir["roles"][1].clone();
+    fresh["name"] = json!("fresh");
+    fresh["runtime"]["target"]["lifetime"] = json!("call");
+    let mut grant = beta["runtime"]["agent"]["grants"][0].clone();
+    grant["name"] = json!("fresh");
+    grant["job"]["target"] = json!("fresh");
+    beta["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap()
+        .push(grant);
+    ir["roles"].as_array_mut().unwrap().extend([beta, fresh]);
+    ir
+}
+
+#[test]
+fn work_target_calls_share_files_and_collect_each_call_once() {
     let dir = TestDir::new();
-    let (record, agents, _) = judged(ir, &dir);
+    let (record, agents, _) = judged(work_and_call_targets(), &dir);
     assert!(agents.iter().all(|agent| agent.submission.is_some()));
     for (job, caller) in ["alpha", "beta"].into_iter().enumerate() {
         let job_dir = record.join(format!("jobs/{job}"));
@@ -5145,6 +5158,12 @@ fn shared_calls_keep_the_service_and_collect_each_call_once() {
         assert!(!job_dir.join("sandbox.json").exists());
     }
     let log = read_log(&record);
+    assert!(record.join("jobs/2/sandbox.json").is_file());
+    assert!(!record.join("jobs/2/got/1/message").exists());
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "call_failed" && line["event"]["job"] == 2)
+    );
     let deleted: Vec<_> = log
         .iter()
         .enumerate()
@@ -5169,10 +5188,26 @@ fn shared_calls_keep_the_service_and_collect_each_call_once() {
         serde_json::from_slice(&fs::read(record.join("shared/trainer/sandbox.json")).unwrap())
             .unwrap();
     assert_eq!(sandbox["delete"]["state"], "deleted");
+
+    // A record written with a service declaration still identifies the same physical sandbox.
+    let path = record.join("ir.json");
+    let mut old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    old["roles"][1]["runtime"] =
+        json!({"shared":{"command":{"argv":["server"],"cwd":"/"},"cwd":"/work"}});
+    fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
+    assert_eq!(progress.shared[&1].role, "trainer");
+    assert_eq!(progress.calls[1].shared, Some(1));
+    assert_eq!(progress.calls[2].shared, None);
 }
 
 fn capture_workflow() -> Value {
-    let mut ir = shared_workflow(
+    let mut ir = work_target_workflow(
         &[
             "ops",
             "call train [65,10]",
@@ -5191,7 +5226,6 @@ fn capture_workflow() -> Value {
             "await 6 completed",
             "call submit a finalize=true",
         ],
-        &["slow"],
         "capture",
     );
     let grants = ir["roles"][0]["runtime"]["agent"]["grants"]
@@ -5261,7 +5295,7 @@ fn captures_complete_worker_replies_on_a_shared_target() {
 
 #[test]
 fn shared_timeout_stops_its_client_before_the_next_call() {
-    let mut ir = shared_workflow(
+    let mut ir = work_target_workflow(
         &[
             "ops",
             "call train slow",
@@ -5271,7 +5305,6 @@ fn shared_timeout_stops_its_client_before_the_next_call() {
             "await 1 completed",
             "call submit ok finalize=true",
         ],
-        &["slow"],
         "slow",
     );
     let grants = ir["roles"][0]["runtime"]["agent"]["grants"]
@@ -5310,38 +5343,8 @@ fn shared_timeout_stops_its_client_before_the_next_call() {
 }
 
 #[test]
-fn shared_service_exit_refuses_new_calls_while_the_agent_can_submit() {
-    let ir = shared_workflow(
-        &[
-            "ops",
-            "await_log shared_failed",
-            "call train 1",
-            "call submit ok finalize=true",
-        ],
-        &["exit", "7"],
-        "board",
-    );
-    let dir = TestDir::new();
-    let (record, agents, _) = judged(ir, &dir);
-    assert!(agents[0].submission.as_ref().unwrap().finalized);
-    let log = read_log(&record);
-    assert!(
-        log.iter().any(
-            |line| line["actions"]
-                .as_array()
-                .is_some_and(
-                    |actions| actions.iter().any(|action| action["reply"]["message"]
-                        .as_str()
-                        .is_some_and(|reason| reason.contains("unavailable")))
-                )
-        )
-    );
-    assert!(!record.join("jobs/0/got/1/message").exists());
-}
-
-#[test]
 fn shared_call_loses_its_session_after_its_client_exits() {
-    let mut ir = shared_workflow(
+    let mut ir = work_target_workflow(
         &[
             "ops",
             "call train 1",
@@ -5349,7 +5352,6 @@ fn shared_call_loses_its_session_after_its_client_exits() {
             "call train 2",
             "call submit ok finalize=true",
         ],
-        &["slow"],
         "run",
     );
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] =
@@ -5376,9 +5378,8 @@ fn shared_call_loses_its_session_after_its_client_exits() {
 
 #[test]
 fn shared_start_failure_is_disposed_before_final() {
-    let mut ir = shared_workflow(
+    let mut ir = work_target_workflow(
         &["ops", "call train 1", "call submit ok finalize=true"],
-        &["slow"],
         "board",
     );
     ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
@@ -5417,11 +5418,7 @@ fn shared_start_failure_is_disposed_before_final() {
 
 #[test]
 fn shared_call_interruption_collects_and_deletes_without_starting_the_judge() {
-    let mut ir = shared_workflow(
-        &["ops", "call train 1", "await 0 completed"],
-        &["slow"],
-        "slow",
-    );
+    let mut ir = work_target_workflow(&["ops", "call train 1", "await 0 completed"], "slow");
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(30);
     let dir = TestDir::new();
     let (record, outcome) = execute_agents(
@@ -5442,8 +5439,8 @@ fn shared_call_interruption_collects_and_deletes_without_starting_the_judge() {
 }
 
 #[test]
-fn shared_client_with_an_unconfirmed_stop_closes_the_service_to_later_calls() {
-    let mut ir = shared_workflow(
+fn an_unconfirmed_command_stop_closes_the_work_target_to_later_calls() {
+    let mut ir = work_target_workflow(
         &[
             "ops",
             "call train 1",
@@ -5451,7 +5448,6 @@ fn shared_client_with_an_unconfirmed_stop_closes_the_service_to_later_calls() {
             "call train 2",
             "call submit ok finalize=true",
         ],
-        &["slow"],
         "run",
     );
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] = json!({"argv":["stall"]});
@@ -5483,7 +5479,7 @@ fn shared_client_with_an_unconfirmed_stop_closes_the_service_to_later_calls() {
 }
 
 fn failed_shared_create(fault: &str) -> Value {
-    let mut ir = shared_workflow(&["ops", "call submit ok finalize=true"], &["slow"], "board");
+    let mut ir = work_target_workflow(&["ops", "call submit ok finalize=true"], "board");
     ir["roles"][1]["image"] = json!(sim::image(fault).as_str());
     ir
 }
