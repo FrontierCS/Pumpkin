@@ -36,7 +36,7 @@ pub(crate) struct SimHost {
 struct State {
     now: Duration,
     late: Option<LateTake>,
-    slow: Option<SlowSync>,
+    slow: VecDeque<SlowSync>,
     failed: Option<u64>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
@@ -76,7 +76,7 @@ impl SimHost {
         let state = State {
             now: Duration::ZERO,
             late: None,
-            slow: None,
+            slow: VecDeque::new(),
             failed: None,
             failed_file: None,
             first: None,
@@ -93,7 +93,7 @@ impl SimHost {
     }
 
     pub(crate) fn slow_sync(self, slow: SlowSync) -> Self {
-        stdx::unpoisoned(self.state.lock()).slow = Some(slow);
+        stdx::unpoisoned(self.state.lock()).slow.push_back(slow);
         self
     }
 
@@ -137,7 +137,7 @@ impl Host for SimHost {
         let lasts = |record: u64| last.is_some_and(|last| last >= record);
         let mut state = stdx::unpoisoned(self.state.lock());
         let holds = |text: &str| fs::read_to_string(&path).is_ok_and(|held| held.contains(text));
-        let slow = state.slow.take_if(|slow| match slow.record {
+        let slow = state.slow.pop_front_if(|slow| match slow.record {
             Synced::Seq(record) => lasts(record),
             Synced::Holding(file, text) => path.ends_with(file) && holds(text),
         });
@@ -248,6 +248,10 @@ trait Fill: Send + Sync {
 
 impl<T: Send> Fill for Mutex<Queue<T>> {
     fn fill(&self, queued: usize, expected: &str) {
+        // A worker syncing its record may be the sender that the loop awaits under this lock.
+        if queued == 0 {
+            return;
+        }
         let mut queue = stdx::unpoisoned(self.lock());
         while queue.behind.len() < queued {
             let next = queue.received(expected);

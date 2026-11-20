@@ -2772,3 +2772,59 @@ fn final_call_leases() {
         "#]],
     );
 }
+
+#[test]
+fn abandoned_final_call_leases() {
+    check(
+        |ir| {
+            holders_leasing(ir);
+            let agent = &mut ir["roles"][0]["runtime"]["agent"];
+            agent["deadline_seconds"] = json!(1);
+            agent["finalize_grace_seconds"] = json!(0);
+            ir["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["instances"] = json!(2);
+        },
+        r"
+        10000 agent_started
+        10500 now submit 10 select
+        10999 agent_exited 0
+        30999 call_started 0
+        120000 @0 box.open
+        121000 lease_ready 0
+        150900 @0 box.open
+        151000 tick
+        151001 lease_ready 1
+        151002 @0 box.status 1
+        151003 call_returned 0 score=7
+        151004 lease_ended 0
+        151005 lease_ended 1
+        ",
+        &expect![[r#"
+            start
+              start the agent
+              (tick due at 11000)
+            10000 agent_started
+            10500 now submit 10 select
+              reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
+            10999 agent_exited 0
+              tear down the agent
+              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              (tick due at 151000)
+            30999 call_started 0
+            120000 @0 box.open
+              reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
+              open lease 0 of box for job 0, as instance 0, started by 150999
+            121000 lease_ready 0
+            150900 @0 box.open
+              reply to op 3: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
+              open lease 1 of box for job 0, as instance 1, started by 150999
+            151000 tick
+              abandon the run at its hard end
+            151001 lease_ready 1
+            151002 @0 box.status 1
+              refuse op 4: the run has passed its hard end: make no more ops
+            151003 call_returned 0 score=7
+            151004 lease_ended 0
+            151005 lease_ended 1
+        "#]],
+    );
+}

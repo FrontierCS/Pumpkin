@@ -28,20 +28,20 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<(), String> {
         let number = self.next_model_request;
         self.next_model_request += 1;
-        // No type excludes a model request here, since one `Arrival` serves sessions with model
-        // requests and without.
-        let Some(served) = self.served.get(&caller).map(Arc::clone) else {
-            unreachable!(
-                "a model request arrived from {caller:?}, though a session takes them only if its \
-                 role has a route (`Sandboxes::start`), whose sandbox's start serves it, and one \
-                 breaks the protocol otherwise, which ends the session"
-            )
-        };
-        // `scope` is none once the run has ended, and no thread starts then.
+        // A call's start and request may both arrive after the run ends, with no route installed.
         let Some(scope) = scope else {
             drop(incoming);
             let note = format!("model request {number} wasn't answered: the run has ended");
             return self.log.note(&note);
+        };
+        // No type excludes a model request here, since one `Arrival` serves sessions with model
+        // requests and without.
+        let Some(served) = self.served.get(&caller).map(Arc::clone) else {
+            unreachable!(
+                "a model request arrived from {caller:?} with no route, though only a role with \
+                 a route takes model requests, the agent's is served before its sandbox starts, \
+                 and a call reports its start before relaying its first request"
+            )
         };
         let role = self.role(caller);
         let allowed = core.model_requests_allowed(caller, at);

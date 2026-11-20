@@ -612,6 +612,8 @@ impl<'w> Core<'w> {
             Phase::Finished(_) | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
+        // Abandon stops every runner. A later expiry or job report has no lease left to close.
+        drop(self.leases.close_where(self.now, |_| true));
         actions.push(Action::Abandon);
     }
 
