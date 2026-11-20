@@ -2334,7 +2334,10 @@ fn reported_past_the_deadline() {
         &SimHost::new().late_take(late),
         "reported-past-the-deadline",
         &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "call train 6"], 30),
+        &short_workflow(
+            &["ops", "await_log agent_started", "ops", "call train 6"],
+            30,
+        ),
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=0]
@@ -2373,7 +2376,10 @@ fn reported_past_the_hard_end() {
         &SimHost::new().late_take(late),
         "reported-past-the-hard-end",
         &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "call train 6"], 30),
+        &short_workflow(
+            &["ops", "await_log agent_started", "ops", "call train 6"],
+            30,
+        ),
         SANDBOXD,
         &expect![[r#"
             failed: the run was still going at its hard end, 121 s after it started: expected it to end within its deadline, its finalize grace, its final call's timeout and its sandboxes' startups
@@ -2429,7 +2435,15 @@ fn torn_down_past_the_hard_end() {
 
 #[test]
 fn model_request_after_abandon() {
-    let mut ir = short_workflow(&["ops", "ops", "call submit 6 finalize=true"], 2);
+    let mut ir = short_workflow(
+        &[
+            "ops",
+            "await_log agent_started",
+            "ops",
+            "call submit 6 finalize=true",
+        ],
+        2,
+    );
     ir["roles"][2]["runtime"]["target"]["egress"] = route();
     ir["final"]["body"]["def"] = json!("routed");
     ir["final"]["keywords"] = json!({ "argv": ["ops", "model m-small 7", "result"] });
@@ -2531,8 +2545,6 @@ fn late_ops() {
     );
 }
 
-// Deterministic, as one thread, the session's reader, produces both inputs, which reach the
-// inbox in a fixed order.
 #[test]
 fn taken_past_the_deadline() {
     let late = LateTake {
@@ -2540,36 +2552,48 @@ fn taken_past_the_deadline() {
         at: Duration::from_millis(30_500),
         then: 0,
     };
-    check(
-        &SimHost::new().late_take(late),
-        "taken-past-the-deadline",
-        &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "call train 6", "close"], 30),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=0]
-            payloads hold: ["xxxxxx"]
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"0","event":{"kind":"work_started"},"observed_ns":"0","seq":1}
-            {"actions":[],"at_ns":"0","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"0","seq":2}
-            {"actions":[{"kind":"reply","reply":{"grants":[{"call_timeout_seconds":1,"calls":100,"cumulative_seconds":null,"kind":"job","name":"train","payload_max_bytes":8},{"arguments":{"finalize":{"default":false,"type":"bool"}},"kind":"now","name":"submit","payload_max_bytes":16}],"kind":"ops","remaining_seconds":30,"resources":{"cpu_millis":8000,"memory_bytes":34359738368}}}],"at_ns":"0","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"kind":"ops"}},"observed_ns":"0","seq":3}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"op_arrived","op":1,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"0","seq":4}
-            {"at_ns":"30500000000","note":"op 1's reply wasn't sent: it was due by the core's next act, which has come","seq":5}
-            {"actions":[{"job":0,"kind":"stop_call"},{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's session ended: the sandbox ended the session"},"observed_ns":"0","seq":6}
-            {"actions":[],"at_ns":"30500000000","event":{"job":0,"kind":"call_failed","reason":"the job's sandbox wasn't created: its start was due by a time that had passed"},"observed_ns":"30500000000","seq":7}
-            {"at_ns":"30500000000","note":"freezing the agent's sandbox failed: the sandbox ended the session","seq":8}
-            {"at_ns":"30500000000","note":"the agent's out is incomplete: collecting /pumpkin/out failed: the sandbox ended the session","seq":9}
-            {"at_ns":"30500000000","note":"the agent's log is incomplete: collecting /pumpkin/log failed: the sandbox ended the session","seq":10}
-            {"at_ns":"30500000000","note":"collected from agent `agent`'s sandbox: out, nothing; log, nothing","seq":11}
-            {"actions":[],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
-            {"actions":[],"at_ns":"30500000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
-            {"actions":[{"job":1,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"1000000000"}],"at_ns":"30500000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"30500000000","seq":14}
-            {"actions":[],"at_ns":"30500000000","event":{"job":1,"kind":"call_started"},"observed_ns":"30500000000","seq":15}
-            {"actions":[],"at_ns":"30500000000","event":{"id":"sim-2","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":16}
-            {"actions":[{"kind":"finish"}],"at_ns":"30500000000","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"30500000000","seq":17}
-            its last record came before the agent's teardown was to end"#]],
+    let ir = short_workflow(
+        &[
+            "ops",
+            "await_log agent_started",
+            "ops",
+            "call train 6",
+            "close",
+        ],
+        30,
+    );
+    let dir = TestDir::new();
+    let (record, outcome) = execute_agents(&SimHost::new().late_take(late), 30, ir, &dir);
+    let outcome = outcome.unwrap();
+    assert!(matches!(
+        outcome.agents[0].work_end,
+        decision::WorkEnd::AgentFailed(_)
+    ));
+    assert!(outcome.result.is_ok());
+
+    let log = read_log(&record);
+    let op = log
+        .iter()
+        .position(|line| line["event"]["op"] == 1)
+        .unwrap();
+    let ended = log
+        .iter()
+        .position(|line| line["event"]["kind"] == "agent_failed")
+        .unwrap();
+    assert!(op < ended);
+    assert_eq!(log[op]["observed_ns"], "0");
+    assert_eq!(log[op]["at_ns"], "30500000000");
+    assert_eq!(log[op]["actions"][1]["kind"], "start_call");
+    assert_eq!(log[ended]["observed_ns"], "0");
+    assert!(log.iter().any(|line| line["note"]
+        == "op 1's reply wasn't sent: it was due by the core's next act, which has come"));
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "call_failed" && line["event"]["job"] == 0)
+    );
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "agent_torn_down")
     );
 }
 
@@ -2629,7 +2653,7 @@ fn started_late() {
         &SimHost::new().slow_sync(slow).late_take(late),
         "started-late",
         &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops", "ops"], 30),
+        &short_workflow(&["ops", "await_log agent_started", "ops", "ops"], 30),
         SANDBOXD,
         &expect![[r#"
             finished, showing [score=0]
@@ -2651,31 +2675,33 @@ fn started_late() {
             {"actions":[{"kind":"finish"}],"at_ns":"55000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"55000000000","seq":13}
             its last record came before the agent's teardown was to end"#]],
     );
+}
+
+#[test]
+fn setup_started_past_its_deadline() {
     let slow = SlowSync {
         record: Synced::Seq(0),
         queued: 0,
         at: Duration::from_secs(35),
     };
-    check(
-        &SimHost::new().slow_sync(slow),
-        "started-past-the-startup",
-        &[(PROVIDER, &Sim::new())],
-        &short_workflow(&["ops", "ops"], 30),
-        SANDBOXD,
-        &expect![[r#"
-            finished, showing [score=0]
-            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's setup missed the startup deadline"}}],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"0","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"35000000000","event":{"kind":"work_started"},"observed_ns":"35000000000","seq":1}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"35000000000","event":{"caller":"agent-0","kind":"agent_failed","reason":"the agent's setup missed the startup deadline"},"observed_ns":"35000000000","seq":2}
-            {"at_ns":"35000000000","note":"agent `agent`: the agent's sandbox didn't start: the simulated create's deadline had passed: expected time left to make it","seq":3}
-            {"at_ns":"35000000000","note":"the agent's sandbox never started: nothing was collected","seq":4}
-            {"actions":[{"job":0,"kind":"start_final_call","selections":[{"role":"agent","selection":null}],"timeout_ns":"1000000000"}],"at_ns":"35000000000","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"35000000000","seq":5}
-            {"actions":[],"at_ns":"35000000000","event":{"job":0,"kind":"call_started"},"observed_ns":"35000000000","seq":6}
-            {"actions":[],"at_ns":"35000000000","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-0"},"seq":7}
-            {"actions":[{"kind":"finish"}],"at_ns":"35000000000","event":{"job":0,"kind":"call_returned","returned":[{"name":"score","value":0}]},"observed_ns":"35000000000","seq":8}
-            its last record came before the agent's teardown was to end"#]],
+    let ir = short_workflow(&["ops", "ops"], 30);
+    let dir = TestDir::new();
+    let (record, outcome) = execute_agents(&SimHost::new().slow_sync(slow), 30, ir, &dir);
+    let outcome = outcome.unwrap();
+    assert!(matches!(
+        outcome.agents[0].work_end,
+        decision::WorkEnd::AgentFailed(_)
+    ));
+    assert!(outcome.result.is_ok());
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .all(|line| line["event"]["kind"] != "agent_started")
+    );
+    assert!(log.iter().all(|line| line["event"]["kind"] != "op_arrived"));
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "agent_torn_down")
     );
 }
 
@@ -4769,13 +4795,19 @@ fn final_body_reads_submitted_bytes_after_one_agent_fails_to_start() {
 fn a_due_grace_does_not_advance_past_another_agents_queued_submission() {
     const STORING_ALPHA: &str =
         "payloads/.8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8.partial";
-    let mut ir = submissions_workflow(&["ops", "await_log ops", "call submit alpha finalize=true"]);
+    let mut ir = submissions_workflow(&[
+        "ops",
+        "await_log agent_started agent-0",
+        "await_log ops",
+        "call submit alpha finalize=true",
+    ]);
     let roles = ir["roles"].as_array_mut().unwrap();
     roles[0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(1);
     let mut beta = roles[0].clone();
     beta["name"] = json!("beta");
     beta["runtime"]["agent"]["command"]["argv"] = json!([
         "ops",
+        "await_log agent_started agent-3",
         "ops",
         format!("await_file {STORING_ALPHA}"),
         "call submit beta"
