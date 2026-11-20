@@ -69,7 +69,7 @@ impl Workflow {
     /// The model route of `role`, the agent's or a target's, with the budgets of its entries, if
     /// it has one.
     pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
-        if role == self.agent.role {
+        if role == self.agent.id.role() {
             return self.agent.model.as_ref();
         }
         let target = self.targets.get(&role).map(|target| &target.model);
@@ -96,6 +96,14 @@ impl Workflow {
         functions.map(|(index, function)| (JobFunctionId(index), function))
     }
 
+    pub fn job_functions_of(
+        &self,
+        role: RoleId,
+    ) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
+        self.job_functions()
+            .filter(move |(_, function)| function.holder.role() == role)
+    }
+
     pub fn job_function(&self, id: JobFunctionId) -> &JobFunction {
         &self.job_functions[id.0]
     }
@@ -112,6 +120,14 @@ impl Workflow {
     /// The agent's now functions, in the IR's order.
     pub fn now_functions(&self) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
         (self.now_functions.iter().enumerate()).map(|(index, now)| (NowFunctionId(index), now))
+    }
+
+    pub fn now_functions_of(
+        &self,
+        role: RoleId,
+    ) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
+        self.now_functions()
+            .filter(move |(_, function)| function.holder.role() == role)
     }
 
     pub fn now_function(&self, id: NowFunctionId) -> &NowFunction {
@@ -264,6 +280,15 @@ impl<T> ByProvider<T> {
 pub struct RoleId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(RoleId);
+
+impl AgentId {
+    pub fn role(self) -> RoleId {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetId(RoleId);
 
 impl TargetId {
@@ -324,7 +349,7 @@ pub struct Sandbox {
 /// and `files` keep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
-    pub role: RoleId,
+    pub id: AgentId,
     pub command: Command,
     /// In order of their paths.
     pub dirs: Vec<Dir>,
@@ -358,6 +383,7 @@ pub struct Runner {
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobFunction {
+    pub holder: AgentId,
     pub name: Name,
     /// The target that each call starts afresh, which no other job function names.
     pub target: TargetId,
@@ -412,15 +438,14 @@ pub struct Session {
 /// The role that holds a [`Session`]: the agent, or a target, each of whose calls uses it afresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
-    Agent,
+    Agent(AgentId),
     Target(TargetId),
 }
 
 impl Holder {
-    /// The holder's role in `workflow`, the workflow that holds the session.
-    pub fn role(self, workflow: &Workflow) -> RoleId {
+    pub fn role(self) -> RoleId {
         match self {
-            Self::Agent => workflow.agent().role,
+            Self::Agent(agent) => agent.role(),
             Self::Target(target) => target.role(),
         }
     }
@@ -443,6 +468,7 @@ impl Session {
 /// One of the agent's now functions; see [`ir::NowFunction`](crate::ir::NowFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NowFunction {
+    pub holder: AgentId,
     pub name: Name,
     pub body: crate::ir::Body,
     pub payload_max_bytes: NonZeroU64,

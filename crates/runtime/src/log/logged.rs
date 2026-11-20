@@ -424,7 +424,7 @@ pub enum CallerName {
 impl From<decision::Caller> for CallerName {
     fn from(caller: decision::Caller) -> Self {
         match caller {
-            decision::Caller::Agent => Self::Agent,
+            decision::Caller::Agent(_) => Self::Agent,
             decision::Caller::Job(job) => Self::Job(job.0),
         }
     }

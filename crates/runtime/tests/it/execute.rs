@@ -1381,7 +1381,7 @@ fn unstarted() {
     let ir = workflow(&["exit", "0"]);
     let parsed: ir::Workflow = serde_json::from_value(ir.clone()).unwrap();
     let placed = placed(&parsed, Sim::new().ready()).unwrap();
-    let startup = placed.startup(placed.workflow().agent().role);
+    let startup = placed.startup(placed.workflow().agent().id.role());
     let begun = Instant::now();
     let on = |name, sandboxd| {
         executed(
@@ -3279,7 +3279,9 @@ fn call_and_agent_model() {
         "exit",
     ];
     let steps = ["model m-small 5", "ask m-small stall", "exit"];
-    let ir = trainer_routed(routed(ops_workflow(&argv, 30)), &steps);
+    let mut ir = trainer_routed(routed(ops_workflow(&argv, 30)), &steps);
+    ir["roles"][0]["name"] = json!("solver");
+    ir["roles"].as_array_mut().unwrap().reverse();
     let shown = executed(
         &System,
         "call-and-agent-model",
@@ -3291,7 +3293,7 @@ fn call_and_agent_model() {
     expect![[r#"
         finished, showing [score=6]
         payloads hold: ["xxx", "xxxxxx"]
-        provider.json routes: {"agent":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"trainer":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
+        provider.json routes: {"solver":[{"api":"responses","models":{"m-large":{"upstream_name":"vendor/m-large"}},"upstream":"stand-in"}],"trainer":[{"api":"responses","models":{"m-small":{"upstream_name":"vendor/m-small","usd_per_mtok":{"cache_write":3.75,"cached":0.3,"input":3.0,"output":15.0}}},"upstream":"stand-in"}]}
         outcome.json: {"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]},"submission":{"finalized":false,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
         outcome.json's usage: {"calls":[{"grant":"train","job":0,"model_requests":2,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":3,"ran_ns":"<ns>","sandboxes":[{"class":"sim","count":3,"lasted_ns":"<ns>","provider":"simulated"}],"tokens":{"input":0,"output":0,"responses":0}}
         log.jsonl:

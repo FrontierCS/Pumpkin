@@ -37,7 +37,7 @@ use schema::sandbox::op::{
     LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd,
     TransferStatus,
 };
-use schema::workflow::{JobFunctionId, JobOf, NowFunctionId, RoleId, Session, SessionId};
+use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, Session, SessionId};
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
@@ -53,7 +53,7 @@ pub(super) enum Working {
     /// The agent, in the work phase, which ends at the deadline, with the payload it selected
     /// last, if any.
     Agent {
-        role: RoleId,
+        id: AgentId,
         deadline: Duration,
         latest: Option<PayloadRef>,
     },
@@ -68,14 +68,15 @@ pub(super) enum Working {
 impl Working {
     pub(super) fn caller(&self) -> Caller {
         match self {
-            Self::Agent { .. } => Caller::Agent,
+            Self::Agent { id, .. } => Caller::Agent(*id),
             Self::Job { job, .. } => Caller::Job(*job),
         }
     }
 
     fn role(&self) -> RoleId {
         match self {
-            Self::Agent { role, .. } | Self::Job { role, .. } => *role,
+            Self::Agent { id, .. } => id.role(),
+            Self::Job { role, .. } => *role,
         }
     }
 
@@ -141,19 +142,19 @@ impl Core<'_> {
                     | None => Err("the call has ended: make no more ops".to_owned()),
                 };
             }
-            (Phase::Work { deadline, latest }, Caller::Agent) => {
+            (Phase::Work { deadline, latest }, Caller::Agent(id)) => {
                 return Ok(Working::Agent {
-                    role: self.workflow.agent().role,
+                    id,
                     deadline: *deadline,
                     latest: latest.clone(),
                 });
             }
-            (Phase::Finalized { .. }, Caller::Agent) => &WorkEnd::Finalized,
+            (Phase::Finalized { .. }, Caller::Agent(_)) => &WorkEnd::Finalized,
             (
                 Phase::Teardown { work_end, .. }
                 | Phase::Final { work_end, .. }
                 | Phase::Finished(Outcome { work_end, .. }),
-                Caller::Agent,
+                Caller::Agent(_),
             ) => work_end,
         };
         match work_end {
@@ -270,9 +271,9 @@ impl Core<'_> {
         // The agent asks only about its calls to job functions: any job it didn't make is refused
         // as absent.
         let job = JobId(number);
-        if caller == Caller::Agent
-            && let Some(found) = self.jobs.get(job)
+        if let Some(found) = self.jobs.get(job)
             && let JobOf::Function(function) = found.call
+            && caller == Caller::Agent(self.workflow.job_function(function).holder)
         {
             return Ok(self.status(job, found, function));
         }
@@ -297,15 +298,15 @@ impl Core<'_> {
             Working::Job { .. } => None,
         };
         let job = agent.and_then(|(deadline, _)| {
-            (self.workflow.job_functions())
+            (self.workflow.job_functions_of(role))
                 .find(|(_, function)| function.name == *name)
                 .map(|(id, _)| Held::Job(id, deadline))
         });
         let lease = (self.workflow.sessions())
-            .find(|(_, grant)| grant.holder.role(self.workflow) == role && grant.name == *name)
+            .find(|(_, grant)| grant.holder.role() == role && grant.name == *name)
             .map(|(id, _)| Held::Session(id));
         let now = agent.and_then(|(deadline, latest)| {
-            (self.workflow.now_functions())
+            (self.workflow.now_functions_of(role))
                 .find(|(_, now)| now.name == *name)
                 .map(|(id, _)| Held::Now(id, deadline, latest.clone()))
         });
@@ -479,10 +480,7 @@ impl Core<'_> {
 
     fn ops(&self, working: &Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
-        let agent = matches!(working, Working::Agent { .. });
-        // A call holds no job function or now function.
-        let jobs = (self.workflow.job_functions()).filter(|_| agent);
-        let jobs = jobs.map(|(_, function)| {
+        let jobs = self.workflow.job_functions_of(role).map(|(_, function)| {
             Grant::Job(op::JobFunction {
                 name: function.name.clone(),
                 payload_max_bytes: function.payload_max_bytes(),
@@ -492,8 +490,7 @@ impl Core<'_> {
                 arguments: function.body.arguments.clone(),
             })
         });
-        let leases = (self.workflow.sessions())
-            .filter(|(_, grant)| grant.holder.role(self.workflow) == role);
+        let leases = (self.workflow.sessions()).filter(|(_, grant)| grant.holder.role() == role);
         let leases = leases.map(|(id, grant)| {
             let Session {
                 name,
@@ -515,8 +512,7 @@ impl Core<'_> {
                 remaining: self.grant_remaining((id, caller), grant.instance()),
             })
         });
-        let now = (self.workflow.now_functions()).filter(|_| agent);
-        let now = now.map(|(_, now)| {
+        let now = self.workflow.now_functions_of(role).map(|(_, now)| {
             Grant::Now(op::NowFunction {
                 name: now.name.clone(),
                 payload_max_bytes: now.payload_max_bytes,

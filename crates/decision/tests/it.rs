@@ -66,7 +66,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut run = Run {
         workflow: placed.workflow(),
         ops: 0,
-        caller: Caller::Agent,
+        caller: Caller::Agent(placed.workflow().agent().id),
         jobs: BTreeMap::new(),
         tick_due: None,
         transcript: String::new(),
@@ -81,7 +81,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         if let Some(asked) = line.strip_suffix(" model") {
             let (at, caller) = match asked.split_once(" @") {
                 Some((at, job)) => (at, Caller::Job(JobId(job.parse().unwrap()))),
-                None => (asked, Caller::Agent),
+                None => (asked, Caller::Agent(run.workflow.agent().id)),
             };
             let at = Duration::from_millis(at.parse().unwrap());
             let allowed = if core.model_requests_allowed(caller, at) {
@@ -186,7 +186,7 @@ impl Run<'_> {
                 let (job, event) = called.split_once(' ').unwrap();
                 (Caller::Job(JobId(job.parse().unwrap())), event)
             }
-            None => (Caller::Agent, event),
+            None => (Caller::Agent(self.workflow.agent().id), event),
         };
         self.caller = caller;
         let words: Vec<&str> = event.splitn(3, ' ').collect();
@@ -391,7 +391,7 @@ impl Run<'_> {
 /// Whose a lease is, as an action says it: nothing for the agent's.
 fn holder_text(holder: Caller) -> String {
     match holder {
-        Caller::Agent => String::new(),
+        Caller::Agent(_) => String::new(),
         Caller::Job(job) => format!(" for job {}", job.0),
     }
 }

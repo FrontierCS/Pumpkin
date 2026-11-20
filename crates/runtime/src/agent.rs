@@ -13,7 +13,7 @@ use schema::sandbox::op::OpReply;
 use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{self, Workflow};
+use schema::workflow::{self, AgentId, Workflow};
 use stdx::{Context, Deadline};
 
 use super::log::Entry;
@@ -37,17 +37,17 @@ impl Agent {
     /// [`Event::AgentStarted`] or [`Event::AgentFailed`].
     pub(super) fn start(
         sandboxes: &Sandboxes<'_, impl Host>,
-        workflow: &Workflow,
+        agent: &workflow::Agent,
         by: Deadline,
         hard_end: UnixTime,
         inbox: Sender<Input>,
         clock: impl Clock,
     ) -> (Option<Self>, Event) {
-        let agent = workflow.agent();
-        let ops = Some(op_payload_limit(workflow));
+        let id = agent.id;
+        let ops = Some(op_payload_limit(sandboxes.workflow(), id));
         // Stamped as the reader hands it over, which is when it reached the host.
-        let wrap = move |arrival| Input::Agent(clock.now(), arrival);
-        let started = sandboxes.start(Which::Agent, ops, by, hard_end, inbox, wrap);
+        let wrap = move |arrival| Input::Agent(id, clock.now(), arrival);
+        let started = sandboxes.start(Which::Agent(id), ops, by, hard_end, inbox, wrap);
         let mut sandbox = match started {
             Ok(sandbox) => sandbox,
             Err(error) => {
@@ -156,10 +156,12 @@ fn put(
 
 /// The largest payload the agent may send: the largest `payload_max_bytes` of its job and now
 /// functions.
-fn op_payload_limit(workflow: &Workflow) -> OpPayloadLimit {
+fn op_payload_limit(workflow: &Workflow, agent: AgentId) -> OpPayloadLimit {
     workflow
-        .job_functions()
+        .job_functions_of(agent.role())
         .map(|(_, function)| function.payload_limit())
-        .chain((workflow.now_functions()).map(|(_, function)| function.payload_limit()))
+        .chain(
+            (workflow.now_functions_of(agent.role())).map(|(_, function)| function.payload_limit()),
+        )
         .fold(OpPayloadLimit::NONE, OpPayloadLimit::max)
 }
