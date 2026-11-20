@@ -1,2 +1,6 @@
-FROM python:3.10-slim@sha256:fd76ade0c607f27677bc04be3c60749f400eedc941d9e72967e19a4cedff80c2
-COPY agent.py /opt/team/agent.py
+FROM python:3.10-slim@sha256:fd76ade0c607f27677bc04be3c60749f400eedc941d9e72967e19a4cedff80c2 AS client
+RUN mkdir --mode=1777 /workspace
+COPY client.py /opt/team/
+
+FROM client AS reference
+COPY agent.py /opt/team/

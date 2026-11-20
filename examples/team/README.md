@@ -1,7 +1,8 @@
-# Two agents score public predictions
+# Two agents score public LWE predictions
 
-Alice and Bob predict the residue of a dot product with a public offset. For a row
-`[a, b]` and offset `e`, the answer is `(2*a + 3*b + e) % 13`.
+Alice and Bob compute two sample values of the Learning With Errors (LWE) equation. All
+inputs are public, including the vector `[2, 3]` and both errors. For a row `[a, b]` and
+error `e`, the prediction is `(2*a + 3*b + e) % 13`.
 
 | Row | Coefficients | Offset | Prediction |
 | --- | --- | --- | --- |
@@ -10,14 +11,34 @@ Alice and Bob predict the residue of a dot product with a public offset. For a r
 
 Alice posts the amber prediction, selects her answer and finishes. Bob reads her authenticated
 message, checks the arithmetic, sends an acknowledgement and adds the blue prediction. One
-sandbox hosts the board across both participants' calls. The agents also check that the board
-refuses a forged sender and that each can use only its own selection grant.
+sandbox hosts the board across both participants' calls. The judge reads each role's selected
+JSON file and takes the highest individual score.
 
-## Run and check the record
+Copy the whole `examples/` directory into a task repository with its Pumpkin launcher.
 
-Copy the whole `examples/` directory into a task repository with its Pumpkin launcher. The
-agents are scripted and need no model. The default run scores Alice 1 and Bob 2, with a team
-score of 2.
+## Run two Codex agents
+
+Set `MODEL` to a configured Responses API model that supports the stock Codex harness's native
+tools. Each role has its own sandbox, prompt and $0.25 model budget. Both agents share a
+five-minute work deadline.
+
+```sh
+task=examples/team/codex.star
+./pumpkin check "$task" --arg "model=${MODEL:?set MODEL}" &&
+team=$(./pumpkin run "$task" --arg "model=$MODEL") &&
+./pumpkin wait --outcome "$team" &&
+python3 examples/team/verify.py ".pumpkin/runs/$team"
+```
+
+The checker requires successful Responses output for each agent, a post from Alice that Bob
+reads and acknowledges, both agents' selection calls, one judge result and four sandbox deletion
+receipts. It reports the scores earned by the selected predictions. A wrong prediction can
+therefore yield a successful check and a lower score.
+
+## Run the scripted reference
+
+The reference needs no model. It also checks that the board refuses a forged sender and that
+each agent can use only its own selection grant. The default run scores Alice 1 and Bob 2.
 
 ```sh
 task=examples/team/task.star
@@ -38,9 +59,5 @@ python3 examples/team/verify.py ".pumpkin/runs/$missing" --omit bob
 Use `--arg omit=all` and `--omit all` to see the judge receive two missing selections. Each
 missing role has a null score. If all selections are missing, the team score is null.
 
-The checker reads the selected bytes by their recorded digests, matches Alice's post to Bob's
-read and acknowledgement, and checks clean exits for omitted selections. It verifies the ordered
-scores, one final call and each sandbox's deletion against its physical receipt. It reports the
-observed order of Alice locking her selection and Bob reading her message. Model routing,
-independent model usage and provider capacity require a workflow with live model sessions on
-the intended provider.
+For the reference, the checker also requires the exact selected predictions and clean exits
+from agents that omit their answers.
