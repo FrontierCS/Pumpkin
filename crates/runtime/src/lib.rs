@@ -694,7 +694,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         actions: Vec<Action>,
-    ) -> Result<Option<Result<Outcome, String>>, String> {
+    ) -> Result<Option<Result<Outcome, String>>, Stopped> {
         let mut end = None;
         for action in actions {
             match action {

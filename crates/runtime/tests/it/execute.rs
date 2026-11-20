@@ -65,6 +65,8 @@ enum At {
     Delete,
     AgentStarted,
     SwapPayloads,
+    Logged(&'static str),
+    FinalSweep,
 }
 
 // A size of its own, within the score slot's 16 bytes.
@@ -107,6 +109,13 @@ impl Sweep for Interrupting<'_> {
     }
 
     fn list(&self, run: &RunTag) -> Result<Vec<Listed>, String> {
+        if self.at == Some(At::FinalSweep)
+            && fs::read_to_string(self.record.join("log.jsonl"))
+                .unwrap_or_default()
+                .contains(r#""kind":"start_final_call""#)
+        {
+            interrupt();
+        }
         self.sim.list(run)
     }
 }
@@ -4605,27 +4614,32 @@ fn execute_agents(
     startup: u64,
     ir: Value,
     dir: &TestDir,
-    interrupt_after: Option<&str>,
+    at: Option<At>,
 ) -> (PathBuf, Result<Outcome, runtime::Stopped>) {
     let ir = serde_json::from_value(ir).unwrap();
-    let sim = Sim::with_startup(startup);
+    let sim = Sim::with_startup(startup).priced(1.0);
     let placed = placed(&ir, sim.ready()).unwrap();
     let ids = placed
         .workflow()
         .agents()
         .map(|agent| agent.id)
         .collect::<Vec<_>>();
-    let on = providers_of(&placed, |_| &sim);
     let upstream = model_routed(&ir).then(StandIn::start);
     let servings = StandIn::servings(upstream.as_ref(), placed.workflow(), dir.path());
     let prices = prices();
     let (models, recorded) = kept(&placed, &servings, &prices);
     let tag = new_id(SystemTime::now()).unwrap();
+    let record = dir.path().join(tag.as_str());
+    let provider = Interrupting {
+        sim: &sim,
+        at,
+        record: &record,
+    };
+    let on = providers_of(&placed, |_| &provider);
     let run = Run::prepare(host, placed, on, dir.path(), tag.clone(), models, recorded).unwrap();
-    let record = run.dir().to_owned();
     sim.records(&record);
     let outcome = thread::scope(|scope| {
-        if let Some(event) = interrupt_after {
+        if let Some(At::Logged(event)) = at {
             scope.spawn(|| {
                 sim::logged(&record, event);
                 interrupt();
@@ -5143,7 +5157,13 @@ fn shared_call_interruption_collects_and_deletes_without_starting_the_judge() {
     );
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(30);
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&System, 2, ir, &dir, Some(r#""kind":"target_run""#));
+    let (record, outcome) = execute_agents(
+        &System,
+        2,
+        ir,
+        &dir,
+        Some(At::Logged(r#""kind":"target_run""#)),
+    );
     assert!(matches!(outcome, Err(runtime::Stopped::Interrupted(_))));
     let deleted: Value =
         serde_json::from_slice(&fs::read(record.join("shared/trainer/sandbox.json")).unwrap())
@@ -5211,6 +5231,7 @@ fn declined_shared_create_has_no_physical_usage() {
         .unwrap()
         .progress
         .unwrap();
+    assert!(!progress.cost().unwrap().partial());
     let shared = &progress.shared[&1];
     assert!(
         shared
@@ -5250,6 +5271,38 @@ fn unnamed_shared_create_is_deleted_before_the_judge_starts() {
         .position(|line| line["event"]["kind"] == "call_started")
         .unwrap();
     assert!(orphan < judge);
+    let record = Record::open(&record).unwrap();
+    let progress = record.progress().unwrap().progress.unwrap();
+    assert!(progress.cost().unwrap().partial());
+    assert!(record.used().unwrap().unwrap().partial);
+    assert_eq!(
+        progress
+            .sandboxes()
+            .values()
+            .map(|used| used.count)
+            .sum::<u64>(),
+        2
+    );
+}
+
+#[test]
+fn interrupt_during_the_pre_final_sweep_skips_the_judge() {
+    let dir = TestDir::new();
+    let (record, outcome) = execute_agents(
+        &System,
+        2,
+        failed_shared_create(LOST),
+        &dir,
+        Some(At::FinalSweep),
+    );
+    assert!(matches!(
+        outcome,
+        Err(runtime::Stopped::Interrupted(runtime::Signal::Term))
+    ));
+    assert!(!record.join("jobs/0").exists());
+    assert!(read_log(&record).iter().any(|line| {
+        line["event"]["kind"] == "sandbox_deleted" && line["event"]["sandbox"].is_null()
+    }));
 }
 
 #[test]

@@ -47,6 +47,8 @@ pub struct Progress {
     pub last: Duration,
     pub agents: BTreeMap<logged::CallerName, AgentSpan>,
     pub shared: BTreeMap<usize, SharedSpan>,
+    // The provider listed an allocation the driver could not associate with a sandbox record.
+    pub(super) unplaced_sandbox: bool,
     /// When the agents began work on their common clock.
     pub work_started: Option<Duration>,
     /// Each call, in the order the log started them.
@@ -366,6 +368,7 @@ pub(super) fn readout(
         last,
         agents,
         shared,
+        unplaced_sandbox,
         work_started,
         calls,
         leases,
@@ -380,6 +383,7 @@ pub(super) fn readout(
         last,
         agents,
         shared,
+        unplaced_sandbox,
         work_started,
         calls,
         leases,
@@ -456,6 +460,7 @@ pub(super) struct Reading {
     last: Duration,
     agents: BTreeMap<logged::CallerName, AgentSpan>,
     shared: BTreeMap<usize, SharedSpan>,
+    unplaced_sandbox: bool,
     work_started: Option<Duration>,
     calls: Vec<CallSpan>,
     leases: Vec<LeaseSpan>,
@@ -686,8 +691,12 @@ impl Reading {
                 }
             }
             logged::Event::SandboxDeleted { sandbox } => {
-                if let Some(sandbox) = sandbox.and_then(|sandbox| self.named(sandbox)) {
-                    sandbox.gone.get_or_insert(at);
+                if let Some(name) = sandbox {
+                    if let Some(sandbox) = self.named(*name) {
+                        sandbox.gone.get_or_insert(at);
+                    }
+                } else {
+                    self.unplaced_sandbox = true;
                 }
             }
             // A call's commands show in no line of its own.

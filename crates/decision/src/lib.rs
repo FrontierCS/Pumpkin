@@ -152,7 +152,7 @@ pub enum Event {
         target: TargetId,
         reason: String,
     },
-    /// The shared sandbox was deleted or its provider confirmed it was never created.
+    /// The worker finished and deleted any shared sandbox its provider identified.
     SharedTornDown {
         target: TargetId,
     },
@@ -222,8 +222,8 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the shared targets and agents, then releases the agents’ commands. The runtime reports
-    /// [`Event::WorkStarted`] on release and each agent's exit or failure separately.
+    /// Starts the shared targets and agents. Releasing the agents' commands produces
+    /// [`Event::WorkStarted`]. Each agent reports its own exit or failure.
     StartAgents,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
@@ -632,6 +632,8 @@ impl<'w> Core<'w> {
             Phase::Finished | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
+        // Abandon stops the workers. A late service failure has no call left to stop.
+        self.shared.clear();
         // Abandon stops every runner. A later expiry or job report has no lease left to close.
         drop(self.leases.close_where(self.now, |_| true));
         actions.push(Action::Abandon);

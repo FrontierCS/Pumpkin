@@ -724,8 +724,8 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
-    /// Once all work has drained, removes any instance a failed create could not name before
-    /// the run uses its final reservation.
+    /// After work drains, sweeps providers whose failed creates could have allocated an instance.
+    /// A provider can list such an instance only later. It never received a work command.
     pub(super) fn finish_work(&self) -> Result<(), String> {
         let unnamed = std::mem::take(&mut stdx::unpoisoned(self.inventory.lock()).unnamed);
         if unnamed.is_empty() {

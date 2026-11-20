@@ -42,12 +42,6 @@ impl Core<'_> {
         let holding = (self.jobs)
             .of(JobOf::Function(id))
             .any(|job| self.leases.holds(Caller::Job(job)));
-        if usage.busy || holding {
-            return Err(format!(
-                "`{name}` runs one call at a time, and already has one queued or running: call \
-                 again once it has finished; this call is not charged"
-            ));
-        }
         if let Some(service) = self.shared.get(&function.target) {
             if *service != crate::Service::Available {
                 return Err(format!(
@@ -63,6 +57,12 @@ impl Core<'_> {
                     "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
                 ));
             }
+        }
+        if usage.busy || holding {
+            return Err(format!(
+                "`{name}` runs one call at a time, and already has one queued or running: call \
+                 again once it has finished; this call is not charged"
+            ));
         }
         let cumulative = function.cumulative();
         if let Some(total) = cumulative

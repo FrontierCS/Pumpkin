@@ -57,10 +57,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         job: JobId,
         selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
-    ) -> Result<(), String> {
-        self.sandboxes
-            .finish_work()
-            .context("cleaning up work sandboxes before the final call")?;
+    ) -> Result<(), crate::Stopped> {
+        let swept = self.sandboxes.finish_work();
+        crate::interruption::check()?;
+        swept.context("cleaning up work sandboxes before the final call")?;
         let final_call = self.workflow().final_call();
         let role = final_call.target.role();
         // The final call's body starts in time to run its whole timeout before the hard end, by
@@ -95,7 +95,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             inputs,
             timeout,
         };
-        self.start_body(scope, call, deadlines, Some(0))
+        Ok(self.start_body(scope, call, deadlines, Some(0))?)
     }
 
     /// Runs a call on its reserved fresh instance or the work phase's shared instance.

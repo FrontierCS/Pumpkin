@@ -1167,6 +1167,37 @@ fn hard_end() {
 }
 
 #[test]
+fn shared_failure_after_abandon_leaves_the_call_to_teardown() {
+    check(
+        |ir| {
+            ir["deadline_seconds"] = json!(60);
+            ir["roles"][1]["runtime"] =
+                json!({"shared": {"command": {"argv": ["server"], "cwd": "/"}, "cwd": "/"}});
+        },
+        r"
+        0 work_started
+        1000 call train 10
+        270000 tick
+        270001 shared_failed trainer disconnected
+        ",
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 70000)
+            0 work_started
+              (tick due at 60000)
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 59s
+            270000 tick
+              abandon the run at its hard end
+              (tick due at 270000)
+            270001 shared_failed trainer disconnected
+        "#]],
+    );
+}
+
+#[test]
 fn hard_end_after_work() {
     check(
         |ir| ir["deadline_seconds"] = json!(60),
@@ -3206,6 +3237,7 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
         230 call_returned 0 count=1
         240 @bob call board 7
         250 shared_failed board exited
+        255 @bob call board 1
         260 call_failed 1 lost
         270 @zoe call board 1
         300 @zoe agent_exited 0
@@ -3233,9 +3265,11 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
           start call 1 of board on op 3's payload of 7 bytes, with a timeout of 19.86s
         250 shared_failed board exited
           stop call 1
+        255 @bob call board 1
+          refuse op 4: `board` cannot run because its shared sandbox is unavailable
         260 call_failed 1 lost
         270 @zoe call board 1
-          refuse op 4: `board` cannot run because its shared sandbox is unavailable
+          refuse op 5: `board` cannot run because its shared sandbox is unavailable
         300 @zoe agent_exited 0
           tear down zoe
         310 @bob agent_exited 0

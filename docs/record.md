@@ -65,7 +65,9 @@ both in nanoseconds written as strings, and the model requests and tokens.
 
 The log identifies agent callers by their role index (`agent-<n>`). Jobs and leases have
 run-wide numbers. Calls on a shared sandbox keep their command output and the files their
-bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all its calls.
+bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all its calls. If a sweep deletes an
+allocation whose role is unknown, `usage.unplaced_sandbox` marks the cost as partial. The
+allocation contributes no estimate to a class’s count, time or price.
 The `start_final_call` action lists the selection for each agent by role.
 [Workflows](workflows.md) describes what the log keeps of each call.
 
