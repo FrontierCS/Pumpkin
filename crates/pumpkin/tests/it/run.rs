@@ -2333,6 +2333,7 @@ fn ops_workflow() -> Value {
     let script = AGENT.replace("SANDBOXCTL", SANDBOXCTL_PATH);
     let mut ir = workflow("", &["/workspace/agent"]);
     let agent = &mut ir["roles"][0]["runtime"]["agent"];
+    agent["prepend_grant_help"] = json!(true);
     let skills = json!({ "path": "/workspace/.codex/skills", "mode": "0750" });
     agent["dirs"].as_array_mut().unwrap().insert(0, skills);
     let launcher = json!({ "path": "/workspace/agent", "mode": "0755", "content": script });
@@ -2632,8 +2633,25 @@ fn ops_on_docker() {
             600 .codex/config.toml
             700 .tmp
             755 agent
-            standard input: Solve the task in /task/README.md.
-            sandboxctl ops: exit 0: {"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"train","payload_max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":5},{"kind":"now","name":"submit","payload_max_bytes":16,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+            standard input: Sandbox commands for role agent
+            Work time upper bound: 300 seconds. Run `sandboxctl ops` for current limits.
+
+            sandboxctl call train [FILE] [--wait SECONDS]
+            Payload limit: 8 bytes. Timeout: 5 seconds per call. Call limit: 100.
+
+            sandboxctl call submit [FILE] [--arg finalize=BOOL] [--wait SECONDS]
+            Default for finalize: false.
+            Payload limit: 16 bytes. Returns immediately.
+
+            FILE is a regular file containing the payload. Omit FILE for an empty payload.
+            Use --wait SECONDS to wait for the job. A completed job has a returned field. Without --wait, follow the job number with sandboxctl status JOB.
+
+            ---
+
+            Task
+
+            Solve the task in /task/README.md.
+            sandboxctl ops: exit 0: {"kind":"ops","role":"agent","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"train","payload_max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":5},{"kind":"now","name":"submit","payload_max_bytes":16,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             sandboxctl status 0: exit 1: {"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}
             sandboxctl call nope six --wait 15: exit 1: {"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}
             sandboxctl call train nine: exit 1: {"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}

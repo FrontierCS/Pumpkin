@@ -20,6 +20,7 @@ use crate::ir::{
 use crate::sandbox::OpPayloadLimit;
 
 mod errors;
+mod ops;
 mod parse;
 mod place;
 
@@ -405,6 +406,7 @@ pub struct Runner {
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobFunction {
+    pub help: String,
     pub holder: AgentId,
     pub name: Name,
     /// The target that each call starts afresh.
@@ -445,6 +447,7 @@ impl JobFunction {
 /// A session; see [`ir::Session`](crate::ir::Session).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
+    pub help: String,
     pub name: Name,
     pub holder: Holder,
     /// An agent's runner has an image no target has
@@ -490,6 +493,7 @@ impl Session {
 /// One of the agent's now functions; see [`ir::NowFunction`](crate::ir::NowFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NowFunction {
+    pub help: String,
     pub holder: AgentId,
     pub name: Name,
     pub body: crate::ir::Body,

@@ -33,11 +33,10 @@ use core::time::Duration;
 
 use schema::ir::{Argv, Name};
 use schema::sandbox::op::{
-    self, CommandStatus, Grant, JobState, Last, LeaseRemaining, LeaseReply, LeaseState,
-    LeaseStatusReply, OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd,
-    TransferStatus,
+    CommandStatus, JobState, Last, LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply,
+    OpReply, OpsReply, REASON_BYTES, SessionOp, StatusReply, TransferEnd, TransferStatus,
 };
-use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, Session, SessionId};
+use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, SessionId};
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
@@ -453,50 +452,10 @@ impl Core<'_> {
 
     fn ops(&self, working: &Working) -> OpsReply {
         let (caller, role, end) = (working.caller(), working.role(), working.end());
-        let jobs = self.workflow.job_functions_of(role).map(|(_, function)| {
-            Grant::Job(op::JobFunction {
-                name: function.name.clone(),
-                payload_max_bytes: function.payload_max_bytes(),
-                calls: function.calls,
-                cumulative_seconds: function.cumulative_seconds,
-                call_timeout_seconds: function.call_timeout_seconds,
-                arguments: function.body.arguments.clone(),
+        self.workflow
+            .ops(role, self.seconds_left(end), |id, grant| {
+                self.grant_remaining((id, caller), grant.instance())
             })
-        });
-        let leases = (self.workflow.sessions()).filter(|(_, grant)| grant.holder.role() == role);
-        let leases = leases.map(|(id, grant)| {
-            let Session {
-                name,
-                holder: _,
-                runner: _,
-                instances,
-                instance_seconds,
-                cumulative_seconds,
-                commands,
-                transfer_bytes,
-            } = grant;
-            Grant::Session(op::SessionGrant {
-                name: name.clone(),
-                instances: *instances,
-                instance_seconds: *instance_seconds,
-                cumulative_seconds: *cumulative_seconds,
-                commands: *commands,
-                transfer_bytes: *transfer_bytes,
-                remaining: self.grant_remaining((id, caller), grant.instance()),
-            })
-        });
-        let now = self.workflow.now_functions_of(role).map(|(_, now)| {
-            Grant::Now(op::NowFunction {
-                name: now.name.clone(),
-                payload_max_bytes: now.payload_max_bytes,
-                arguments: now.body.arguments.clone(),
-            })
-        });
-        OpsReply {
-            remaining_seconds: self.seconds_left(end),
-            resources: (self.workflow.sandbox(role).needs).resources(),
-            grants: (jobs.chain(leases)).chain(now).collect(),
-        }
     }
 
     fn status(&self, id: JobId, job: &Job, function: JobFunctionId) -> StatusReply {

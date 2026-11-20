@@ -1,19 +1,27 @@
 """The hypergraph team, its board and its final judge."""
 
-load("//submit.star", "submit")
-load("//team/bodies.star", "board_call", "evaluate", "judge")
+load("//submit.star", "submission")
+load("//team/bodies.star", "evaluate", "judge", "post", "read", "send")
 
 SOURCE_BYTES = 64 * KiB
 PARTICIPANTS = ["alice", "bob"]
 USER = {"uid": 1000, "gid": 1000}
 SERVICE_NEEDS = {"cpu_millis": 500, "memory_bytes": 256 * MiB}
-GRANT = {"name": "board", "job": {
-    "target": "board",
-    "body": board_call,
-    "payload_max_bytes": 16 * KiB,
-    "call_timeout_seconds": 10,
-    "calls": 200,
-}}
+
+def _board(name, body, calls, help):
+    return {"name": name, "help": help, "job": {
+        "target": "board",
+        "body": body,
+        "payload_max_bytes": 2 * KiB,
+        "call_timeout_seconds": 10,
+        "calls": calls,
+    }}
+
+_BOARD = [
+    _board("post", post, 50, "Publish the file's nonempty UTF-8 text to the shared board. Returns its message id."),
+    _board("send", send, 50, "Send the file's nonempty UTF-8 text to another role's inbox. Returns its message id."),
+    _board("read", read, 100, "Read public posts from board or private messages from your inbox. Omit the file. Returns messages with id, from and text, and an after cursor for the next page."),
+]
 
 def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, evaluations = 0):
     """Runs Alice and Bob with access to the same board and judge.
@@ -28,7 +36,7 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
       evaluations: how many drafts each role may score before selecting.
     """
     evaluators = [("judge", "compiler")] + ([("evaluator", "eval_compiler")] if evaluations else [])
-    draft = [{"name": "eval", "job": {
+    draft = [{"name": "eval", "help": "Compile and score the file as draft C++ source. Returns its status and score.", "job": {
         "target": "evaluator",
         "body": evaluate,
         "calls": evaluations,
@@ -45,10 +53,7 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
                 "image": agent_image,
                 "user": USER,
                 "needs": needs,
-                "runtime": {"agent": runtimes[role] | {"grants": draft + [
-                    GRANT,
-                    {"name": "select_" + role, "now": {"body": submit, "payload_max_bytes": SOURCE_BYTES}},
-                ]}},
+                "runtime": {"agent": runtimes[role] | {"grants": draft + _BOARD + [submission("submit", SOURCE_BYTES)]}},
             }
             for role in PARTICIPANTS
         ] + [

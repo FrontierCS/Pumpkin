@@ -16,8 +16,10 @@ It prints one integer per vertex, in vertex order, separated by whitespace. For 
 ```
 
 The output is `2 2 2 0`. Alice and Bob work in separate sandboxes, share one board and can
-each finalize only their own C++ source. Alice publishes a test graph and its core vector.
-Bob runs his program on her graph and sends Alice the message ID and his observed output.
+each finalize their own C++ source with `submit`. Alice uses `post` to publish a test graph
+and its core vector. Bob uses `read` to find her graph, runs his program on it, and uses
+`send` to deliver the message ID and his observed output to Alice’s inbox. Each message is a
+UTF-8 text file. The board records its sender from the authenticated call.
 
 The final body receives each role’s source or a missing value. It stages each selected file in the
 judge sandbox, where a trusted Python worker checks its encoding and computes its SHA-256 digest.
@@ -41,7 +43,8 @@ Alice writes a straightforward implementation and designs a small test of whole-
 Bob writes an incidence-list peeling algorithm, reads Alice’s case and sends her his result.
 Each role saves a working source as soon as it compiles and can send two drafts to `eval`
 after the exchange. The evaluator compiles and scores each draft in a fresh runner. Each agent
-finalizes its best evaluated source with its own grant, even if the score is partial.
+finalizes its best evaluated source, even if the score is partial. The grant declarations
+supply each agent with command usage, argument defaults, limits and task-specific help.
 
 ```sh
 task=examples/team/codex.star
@@ -86,5 +89,6 @@ or malformed output earns zero. A program returning well-formed incorrect vector
 points for the graphs it solved.
 
 The checker reads each selected C++ file by its recorded digest. It checks Alice's post,
-Bob's read and reply, the ordered scores, and one final call. It verifies the deletion
-receipts for the agents, the board, the judge and each compiler sandbox.
+Bob's read and reply, the refused attempts to post or submit as the other role, the ordered
+scores and one final call. It verifies the deletion receipts for the agents, the board, the
+judge and each compiler sandbox.

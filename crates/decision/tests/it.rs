@@ -657,7 +657,7 @@ fn whole_run() {
             0 work_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 1: {"kind":"ops","role":"agent","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             2000 call train 10240
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 2's payload of 10240 bytes, with a timeout of 12000s
@@ -789,7 +789,7 @@ fn job_functions() {
             0 work_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"job","name":"check","payload_max_bytes":20,"calls":2,"cumulative_seconds":null,"call_timeout_seconds":60,"arguments":{"mode":{"type":"str","default":"fast"},"n":{"type":"int"}}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 1: {"kind":"ops","role":"agent","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"job","name":"check","payload_max_bytes":20,"calls":2,"cumulative_seconds":null,"call_timeout_seconds":60,"arguments":{"mode":{"type":"str","default":"fast"},"n":{"type":"int"}}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             1050 call check 10
               refuse op 2: `--arg n` is required, as `check` gives it no default: give it as `--arg n=<value>`
             1060 call check 10 n=x
@@ -974,7 +974,7 @@ fn deadline_from_work_start() {
             8000 work_started
               (tick due at 68000)
             8000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 1: {"kind":"ops","role":"agent","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             9000 work_started
             67999 tick
             68000 tick
@@ -998,7 +998,7 @@ fn deadline_from_work_start() {
               (tick due at 70000)
             12000 work_started
             12000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 1: {"kind":"ops","role":"agent","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             70000 tick
               tear down agent
               (tick due at 270000)
@@ -1801,7 +1801,7 @@ fn leases() {
             0 work_started
               (tick due at 18000000)
             1000 ops
-              reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 1: {"kind":"ops","role":"agent","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             2000 gpu.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 0 of gpu, as instance 0, started by 18000000
@@ -2529,12 +2529,12 @@ fn lease_slots() {
             4200 gpu.open
               refuse op 6: `gpu` has 2 leases open, as many as it allows at once, 1 of them `closing`, which holds its instance until its runner is gone: open another once `gpu.status` says one has ended
             4300 ops
-              reply to op 7: {"kind":"ops","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 7: {"kind":"ops","role":"agent","remaining_seconds":17995,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             5000 lease_ended 0
             5100 gpu.status 0
               reply to op 8: {"kind":"lease_status","lease":0,"state":"closed","elapsed_seconds":4,"busy_seconds":1,"idle_seconds":1,"failure":null,"last":{"kind":"command","command":0,"end":null,"stdout":"","stderr":""},"remaining":{"instances":1,"instance_seconds":0,"cumulative_seconds":1198,"commands":2}}
             5200 ops
-              reply to op 9: {"kind":"ops","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+              reply to op 9: {"kind":"ops","role":"agent","remaining_seconds":17994,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             5300 gpu.open
               reply to op 10: {"kind":"lease","lease":2,"remaining":{"instances":0,"instance_seconds":900,"cumulative_seconds":1198,"commands":2}}
               open lease 2 of gpu, as instance 0, started by 18000000
@@ -2560,6 +2560,7 @@ fn holders_leasing(ir: &mut Value) {
             "transfer_bytes": 4096,
         } });
         if holder == 1 {
+            grant["help"] = json!("Compile the draft in a fresh runner.");
             grant["session"]["commands"] = json!(2);
         }
         ir["roles"][holder]["runtime"]["target"]["sessions"] = json!([grant]);
@@ -2712,7 +2713,7 @@ fn target_leases() {
               refuse op 2: the call has ended: make no more ops
             2000 call_started 0
             2100 @0 ops
-              reply to op 3: {"kind":"ops","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
+              reply to op 3: {"kind":"ops","role":"trainer","remaining_seconds":49,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","help":"Compile the draft in a fresh runner.","name":"box","instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}]}
             2200 @0 box.open
               reply to op 4: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
               open lease 0 of box for job 0, as instance 0, started by 52000
@@ -2915,7 +2916,7 @@ fn final_call_leases() {
               start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             3000 call_started 0
             3100 @0 ops
-              reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
+              reply to op 2: {"kind":"ops","role":"final_judge","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
             3200 @0 box.open
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
               open lease 0 of box for job 0, as instance 0, started by 123000

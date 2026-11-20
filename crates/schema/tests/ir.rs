@@ -587,22 +587,22 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":1}"#),
-            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":1,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
-            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddee"}"#),
-            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddeefg"}"#),
-            HelloJson(r#"{"version":1,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":1,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":2}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddee"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeefg"}"#),
+            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { grant: None, gpus: None }
             Hello { grant: Some(RegistrationGrant(..)), gpus: None }
-            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             Hello { grant: None, gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 1's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 2's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -731,6 +731,101 @@ fn agents() -> Value {
     agent["grants"][0]["job"]["calls"] = json!(1);
     ir["roles"].as_array_mut().unwrap().push(peer);
     ir
+}
+
+struct GrantHelp(Value);
+
+impl Case for GrantHelp {
+    fn outcome(self) -> String {
+        let workflow = Workflow::parse(&serde_json::from_value(self.0).unwrap()).unwrap();
+        let mut agents = workflow.agents();
+        let raw = agents.next().unwrap();
+        assert_eq!(raw.stdin.as_deref(), Some("\0{\"raw\":true}\r\n"));
+        let agent = agents.next().unwrap();
+        let files: Vec<_> = agent
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.mode.bits(), f.content.as_str()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("/work/.codex/AGENTS.md", 0o640, "Existing instructions."),
+                (
+                    "/work/.codex/AGENTS.override.md",
+                    0o600,
+                    "Project overrides."
+                ),
+            ]
+        );
+        agent.stdin.clone().unwrap()
+    }
+}
+
+#[test]
+fn grant_help() {
+    let mut ir = agents();
+    ir["roles"][0]["runtime"]["agent"]["stdin"] = json!("\0{\"raw\":true}\r\n");
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["help"] = json!("A different role's grant.");
+    let peer = &mut ir["roles"].as_array_mut().unwrap().last_mut().unwrap()["runtime"]["agent"];
+    peer["prepend_grant_help"] = json!(true);
+    peer["stdin"] = json!("{\"task\":42}\n");
+    peer["files"] = json!([{"path":"/work/.codex/AGENTS.md", "mode":"0640", "content":"Existing instructions."},
+        {"path":"/work/.codex/AGENTS.override.md", "mode":"0600", "content":"Project overrides."}]);
+    peer["grants"][0]["name"] = json!("score");
+    peer["grants"][0]["help"] = json!("Score the source file and return its points.");
+    peer["grants"][0]["job"]["keywords"] = json!({"private": "never expose this"});
+    peer["grants"][0]["job"]["body"]["arguments"] =
+        json!({"draft":{"type":"str"}, "level":{"type":"int","default":2}});
+    check(
+        [GrantHelp(ir)],
+        &expect![[r#"
+        Sandbox commands for role alpha
+        Work time upper bound: 18000 seconds. Run `sandboxctl ops` for current limits.
+
+        sandboxctl call score [FILE] --arg draft=STR [--arg level=INT] [--wait SECONDS]
+        Default for level: 2.
+        Score the source file and return its points.
+        Payload limit: 4194304 bytes. Timeout: 12000 seconds per call. Call limit: 1. Total call time limit: 12000 seconds.
+
+        sandboxctl call gpu.open [--seconds SECONDS]
+        sandboxctl call gpu.run LEASE [--timeout SECONDS] -- COMMAND [ARG ...]
+        sandboxctl call gpu.put LEASE LOCAL REMOTE [--replace]
+        sandboxctl call gpu.get LEASE REMOTE LOCAL
+        sandboxctl call gpu.status LEASE
+        sandboxctl call gpu.close LEASE
+        Limits: 2 simultaneous leases, 900 seconds per lease, 1048576 bytes per transfer.
+        Command limit: 32 (each transfer counts as one).
+        Total lease time limit: 1200 seconds.
+
+        sandboxctl call submit [FILE] [--arg finalize=BOOL] [--wait SECONDS]
+        Default for finalize: false.
+        Payload limit: 4194304 bytes. Returns immediately.
+
+        FILE is a regular file containing the payload. Omit FILE for an empty payload.
+        Use --wait SECONDS to wait for the job. A completed job has a returned field. Without --wait, follow the job number with sandboxctl status JOB.
+
+        ---
+
+        Task
+
+        {"task":42}
+    "#]],
+    );
+}
+
+#[test]
+fn ops_frame_bound() {
+    let ir = fixture_with(
+        "/roles/0/runtime/agent/grants/0/help",
+        json!("\0".repeat(frame::MAX_MESSAGE_BYTES / 6)),
+    );
+    check(
+        [ir],
+        &expect![
+            "/roles/0: the role's ops reply cannot be sent: the message is 65968 bytes: a frame's message holds at most 65536: shorten its public grant interface"
+        ],
+    );
 }
 
 #[test]
