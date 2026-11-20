@@ -6,7 +6,7 @@ load("//team/bodies.star", "evaluate", "judge", "post", "read", "send")
 SOURCE_BYTES = 64 * KiB
 PARTICIPANTS = ["alice", "bob"]
 USER = {"uid": 1000, "gid": 1000}
-SERVICE_NEEDS = {"cpu_millis": 500, "memory_bytes": 256 * MiB}
+TARGET_NEEDS = {"cpu_millis": 500, "memory_bytes": 256 * MiB}
 
 def _board(name, body, calls, help):
     return {"name": name, "help": help, "job": {
@@ -61,10 +61,11 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
                 "name": "board",
                 "image": image("board/Dockerfile"),
                 "user": USER,
-                "needs": SERVICE_NEEDS,
-                "runtime": {"shared": {
-                    "command": {"argv": ["python3", "/opt/team/board.py", "serve"] + PARTICIPANTS, "cwd": "/pumpkin/home"},
-                    "cwd": "/pumpkin/home",
+                "needs": TARGET_NEEDS,
+                "runtime": {"target": {
+                    "lifetime": "work",
+                    "cwd": "/pumpkin/out",
+                    "env": {"TEAM_ROLES": " ".join(PARTICIPANTS)},
                 }},
             },
         ] + [
@@ -72,7 +73,7 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
                 "name": target,
                 "image": judge_image,
                 "user": USER,
-                "needs": SERVICE_NEEDS,
+                "needs": TARGET_NEEDS,
                 "runtime": {"target": {"cwd": "/pumpkin/home", "sessions": [{
                     "name": "cpp",
                     "session": {"runner": compiler, "instances": 1, "instance_seconds": 60, "commands": 8, "transfer_bytes": SOURCE_BYTES},

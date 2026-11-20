@@ -1,12 +1,11 @@
-"""An in-memory board and its local client. The workflow supplies the caller as an argument."""
+"""Read or update the team board in its work-scoped sandbox."""
 
 import json
-import socket
-import socketserver
+import os
 import sys
-import time
+from pathlib import Path
 
-SOCKET = "board.sock"
+BOARD = Path("board.json")
 LIMIT = 16 * 1024
 
 
@@ -49,46 +48,27 @@ def answer(messages, roles, caller, op, args, text):
         raise ValueError("message is empty")
     ident = len(messages) + 1
     messages.append({"id": ident, "from": caller, **fields, "text": text})
+    pending = BOARD.with_suffix(".tmp")
+    pending.write_bytes(encode(messages))
+    pending.replace(BOARD)
     return {"id": ident}
-
-
-class Handler(socketserver.StreamRequestHandler):
-    def handle(self):
-        try:
-            request = json.loads(self.rfile.readline())
-            reply = answer(self.server.messages, self.server.roles, *request)
-        except (ValueError, RecursionError) as exc:
-            reply = {"error": str(exc)}
-        self.wfile.write(encode(reply) + b"\n")
 
 
 def call(op, caller, *args):
     try:
+        messages = json.loads(BOARD.read_bytes())
+    except FileNotFoundError:
+        messages = []
+    try:
         text = sys.stdin.buffer.read().decode("utf-8")
     except UnicodeDecodeError:
         return {"error": "message must be UTF-8 text"}
-    wire = encode([caller, op, args, text]) + b"\n"
-    with socket.socket(socket.AF_UNIX) as client:
-        # The first body can start before the service has bound its socket.
-        until = time.monotonic() + 3
-        while True:
-            try:
-                client.connect(SOCKET)
-                break
-            except (FileNotFoundError, ConnectionRefusedError):
-                if time.monotonic() >= until:
-                    raise
-                time.sleep(0.05)
-        client.sendall(wire)
-        with client.makefile("rb") as response:
-            return json.loads(response.readline(LIMIT + 1))
+    try:
+        roles = os.environ["TEAM_ROLES"].split()
+        return answer(messages, roles, caller, op, args, text)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "serve":
-        with socketserver.UnixStreamServer(SOCKET, Handler) as service:
-            service.roles = sys.argv[2:]
-            service.messages = []
-            service.serve_forever()
-    else:
-        sys.stdout.buffer.write(encode(call(*sys.argv[1:])))
+    sys.stdout.buffer.write(encode(call(*sys.argv[1:])))

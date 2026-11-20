@@ -148,7 +148,7 @@ def verify(record, omit):
         raise ValueError(f"judge ended with {verdict['kind']}")
     result = {f["name"]: f["value"] for f in verdict["result"]["values"]}
     callers = {f"agent-{i}": r["name"] for i, r in enumerate(ir["roles"])}
-    calls, posted = {}, {}
+    calls, messages = {}, []
     peer_read = alice_finished = None
     finals = []
     read_ids = {}
@@ -241,24 +241,27 @@ def verify(record, omit):
             if event["job"] not in calls:
                 continue
             role, grant, args, raw = calls[event["job"]]
-            if (
-                role == "alice"
-                and grant == "post"
-                and not args
-                and type(reply.get("id")) is int
-            ):
-                posted[reply["id"]] = raw.decode("utf-8")
-            if (
-                role == "bob"
-                and grant == "read"
-                and args.get("stream", "board") == "board"
-            ):
+            if grant in {"post", "send"} and "id" in reply:
+                ident = len(messages) + 1
+                if type(reply["id"]) is not int or reply["id"] != ident:
+                    raise ValueError(f"expected board message ID {ident}, got {reply}")
+                message = {"id": ident, "from": role, "text": raw.decode("utf-8")}
+                if grant == "send":
+                    message["to"] = args["to"]
+                messages.append(message)
+            if grant == "read":
+                public = args.get("stream", "board") == "board"
+                destination = None if public else role
                 for msg in reply.get("messages", []):
                     if (
-                        msg["from"] == "alice"
-                        and msg["id"] > int(args.get("after", 0))
-                        and posted.get(msg["id"]) == msg["text"]
+                        msg not in messages
+                        or msg.get("to") != destination
+                        or msg["id"] <= int(args.get("after", 0))
                     ):
+                        raise ValueError(
+                            f"unexpected message returned to {role}: {msg}"
+                        )
+                    if role == "bob" and public and msg["from"] == "alice":
                         graph = message_data(msg["text"])
                         if not check_graph(graph):
                             continue
@@ -295,6 +298,8 @@ def verify(record, omit):
                             print(
                                 f"Message {ident}: Alice posted {expected}, Bob observed {observed}"
                             )
+    if read(record / "shared/board/out/board.json") != messages:
+        raise ValueError("board checkpoint differs from the agents' committed messages")
     if peer_read is None or len(finals) != 1:
         raise ValueError(
             "expected Bob to read and acknowledge Alice's message, and one final call"
