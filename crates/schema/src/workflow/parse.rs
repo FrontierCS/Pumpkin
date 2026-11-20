@@ -89,18 +89,11 @@ impl<'ir> Parser<'ir> {
             mut agent, runtime, ..
         } in agents
         {
-            if let Some(path) = &runtime.grant_help {
-                let content = workflow.initial_ops(agent.id.role()).guide();
-                if let Some(file) = agent.files.iter_mut().find(|f| f.path == *path) {
-                    file.content.push_str("\n\n");
-                    file.content.push_str(&content);
-                } else {
-                    agent.files.push(ir::File {
-                        path: path.clone(),
-                        mode: ir::Mode::new(0o600),
-                        content,
-                    });
-                }
+            if runtime.prepend_grant_help {
+                let mut stdin = workflow.initial_ops(agent.id.role()).guide();
+                stdin.push_str("\n---\n\nTask\n\n");
+                stdin.push_str(agent.stdin.as_deref().unwrap_or_default());
+                agent.stdin = Some(stdin);
             }
             workflow.agents.insert(agent.id, agent);
         }
@@ -149,13 +142,13 @@ impl<'ir> Parser<'ir> {
             command,
             dirs,
             files,
-            grant_help,
+            prepend_grant_help: _,
             stdin,
             finalize_grace_seconds,
             egress,
             grants: _,
         } = runtime;
-        self.agent_paths(&at, dirs, files, grant_help.as_ref());
+        self.agent_paths(&at, dirs, files);
         let model = egress.model.clone();
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -171,19 +164,11 @@ impl<'ir> Parser<'ir> {
         self.agents.push(DeclaredAgent { at, agent, runtime });
     }
 
-    fn agent_paths(
-        &mut self,
-        runtime: &JsonPointer,
-        dirs: &[ir::Dir],
-        files: &[ir::File],
-        grant_help: Option<&RolePath>,
-    ) {
-        let extra = grant_help.filter(|path| !files.iter().any(|file| file.path == **path));
-        let file_paths = files.iter().map(|file| &file.path).chain(extra);
+    fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
+        let file_paths = files.iter().map(|file| &file.path);
         let all: Vec<&RolePath> = dirs.iter().map(|dir| &dir.path).chain(file_paths).collect();
         let at = |index: usize| match index.checked_sub(dirs.len()) {
             None => runtime.token("dirs").token(index),
-            Some(file) if file == files.len() => runtime.token("grant_help"),
             Some(file) => runtime.token("files").token(file),
         };
         for (index, path) in all.iter().enumerate() {
@@ -201,12 +186,7 @@ impl<'ir> Parser<'ir> {
                 ),
                 (None, None) => continue,
             };
-            let location = if index == dirs.len() + files.len() {
-                at(index)
-            } else {
-                at(index).token("path")
-            };
-            self.errors.report(location, message);
+            self.errors.report(at(index).token("path"), message);
         }
     }
 
@@ -216,8 +196,18 @@ impl<'ir> Parser<'ir> {
         let names = sessions.iter().map(|named| &named.name);
         self.errors.unique(names, |index| list.token(index));
         let sessions = sessions.iter().enumerate();
-        let sessions = sessions.map(|(index, ir::NamedSession { name, session })| {
-            (list.token(index).token("session"), name, "", session)
+        let sessions = sessions.map(|(index, named)| {
+            let ir::NamedSession {
+                name,
+                help,
+                session,
+            } = named;
+            (
+                list.token(index).token("session"),
+                name,
+                help.as_str(),
+                session,
+            )
         });
         self.holders.push(Holding {
             holder: Holder::Target(target),

@@ -740,31 +740,38 @@ impl Case for GrantHelp {
         let workflow = Workflow::parse(&serde_json::from_value(self.0).unwrap()).unwrap();
         let mut agents = workflow.agents();
         let raw = agents.next().unwrap();
-        assert!(
-            raw.files
-                .iter()
-                .all(|file| !file.content.contains("Sandbox commands"))
-        );
+        assert_eq!(raw.stdin.as_deref(), Some("\0{\"raw\":true}\r\n"));
         let agent = agents.next().unwrap();
-        assert_eq!(agent.stdin.as_deref(), Some("{\"task\":42}\n"));
-        let file = agent
+        let files: Vec<_> = agent
             .files
             .iter()
-            .find(|file| file.path.as_str() == "/work/AGENTS.md")
-            .unwrap();
-        format!("mode {:04o}\n{}", file.mode.bits(), file.content)
+            .map(|f| (f.path.as_str(), f.mode.bits(), f.content.as_str()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("/work/.codex/AGENTS.md", 0o640, "Existing instructions."),
+                (
+                    "/work/.codex/AGENTS.override.md",
+                    0o600,
+                    "Project overrides."
+                ),
+            ]
+        );
+        agent.stdin.clone().unwrap()
     }
 }
 
 #[test]
 fn grant_help() {
     let mut ir = agents();
+    ir["roles"][0]["runtime"]["agent"]["stdin"] = json!("\0{\"raw\":true}\r\n");
     ir["roles"][0]["runtime"]["agent"]["grants"][0]["help"] = json!("A different role's grant.");
     let peer = &mut ir["roles"].as_array_mut().unwrap().last_mut().unwrap()["runtime"]["agent"];
-    peer["grant_help"] = json!("/work/AGENTS.md");
+    peer["prepend_grant_help"] = json!(true);
     peer["stdin"] = json!("{\"task\":42}\n");
-    peer["files"] =
-        json!([{"path":"/work/AGENTS.md", "mode":"0640", "content":"Existing instructions."}]);
+    peer["files"] = json!([{"path":"/work/.codex/AGENTS.md", "mode":"0640", "content":"Existing instructions."},
+        {"path":"/work/.codex/AGENTS.override.md", "mode":"0600", "content":"Project overrides."}]);
     peer["grants"][0]["name"] = json!("score");
     peer["grants"][0]["help"] = json!("Score the source file and return its points.");
     peer["grants"][0]["job"]["keywords"] = json!({"private": "never expose this"});
@@ -773,9 +780,6 @@ fn grant_help() {
     check(
         [GrantHelp(ir)],
         &expect![[r#"
-        mode 0640
-        Existing instructions.
-
         Sandbox commands for role alpha
         Work time upper bound: 18000 seconds. Run `sandboxctl ops` for current limits.
 
@@ -794,12 +798,18 @@ fn grant_help() {
         Command limit: 32 (each transfer counts as one).
         Total lease time limit: 1200 seconds.
 
-        sandboxctl call submit [FILE] [--arg finalize=BOOL]
+        sandboxctl call submit [FILE] [--arg finalize=BOOL] [--wait SECONDS]
         Default for finalize: false.
         Payload limit: 4194304 bytes. Returns immediately.
 
         FILE is a regular file containing the payload. Omit FILE for an empty payload.
         Use --wait SECONDS to wait for the job. A completed job has a returned field. Without --wait, follow the job number with sandboxctl status JOB.
+
+        ---
+
+        Task
+
+        {"task":42}
     "#]],
     );
 }

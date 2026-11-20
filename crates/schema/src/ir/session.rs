@@ -13,6 +13,9 @@ use super::Name;
 pub struct NamedSession {
     /// Unique among the target's sessions.
     pub name: Name,
+    /// The public description shown to this target when it queries its grants.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
     pub session: Session,
 }
 

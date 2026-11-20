@@ -68,8 +68,8 @@ command, model route and grants. They work under one deadline.
 | `command` | `{"argv": [...], "cwd": …, "env": [...]}`: the whole command line, as the image's entrypoint is not used; the directory it starts in; and `NAME=value` entries added to the image's environment, which may be left out |
 | `finalize_grace_seconds` | how long the agent may keep running once a call has ended its work, its ops refused meanwhile; 0 ends the work in that call's step |
 | `dirs`, `files` | directories (`{"path", "mode"}`) and text files (`{"path", "mode", "content"}`) made before the command starts, as the role's user, with modes written as `"0644"` |
-| `grant_help` | optional file path for shell usage generated from this role’s grants. Appends to a declared file or creates one with mode `0600`. The Codex harness uses `$CODEX_HOME/AGENTS.md`. |
-| `stdin` | the text the command reads on its standard input; absent, it reads nothing |
+| `prepend_grant_help` | when true, put the role’s generated grant guide, a separator and a task heading before the original `stdin` bytes. The Codex harness enables this for its first prompt. Defaults to false. |
+| `stdin` | the task text, empty when absent. The command reads these bytes verbatim unless its harness enables `prepend_grant_help`. |
 | `egress` | its routes out: `{"model": [...]}`, a model route ([models](models.md)) |
 | `grants` | the functions it may call |
 
@@ -123,7 +123,8 @@ is refused, and so is a grant with none.
 A grant may include a public `"help"` string beside its name to describe its purpose, payload
 and return value. Pumpkin combines that description with the role’s actual grant name,
 caller arguments and limits. The body’s source, its docstring and the task’s private keywords
-stay with the host.
+stay with the host. Target sessions may likewise declare a public `help` string beside
+the session name. The target sees it through its own `sandboxctl ops`.
 
 ### A job function
 
