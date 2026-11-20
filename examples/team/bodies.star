@@ -40,17 +40,17 @@ def _stage(target, role, chosen):
     target.put(path, chosen)
     return [role, path]
 
-def judge(target: Target, selections):
+def judge(target: Target, submissions):
     """Scores each selected program and returns the best individual score.
 
     Args:
       target: the trusted judge with a compiler session.
-      selections: each role's selected C++ source, or None for a missing submission.
+      submissions: maps each agent role to its C++ payload or None.
 
     Returns:
       The team score and each role's source digest, status and score.
     """
     result = "/pumpkin/out/result.json"
-    args = [arg for role, chosen in selections.items() for arg in _stage(target, role, chosen)]
+    args = [arg for role, chosen in submissions.items() for arg in _stage(target, role, chosen)]
     target.run(["python3", "/opt/team/judge.py", "final", result] + args)
     return json.decode(target.get(result))
