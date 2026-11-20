@@ -76,7 +76,7 @@ impl Roles {
             shared: roles
                 .iter()
                 .enumerate()
-                .filter(|(_, role)| matches!(role.runtime, ir::Runtime::Shared(_)))
+                .filter(|(_, role)| matches!(&role.runtime, ir::Runtime::Target(target) if target.lifetime == Some(ir::TargetLifetime::Work)))
                 .map(|(index, role)| (role.name.to_string(), index))
                 .collect(),
             grants: grants.collect(),
@@ -140,7 +140,7 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
     let (agent, sessions) = match runtime {
         ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
         ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (&[][..], sessions.as_slice()),
-        ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => (&[][..], &[][..]),
+        ir::Runtime::Runner(_) => (&[][..], &[][..]),
     };
     let agent = agent.iter().map(move |grant| {
         let held = match &grant.function {
@@ -169,11 +169,34 @@ pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     let Some(bytes) = read_optional(&path)? else {
         return Ok(None);
     };
-    let ir = serde_json::from_slice(&bytes).map_err(|error| {
-        ReadError::Form(format!(
-            "{} holds an IR that this build doesn't read: {error}",
-            path.display()
-        ))
-    })?;
+    let ir = serde_json::from_slice(&bytes)
+        .or_else(|error| legacy_ir(&bytes).ok_or(error))
+        .map_err(|error| {
+            ReadError::Form(format!(
+                "{} holds an IR that this build doesn't read: {error}",
+                path.display()
+            ))
+        })?;
     Ok(Some(ir))
+}
+
+/// Recorded service roles used the same physical sandbox and job records as work-lifetime
+/// targets. Only record readers accept their old declaration.
+fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
+    let mut ir: Value = serde_json::from_slice(bytes).ok()?;
+    let mut converted = false;
+    for role in ir.get_mut("roles")?.as_array_mut()? {
+        let runtime = role.get_mut("runtime")?.as_object_mut()?;
+        if runtime.len() == 1
+            && let Some(mut shared) = runtime.remove("shared")
+        {
+            let target = shared.as_object_mut()?;
+            ir::Command::deserialize(target.remove("command")?).ok()?;
+            target.insert("lifetime".to_owned(), Value::from("work"));
+            runtime.insert("target".to_owned(), shared);
+            converted = true;
+        }
+    }
+    converted.then_some(())?;
+    serde_json::from_value(ir).ok()
 }

@@ -789,12 +789,12 @@ fn shared_summary(summary: &mut String, progress: &Progress) {
             summary,
             "  {:>7} {}",
             clock(service.sandbox.asked),
-            service_line(service)
+            work_target_line(service)
         );
     }
 }
 
-pub(crate) fn service_line(service: &runtime::SharedSpan) -> String {
+pub(crate) fn work_target_line(service: &runtime::SharedSpan) -> String {
     let state = if let Some(reason) = &service.failure {
         format!("failed: {}", crate::escaped(reason))
     } else if service.sandbox.gone.is_some() {
@@ -805,7 +805,7 @@ pub(crate) fn service_line(service: &runtime::SharedSpan) -> String {
         "starting".to_owned()
     };
     format!(
-        "shared {} on {}: {state}",
+        "work-lifetime target {} on {}: {state}",
         service.role,
         placed(&service.sandbox)
     )
