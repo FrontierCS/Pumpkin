@@ -2,7 +2,7 @@
 
 load("@pumpkin//harness/codex/codex.star", "codex")
 load("//hypergraph/score.star", "final_score", "score")
-load("//submit.star", "submit")
+load("//submit.star", "submission")
 
 MODEL = arg("model", str)
 PAYLOAD_BYTES = 1 * KiB
@@ -13,10 +13,8 @@ When a vertex is removed, every edge containing it disappears. Repeated edges co
 A vertex's core number is the largest k for which it belongs to a set of vertices that all have
 degree at least k using only edges wholly in the set. An isolated vertex has core number zero.
 
-Write cores.json as a JSON array of integers in vertex order. To score a draft, run
-sandboxctl call eval cores.json and poll sandboxctl status JOB
-with the returned job number. A score of 1 means every entry matches. Submit the final file with
-sandboxctl call final cores.json --arg finalize=true.
+Write cores.json as a JSON array of integers in vertex order. Score your draft, correct any
+error you find and finalize your best vector. A score of 1 means every entry matches.
 """
 
 agent = codex(
@@ -41,14 +39,14 @@ workflow(
         "user": {"uid": 1000, "gid": 1000},
         "needs": {"cpu_millis": 1000, "memory_bytes": 1 * GiB},
         "runtime": {"agent": runtime | {"egress": {"model": routes}, "grants": [
-            {"name": "eval", "job": {
+            {"name": "eval", "help": "Score a draft JSON core vector. Returns its score.", "job": {
                 "target": "evaluator",
                 "body": score,
                 "payload_max_bytes": PAYLOAD_BYTES,
                 "calls": 2,
                 "call_timeout_seconds": 30,
             }},
-            {"name": "final", "now": {"body": submit, "payload_max_bytes": PAYLOAD_BYTES}},
+            submission("final", PAYLOAD_BYTES),
         ]}},
     }] + [{
         "name": name,

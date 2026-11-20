@@ -1047,6 +1047,8 @@ fn ops() {
                 r#"{CTL}
                 cp payload big && printf '!' >> big && ln -s payload link
                 ctl ops
+                ctl ops --text
+                ctl call train
                 /.pumpkin/bin/sandboxctl ops > /dev/full; echo "\$ sandboxctl ops > /dev/full: exit $?"
                 ctl call train payload
                 ctl call submit ../home/payload --arg finalize=true
@@ -1082,7 +1084,12 @@ fn ops() {
         &expect![[r#"
             Code(1)
             $ sandboxctl ops: exit 0
-              {"kind":"ops","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+              {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
+            $ sandboxctl ops --text: exit 0
+              Sandbox commands for role agent
+            Work time upper bound: 0 seconds. Run `sandboxctl ops` for current limits.
+            $ sandboxctl call train: exit 0
+              {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl ops > /dev/full: exit 0
             $ sandboxctl call train payload: exit 0
               {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
@@ -1129,6 +1136,8 @@ fn ops() {
             control socket's directory: drwx------; TCP listeners: 0
             stderr: sh: can't create /.pumpkin/bin/sandboxctl: Read-only file system
             owner: ops
+            owner: ops
+            owner: call train {}: 0 bytes, intact: false
             owner: ops
             owner: call train {}: 2621440 bytes, intact: true
             owner: call submit {Name("finalize"): "true"}: 2621440 bytes, intact: true
@@ -1183,7 +1192,7 @@ fn refused_calls() {
                 ctl call train ''
                 ctl call Train huge
                 ctl status soon
-                ctl call train
+                ctl call train one two
                 ctl call train --seconds 5 huge
                 ctl call submit huge --arg finalize
                 ctl call submit huge --arg a=1 --arg a=2
@@ -1229,10 +1238,10 @@ fn refused_calls() {
               sandboxctl: `Train` is not a valid name: use 1 to 64 characters from a-z, 0-9, `_` and `-`, starting with a letter
             $ sandboxctl status soon: exit 1
               sandboxctl: `soon` is not a job: name one by the number a call returned
-            $ sandboxctl call train: exit 1
-              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
+            $ sandboxctl call train one two: exit 1
+              sandboxctl: `train` takes at most one payload file: call it as `sandboxctl call train [<file>] [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call train --seconds 5 huge: exit 1
-              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
+              sandboxctl: `train` takes at most one payload file: call it as `sandboxctl call train [<file>] [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call submit huge --arg finalize: exit 1
               sandboxctl: `--arg finalize` has no `=`: give it as `--arg <name>=<value>`
             $ sandboxctl call submit huge --arg a=1 --arg a=2: exit 1
@@ -1551,6 +1560,7 @@ fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
                 memory_bytes: NonZeroU64::MIN,
             };
             let ops = OpsReply {
+                role: Name::from_static("agent"),
                 remaining_seconds: 0,
                 resources,
                 grants: Vec::new(),

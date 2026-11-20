@@ -178,8 +178,12 @@ pub struct AgentRuntime {
     /// Absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<File>,
-    /// The text the command reads on its standard input, which the runtime puts at
-    /// [`command_stdin()`](crate::sandbox::command_stdin); absent, its standard input is empty.
+    /// Prepend this role's grant guide and a task heading to `stdin`. Absent or false, pass
+    /// `stdin` verbatim.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepend_grant_help: bool,
+    /// The task input, empty when absent. The runtime puts the resulting command input at
+    /// [`command_stdin()`](crate::sandbox::command_stdin).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
     /// How long the agent may keep running after a call of its ends its work. Its ops are

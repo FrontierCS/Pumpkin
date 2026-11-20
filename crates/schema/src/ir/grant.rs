@@ -15,6 +15,9 @@ use super::{Argument, JobFunction, Label, Name, NowFunction, Session};
 pub struct Grant {
     /// Unique among the role's grants.
     pub name: Name,
+    /// The public description of the call, its payload and its result, shown to its caller.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub help: String,
     #[serde(flatten)]
     pub function: Function,
 }
@@ -57,6 +60,7 @@ impl<'de> de::Visitor<'de> for GrantVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Grant, A::Error> {
         let mut name = None;
+        let mut help = None;
         let mut function: Option<(String, Function)> = None;
         while let Some(key) = map.next_key::<String>()? {
             if key == "name" {
@@ -64,6 +68,11 @@ impl<'de> de::Visitor<'de> for GrantVisitor {
                     return Err(de::Error::duplicate_field("name"));
                 }
                 name = Some(map.next_value()?);
+            } else if key == "help" {
+                if help.is_some() {
+                    return Err(de::Error::duplicate_field("help"));
+                }
+                help = Some(map.next_value()?);
             } else if let Some((kind, _)) = &function {
                 return Err(de::Error::custom(format_args!(
                     "`{key}` follows `{kind}`, the function's kind: give a grant its `name` and \
@@ -81,7 +90,11 @@ impl<'de> de::Visitor<'de> for GrantVisitor {
         let (_, function) = function.ok_or_else(|| {
             de::Error::custom("the grant gives no function: give one, under its kind's key")
         })?;
-        Ok(Grant { name, function })
+        Ok(Grant {
+            name,
+            help: help.unwrap_or_default(),
+            function,
+        })
     }
 }
 
