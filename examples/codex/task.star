@@ -3,7 +3,7 @@ greeting and submits it, and the final call scores the greeting's size."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
 load("//codex/final.star", "final_call")
-load("//submit.star", "submit")
+load("//submit.star", "submission")
 
 MODEL = arg("model", str)
 EFFORT = arg("effort", str, default = "high")
@@ -16,7 +16,7 @@ agent = codex(
     effort = EFFORT,
     tools = "native",
     workspace = "/workspace",
-    prompt = "Write a greeting to the file `greeting`, then submit it with `sandboxctl call final greeting --arg finalize=true`.\n",
+    prompt = "Write a greeting to the file `greeting` and finalize it as your submission.\n",
     finalize_grace_seconds = 60,
 )
 
@@ -29,7 +29,7 @@ workflow(
             "image": agent["image"],
             "user": {"uid": 1000, "gid": 1000},
             "needs": {"cpu_millis": 1000, "memory_bytes": 1 * GiB},
-            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [{"name": "final", "now": {"body": submit, "payload_max_bytes": 1 * KiB}}]}},
+            "runtime": {"agent": agent["runtime"]["agent"] | {"grants": [submission("final", 1 * KiB)]}},
         },
         {
             "name": "judge",

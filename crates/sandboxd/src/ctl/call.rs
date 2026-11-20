@@ -43,17 +43,22 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
     }
     let function = parse_grant(&function)?;
     match (&args[..], timeout, seconds, replace) {
-        ([file], None, None, false) => {
+        (files @ ([] | [_]), None, None, false) => {
             let arguments = arguments(&arg)?;
             let call = OpCall::Call {
                 grant: function,
                 arguments,
             };
-            Ok((call, payload_path(Path::new(file))?))
+            let body = files
+                .first()
+                .map(|file| payload_path(Path::new(file)))
+                .transpose()?
+                .unwrap_or_default();
+            Ok((call, body))
         }
         _ => Err(format!(
-            "`{function}` takes the file that holds the payload: call it \
-             as `sandboxctl call {function} <file> [--arg <name>=<value>]… [--wait <seconds>]`"
+            "`{function}` takes at most one payload file: call it \
+             as `sandboxctl call {function} [<file>] [--arg <name>=<value>]… [--wait <seconds>]`"
         )),
     }
 }
