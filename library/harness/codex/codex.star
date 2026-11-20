@@ -156,7 +156,7 @@ def codex(
       model: as every harness; Codex's `model`.
       effort: as every harness; Codex's `model_reasoning_effort`: one of `_EFFORTS`.
       workspace: as every harness; it holds Codex's temporary directory too.
-      prompt: as every harness; what Codex reads on its standard input, which may be empty.
+      prompt: as every harness; the task on Codex's standard input, following its grant guide.
       finalize_grace_seconds: as every harness.
       tools: how Codex sends the model its tools: one of `_TOOLS`. `functions` needs `CATALOG` to
         carry the model's entry.
@@ -233,9 +233,7 @@ def codex(
             },
             "dirs": [{"path": home, "mode": "0700"}, {"path": tmp, "mode": "0700"}],
             "files": files,
-            # Codex loads home instructions before the task prompt (codex-home/src/instructions).
-            # https://github.com/openai/codex/blob/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/codex-home/src/instructions/mod.rs#L43-L76
-            "grant_help": home + "/AGENTS.md",
+            "prepend_grant_help": True,
             "stdin": prompt,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
