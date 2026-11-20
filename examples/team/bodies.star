@@ -10,12 +10,8 @@ def board_call(target: Target, payload: Payload):
     Returns:
       The committed message ID, the requested messages, or a request error.
     """
-    request = "/pumpkin/in/request"
-    response = "/pumpkin/home/response"
-    target.run(["rm", "--force", request, response])
-    target.put(request, payload)
-    target.run(["python3", "/opt/team/board.py", "call", target.caller(), request, response])
-    return json.decode(target.get(response))
+    reply = target.capture(["python3", "/opt/team/board.py", "call", target.caller()], stdin = payload)
+    return json.decode(reply)
 
 def evaluate(target: Target, payload: Payload):
     """Compiles a draft source in a fresh runner and scores the resulting program.
@@ -27,11 +23,8 @@ def evaluate(target: Target, payload: Payload):
     Returns:
       The draft's status and score.
     """
-    path = "/pumpkin/in/draft.cpp"
-    result = "/pumpkin/out/result.json"
-    target.put(path, payload)
-    target.run(["python3", "/opt/team/judge.py", "draft", result, path])
-    return json.decode(target.get(result))
+    reply = target.capture(["python3", "/opt/team/judge.py", "draft"], stdin = payload)
+    return json.decode(reply)
 
 def _stage(target, role, chosen):
     if chosen == None:

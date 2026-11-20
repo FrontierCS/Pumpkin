@@ -5,7 +5,6 @@ import socket
 import socketserver
 import sys
 import time
-from pathlib import Path
 
 SOCKET = "board.sock"
 LIMIT = 16 * 1024
@@ -68,13 +67,12 @@ class Handler(socketserver.StreamRequestHandler):
         self.wfile.write(encode(reply) + b"\n")
 
 
-def call(caller, request_path, result_path):
+def call(caller):
     try:
-        request = json.loads(request_path.read_bytes())
+        request = json.load(sys.stdin.buffer)
         wire = encode([caller, request]) + b"\n"
     except (ValueError, RecursionError) as exc:
-        result_path.write_bytes(encode({"error": str(exc)}))
-        return
+        return {"error": str(exc)}
     with socket.socket(socket.AF_UNIX) as client:
         # The first body can start before the service has bound its socket.
         until = time.monotonic() + 3
@@ -88,8 +86,7 @@ def call(caller, request_path, result_path):
                 time.sleep(0.05)
         client.sendall(wire)
         with client.makefile("rb") as response:
-            result = json.loads(response.readline(LIMIT + 1))
-        result_path.write_bytes(encode(result))
+            return json.loads(response.readline(LIMIT + 1))
 
 
 if __name__ == "__main__":
@@ -99,4 +96,4 @@ if __name__ == "__main__":
             service.messages = []
             service.serve_forever()
     else:
-        call(sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]))
+        sys.stdout.buffer.write(encode(call(sys.argv[2])))
