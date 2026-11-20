@@ -2,12 +2,14 @@
 
 use std::io::{self, Cursor, Read, Write};
 use std::process::ChildStdin;
+use std::time::Instant;
 
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::{Deserialize, Serialize};
+use stdx::Context as _;
 
 use super::{Ask, Head, Link, Part, Request, Unanswered};
 use crate::manifest;
@@ -150,34 +152,20 @@ impl Link {
     pub(crate) fn put(
         &mut self,
         request: Put,
-        mut source: impl Read,
-        mut progress: impl FnMut(u64),
+        source: impl Read,
+        progress: impl FnMut(u64),
     ) -> Result<Result<PutAnswer, String>, Unanswered> {
-        let mut left = request
-            .body_bytes()
-            .map_err(|error| Unanswered::Failed(error.to_string()))?;
-        let mut pipe = Pipe(&mut self.stdin);
-        let failed = |error: io::Error| match error.kind() {
-            io::ErrorKind::BrokenPipe => {
-                Unanswered::Unreached("ended during the upload".to_owned())
-            }
-            _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
+        let nonblocking = |enabled| {
+            rustix::io::retry_on_intr(|| rustix::io::ioctl_fionbio(&self.stdin, enabled))
+                .context("setting the blocking mode of the pipe to `ssh` failed")
+                .map_err(Unanswered::Failed)
         };
-        frame::write(&mut pipe, &Ask::Put(request), &[]).map_err(failed)?;
-        let capacity = usize::try_from(left)
-            .unwrap_or(usize::MAX)
-            .min(MAX_BODY_BYTES);
-        let mut buffer = vec![0; capacity];
-        while left > 0 {
-            let size = usize::try_from(left.min(MAX_BODY_BYTES as u64)).unwrap_or(MAX_BODY_BYTES);
-            let part = &mut buffer[..size];
-            source.read_exact(part).map_err(|error| Unanswered::Failed(format!(
-                "the file changed or could not be read while it was sent: {error}: send the task again"
-            )))?;
-            frame::write(&mut pipe, &Part, part).map_err(failed)?;
-            left -= size as u64;
-            progress(size as u64);
-        }
+        nonblocking(true)?;
+        let sent = Pipe(&self.stdin).send(request, source, progress);
+        // The next request writes to the same pipe in its ordinary blocking mode.
+        let restored = nonblocking(false);
+        sent?;
+        restored?;
         match self.received("the upload's answer")? {
             Head::Answered(answer) => Ok(Ok(answer)),
             Head::Refused { message } => Ok(Err(message)),
@@ -191,26 +179,73 @@ const STALL_TIMEOUT: Timespec = Timespec {
     tv_nsec: 0,
 };
 
-struct Pipe<'a>(&'a mut ChildStdin);
+struct Pipe<'a>(&'a ChildStdin);
+
+impl Pipe<'_> {
+    fn send(
+        &mut self,
+        request: Put,
+        mut source: impl Read,
+        mut progress: impl FnMut(u64),
+    ) -> Result<(), Unanswered> {
+        let mut left = request
+            .body_bytes()
+            .map_err(|error| Unanswered::Failed(error.to_string()))?;
+        let failed = |error: io::Error| match error.kind() {
+            io::ErrorKind::BrokenPipe => {
+                Unanswered::Unreached("ended during the upload".to_owned())
+            }
+            _ => Unanswered::Failed(format!("writing to `ssh` failed: {error}")),
+        };
+        frame::write(self, &Ask::Put(request), &[]).map_err(failed)?;
+        let capacity = usize::try_from(left)
+            .unwrap_or(usize::MAX)
+            .min(MAX_BODY_BYTES);
+        let mut buffer = vec![0; capacity];
+        while left > 0 {
+            let size = usize::try_from(left.min(MAX_BODY_BYTES as u64)).unwrap_or(MAX_BODY_BYTES);
+            let part = &mut buffer[..size];
+            source.read_exact(part).map_err(|error| Unanswered::Failed(format!(
+                "the file changed or could not be read while it was sent: {error}: send the task again"
+            )))?;
+            frame::write(self, &Part, part).map_err(failed)?;
+            left -= size as u64;
+            progress(size as u64);
+        }
+        Ok(())
+    }
+}
 
 impl Write for Pipe<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // A nonblocking write larger than PIPE_BUF can fill the available space in one call:
+        // https://man7.org/linux/man-pages/man7/pipe.7.html
+        let started = Instant::now();
         loop {
-            let mut polled = [PollFd::new(&*self.0, PollFlags::OUT)];
-            match event::poll(&mut polled, Some(&STALL_TIMEOUT)) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("it took no byte for {} s", STALL_TIMEOUT.tv_sec),
-                    ));
-                }
-                Ok(_) => break,
-                Err(Errno::INTR) => {}
+            match self.0.write(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                written => return written,
+            }
+            let elapsed = Timespec::try_from(started.elapsed()).unwrap_or(STALL_TIMEOUT);
+            if elapsed >= STALL_TIMEOUT {
+                break;
+            }
+            let timeout = STALL_TIMEOUT - elapsed;
+            let mut polled = [PollFd::new(self.0, PollFlags::OUT)];
+            match event::poll(&mut polled, Some(&timeout)) {
+                Ok(0) => break,
+                Ok(_) | Err(Errno::INTR) => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        // A writable pipe takes at least PIPE_BUF without waiting.
-        self.0.write(&bytes[..bytes.len().min(libc::PIPE_BUF)])
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("it took no byte for {} s", STALL_TIMEOUT.tv_sec),
+        ))
     }
 
     fn flush(&mut self) -> io::Result<()> {
