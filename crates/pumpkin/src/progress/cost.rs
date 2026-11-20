@@ -142,7 +142,7 @@ pub(super) fn budgets(progress: &Progress, ir: &ir::Workflow) -> Vec<String> {
         let (agent, egress) = match &role.runtime {
             ir::Runtime::Agent(agent) => (true, Some(&agent.egress)),
             ir::Runtime::Target(target) => (false, Some(&target.egress)),
-            ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => (false, None),
+            ir::Runtime::Runner(_) => (false, None),
         };
         let route = egress.and_then(|egress| egress.model.as_ref());
         let entries = route.map_or(&[][..], ir::ModelRoute::as_slice);

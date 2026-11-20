@@ -82,13 +82,9 @@ impl Relay {
         }
         while let Some(message) = child.inbox.take() {
             match self.relay(child, job, (&mut *session, by), message)? {
-                None => {}
                 Some(Arrived::Stopped) => return Ok(true),
-                Some(Arrived::Exited(_, _)) => unreachable!(
-                    "job {} received a client exit while idle, though it waits for each client's \
-                     exit and the driver handles the shared server's exit separately",
-                    job.0
-                ),
+                // Only a waiter for a particular process consumes its exit status.
+                None | Some(Arrived::Exited(_, _)) => {}
             }
         }
         Ok(false)
@@ -134,7 +130,6 @@ impl Relay {
                 }
                 child.note(format!("job {}'s op was refused: {message}", job.0));
             }
-            // The sandbox runs one command at a time, so the exit is its.
             Message::Session(Arrival::Exited { process, status }) => {
                 return Ok(Some(Arrived::Exited(process, status)));
             }

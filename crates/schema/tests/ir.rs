@@ -1184,8 +1184,9 @@ fn job_functions() {
         .unwrap()
         .push(again);
     let mut resident = twice.clone();
-    resident["roles"][4]["runtime"] =
-        json!({"shared": {"cwd": "/", "command": {"argv": ["server"], "cwd": "/"}}});
+    resident["roles"][4]["runtime"] = json!({"target": {"lifetime": "work", "cwd": "/"}});
+    let mut resident_grants = target_holding();
+    resident_grants["roles"][4]["runtime"]["target"]["lifetime"] = json!("work");
     let mut resident_final = resident.clone();
     resident_final["final"]["target"] = json!("verifier");
     let mut uncalled = calling();
@@ -1208,6 +1209,7 @@ fn job_functions() {
             shared,
             resident,
             resident_final,
+            resident_grants,
         ],
         &expect![[r#"
             parsed
@@ -1227,7 +1229,9 @@ fn job_functions() {
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one
             parsed
             /final/target: `verifier` is a shared work sandbox: give the final call a fresh target
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one"#]],
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            /roles/4/runtime/target/sessions: sandbox-issued sessions require a call-lifetime target
+            /roles/4/runtime/target/egress: model egress requires a call-lifetime target"#]],
     );
 }
 

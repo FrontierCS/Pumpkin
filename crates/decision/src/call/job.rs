@@ -43,7 +43,7 @@ impl Core<'_> {
             .of(JobOf::Function(id))
             .any(|job| self.leases.holds(Caller::Job(job)));
         if let Some(service) = self.shared.get(&function.target) {
-            if *service != crate::Service::Available {
+            if *service != crate::Availability::Available {
                 return Err(format!(
                     "`{name}` cannot run because its shared sandbox is unavailable"
                 ));
