@@ -119,11 +119,9 @@ def score(inputs):
 
 
 if __name__ == "__main__":
-    mode, result, *inputs = sys.argv[1:]
-    if mode == "draft":
-        (path,) = inputs
-        status, points = score_source(Path(path).read_bytes())
-        verdict = {"status": status, "score": points}
+    if sys.argv[1] == "draft":
+        status, points = score_source(sys.stdin.buffer.read())
+        print(json.dumps({"status": status, "score": points}))
     else:
-        verdict = score(inputs)
-    Path(result).write_text(json.dumps(verdict))
+        result, *inputs = sys.argv[2:]
+        Path(result).write_text(json.dumps(score(inputs)))
