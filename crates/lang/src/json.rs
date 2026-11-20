@@ -416,25 +416,31 @@ impl Decoder<'_> {
                     .then(|| self.code_unit());
                 match low.transpose()? {
                     Some(low @ 0xdc00..=0xdfff) => {
-                        0x10000 + ((first - 0xd800) << 10) + (low - 0xdc00)
+                        0x10000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(low) - 0xdc00)
                     }
                     Some(_) | None => return Err(self.lone(start)),
                 }
             }
-            unit => unit,
+            0xdc00..=0xdfff => return Err(self.lone(start)),
+            unit => u32::from(unit),
         };
-        char::from_u32(code).ok_or_else(|| self.lone(start))
+        let Some(char) = char::from_u32(code) else {
+            unreachable!("{code:#x} is no character, though it is no surrogate and below 0x110000")
+        };
+        Ok(char)
     }
 
-    fn code_unit(&mut self) -> Result<u32, Fault> {
+    fn code_unit(&mut self) -> Result<u16, Fault> {
         self.offset += 2;
-        let mut digits = self.text[self.offset..].chars();
         let mut unit = 0;
         for _ in 0..4 {
-            let Some(digit) = digits.next().and_then(|char| char.to_digit(16)) else {
-                return Err(self.unexpected("a hexadecimal digit, as `\\u` takes four"));
+            let digit = match self.text.as_bytes().get(self.offset).copied() {
+                Some(byte @ b'0'..=b'9') => byte - b'0',
+                Some(byte @ b'a'..=b'f') => byte - b'a' + 10,
+                Some(byte @ b'A'..=b'F') => byte - b'A' + 10,
+                _ => return Err(self.unexpected("a hexadecimal digit, as `\\u` takes four")),
             };
-            unit = (unit << 4) | digit;
+            unit = (unit << 4) | u16::from(digit);
             self.offset += 1;
         }
         Ok(unit)
