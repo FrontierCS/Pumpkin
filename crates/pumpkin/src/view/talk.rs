@@ -87,7 +87,7 @@ impl Talk {
                 ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (sessions.iter())
                     .map(|named| (&named.name, &named.session.runner, "lease"))
                     .collect(),
-                ir::Runtime::Runner(_) => Vec::new(),
+                ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => Vec::new(),
             };
             for (name, target, call) in named {
                 let key = (role.name.to_string(), name.to_string());
@@ -372,6 +372,7 @@ fn role_json(
         ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
         ir::Runtime::Target(target) => ("target", target.egress.model.is_some()),
         ir::Runtime::Runner(_) => ("runner", false),
+        ir::Runtime::Shared(_) => ("shared", false),
     };
     let place = (places.get(name)).map(|Place { provider, class }| format!("{provider}/{class}"));
     let routes = routes.map_or(json!("unknown"), |entries| {

@@ -125,6 +125,11 @@ so the same events give the same actions, and time reaches it only with each eve
 `#![no_std]` and depends on `schema` and `serde_json` alone, though `schema`'s own I/O items stay
 reachable through it.
 
+A shared role owns one service sandbox for the work phase. Grants on several agents can name
+that role. The decision core admits one call on it at a time, and the driver runs the call's
+body on the resident session using the issuing agent's identity. Each call owns its command
+logs; the service owns the sandbox until work teardown.
+
 **Architecture Invariant:** only the core authorizes ops. `sandboxd` carries any op that any code
 in its sandbox makes. The gateway hands each to the session's owner as an `Arrival`. The runtime
 identifies the caller by the agent role or job registered for that session and sends the core's

@@ -950,6 +950,8 @@ fn examples() {
             $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
+            exit status: Some(0)
+            $ pumpkin check team/task.star
             exit status: Some(0)"#]],
     );
 }

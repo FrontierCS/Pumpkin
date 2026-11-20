@@ -147,6 +147,21 @@ A lease runs one command or copy at a time, until its holder closes it, its time
 holder's work ends: the work phase, for the agent; its call, for a target. A target's session
 bounds each call afresh.
 
+## Shared services
+
+A role with `runtime = {"shared": {"command": …, "cwd": …}}` starts one sandbox when the
+work phase begins. Its command can serve a mailbox, board, or other state the workflow defines.
+A job grant names this role as its `target`. Its body gets the issuing agent's declared role name
+from `target.caller()` and may use it when invoking the service. The driver derives that name
+from the agent's session. The service has no grants or model route.
+
+Calls to one shared role run one at a time. A competing call gets a busy refusal and costs no
+call quota. A body can run commands and read or write files in the existing sandbox, so it must
+choose how to update its own persistent state and clear any temporary files from an earlier call.
+A failed call may already have changed the service. Its caller decides whether to retry.
+When the work calls have ended the driver deletes the shared sandbox before starting the final
+judge. [Two-agent example](../examples/team/task.star)
+
 ## The final call
 
 `final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which

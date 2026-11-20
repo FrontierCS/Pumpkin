@@ -742,6 +742,7 @@ pub(crate) fn summary_of(
     // Only a run that has a cost says what its tokens cost.
     let prices = cost.is_some().then_some(&progress.token_prices);
     agent::summarize(&mut summary, progress, members, prices);
+    shared_summary(&mut summary, progress);
     let calls = (progress.calls.iter()).map(|call| {
         let asked = call.sandbox.asked;
         let mut line = called(call);
@@ -793,6 +794,34 @@ pub(crate) fn summary_of(
         let _ = writeln!(summary, "  {unread}");
     }
     Some(summary)
+}
+
+fn shared_summary(summary: &mut String, progress: &Progress) {
+    for service in progress.shared.values() {
+        let _ = writeln!(
+            summary,
+            "  {:>7} {}",
+            clock(service.sandbox.asked),
+            service_line(service)
+        );
+    }
+}
+
+pub(crate) fn service_line(service: &runtime::SharedSpan) -> String {
+    let state = if let Some(reason) = &service.failure {
+        format!("failed: {}", crate::escaped(reason))
+    } else if service.sandbox.gone.is_some() {
+        "ended".to_owned()
+    } else if service.sandbox.started.is_some() {
+        "running".to_owned()
+    } else {
+        "starting".to_owned()
+    };
+    format!(
+        "shared {} on {}: {state}",
+        service.role,
+        placed(&service.sandbox)
+    )
 }
 
 fn sandboxes(progress: &Progress) -> String {

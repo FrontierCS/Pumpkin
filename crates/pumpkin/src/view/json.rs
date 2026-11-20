@@ -279,6 +279,15 @@ fn sandbox(sandbox: &runtime::Sandbox) -> Value {
     })
 }
 
+fn shared_lanes(progress: &Progress) -> impl Iterator<Item = Value> {
+    progress.shared.iter().map(|(index, service)| {
+        json!({
+            "lane": format!("shared {index}"), "kind": "shared", "role": service.role,
+            "sandbox": sandbox(&service.sandbox), "said": progress::service_line(service),
+        })
+    })
+}
+
 fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
@@ -309,6 +318,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         answered(caller, &mut lane);
         lane
     });
+    let shared = shared_lanes(progress);
     let calls = (progress.calls.iter()).map(|call| {
         let caller = CallerName::Job(call.job);
         let mut lane_json = json!({
@@ -321,6 +331,9 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "said": progress::called(call),
             "model": model_json(&call.model),
         });
+        if let Some(shared) = call.shared {
+            lane_json["service"] = json!(format!("shared {shared}"));
+        }
         if let Some(holder @ CallerName::Member(_)) = call.caller {
             lane_json["holder"] = json!(progress::caller_lane(holder));
         }
@@ -343,6 +356,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let mut children: Vec<((Duration, Duration), Value)> = calls.chain(leases).collect();
     children.sort_by_key(|(begun, _)| *begun);
     agents
+        .chain(shared)
         .chain(children.into_iter().map(|(_, lane)| lane))
         .collect()
 }

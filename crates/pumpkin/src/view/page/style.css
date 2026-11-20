@@ -172,7 +172,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .lane .name:hover { color: var(--accent); }
 .lane .name .place { color: var(--dim); }
 .lane.on .name { font-weight: 600; } .lane.dim { opacity: 0.35; }
-.lane.agent { --kind: var(--agent); } .lane.target { --kind: var(--target); } .lane.runner { --kind: var(--runner); }
+.lane.agent { --kind: var(--agent); } .lane.target, .lane.shared { --kind: var(--target); } .lane.runner { --kind: var(--runner); }
 .lane.lit .name { box-shadow: inset 2px 0 0 var(--kind); padding-left: var(--s1); }
 .track { position: relative; height: 14px; }
 .axis { position: sticky; top: 0; z-index: 1; height: var(--axis); padding-left: var(--label); background: var(--panel); border-bottom: 1px solid var(--line); color: var(--dim); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--axis); }
@@ -215,7 +215,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 /* A kind is a mono word in its ink, never a filled badge. */
 .kind { font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
 .kind.model_answered { color: var(--model-ink); } .kind.agent { color: var(--agent-ink); }
-.kind.target, .kind.call, .kind.call_returned { color: var(--target-ink); }
+.kind.target, .kind.shared, .kind.call, .kind.call_returned { color: var(--target-ink); }
 .kind.runner, .kind.command_ended, .kind.transfer_ended { color: var(--runner-ink); }
 .row.refused .kind { color: var(--warn); } .row.failed .kind { color: var(--fail); }
 
@@ -227,7 +227,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node text { font-family: var(--mono); font-size: var(--fs-diagram); fill: var(--text); }
 .talk .node text.place { fill: var(--dim); }
 .talk .node rect.final { fill: var(--accent); stroke: none; }
-.talk .node.agent rect { stroke: var(--agent); } .talk .node.target rect { stroke: var(--target); }
+.talk .node.agent rect { stroke: var(--agent); } .talk .node.target rect, .talk .node.shared rect { stroke: var(--target); }
 .talk .node.runner rect { stroke: var(--runner); } .talk .node.model rect { stroke: var(--model); }
 .talk .node.on rect { fill: var(--select); stroke-width: 2.5; }
 .talk .dim { opacity: 0.25; }

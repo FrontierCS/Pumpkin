@@ -1,7 +1,7 @@
 //! The agent's sandbox, which runs the agent's IR command, once its directories, files and
 //! standard input are in place, and whose session takes its ops.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,7 +16,7 @@ use schema::sandbox::op::OpReply;
 use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{self, AgentId, Workflow};
+use schema::workflow::{self, AgentId, TargetId, Workflow};
 use stdx::{Context, Deadline};
 
 use super::log::Entry;
@@ -136,7 +136,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         id: AgentId,
     ) -> Result<(), String> {
-        let team = self.workflow().final_call().selections();
+        let team = self.workflow().final_call().selections() || !self.services.is_empty();
         if let Some(starting) = self.starting.get_mut(&id) {
             starting.tear_down = true;
             return Ok(());
@@ -205,13 +205,56 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
+    pub(super) fn launched<'s>(
+        &mut self,
+        scope: Option<&'s Scope<'s, 'r>>,
+        id: AgentId,
+        at: Duration,
+        agent: Option<Agent>,
+        result: Result<(), String>,
+    ) -> Result<Option<(Duration, Event)>, String> {
+        self.agents.extend(agent.map(|agent| (id, agent)));
+        if result.is_ok() {
+            self.log.entry(Entry::AgentLaunched(id, at))?;
+        }
+        if let Some(starting) = self.starting.remove(&id) {
+            self.arrivals.extend(
+                starting
+                    .arrivals
+                    .into_iter()
+                    .map(|(at, arrival)| Input::Agent(id, at, arrival)),
+            );
+            if starting.tear_down {
+                if let Err(reason) = result {
+                    self.log.note(&format!(
+                        "agent `{}`: {reason}",
+                        self.workflow().sandbox(id.role()).name
+                    ))?;
+                }
+                if let Some(scope) = scope {
+                    self.tear_down_agent(scope, id)?;
+                }
+                return Ok(None);
+            }
+        }
+        Ok(result
+            .err()
+            .map(|reason| (at, Event::AgentFailed { agent: id, reason })))
+    }
+
     pub(super) fn start_agents<'s>(&mut self, scope: &'s Scope<'s, 'r>) -> Result<(), String> {
         let workflow = self.workflow();
         let sandboxes = self.sandboxes;
         let hard_end = self.unix_hard_end;
         let (notices, ready) = mpsc::channel();
         let mut gates = BTreeMap::new();
-        let mut startup = Duration::ZERO;
+        self.start_services(scope, &notices)?;
+        let mut startup = self
+            .services
+            .keys()
+            .map(|target| self.placed.startup(target.role()))
+            .max()
+            .unwrap_or_default();
         for role in workflow.agents() {
             let id = role.id;
             self.serve(decision::Caller::Agent(id));
@@ -220,7 +263,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let bound = self.placed.startup(id.role());
             let by = deadline(&clock, bound);
             let prepare = move || Agent::prepare(sandboxes, role, by, hard_end, inbox, clock);
-            if !workflow.final_call().selections() {
+            if !workflow.final_call().selections() && self.services.is_empty() {
                 let (agent, result) = match prepare() {
                     Ok((agent, launch)) => agent.launch(launch, by),
                     Err(failure) => {
@@ -263,36 +306,51 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         startup: Duration,
         mut gates: BTreeMap<AgentId, Sender<Duration>>,
-        ready: &Receiver<(AgentId, Result<(), String>)>,
+        ready: &Receiver<Ready>,
     ) {
         let by = deadline(&self.clock, startup);
         let mut releases = Vec::new();
+        let mut waiting: BTreeSet<_> = self.services.keys().copied().collect();
         let mut failures = Vec::new();
-        while !gates.is_empty() {
+        while !gates.is_empty() || !waiting.is_empty() {
             let Some(left) = by.remaining() else { break };
-            let Ok((id, status)) = ready.recv_timeout(left) else {
-                break;
-            };
-            if let Some(release) = gates.remove(&id) {
-                match status {
-                    Ok(()) => releases.push((id, release)),
-                    Err(reason) => failures.push((id, reason)),
+            match ready.recv_timeout(left) {
+                Ok(Ready::Agent(id, status)) => {
+                    if let Some(release) = gates.remove(&id) {
+                        match status {
+                            Ok(()) => releases.push((id, release)),
+                            Err(reason) => failures.push(Event::AgentFailed { agent: id, reason }),
+                        }
+                    }
                 }
+                Ok(Ready::Shared(target, status)) => {
+                    waiting.remove(&target);
+                    if let Some(service) = self.services.get_mut(&target) {
+                        match status {
+                            Ok(process) => service.process = Some(process),
+                            Err(reason) => failures.extend(service.fail(target, reason)),
+                        }
+                    }
+                }
+                Err(_) => break,
             }
         }
         let at = self.clock.now();
         self.pending.push_back((at, Event::WorkStarted));
-        failures.extend(gates.into_keys().map(|id| {
-            (
-                id,
-                "the agent's setup missed the startup deadline".to_owned(),
-            )
+        failures.extend(gates.into_keys().map(|agent| Event::AgentFailed {
+            agent,
+            reason: "the agent's setup missed the startup deadline".to_owned(),
         }));
-        self.pending.extend(
-            failures
-                .into_iter()
-                .map(|(agent, reason)| (at, Event::AgentFailed { agent, reason })),
-        );
+        for target in waiting {
+            if let Some(service) = self.services.get_mut(&target) {
+                failures.extend(service.fail(
+                    target,
+                    "the shared role's setup missed the startup deadline".to_owned(),
+                ));
+            }
+        }
+        self.pending
+            .extend(failures.into_iter().map(|event| (at, event)));
         let end = at
             .min(startup)
             .saturating_add(self.workflow().work_deadline());
@@ -320,10 +378,15 @@ impl Agent {
     }
 }
 
+pub(super) enum Ready {
+    Agent(AgentId, Result<(), String>),
+    Shared(TargetId, Result<Process, String>),
+}
+
 struct Worker<C> {
     id: AgentId,
     clock: C,
-    notices: Sender<(AgentId, Result<(), String>)>,
+    notices: Sender<Ready>,
     inbox: Sender<Input>,
     gate: Receiver<Duration>,
 }
@@ -337,7 +400,7 @@ impl<C: Clock> Worker<C> {
         let id = self.id;
         let (agent, result) = match prepared {
             Ok((agent, Ok(launch))) => {
-                let _ = self.notices.send((id, Ok(())));
+                let _ = self.notices.send(Ready::Agent(id, Ok(())));
                 match self.gate.recv() {
                     Ok(end) => agent.launch(Ok(launch), deadline(&self.clock, end)),
                     Err(_) => (
@@ -347,12 +410,12 @@ impl<C: Clock> Worker<C> {
                 }
             }
             Ok((agent, Err(reason))) => {
-                let _ = self.notices.send((id, Err(reason.clone())));
+                let _ = self.notices.send(Ready::Agent(id, Err(reason.clone())));
                 (Some(agent), Err(reason))
             }
             Err(failure) => {
                 let reason = format!("the agent's sandbox didn't start: {}", failure.reason());
-                let _ = self.notices.send((id, Err(reason)));
+                let _ = self.notices.send(Ready::Agent(id, Err(reason)));
                 match failure.dispose(sandboxes) {
                     Ok(detail) => (
                         None,

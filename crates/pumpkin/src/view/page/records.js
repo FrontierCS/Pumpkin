@@ -44,6 +44,7 @@ export function lanesOf(record) {
   const caller = event.caller;
   if (typeof caller === "string") lanes.add(caller.replace("-", " "));
   if (!caller && ["agent_started", "agent_exited", "agent_failed", "agent_collected"].includes(event.kind)) lanes.add("agent");
+  if (event.shared !== undefined) lanes.add("shared " + event.shared);
   if (event.job !== undefined) lanes.add("job " + event.job);
   if (event.lease !== undefined) lanes.add("lease " + event.lease);
   if (event.sandbox) lanes.add(String(event.sandbox).replace("-", " "));
@@ -51,6 +52,7 @@ export function lanesOf(record) {
   if (request.lease !== undefined) lanes.add("lease " + request.lease);
   if (request.job !== undefined) lanes.add("job " + request.job);
   for (const action of record.actions || []) {
+    if (action.shared !== undefined) lanes.add("shared " + action.shared);
     if (action.lease !== undefined) lanes.add("lease " + action.lease);
     if (action.job !== undefined) lanes.add("job " + action.job);
     if (action.caller) lanes.add(String(action.caller).replace("-", " "));

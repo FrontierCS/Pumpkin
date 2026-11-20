@@ -80,12 +80,17 @@ pub(crate) fn workflow(
     let agents = roles
         .iter()
         .filter(|role| matches!(role.runtime, ir::Runtime::Agent(_)));
-    let ir_version =
-        if deadline_seconds.is_some() || final_call.input.is_some() || agents.count() > 1 {
-            ir::IrVersion::V1
-        } else {
-            ir::IrVersion::V0
-        };
+    let ir_version = if deadline_seconds.is_some()
+        || final_call.input.is_some()
+        || agents.count() > 1
+        || roles
+            .iter()
+            .any(|role| matches!(role.runtime, ir::Runtime::Shared(_)))
+    {
+        ir::IrVersion::V1
+    } else {
+        ir::IrVersion::V0
+    };
     Ok(ir::Workflow {
         ir_version,
         name,

@@ -315,7 +315,7 @@ fn model_routed(ir: &ir::Workflow) -> bool {
     ir.roles.iter().any(|role| match &role.runtime {
         ir::Runtime::Agent(agent) => agent.egress.model.is_some(),
         ir::Runtime::Target(target) => target.egress.model.is_some(),
-        ir::Runtime::Runner(_) => false,
+        ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => false,
     })
 }
 
@@ -4396,14 +4396,14 @@ fn lease_starts_by_its_holders_end() {
             {"at_ns":"<ns>","note":"collected from the agent's sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":13}
             {"actions":[],"at_ns":"<ns>","event":{"kind":"agent_collected"},"seq":14}
             {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent"},"seq":15}
-            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":16}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":17}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":18}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":19}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":20}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":21}
-            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":22}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":23}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-3","kind":"sandbox_deleted","provider":"simulated","sandbox":null},"seq":16}
+            {"actions":[],"at_ns":"<ns>","event":{"job":1,"kind":"call_started"},"observed_ns":"<ns>","seq":17}
+            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":1,"kind":"target_put","path":"/pumpkin/in/payload/raw"},"observed_ns":"<ns>","seq":18}
+            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/pumpkin/in/payload/raw"],"command":0,"job":1,"kind":"target_run"},"observed_ns":"<ns>","seq":19}
+            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":1,"kind":"command_ended"},"observed_ns":"<ns>","seq":20}
+            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":1,"kind":"target_get","path":"/pumpkin/out/result.json"},"observed_ns":"<ns>","seq":21}
+            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-4","kind":"sandbox_deleted","provider":"simulated","sandbox":"job-1"},"seq":22}
+            {"actions":[{"kind":"finish"}],"at_ns":"<ns>","event":{"job":1,"kind":"call_returned","returned":[{"name":"score","value":6}]},"observed_ns":"<ns>","seq":23}
             its last record came before the agent's teardown was to end"#]],
     );
 }
@@ -4427,6 +4427,7 @@ fn execute_team(
     host: &impl Host,
     ir: Value,
     dir: &TestDir,
+    interrupt_after: Option<&str>,
 ) -> (PathBuf, Result<Outcome, runtime::Stopped>) {
     let ir = serde_json::from_value(ir).unwrap();
     let sim = Sim::with_startup(2);
@@ -4445,13 +4446,21 @@ fn execute_team(
     let run = Run::prepare(host, placed, on, dir.path(), tag.clone(), models, recorded).unwrap();
     let record = run.dir().to_owned();
     sim.records(&record);
-    let outcome = run.execute(
-        Path::new(SANDBOXD),
-        None,
-        &Dialer::new(test_support::edge::client()),
-        &Bodies { record: &record },
-        || Ok(()),
-    );
+    let outcome = thread::scope(|scope| {
+        if let Some(event) = interrupt_after {
+            scope.spawn(|| {
+                sim::logged(&record, event);
+                interrupt();
+            });
+        }
+        run.execute(
+            Path::new(SANDBOXD),
+            None,
+            &Dialer::new(test_support::edge::client()),
+            &Bodies { record: &record },
+            || Ok(()),
+        )
+    });
     if let Ok(Outcome::Team { members, .. }) = &outcome {
         assert_eq!(members.iter().map(|m| m.agent).collect::<Vec<_>>(), ids);
     }
@@ -4466,7 +4475,7 @@ fn run_team(
     ir: Value,
     dir: &TestDir,
 ) -> (PathBuf, Vec<decision::MemberOutcome>, decision::CallResult) {
-    let (record, outcome) = execute_team(&System, ir, dir);
+    let (record, outcome) = execute_team(&System, ir, dir, None);
     let Ok(Outcome::Team {
         members,
         result: Ok(result),
@@ -4566,7 +4575,7 @@ fn a_due_grace_does_not_advance_past_another_members_queued_submission() {
             queued: 1,
         });
     let dir = TestDir::new();
-    let (record, outcome) = execute_team(&host, ir, &dir);
+    let (record, outcome) = execute_team(&host, ir, &dir, None);
     let Ok(Outcome::Team { members, .. }) = outcome else {
         panic!("team failed: {outcome:?}")
     };
@@ -4591,7 +4600,7 @@ fn team_cannot_judge_while_an_unstarted_agents_deletion_is_unconfirmed() {
     broken["image"] = json!(sim::image(sim::HUNG_REFUSED).as_str());
     roles.push(broken);
     let dir = TestDir::new();
-    let (record, outcome) = execute_team(&System, ir, &dir);
+    let (record, outcome) = execute_team(&System, ir, &dir, None);
     assert!(
         outcome
             .unwrap_err()
@@ -4662,4 +4671,439 @@ fn finished(outcome: &Outcome) -> String {
         }
         Verdict::NoSubmission | Verdict::NoResult { .. } => "finished without a result".to_owned(),
     }
+}
+
+fn shared_workflow(agent: &[&str], server: &[&str], body: &str) -> Value {
+    let mut ir = team_workflow(agent);
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["body"]["def"] = json!(body);
+    ir["roles"][1]["runtime"] = json!({"shared": {
+        "command": {"argv":server,"cwd":"/work"}, "cwd":"/work",
+    }});
+    ir
+}
+
+#[test]
+fn shared_calls_keep_the_service_and_collect_each_call_once() {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train forged",
+            "await 0 completed",
+            "call submit a finalize=true",
+        ],
+        &["slow"],
+        "board",
+    );
+    let mut beta = ir["roles"][0].clone();
+    beta["name"] = json!("beta");
+    beta["runtime"]["agent"]["command"]["argv"] = json!([
+        "ops",
+        "await_log agent_collected",
+        "call train beta",
+        "await 1 completed",
+        "call submit b finalize=true"
+    ]);
+    ir["roles"].as_array_mut().unwrap().push(beta);
+    let dir = TestDir::new();
+    let (record, members, _) = run_team(ir, &dir);
+    assert!(members.iter().all(|member| member.submission.is_some()));
+    for (job, caller) in ["alpha", "beta"].into_iter().enumerate() {
+        let job_dir = record.join(format!("jobs/{job}"));
+        assert_eq!(fs::read(job_dir.join("got/1/message")).unwrap(), b"forged");
+        assert_eq!(
+            fs::read(job_dir.join("log/0/command.stdout")).unwrap(),
+            caller.as_bytes()
+        );
+        assert!(!job_dir.join("sandbox.json").exists());
+    }
+    let log = read_log(&record);
+    let deleted: Vec<_> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line["event"]["kind"] == "sandbox_deleted" && line["event"]["sandbox"] == "shared-1"
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let final_start = log
+        .iter()
+        .position(|line| {
+            line["actions"].as_array().is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action["kind"] == "start_final_call")
+            })
+        })
+        .unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert!(deleted[0] < final_start);
+    let sandbox: Value =
+        serde_json::from_slice(&fs::read(record.join("shared/trainer/sandbox.json")).unwrap())
+            .unwrap();
+    assert_eq!(sandbox["delete"]["state"], "deleted");
+}
+
+#[test]
+fn shared_timeout_stops_its_client_before_the_next_call() {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train slow",
+            "call fast busy",
+            "await 0 errored",
+            "call fast next",
+            "await 1 completed",
+            "call submit ok finalize=true",
+        ],
+        &["slow"],
+        "slow",
+    );
+    let grants = ir["roles"][0]["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap();
+    let mut fast = grants[0].clone();
+    fast["name"] = json!("fast");
+    fast["job"]["body"]["def"] = json!("board");
+    grants.push(fast);
+    let dir = TestDir::new();
+    let (record, _, _) = run_team(ir, &dir);
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "call_timed_out" && line["event"]["job"] == 0)
+    );
+    assert!(
+        log.iter()
+            .all(|line| line["event"]["kind"] != "shared_failed")
+    );
+    assert!(
+        log.iter().any(
+            |line| line["actions"]
+                .as_array()
+                .is_some_and(
+                    |actions| actions.iter().any(|action| action["reply"]["message"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("busy")))
+                )
+        )
+    );
+    assert_eq!(
+        fs::read(record.join("jobs/1/got/1/message")).unwrap(),
+        b"next"
+    );
+}
+
+#[test]
+fn shared_service_exit_refuses_new_calls_while_the_agent_can_submit() {
+    let ir = shared_workflow(
+        &[
+            "ops",
+            "await_log shared_failed",
+            "call train 1",
+            "call submit ok finalize=true",
+        ],
+        &["exit", "7"],
+        "board",
+    );
+    let dir = TestDir::new();
+    let (record, members, _) = run_team(ir, &dir);
+    assert!(members[0].submission.as_ref().unwrap().finalized);
+    let log = read_log(&record);
+    assert!(
+        log.iter().any(
+            |line| line["actions"]
+                .as_array()
+                .is_some_and(
+                    |actions| actions.iter().any(|action| action["reply"]["message"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("unavailable")))
+                )
+        )
+    );
+    assert!(!record.join("jobs/0/got/1/message").exists());
+}
+
+#[test]
+fn shared_call_loses_its_session_after_its_client_exits() {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train 1",
+            "await 0 errored",
+            "call train 2",
+            "call submit ok finalize=true",
+        ],
+        &["slow"],
+        "run",
+    );
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] =
+        json!({"argv":["exit-close","0"]});
+    let dir = TestDir::new();
+    let (record, members, _) = run_team(ir, &dir);
+    assert!(members[0].submission.as_ref().unwrap().finalized);
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "call_failed" && line["event"]["job"] == 0)
+    );
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "shared_failed")
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|line| line["event"]["kind"] == "target_run" && line["event"]["job"] == 0)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn shared_start_failure_is_disposed_before_final() {
+    let mut ir = shared_workflow(
+        &["ops", "call train 1", "call submit ok finalize=true"],
+        &["slow"],
+        "board",
+    );
+    ir["roles"][1]["image"] = json!(sim::image(MUTE).as_str());
+    let dir = TestDir::new();
+    let (record, members, _) = run_team(ir, &dir);
+    assert!(members[0].submission.as_ref().unwrap().finalized);
+    let log = read_log(&record);
+    let failure = log
+        .iter()
+        .find(|line| line["event"]["kind"] == "shared_failed")
+        .unwrap();
+    assert!(
+        failure["event"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("before it met the gateway")
+    );
+    let deleted = log
+        .iter()
+        .position(|line| {
+            line["event"]["kind"] == "sandbox_deleted" && line["event"]["sandbox"] == "shared-1"
+        })
+        .unwrap();
+    let final_start = log
+        .iter()
+        .position(|line| {
+            line["actions"].as_array().is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action["kind"] == "start_final_call")
+            })
+        })
+        .unwrap();
+    assert!(deleted < final_start);
+}
+
+#[test]
+fn shared_call_interruption_collects_and_deletes_without_starting_the_judge() {
+    let mut ir = shared_workflow(
+        &["ops", "call train 1", "await 0 completed"],
+        &["slow"],
+        "slow",
+    );
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] = json!(30);
+    let dir = TestDir::new();
+    let (record, outcome) = execute_team(&System, ir, &dir, Some(r#""kind":"target_run""#));
+    assert!(matches!(outcome, Err(runtime::Stopped::Interrupted(_))));
+    let deleted: Value =
+        serde_json::from_slice(&fs::read(record.join("shared/trainer/sandbox.json")).unwrap())
+            .unwrap();
+    assert_eq!(deleted["delete"]["state"], "deleted");
+    assert!(record.join("shared/trainer/out/collected").is_file());
+    assert!(record.join("jobs/0/log/0/collected").is_file());
+    assert!(!record.join("jobs/1").exists());
+}
+
+#[test]
+fn shared_client_with_an_unconfirmed_stop_closes_the_service_to_later_calls() {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train 1",
+            "await_log shared_failed",
+            "call train 2",
+            "call submit ok finalize=true",
+        ],
+        &["slow"],
+        "run",
+    );
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["keywords"] = json!({"argv":["stall"]});
+    let dir = TestDir::new();
+    let (record, members, _) = run_team(ir, &dir);
+    assert!(members[0].submission.as_ref().unwrap().finalized);
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "call_failed" && line["event"]["job"] == 0)
+    );
+    assert!(
+        log.iter().any(
+            |line| line["actions"]
+                .as_array()
+                .is_some_and(
+                    |actions| actions.iter().any(|action| action["reply"]["message"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("unavailable")))
+                )
+        )
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|line| line["event"]["kind"] == "target_run" && line["event"]["job"] == 0)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn scalar_final_starts_after_its_shared_service_is_deleted() {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train text",
+            "await 0 completed",
+            "call submit ok finalize=true",
+        ],
+        &["slow"],
+        "board",
+    );
+    ir["final"].as_object_mut().unwrap().remove("input");
+    ir["final"]["body"]["def"] = json!("final_call");
+    let dir = TestDir::new();
+    let (record, outcome) = execute_team(&System, ir, &dir, None);
+    assert!(matches!(
+        outcome,
+        Ok(Outcome::Single {
+            verdict: Verdict::Returned { .. },
+            ..
+        })
+    ));
+    let log = read_log(&record);
+    let released = log
+        .iter()
+        .position(|line| line["event"]["kind"] == "work_started")
+        .unwrap();
+    let launched = log
+        .iter()
+        .position(|line| line["event"]["kind"] == "agent_started")
+        .unwrap();
+    assert!(released < launched);
+    let deleted = log
+        .iter()
+        .position(|line| {
+            line["event"]["sandbox"] == "shared-1" && line["event"]["kind"] == "sandbox_deleted"
+        })
+        .unwrap();
+    let final_start = log
+        .iter()
+        .position(|line| {
+            line["actions"].as_array().is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action["kind"] == "start_final_call")
+            })
+        })
+        .unwrap();
+    assert!(deleted < final_start);
+    assert!(record.join("agent/sandbox.json").is_file());
+}
+
+#[test]
+fn scalar_shared_work_start_does_not_report_an_agent_that_failed_to_start() {
+    let mut ir = shared_workflow(&["exit", "0"], &["slow"], "board");
+    ir["roles"][0]["image"] = json!(sim::image(MUTE).as_str());
+    ir["final"].as_object_mut().unwrap().remove("input");
+    ir["final"]["body"]["def"] = json!("final_call");
+    let dir = TestDir::new();
+    let (record, outcome) = execute_team(&System, ir, &dir, None);
+    assert!(matches!(
+        outcome,
+        Ok(Outcome::Single {
+            verdict: Verdict::NoSubmission,
+            ..
+        })
+    ));
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .any(|line| line["event"]["kind"] == "work_started")
+    );
+    assert!(
+        !log.iter()
+            .any(|line| line["event"]["kind"] == "agent_started")
+    );
+}
+
+fn failed_shared_create(fault: &str) -> Value {
+    let mut ir = shared_workflow(&["ops", "call submit ok finalize=true"], &["slow"], "board");
+    ir["roles"][1]["image"] = json!(sim::image(fault).as_str());
+    ir
+}
+
+#[test]
+fn declined_shared_create_has_no_physical_usage() {
+    let dir = TestDir::new();
+    let (record, _, _) = run_team(failed_shared_create(sim::UNCREATED), &dir);
+    let progress = Record::open(&record)
+        .unwrap()
+        .progress()
+        .unwrap()
+        .progress
+        .unwrap();
+    let shared = &progress.shared[&1];
+    assert!(
+        shared
+            .failure
+            .as_ref()
+            .unwrap()
+            .contains("declined to create")
+    );
+    assert!(!record.join("shared/trainer/sandbox.json").exists());
+    let usage = progress.sandboxes();
+    assert_eq!(usage.values().map(|used| used.count).sum::<u64>(), 2);
+    let agent = &progress.agents[&runtime::CallerName::Member(0)].sandbox;
+    let judge = &progress.calls[0].sandbox;
+    let lasted = [agent, judge]
+        .iter()
+        .map(|sandbox| sandbox.gone.unwrap().checked_sub(sandbox.asked).unwrap())
+        .sum::<Duration>();
+    assert_eq!(
+        usage.values().map(|used| used.lasted).sum::<Duration>(),
+        lasted
+    );
+}
+
+#[test]
+fn unnamed_shared_create_is_deleted_before_the_judge_starts() {
+    let dir = TestDir::new();
+    let (record, _, _) = run_team(failed_shared_create(LOST), &dir);
+    let log = read_log(&record);
+    let orphan = log
+        .iter()
+        .position(|line| {
+            line["event"]["kind"] == "sandbox_deleted" && line["event"]["sandbox"].is_null()
+        })
+        .unwrap();
+    let judge = log
+        .iter()
+        .position(|line| line["event"]["kind"] == "call_started")
+        .unwrap();
+    assert!(orphan < judge);
+}
+
+#[test]
+fn failed_deletion_of_an_unnamed_shared_instance_prevents_the_judge() {
+    let dir = TestDir::new();
+    let (record, outcome) =
+        execute_team(&System, failed_shared_create(sim::LOST_REFUSED), &dir, None);
+    let Err(runtime::Stopped::Failed(reason)) = outcome else {
+        panic!("the judge ran: {outcome:?}")
+    };
+    assert!(reason.contains("cleaning up work sandboxes before the final call"));
+    assert!(!record.join("jobs/0").exists());
 }

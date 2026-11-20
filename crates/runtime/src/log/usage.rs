@@ -19,11 +19,21 @@ use crate::TokenPrices;
 
 impl Progress {
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
-        let calls = self.calls.iter().map(|call| &call.sandbox);
+        let calls = self
+            .calls
+            .iter()
+            .filter(|call| call.shared.is_none())
+            .map(|call| &call.sandbox);
         let leases = self.leases.iter().map(|lease| &lease.sandbox);
         self.agents
             .values()
             .map(|agent| &agent.sandbox)
+            .chain(
+                self.shared
+                    .values()
+                    .filter(|service| service.sandbox.deleted.is_some())
+                    .map(|service| &service.sandbox),
+            )
             .chain(calls)
             .chain(leases)
     }

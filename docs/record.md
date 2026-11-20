@@ -101,6 +101,11 @@ submission (payload digest, size and finalization flag) or a JSON `null` submiss
 separate verdict gives the single final call's result. The run log identifies both the selected
 files and the manifest delivered to the judge.
 
+A shared service has one physical sandbox in `shared/<role>/`. Its calls have distinct
+`jobs/<n>/` records and keep their individual requests, command output and replies. Sandbox
+usage counts the service once across all grants and callers. Its lifetime appears as a separate
+lane in the run view.
+
 ## Model exchanges
 
 `model/` keeps every exchange as the route saw it pass: each request as it went upstream, or as

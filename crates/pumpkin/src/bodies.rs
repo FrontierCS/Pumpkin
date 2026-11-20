@@ -188,6 +188,10 @@ impl lang::Run for Proposing<'_> {
 struct Driven<'t>(&'t mut dyn runtime::Target);
 
 impl lang::Target for Driven<'_> {
+    fn caller(&self) -> Option<&str> {
+        self.0.caller()
+    }
+
     fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
         self.0.put(path)
     }

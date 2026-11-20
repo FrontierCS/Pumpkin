@@ -73,6 +73,9 @@ impl Host<'_> {
 /// What a job's body drives through its `Target`: the call's target. A method's `Err` is why it
 /// failed, which ends the call with that message.
 pub trait Target {
+    /// The issuing agent role for a job; the final call has no agent caller.
+    fn caller(&self) -> Option<&str>;
+
     /// Puts the call's payload at `path`, one file, its parents made.
     fn put(&mut self, path: &AbsolutePath) -> Result<(), String>;
 
@@ -480,6 +483,7 @@ impl Hosted {
     pub(crate) fn methods(self) -> Result<&'static [(&'static str, Method)], &'static str> {
         match self {
             Self::Target => Ok(&[
+                ("caller", Method::Target(caller)),
                 ("get", Method::Target(get)),
                 ("put", Method::Target(put)),
                 ("run", Method::Target(run)),
@@ -574,6 +578,14 @@ fn run(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
         .run(&argv)
         .map_err(|message| Fault::new(call.at, message))?;
     Ok(value::Kind::None)
+}
+
+fn caller(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+    positional::<0>(&name.text, Takes::exactly(0), call)?;
+    let role = target
+        .caller()
+        .ok_or_else(|| Fault::new(call.at, "the final call has no agent caller"))?;
+    Ok(value::Kind::Str(Text::new(role, call.at, call.budget)?))
 }
 
 fn get(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {

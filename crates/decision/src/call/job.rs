@@ -48,6 +48,22 @@ impl Core<'_> {
                  again once it has finished; this call is not charged"
             ));
         }
+        if let Some(service) = self.shared.get(&function.target) {
+            if *service != crate::Service::Available {
+                return Err(format!(
+                    "`{name}` cannot run because its shared sandbox is unavailable"
+                ));
+            }
+            if self
+                .jobs
+                .active_on(self.workflow, function.target)
+                .is_some()
+            {
+                return Err(format!(
+                    "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
+                ));
+            }
+        }
         let cumulative = function.cumulative();
         if let Some(total) = cumulative
             && usage.used >= total

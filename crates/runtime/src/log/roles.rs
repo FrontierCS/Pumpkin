@@ -17,6 +17,7 @@ use crate::read_error::{ReadError, read_optional};
 #[derive(Default)]
 pub(super) struct Roles {
     pub(super) agents: BTreeMap<CallerName, Agent>,
+    pub(super) shared: BTreeMap<usize, String>,
     pub(super) grants: BTreeMap<(String, String), Grant>,
     pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
@@ -77,16 +78,14 @@ impl Roles {
                 }
             }
         }
-        // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
-        let entries = provided["routes"].as_object().into_iter().flatten();
-        let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
-        let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
-        let token_prices = models.filter_map(|(model, served)| {
-            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
-            Some((model.clone(), prices))
-        });
         Self {
             agents,
+            shared: roles
+                .iter()
+                .enumerate()
+                .filter(|(_, role)| matches!(role.runtime, ir::Runtime::Shared(_)))
+                .map(|(index, role)| (index, role.name.to_string()))
+                .collect(),
             grants: grants.collect(),
             final_target,
             places: places(provided),
@@ -94,7 +93,7 @@ impl Roles {
             deadline: deadline.map(|seconds| Duration::from_secs(seconds.get())),
             startups,
             prices,
-            token_prices: token_prices.collect(),
+            token_prices: token_prices(provided),
         }
     }
 
@@ -112,6 +111,19 @@ impl Roles {
             ..Sandbox::default()
         }
     }
+}
+
+fn token_prices(provided: &Value) -> BTreeMap<String, TokenPrices> {
+    // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
+    let entries = provided["routes"].as_object().into_iter().flatten();
+    let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
+    let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
+    models
+        .filter_map(|(model, served)| {
+            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
+            Some((model.clone(), prices))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -135,7 +147,7 @@ fn held(runtime: &ir::Runtime) -> impl Iterator<Item = (&Name, Grant)> {
     let (agent, sessions) = match runtime {
         ir::Runtime::Agent(agent) => (agent.grants.as_slice(), &[][..]),
         ir::Runtime::Target(ir::TargetRuntime { sessions, .. }) => (&[][..], sessions.as_slice()),
-        ir::Runtime::Runner(_) => (&[][..], &[][..]),
+        ir::Runtime::Runner(_) | ir::Runtime::Shared(_) => (&[][..], &[][..]),
     };
     let agent = agent.iter().map(move |grant| {
         let held = match &grant.function {

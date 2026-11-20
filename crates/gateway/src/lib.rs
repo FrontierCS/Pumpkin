@@ -146,34 +146,6 @@ pub struct Trees {
     shared: Arc<Shared>,
 }
 
-impl Trees {
-    /// As [`Session::put`], with `root` saying how `dir` is made: [`Root::New`] fails if it exists.
-    pub fn put<'a>(
-        &self,
-        dir: &AbsolutePath,
-        root: Root,
-        entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
-    ) -> io::Result<()> {
-        self.shared.put(dir, root, entries, by)
-    }
-
-    /// Collects as [`Session::collect`] does, cut short with [`io::ErrorKind::Interrupted`], the
-    /// session still open, once `stopped`, which it asks before each part of the tree, says yes.
-    /// Returns the tree's entries, each with its mode as the sandbox sent it, which the host's
-    /// umask may have narrowed in `into`.
-    pub fn collect(
-        &self,
-        path: &AbsolutePath,
-        into: &Path,
-        limits: Limits,
-        by: Deadline,
-        stopped: &mut dyn FnMut() -> bool,
-    ) -> io::Result<Vec<Entry>> {
-        self.shared.collect(path, into, limits, by, stopped)
-    }
-}
-
 #[derive(Debug)]
 #[must_use = "an op dropped unanswered wedges the sandbox's ops, which wait on it for good: \
               answer it with `Session::reply`"]
@@ -326,6 +298,12 @@ impl Session {
             reader: Some(reader),
             gpus,
         })
+    }
+
+    /// Why the session has closed, including a failure already seen by a request whose
+    /// [`Arrival::Ended`] is still on its way to the owner.
+    pub fn ended(&self) -> Option<&str> {
+        self.shared.ended.get().map(String::as_str)
     }
 
     /// The GPUs that the sandbox's `sandboxd` saw as it started, each by its model as `nvidia-smi`

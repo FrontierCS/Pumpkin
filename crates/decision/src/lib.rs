@@ -27,7 +27,7 @@ use core::time::Duration;
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, Workflow};
+use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, TargetId, Workflow};
 
 mod call;
 mod jobs;
@@ -146,6 +146,15 @@ pub enum Event {
     /// The member's teardown has completed, including collection and destruction.
     AgentTornDown {
         agent: AgentId,
+    },
+    /// The shared sandbox's process or session failed; stop offering its grants.
+    SharedFailed {
+        target: TargetId,
+        reason: String,
+    },
+    /// The shared sandbox was deleted or its provider confirmed it was never created.
+    SharedTornDown {
+        target: TargetId,
     },
     /// `caller`'s sandbox made an op. The core answers it with an [`Action::Reply`] naming `op`.
     OpArrived {
@@ -283,6 +292,8 @@ pub enum Action {
     /// the runtime completes teardown before performing the next action. In selections mode it
     /// reports [`Event::AgentTornDown`] once teardown completes, including a failed start.
     TearDownAgent { agent: AgentId },
+    /// Stop and delete the shared sandbox after all work calls have drained.
+    TearDownShared { target: TargetId },
     /// Ends the run with its outcome. After it, the core only refuses the ops that still
     /// arrive.
     Finish { outcome: Outcome },
@@ -410,6 +421,12 @@ fn agent_startup(placed: &Placed) -> Duration {
         .workflow()
         .agents()
         .map(|agent| placed.startup(agent.id.role()))
+        .chain(
+            placed
+                .workflow()
+                .shared_targets()
+                .map(|(id, _)| placed.startup(id.role())),
+        )
         .max()
         .unwrap_or_default()
 }
@@ -432,8 +449,16 @@ pub struct Core<'w> {
     hard_end: Duration,
     phase: Phase,
     members: BTreeMap<AgentId, Member>,
+    shared: BTreeMap<TargetId, Service>,
     jobs: jobs::Jobs,
     leases: leases::Leases,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Service {
+    Available,
+    Failed,
+    Stopping,
 }
 
 #[derive(Debug)]
@@ -460,6 +485,10 @@ impl<'w> Core<'w> {
             members: workflow
                 .agents()
                 .map(|agent| (agent.id, Member::Working(None)))
+                .collect(),
+            shared: workflow
+                .shared_targets()
+                .map(|(id, _)| (id, Service::Available))
                 .collect(),
             jobs: jobs::Jobs::default(),
             leases: leases::Leases::default(),
@@ -488,6 +517,19 @@ impl<'w> Core<'w> {
                 if let Phase::Work { deadline } = &mut self.phase {
                     *deadline =
                         (*deadline).min(self.now.saturating_add(self.workflow.work_deadline()));
+                }
+            }
+            Event::SharedFailed { target, .. } => {
+                if let Some(state @ Service::Available) = self.shared.get_mut(&target) {
+                    *state = Service::Failed;
+                    if let Some(job) = self.jobs.active_on(self.workflow, target) {
+                        actions.push(Action::StopCall { job });
+                    }
+                }
+            }
+            Event::SharedTornDown { target } => {
+                if self.shared.get(&target) == Some(&Service::Stopping) {
+                    self.shared.remove(&target);
                 }
             }
             Event::AgentTornDown { agent } => {

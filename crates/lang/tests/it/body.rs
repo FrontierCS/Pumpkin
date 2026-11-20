@@ -22,6 +22,10 @@ const RESULT: (&str, &str) = (
 struct Logged(Vec<String>);
 
 impl lang::Target for Logged {
+    fn caller(&self) -> Option<&str> {
+        Some("agent")
+    }
+
     fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
         self.0.push(format!("put the payload at {path}"));
         Ok(())
@@ -506,7 +510,7 @@ def train_call(target, payload):
     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
-            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
+            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `get`, `put`, `run`
                 2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5

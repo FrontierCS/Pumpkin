@@ -125,7 +125,7 @@ impl Core<'_> {
                 submission,
             },
             // A scalar teardown completes before the next action. A team teardown reports back.
-            torn_down: !self.workflow.final_call().selections(),
+            torn_down: !self.workflow.final_call().selections() && self.shared.is_empty(),
         };
 
         let owns = |call| match call {
@@ -158,7 +158,16 @@ impl Core<'_> {
                 }) && self.jobs.all_ended()
                     && self.leases.all_ended()
                 {
-                    self.enter_final(actions);
+                    if self.shared.is_empty() {
+                        self.enter_final(actions);
+                    } else {
+                        for (target, service) in &mut self.shared {
+                            if *service != crate::Service::Stopping {
+                                *service = crate::Service::Stopping;
+                                actions.push(Action::TearDownShared { target: *target });
+                            }
+                        }
+                    }
                 }
             }
             Phase::Final { judging, job } => {

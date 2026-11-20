@@ -50,7 +50,7 @@ struct DeclaredAgent<'ir> {
 
 impl<'ir> Parser<'ir> {
     fn workflow(mut self, ir: &'ir ir::Workflow) -> Result<Workflow, ParseErrors> {
-        self.roles(&ir.roles);
+        self.roles(ir);
         let agents = std::mem::take(&mut self.agents);
         let deadline = self.work_deadline(ir, &agents);
         let target_holders = std::mem::take(&mut self.holders);
@@ -145,7 +145,8 @@ impl<'ir> Parser<'ir> {
             })
     }
 
-    fn roles(&mut self, roles: &'ir [ir::Role]) {
+    fn roles(&mut self, workflow: &'ir ir::Workflow) {
+        let roles = &workflow.roles;
         let list = JsonPointer::root().token("roles");
         let names = roles.iter().map(|role| &role.name);
         self.errors.unique(names, |index| list.token(index));
@@ -169,6 +170,23 @@ impl<'ir> Parser<'ir> {
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
                 ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
+                ir::Runtime::Shared(ir::SharedRuntime { command, cwd, env }) => {
+                    if workflow.ir_version == ir::IrVersion::V0 {
+                        self.errors.report(
+                            runtime_at.token("shared"),
+                            "a shared sandbox requires pumpkin.ir/v1",
+                        );
+                    }
+                    self.targets.insert(
+                        id,
+                        Target {
+                            shared: Some(command.clone()),
+                            cwd: cwd.clone(),
+                            env: env.clone(),
+                            model: None,
+                        },
+                    );
+                }
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
                     let runner = Runner {
                         cwd: cwd.clone(),
@@ -259,6 +277,7 @@ impl<'ir> Parser<'ir> {
         } = target;
         self.hold(at, TargetId(role), sessions);
         let target = Target {
+            shared: None,
             cwd: cwd.clone(),
             env: env.clone(),
             model: egress.model.clone(),
@@ -319,14 +338,14 @@ impl<'ir> Parser<'ir> {
             .iter()
             .find(|(target, agent, _)| *target == target_id && *agent == holder);
         let shared = match first {
-            Some((_, _, first)) => Err(self.errors.report(
+            Some((_, _, first)) if self.targets[&target_id.0].shared.is_none() => Err(self.errors.report(
                 target_at,
                 format!(
                     "`{target}` is the target of job functions `{first}` and `{name}`: name each \
                      target from one function"
                 ),
             )),
-            None => Ok(()),
+            Some(_) | None => Ok(()),
         };
         self.called.push((target_id, holder, name));
         shared.and(bounded).map(|payload_max_bytes| JobFunction {
@@ -555,6 +574,12 @@ impl<'ir> Parser<'ir> {
     fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
         let at = JsonPointer::root().token("final").token("target");
         let id = self.call_target(&at, target, "the final call's target")?;
+        if self.targets[&id.0].shared.is_some() {
+            return Err(self.errors.report(
+                at,
+                format!("`{target}` is a shared work sandbox: give the final call a fresh target"),
+            ));
+        }
         // So that the final call, like a job, has its target to itself.
         if let Some((_, _, function)) = self.called.iter().find(|(target, _, _)| *target == id) {
             let message = format!(

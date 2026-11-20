@@ -157,6 +157,8 @@ pub enum Runtime {
     /// A target, which each call that names it, a [`JobFunction`]'s or the [`Final`] call, starts
     /// afresh, and which runs the commands the call's body sends.
     Target(TargetRuntime),
+    /// A service that agents call in one sandbox throughout the work phase.
+    Shared(SharedRuntime),
     /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
     /// lease ([`Session`]).
     Runner(RunnerRuntime),
@@ -235,6 +237,18 @@ pub struct RunnerRuntime {
     /// The directory each command starts in.
     pub cwd: AbsolutePath,
     /// Variables added to each command's environment, as [`Command::env`]'s are.
+    #[serde(default, skip_serializing_if = "Env::is_empty")]
+    pub env: Env,
+}
+
+/// A work-phase service. Its command starts once; authorized job bodies run subsequent
+/// commands in the same sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedRuntime {
+    pub command: Command,
+    /// The working directory for commands issued by a job body.
+    pub cwd: AbsolutePath,
     #[serde(default, skip_serializing_if = "Env::is_empty")]
     pub env: Env,
 }

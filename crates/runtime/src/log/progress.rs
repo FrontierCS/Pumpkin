@@ -47,6 +47,7 @@ pub struct Progress {
     /// When the latest line read was written.
     pub last: Duration,
     pub agents: BTreeMap<logged::CallerName, AgentSpan>,
+    pub shared: BTreeMap<usize, SharedSpan>,
     /// When the agents began work on their common clock.
     pub work_started: Option<Duration>,
     /// Each call, in the order the log started them.
@@ -148,6 +149,14 @@ pub struct AgentSpan {
     /// Its own model requests, which the run's (`Progress::model`) count too; `None` if its role
     /// has no model route.
     pub model: Option<ModelUse>,
+}
+
+/// A resident service: one sandbox for every granted call that names this role.
+#[derive(Clone, Debug, Default)]
+pub struct SharedSpan {
+    pub role: String,
+    pub sandbox: Sandbox,
+    pub failure: Option<String>,
 }
 
 /// How the agent's command ended.
@@ -344,7 +353,7 @@ pub struct Tokens {
 pub(super) fn readout(
     dir: &Path,
     roles: Option<&Roles>,
-    reading: Reading,
+    mut reading: Reading,
     unread: Vec<Unread>,
 ) -> Result<Readout, ReadError> {
     let (Some(roles), Some((started, hard_end))) = (roles, reading.started) else {
@@ -353,10 +362,12 @@ pub(super) fn readout(
             unread,
         });
     };
+    reading.place_members(dir, roles)?;
     let Reading {
         started: _,
         last,
-        mut agents,
+        agents,
+        shared,
         work_started,
         calls,
         leases,
@@ -364,32 +375,13 @@ pub(super) fn readout(
         work_end,
         end,
     } = reading;
-    for (caller, role) in &roles.agents {
-        let agent = agents.entry(*caller).or_default();
-        let path = match caller {
-            logged::CallerName::Agent => dir.join("agent"),
-            logged::CallerName::Member(_) => dir.join("agents").join(&role.name),
-            logged::CallerName::Job(_) => continue,
-        };
-        agent.role.clone_from(&role.name);
-        agent.sandbox = Sandbox {
-            started: agent.sandbox.started,
-            gone: agent.sandbox.gone,
-            deleted: deleted(&path)?,
-            gpus: agent.sandbox.gpus.take(),
-            ..roles.sandbox(Some(&role.name), Duration::ZERO)
-        };
-        agent.model = agent
-            .model
-            .take()
-            .or_else(|| role.routed.then(ModelUse::default));
-    }
     let mut progress = Progress {
         started,
         hard_end,
         deadline: roles.deadline,
         last,
         agents,
+        shared,
         work_started,
         calls,
         leases,
@@ -403,7 +395,11 @@ pub(super) fn readout(
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
-    for call in &mut progress.calls {
+    for call in progress
+        .calls
+        .iter_mut()
+        .filter(|call| call.shared.is_none())
+    {
         let job = dir.join(format!("jobs/{}", call.job));
         call.sandbox.deleted = deleted(&job)?;
     }
@@ -411,6 +407,22 @@ pub(super) fn readout(
         progress: Some(progress),
         unread,
     })
+}
+
+fn set_place(
+    sandbox: &mut Sandbox,
+    roles: &Roles,
+    role: &str,
+    dir: &Path,
+) -> Result<(), ReadError> {
+    *sandbox = Sandbox {
+        started: sandbox.started,
+        gone: sandbox.gone,
+        deleted: deleted(dir)?,
+        gpus: sandbox.gpus.take(),
+        ..roles.sandbox(Some(role), Duration::ZERO)
+    };
+    Ok(())
 }
 
 /// The JSON in `path`, or `null` if there is no such file.
@@ -445,12 +457,43 @@ pub(super) struct Reading {
     started: Option<(UnixTime, Duration)>,
     last: Duration,
     agents: BTreeMap<logged::CallerName, AgentSpan>,
+    shared: BTreeMap<usize, SharedSpan>,
     work_started: Option<Duration>,
     calls: Vec<CallSpan>,
     leases: Vec<LeaseSpan>,
     model: ModelUse,
     work_end: Option<Duration>,
     end: Option<Duration>,
+}
+
+impl Reading {
+    fn place_members(&mut self, dir: &Path, roles: &Roles) -> Result<(), ReadError> {
+        for (caller, role) in &roles.agents {
+            let agent = self.agents.entry(*caller).or_default();
+            let path = match caller {
+                logged::CallerName::Agent => dir.join("agent"),
+                logged::CallerName::Member(_) => dir.join("agents").join(&role.name),
+                logged::CallerName::Job(_) => continue,
+            };
+            agent.role.clone_from(&role.name);
+            set_place(&mut agent.sandbox, roles, &role.name, &path)?;
+            agent.model = agent
+                .model
+                .take()
+                .or_else(|| role.routed.then(ModelUse::default));
+        }
+        for (&id, name) in &roles.shared {
+            let service = self.shared.entry(id).or_default();
+            service.role.clone_from(name);
+            set_place(
+                &mut service.sandbox,
+                roles,
+                name,
+                &dir.join("shared").join(name),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 impl Reading {
@@ -524,10 +567,24 @@ impl Reading {
                 hard_end_ns,
             } => self.started = hard_end_ns.map(|hard_end| (*unix_ns, hard_end)),
             logged::Event::WorkStarted => self.work_started = Some(at),
+            logged::Event::SharedStarted { shared } => {
+                self.shared.entry(*shared).or_default().sandbox.started = Some(at);
+            }
+            logged::Event::SharedFailed { shared, reason } => {
+                self.shared.entry(*shared).or_default().failure = Some(reason.clone());
+            }
+            logged::Event::SharedTornDown { shared } => {
+                self.shared
+                    .entry(*shared)
+                    .or_default()
+                    .sandbox
+                    .gone
+                    .get_or_insert(at);
+            }
             logged::Event::AgentStarted { caller } => {
                 self.agents.entry(*caller).or_default().sandbox.started = Some(at);
                 if *caller == logged::CallerName::Agent {
-                    self.work_started = Some(at);
+                    self.work_started.get_or_insert(at);
                 }
             }
             logged::Event::AgentExited { caller, status } => {
@@ -680,6 +737,7 @@ impl Reading {
                     .or_default()
                     .sandbox,
             ),
+            SandboxName::Shared(index) => Some(&mut self.shared.entry(index).or_default().sandbox),
             SandboxName::Job(job) => self.call(job).map(|call| &mut call.sandbox),
             SandboxName::Lease(lease) => self.lease(lease).map(|lease| &mut lease.sandbox),
         }
@@ -730,14 +788,14 @@ impl Reading {
                     .unwrap_or_default();
                 let (of, role) = (CallOf::Function(grant.clone()), granted.role);
                 let sandbox = roles.sandbox(role.as_deref(), at);
-                (self.calls).push(CallSpan::new(
-                    *job,
-                    Some(*caller),
-                    of,
-                    role,
-                    sandbox,
-                    *timeout_ns,
-                ));
+                let shared = roles
+                    .shared
+                    .iter()
+                    .find(|(_, name)| Some(name.as_str()) == role.as_deref())
+                    .map(|(id, _)| *id);
+                let mut call = CallSpan::new(*job, Some(*caller), of, role, sandbox, *timeout_ns);
+                call.shared = shared;
+                self.calls.push(call);
             }
             logged::Action::StartFinalCall {
                 job,

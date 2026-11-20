@@ -38,7 +38,7 @@ use provider::UnixTime;
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
-use schema::workflow::{AgentId, Workflow};
+use schema::workflow::{AgentId, TargetId, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
@@ -61,7 +61,7 @@ pub use logged::{CallerName, Direction};
 pub(super) use progress::places;
 pub use progress::{
     AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
-    Tokens, Unread, Work,
+    SharedSpan, Tokens, Unread, Work,
 };
 pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
@@ -123,7 +123,16 @@ impl<'h, H: Host> Log<'h, H> {
         event: &Event,
         actions: &[Action],
     ) -> Result<(), String> {
-        self.decided(workflow, observed, event_json(event, self.team), actions)
+        self.decided(
+            workflow,
+            observed,
+            event_json(
+                event,
+                self.team,
+                self.team || workflow.shared_targets().next().is_some(),
+            ),
+            actions,
+        )
     }
 
     pub(super) fn refused(&mut self, caller: Caller, refused: &RefusedOp) -> Result<(), String> {
@@ -272,8 +281,15 @@ impl<'h, H: Host> Log<'h, H> {
             Entry::Note(note) => self.note(&note),
             Entry::AgentCollected(id) => self.told(member_event("agent_collected", id, self.team)),
             Entry::AgentLaunched(id, at) => {
-                self.observed(at, member_event("agent_started", id, true), &[])
+                self.observed(at, member_event("agent_started", id, self.team), &[])
             }
+            Entry::SharedStarted { target, at } => self.observed(
+                at,
+                json!({
+                    "kind": "shared_started", "shared": target.role().index(),
+                }),
+                &[],
+            ),
             Entry::FinalManifest(job, payload) => self.told(json!({
                 "kind": "final_manifest", "job": job.0, "payload": payload_json(&payload),
             })),
@@ -389,6 +405,10 @@ pub(super) enum Entry {
     AgentCollected(AgentId),
     AgentLaunched(AgentId, Duration),
     FinalManifest(JobId, PayloadRef),
+    SharedStarted {
+        target: TargetId,
+        at: Duration,
+    },
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
@@ -480,10 +500,10 @@ fn member_event(kind: &str, agent: AgentId, team: bool) -> Value {
     clippy::too_many_lines,
     reason = "one arm per decision event, as in action_json"
 )]
-fn event_json(event: &Event, team: bool) -> Value {
+fn event_json(event: &Event, team: bool, barrier: bool) -> Value {
     match event {
         Event::WorkStarted => {
-            json!({ "kind": if team { "work_started" } else { "agent_started" } })
+            json!({ "kind": if barrier { "work_started" } else { "agent_started" } })
         }
         Event::AgentTornDown { agent } => member_event("agent_torn_down", *agent, team),
         Event::AgentExited { agent, status } => {
@@ -495,6 +515,12 @@ fn event_json(event: &Event, team: bool) -> Value {
             let mut event = member_event("agent_failed", *agent, team);
             event["reason"] = json!(reason);
             event
+        }
+        Event::SharedFailed { target, reason } => json!({
+            "kind": "shared_failed", "shared": target.role().index(), "reason": reason,
+        }),
+        Event::SharedTornDown { target } => {
+            json!({ "kind": "shared_torn_down", "shared": target.role().index() })
         }
         Event::OpArrived {
             op,
@@ -776,6 +802,9 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             workflow.final_call().selections(),
         ),
         // `outcome.json` holds the outcome.
+        Action::TearDownShared { target } => {
+            json!({ "kind": "tear_down_shared", "shared": target.role().index() })
+        }
         Action::Finish { outcome: _ } => json!({ "kind": "finish" }),
         Action::Abandon => json!({ "kind": "abandon" }),
     }
