@@ -2578,7 +2578,7 @@ fn taken_past_the_deadline() {
         30,
     );
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&SimHost::new().late_take(late), 30, ir, &dir);
+    let (record, outcome) = execute_agents(&SimHost::new().late_take(late), 30, ir, &dir, None);
     let outcome = outcome.unwrap();
     assert!(matches!(
         outcome.agents[0].work_end,
@@ -2701,7 +2701,7 @@ fn setup_started_past_its_deadline() {
     };
     let ir = short_workflow(&["ops", "ops"], 30);
     let dir = TestDir::new();
-    let (record, outcome) = execute_agents(&SimHost::new().slow_sync(slow), 30, ir, &dir);
+    let (record, outcome) = execute_agents(&SimHost::new().slow_sync(slow), 30, ir, &dir, None);
     let outcome = outcome.unwrap();
     assert!(matches!(
         outcome.agents[0].work_end,
