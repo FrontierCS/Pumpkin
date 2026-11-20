@@ -915,6 +915,7 @@ fn library_lints() {
 /// `examples/`; it checks one not named here with none.
 const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
     ("codex", &["--arg", "model=model-a"]),
+    ("hypergraph", &["--arg", "model=model-a"]),
     // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
     ("smoke", &["--arg", "gpu_model=gpu-a"]),
 ];
@@ -945,6 +946,8 @@ fn examples() {
             $ pumpkin check codex/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check hello/task.star
+            exit status: Some(0)
+            $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
             exit status: Some(0)"#]],
