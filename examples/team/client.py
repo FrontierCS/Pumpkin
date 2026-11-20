@@ -6,12 +6,13 @@ import sys
 import time
 from pathlib import Path
 
-CTL = "/.pumpkin/bin/sandboxctl"
 PAYLOAD = Path("request.json")
 
 
 def ctl(*args):
-    reply = subprocess.run([CTL, *args], capture_output=True, text=True, check=False)
+    reply = subprocess.run(
+        ["sandboxctl", *args], capture_output=True, text=True, check=False
+    )
     if not reply.stdout:
         raise RuntimeError(reply.stderr)
     return json.loads(reply.stdout)
