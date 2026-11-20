@@ -177,16 +177,19 @@ fn interrupted_at(
     run: Run<'_, impl Host>,
     providers: &[(&'static str, &Sim)],
     sandboxd: &str,
-    at: Option<At>,
+    also: &[Also],
 ) -> Vec<String> {
     let record = run.dir().to_owned();
-    let private = (providers.iter())
-        .any(|(_, provider)| matches!(provider.meeting(), Meeting::Private(_)))
-        .then(|| {
-            let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-            let address = GatewayAddress::try_from(loopback).unwrap();
-            GrantListener::bind(&address, HELLO_TIMEOUT).unwrap()
-        });
+    let at = interruption(also);
+    let listen = !also.contains(&Also::WithoutListener)
+        && providers
+            .iter()
+            .any(|(_, provider)| matches!(provider.meeting(), Meeting::Private(_)));
+    let private = listen.then(|| {
+        let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let address = GatewayAddress::try_from(loopback).unwrap();
+        GrantListener::bind(&address, HELLO_TIMEOUT).unwrap()
+    });
     let waited = Deadline::after(Duration::from_secs(WAITED));
     let mut ran = false;
     let executed = thread::scope(|scope| {
@@ -274,6 +277,7 @@ fn check_polls(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Also {
     Interrupted(At),
+    WithoutListener,
     Listing,
     Usage,
     Exchanges,
@@ -285,7 +289,8 @@ enum Also {
 fn interruption(also: &[Also]) -> Option<At> {
     also.iter().find_map(|also| match also {
         Also::Interrupted(at) => Some(*at),
-        Also::Listing
+        Also::WithoutListener
+        | Also::Listing
         | Also::Usage
         | Also::Exchanges
         | Also::ChangedItem
@@ -344,7 +349,7 @@ fn executed_ir<H: Shown>(
     let sockets = record.join("sockets");
     let partial = record.with_file_name(format!(".{}.partial", run.id()));
     let before = unix_ns();
-    let mut lines = interrupted_at(run, providers, sandboxd, at);
+    let mut lines = interrupted_at(run, providers, sandboxd, also);
     let started = before..=unix_ns();
     let log = read_log(&record);
     let held = held(name, &record, &log, providers, also, &lines[0]);
@@ -1734,6 +1739,22 @@ fn unpublished_image() {
         record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
         log.jsonl:"#]]
     .assert_eq(&shown);
+}
+
+#[test]
+fn missing_private_listener() {
+    let shown = executed(
+        &System,
+        "missing-private-listener",
+        &[(PROVIDER, &Sim::new().private())],
+        &workflow(&["exit", "0"]),
+        SANDBOXD,
+        &[Also::WithoutListener, Also::Listing],
+    );
+    expect![[r#"
+        failed: private provider `simulated` has no grant listener: bind one for its sandboxes to dial
+        record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
+        log.jsonl:"#]].assert_eq(&shown);
 }
 
 #[test]
