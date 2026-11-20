@@ -1087,7 +1087,7 @@ fn ops() {
               {"kind":"ops","role":"agent","remaining_seconds":0,"resources":{"cpu_millis":1,"memory_bytes":1},"grants":[]}
             $ sandboxctl ops --text: exit 0
               Sandbox commands for role agent
-              Work time upper bound: 0 seconds. Run `sandboxctl ops` for current limits.
+            Work time upper bound: 0 seconds. Run `sandboxctl ops` for current limits.
             $ sandboxctl call train: exit 0
               {"kind":"call","job":1,"remaining":{"calls":1,"seconds":null}}
             $ sandboxctl ops > /dev/full: exit 0
