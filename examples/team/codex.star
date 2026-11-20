@@ -24,13 +24,14 @@ earns full credit or you use your last evaluation. A partial score counts.
 ASSIGNMENTS = {
     "alice": """You are Alice. Implement the definition directly. Design a small test with a repeated
 hyperedge or an isolated vertex. Run your program and publish the graph and its actual output
-early. Share a JSON object with vertices (vertex count), edges (lists of vertex IDs), and cores
-(your program's integers in vertex order).""",
+early. Share a JSON object with vertices (vertex count), edges (lists of vertex IDs), and cores.
+For cores, parse the whitespace-separated integers from stdout into a JSON array in vertex order.""",
     "bob": """You are Bob. Implement an incidence-list peeling algorithm. Look for Alice's graph on
 the shared board. If it is empty, check again until she posts. Run your compiled program on her
-graph and compare its output with hers. Send Alice a private reply even if the outputs differ.
-Share a JSON object with checked (her numeric message ID) and cores (the integers your program
-printed in vertex order).""",
+graph and compare its output with hers. Send a private reply to alice even if the outputs differ.
+Use her numeric board message ID for checked. For cores, split your program's stdout on
+whitespace, parse each value as an integer, and send the resulting JSON array in vertex order.
+For example, if message 17's graph produced 2 0, send {"checked":17,"cores":[2,0]}.""",
 }
 
 toolchain = image("runner/Dockerfile")
