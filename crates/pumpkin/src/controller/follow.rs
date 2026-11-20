@@ -55,24 +55,25 @@ impl Shown {
                 Ok(frame) => frame,
                 Err(message) => return Ok(Err(message)),
             };
-            if matches!(item, Followed::Logged) {
-                let Some(last) = body.last() else {
-                    return Err(Unanswered::Failed("a logged frame has no bytes".to_owned()));
-                };
-                crate::to_stderr(&body);
-                self.mid_line = *last != b'\n';
-                self.log_bytes += body.len() as u64;
-                progress();
-                continue;
-            }
-            self.end_line();
-            if !body.is_empty() {
-                return Err(Unanswered::Failed(
-                    "a follow frame other than logged has a body".to_owned(),
-                ));
+            if !matches!(item, Followed::Logged) {
+                self.end_line();
+                if !body.is_empty() {
+                    return Err(Unanswered::Failed(
+                        "a follow frame other than logged has a body".to_owned(),
+                    ));
+                }
             }
             let end = match item {
-                Followed::Logged => unreachable!("a logged frame continued just above"),
+                Followed::Logged => {
+                    let Some(last) = body.last() else {
+                        return Err(Unanswered::Failed("a logged frame has no bytes".to_owned()));
+                    };
+                    crate::to_stderr(&body);
+                    self.mid_line = *last != b'\n';
+                    self.log_bytes += body.len() as u64;
+                    progress();
+                    continue;
+                }
                 Followed::Said { body_bytes } => {
                     let bytes = link.body(body_bytes)?;
                     let message = String::from_utf8(bytes).map_err(|error| {
