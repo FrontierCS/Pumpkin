@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime};
@@ -171,9 +171,7 @@ pub(crate) fn by_hand(flags: cli::Publish) -> Result<ExitCode, String> {
         ));
     }
     let to = Publisher::new(&runs, bucket, since, &controller_addresses, region)?;
-    let Some(published) = to.publish(Wait::Yes)? else {
-        unreachable!("a publish that waits for the lock always takes it");
-    };
+    let published = to.publish()?;
     published.exported.say_refused();
     let Published {
         exported:
@@ -232,8 +230,12 @@ pub(crate) fn until_ended(
     loop {
         let ended = record.ending()?.is_some();
         // The last publish waits for another's, which may have read the runs before this one ended.
-        let wait = if ended { Wait::Yes } else { Wait::No };
-        if let Err(error) = publisher.publish(wait) {
+        let result = if ended {
+            publisher.publish().map(Some)
+        } else {
+            publisher.try_publish()
+        };
+        if let Err(error) = result {
             say(format_args!(
                 "publishing the runs failed: {error}; the next publish uploads what this one \
                  didn't"
@@ -256,13 +258,6 @@ struct Publisher {
     since: Option<Since>,
     scrub: Scrub,
     aws: Cli,
-}
-
-/// Whether a publish waits for another that holds the mark, or gives up.
-#[derive(Clone, Copy)]
-enum Wait {
-    Yes,
-    No,
 }
 
 struct Published {
@@ -299,22 +294,46 @@ impl Publisher {
         })
     }
 
-    /// Exports, under the mark's lock, then runs, in order, the uploads of what changed since the
-    /// mark (`plan`), then moves the mark to the time it planned at; none if another publish holds
-    /// the lock and `wait` is `No`.
-    fn publish(&self, wait: Wait) -> Result<Option<Published>, String> {
+    /// Opens the mark, dated at the epoch if new so that the first publish uploads everything.
+    fn mark(&self) -> Result<(PathBuf, File), String> {
         let export = Path::new(&self.export);
         fs::create_dir_all(export).context(export.display())?;
         let path = export.join(MARK);
-        let mark = mark(&path)?;
-        match wait {
-            Wait::Yes => mark.lock().context(path.display())?,
-            Wait::No => match mark.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => return Ok(None),
-                Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
-            },
+        let made = OpenOptions::new().write(true).create_new(true).open(&path);
+        let mark = match made {
+            Ok(made) => {
+                made.set_modified(SystemTime::UNIX_EPOCH)
+                    .context(path.display())?;
+                made
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .context(path.display())?,
+            Err(error) => return Err(error).context(path.display()),
+        };
+        Ok((path, mark))
+    }
+
+    fn publish(&self) -> Result<Published, String> {
+        let (path, mark) = self.mark()?;
+        mark.lock().context(path.display())?;
+        self.upload(&path, &mark)
+    }
+
+    fn try_publish(&self) -> Result<Option<Published>, String> {
+        let (path, mark) = self.mark()?;
+        match mark.try_lock() {
+            Ok(()) => self.upload(&path, &mark).map(Some),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error).context(path.display()),
         }
+    }
+
+    /// With `mark` locked, exports, uploads what changed since the mark in order, then moves the
+    /// mark to the time it planned at.
+    fn upload(&self, path: &Path, mark: &File) -> Result<Published, String> {
+        let export = Path::new(&self.export);
         let since = self.since.map(|since| since.since_epoch);
         let exported = view::exported(Path::new(&self.runs), export, self.scrub.clone(), since)?;
         let planned_at = SystemTime::now();
@@ -333,27 +352,10 @@ impl Publisher {
             })?;
         }
         mark.set_modified(planned_at).context(path.display())?;
-        Ok(Some(Published {
+        Ok(Published {
             exported,
             uploads_count: plan.len(),
-        }))
-    }
-}
-
-/// Opens the mark, made at the epoch if it is new, so that the first publish uploads everything.
-fn mark(path: &Path) -> Result<File, String> {
-    let made = OpenOptions::new().write(true).create_new(true).open(path);
-    match made {
-        Ok(made) => {
-            made.set_modified(SystemTime::UNIX_EPOCH)
-                .context(path.display())?;
-            Ok(made)
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => OpenOptions::new()
-            .write(true)
-            .open(path)
-            .context(path.display()),
-        Err(error) => Err(error).context(path.display()),
+        })
     }
 }
 
