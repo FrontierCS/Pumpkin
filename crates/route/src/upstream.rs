@@ -292,7 +292,13 @@ impl Upstream {
     ) -> io::Result<()> {
         client.keep.dropped_headers(closed.dropped_headers());
         client.keep.request(closed.body(), Some(closed.apart()));
-        let call = self.agent.post(self.url(closed)).config();
+        let call = match self.url(closed) {
+            Ok(url) => self.agent.post(url).config(),
+            Err(refusal) => {
+                let answer = refusal.answered(None, None);
+                return refuse(refusal, answer, closed, client, answered);
+            }
+        };
         let call = call.timeout_global(bound(client.by)).build();
         let call =
             (closed.headers().iter()).fold(call, |call, (name, value)| call.header(name, value));
@@ -447,12 +453,17 @@ impl Upstream {
     }
 
     /// The endpoint's URL for `closed`, with the query that its target carried.
-    fn url(&self, closed: &Closed<'_>) -> Uri {
+    fn url(&self, closed: &Closed<'_>) -> Result<Uri, Refusal> {
         let Some(query) = closed.query() else {
-            return self.url.clone();
+            return Ok(self.url.clone());
         };
-        Uri::try_from(format!("{}?{query}", self.url))
-            .unwrap_or_else(|_| unreachable!("a URL and a query of URL characters is a URL"))
+        Uri::try_from(format!("{}?{query}", self.url)).map_err(|error| {
+            let message = format!(
+                "the upstream's URL with the request's query is invalid ({error}): \
+                 check the configured upstream URL"
+            );
+            refusal(Status::BadGateway, message)
+        })
     }
 
     pub fn was_shut_down(&self) -> bool {
