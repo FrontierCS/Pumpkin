@@ -152,9 +152,9 @@ def verify(record, omit):
     peer_read = alice_finished = None
     finals = []
     read_ids = {}
-    acknowledged = False
     deleted, selected = {}, {}
     eval_jobs, evaluated, final_leases = {}, set(), []
+    refusals = set()
     responses = {"alice": 0, "bob": 0}
 
     with (record / "log.jsonl").open() as log:
@@ -169,6 +169,9 @@ def verify(record, omit):
                 and event.get("usage", {}).get("output_tokens", 0) > 0
             ):
                 responses[callers[event["caller"]]] += 1
+            request = event["request"] if event.get("kind") == "op_arrived" else {}
+            grant = request.get("grant")
+            args = request.get("arguments", {})
             for action in line.get("actions", []):
                 if action["kind"] == "start_final_call":
                     finals.append(action["job"])
@@ -186,20 +189,41 @@ def verify(record, omit):
                     and action["holder"] == f"job-{finals[0]}"
                 ):
                     final_leases.append(action["lease"])
-                if action["kind"] == "start_call" and action["grant"] == "board":
-                    calls[action["job"]] = (
-                        callers[action["caller"]],
-                        json.loads(payload(record, action["payload"])),
-                    )
-                if action["kind"] == "start_call" and action["grant"] == "eval":
-                    eval_jobs[action["job"]] = callers[action["caller"]]
-                request = event.get("request", {})
+                if action["kind"] == "start_call":
+                    role = callers[action["caller"]]
+                    if (
+                        action["grant"] != grant
+                        or event["caller"] != action["caller"]
+                        or request["payload"] != action["payload"]
+                    ):
+                        raise ValueError(
+                            "job differs from the authenticated caller's request"
+                        )
+                    if grant == "eval":
+                        eval_jobs[action["job"]] = role
+                    else:
+                        calls[action["job"]] = (
+                            role,
+                            grant,
+                            args,
+                            payload(record, action["payload"]),
+                        )
+                if action["kind"] == "reply" and action["reply"]["kind"] == "refused":
+                    message = action["reply"]["message"]
+                    if (
+                        grant == "post"
+                        and args.get("from") == "bob"
+                        and "`--arg from`" in message
+                    ):
+                        refusals.add((callers[event["caller"]], "post"))
+                    if grant == "submit" and "`--arg role`" in message:
+                        refusals.add((callers[event["caller"]], "submit"))
                 if (
                     action["kind"] == "reply"
                     and action["reply"].get("returned", {}).get("state") == "accepted"
                 ):
                     role = callers[event["caller"]]
-                    if request.get("grant") != "select_" + role:
+                    if grant != "submit":
                         raise ValueError(f"{role} finalized with the wrong grant")
                     selected[role] = request["payload"]
                     if role == "alice":
@@ -216,13 +240,25 @@ def verify(record, omit):
                 evaluated.add(eval_jobs[event["job"]])
             if event["job"] not in calls:
                 continue
-            role, request = calls[event["job"]]
-            if role == "alice" and request.get("op") == "post" and "id" in reply:
-                posted[reply["id"]] = request["text"]
-            if role == "bob" and request.get("op") == "read":
+            role, grant, args, raw = calls[event["job"]]
+            if (
+                role == "alice"
+                and grant == "post"
+                and not args
+                and type(reply.get("id")) is int
+            ):
+                posted[reply["id"]] = raw.decode("utf-8")
+            if (
+                role == "bob"
+                and grant == "read"
+                and args.get("stream", "board") == "board"
+            ):
                 for msg in reply.get("messages", []):
-                    if msg["from"] == "alice" and posted.get(msg["id"]) == msg["text"]:
-                        peer_read = line["seq"]
+                    if (
+                        msg["from"] == "alice"
+                        and msg["id"] > int(args.get("after", 0))
+                        and posted.get(msg["id"]) == msg["text"]
+                    ):
                         graph = message_data(msg["text"])
                         if not check_graph(graph):
                             continue
@@ -234,30 +270,32 @@ def verify(record, omit):
                             raise ValueError(
                                 "Alice posted an unexpected graph or answer"
                             )
-                        read_ids[msg["id"]] = graph["cores"]
+                        read_ids[msg["id"]] = line["seq"], graph["cores"]
             if (
                 role == "bob"
-                and request.get("op") == "send"
-                and request.get("to") == "alice"
+                and grant == "send"
+                and args == {"to": "alice"}
                 and type(reply.get("id")) is int
             ):
-                ack = message_data(request["text"])
+                ack = message_data(raw)
                 ident, observed = ack.get("checked"), ack.get("cores")
                 if (
                     type(ident) is int
                     and ident in read_ids
                     and isinstance(observed, list)
                 ):
-                    expected = read_ids[ident]
-                    if len(observed) == len(expected) and all(
-                        type(c) is int for c in observed
+                    seq, expected = read_ids[ident]
+                    if (
+                        len(observed) == len(expected)
+                        and all(type(c) is int for c in observed)
+                        and (codex or observed == expected)
                     ):
-                        acknowledged |= codex or observed == expected
+                        peer_read = seq
                         if codex:
                             print(
                                 f"Message {ident}: Alice posted {expected}, Bob observed {observed}"
                             )
-    if peer_read is None or not acknowledged or len(finals) != 1:
+    if peer_read is None or len(finals) != 1:
         raise ValueError(
             "expected Bob to read and acknowledge Alice's message, and one final call"
         )
@@ -269,6 +307,10 @@ def verify(record, omit):
         if evaluated != responses.keys():
             raise ValueError("expected a draft evaluation from each agent")
         print(f"Successful model responses: {responses}")
+    elif refusals != {("alice", "post"), ("alice", "submit"), ("bob", "submit")}:
+        raise ValueError(
+            "expected refusals of Alice's forged post and both submission role overrides"
+        )
     best = check_scores(
         record, outcome["agents"], result, selected, final_leases, codex, omit
     )

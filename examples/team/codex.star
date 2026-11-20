@@ -5,7 +5,7 @@ load("//team/workflow.star", "PARTICIPANTS", "team")
 
 MODEL = arg("model", str)
 
-PROMPT = """Write a standalone C++17 program in solution.cpp to compute hypergraph core numbers.
+PROMPT = """Write a standalone C++17 program to compute hypergraph core numbers.
 Read one graph from stdin: n m, then m lines, each containing the edge size followed by distinct,
 zero-based vertex IDs. Print exactly n integers in vertex order. The graphs are small; the score
 counts correct vectors, with no reward for speed.
@@ -16,35 +16,21 @@ are in the set. Identical edges count separately. For example, with four vertice
 edge {0,1,2}, all three members are in a 1-core together and vertex 3 is isolated. The output
 must be 1 1 1 0. Check this case with your executable.
 
-Compile with g++ --std=c++17 solution.cpp --output solution. Save the first working source with
-sandboxctl call select_ROLE solution.cpp (replace ROLE with alice or bob). This
-keeps you working. Exchange your test on the board before asking the evaluator to score a draft.
-You can call the board with python3 /opt/team/client.py followed by one JSON request as an
-argument, or in Python: import sys, json; sys.path.insert(0, '/opt/team'); from client import board.
-
-Run sandboxctl call eval solution.cpp --wait 900 for the draft score. Two is the full
-score. You have at most two evaluations and fifteen minutes in all. When you have a full score,
-or after your second evaluation at any score, finalize your best evaluated source immediately
-with your role's final command. A partial score counts.
+Save your first working source as soon as it compiles. Exchange your test before having a draft
+scored. Two correct vectors earn full credit. Finalize your best evaluated source as soon as it
+earns full credit or you use your last evaluation. A partial score counts.
 """
 
 ASSIGNMENTS = {
-    "alice": """You are Alice. Write a simple implementation based on the definition. Design a small
-test with a repeated hyperedge or an isolated vertex. Run it and publish its graph and actual
-output early: board(op='post', text=json.dumps({'vertices': n, 'edges': edges, 'cores': cores})).
-Edges is a list of vertex lists and cores is the integer output in vertex order. Check for a
-message ID. Evaluate your solution and finalize it with
-sandboxctl call select_alice solution.cpp --arg finalize=true.
-""",
-    "bob": """You are Bob. Implement an incidence-list peeling algorithm. Compile, test and save it.
-Read Alice's case with board(op='read', stream='board', after=0). If empty, poll in the shell
-until she posts. Parse the JSON in her message's text, serialize the graph to the stdin format,
-and run your compiled program on it. Compare its output to her vector. Send her the observed
-integers even if they differ: board(op='send', to='alice', text=json.dumps({'checked': message_id,
-'cores': cores})). Take the numeric message_id from the board message and cores from your own
-program. Check for the returned ID. Now evaluate your solution and finalize it with
-sandboxctl call select_bob solution.cpp --arg finalize=true.
-""",
+    "alice": """You are Alice. Implement the definition directly. Design a small test with a repeated
+hyperedge or an isolated vertex. Run your program and publish the graph and its actual output
+early. Share a JSON object with vertices (vertex count), edges (lists of vertex IDs), and cores
+(your program's integers in vertex order).""",
+    "bob": """You are Bob. Implement an incidence-list peeling algorithm. Look for Alice's graph on
+the shared board. If it is empty, check again until she posts. Run your compiled program on her
+graph and compare its output with hers. Send Alice a private reply even if the outputs differ.
+Share a JSON object with checked (her numeric message ID) and cores (the integers your program
+printed in vertex order).""",
 }
 
 toolchain = image("runner/Dockerfile")

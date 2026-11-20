@@ -1,17 +1,47 @@
 """Calls that drive the board and judge."""
 
-def board_call(target: Target, payload: Payload):
-    """Returns the board's reply to the authenticated caller.
+def _board(target, payload, op, args = []):
+    reply = target.capture(["python3", "/opt/team/board.py", op, target.caller()] + args, stdin = payload)
+    return json.decode(reply)
+
+def post(target: Target, payload: Payload):
+    """Publishes one message to the board.
 
     Args:
-      target: the board sandbox shared by both agents.
-      payload: the request issued by the caller.
+      target: the shared board.
+      payload: the caller's UTF-8 message.
 
     Returns:
-      The committed message ID, the requested messages, or a request error.
+      The message ID or a request error.
     """
-    reply = target.capture(["python3", "/opt/team/board.py", "call", target.caller()], stdin = payload)
-    return json.decode(reply)
+    return _board(target, payload, "post")
+
+def send(target: Target, payload: Payload, to: str):
+    """Delivers one message to a teammate.
+
+    Args:
+      target: the shared board.
+      payload: the caller's UTF-8 message.
+      to: the recipient's role name.
+
+    Returns:
+      The message ID or a request error.
+    """
+    return _board(target, payload, "send", [to])
+
+def read(target: Target, payload: Payload, stream: str = "board", after: int = 0):
+    """Reads one page visible to the caller.
+
+    Args:
+      target: the shared board.
+      payload: empty.
+      stream: board for public posts or inbox for private messages.
+      after: the last message ID already read.
+
+    Returns:
+      Matching messages and the next cursor, or a request error.
+    """
+    return _board(target, payload, "read", [stream, str(after)])
 
 def evaluate(target: Target, payload: Payload):
     """Compiles a draft source in a fresh runner and scores the resulting program.
