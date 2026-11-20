@@ -1,4 +1,4 @@
-//! A work phase owns one sandbox and one server process per shared role. Its worker lends the
+//! A work phase owns one sandbox per work-lifetime target. Its worker lends the
 //! session to each admitted body in turn, then collects and deletes the sandbox on closure.
 
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{CallResult, Event, JobId};
-use gateway::{Arrival, Process};
+use gateway::Arrival;
 use schema::sandbox::op::OpReply;
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::TargetId;
@@ -16,28 +16,26 @@ use stdx::Context;
 use crate::agent::Ready;
 use crate::call::job;
 use crate::child::{Child, End, Message, Report};
-use crate::sandbox::{Sandboxes, Started, Which, collect, launch};
+use crate::sandbox::{Sandboxes, Started, Which, collect};
 use crate::{Clock, Entry, Host, Inbox, Input, Runtime, deadline};
 
 type Call<'r, H> = (job::Call<'r>, Child<'r, H, OpReply>);
 
-pub(super) struct Service<'r, H: Host> {
+pub(super) struct Resident<'r, H: Host> {
     orders: Option<Sender<Call<'r, H>>>,
-    pub(super) process: Option<Process>,
     failed: Option<String>,
     active: Option<(JobId, Sender<Message<OpReply>>)>,
 }
 
-impl<'r, H: Host> Service<'r, H> {
+impl<'r, H: Host> Resident<'r, H> {
     fn open() -> (Self, Receiver<Call<'r, H>>) {
         let (tx, rx) = mpsc::channel();
-        let service = Self {
+        let resident = Self {
             orders: Some(tx),
-            process: None,
             failed: None,
             active: None,
         };
-        (service, rx)
+        (resident, rx)
     }
 
     pub(super) fn call(
@@ -64,12 +62,9 @@ impl<'r, H: Host> Service<'r, H> {
     }
 
     pub(super) fn arrival(&mut self, target: TargetId, arrival: Arrival) -> Option<Event> {
-        // A freeze ends the server and a deletion ends its session.
+        // Deleting the sandbox ends its session.
         self.orders.as_ref()?;
         let reason = match arrival {
-            Arrival::Exited { process, status } if Some(process) == self.process => {
-                format!("the shared role's command exited: {status:?}")
-            }
             Arrival::Ended { reason } => format!("the shared role's session ended: {reason}"),
             arrival @ Arrival::Exited { .. } => {
                 if let Some((_, sender)) = &self.active {
@@ -110,17 +105,17 @@ impl<'r, H: Host> Service<'r, H> {
 }
 
 impl<'r, H: Host + 'r> Runtime<'r, H> {
-    pub(super) fn start_services<'s>(
+    pub(super) fn start_residents<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         ready: &Sender<(Duration, Ready)>,
     ) -> Result<(), String> {
-        for (target, command) in self.workflow().shared_targets() {
+        for target in self.workflow().work_targets() {
             let which = Which::Shared(target);
             let by = deadline(&self.clock, self.placed.startup(target.role()));
             let hard_end = self.unix_hard_end;
-            let (service, rx) = Service::open();
-            self.services.insert(target, service);
+            let (resident, rx) = Resident::open();
+            self.residents.insert(target, resident);
             let inbox = self.inbox.sender();
             let clock = self.clock.clone();
             let observed = clock.clone();
@@ -137,21 +132,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     let started =
                         sandboxes.start(which, None, by, hard_end, inbox.clone(), arrivals);
                     let mut sandbox = match started {
-                        Ok(mut sandbox) => {
-                            let status = crate::interruption::check()
-                                .map_err(|stopped| stopped.to_string())
-                                .and_then(|()| {
-                                    sandbox
-                                        .session
-                                        .start(launch(command), by)
-                                        .context("the shared role's command didn't start")
-                                });
+                        Ok(sandbox) => {
                             let at = clock.now();
-                            if status.is_ok() {
-                                let _ =
-                                    inbox.send(Input::Logged(Entry::SharedStarted { target, at }));
-                            }
-                            let _ = ready.send((at, Ready::Shared(target, status)));
+                            let _ = inbox.send(Input::Logged(Entry::SharedStarted { target, at }));
+                            let _ = ready.send((at, Ready::Shared(target, Ok(()))));
                             Some(sandbox)
                         }
                         Err(failure) => {

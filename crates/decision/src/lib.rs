@@ -147,7 +147,7 @@ pub enum Event {
     AgentTornDown {
         agent: AgentId,
     },
-    /// The shared sandbox's process or session failed; stop offering its grants.
+    /// The work target lost its sandbox or could not stop a command. Refuse further calls.
     SharedFailed {
         target: TargetId,
         reason: String,
@@ -222,7 +222,7 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the shared targets and agents. Releasing the agents' commands produces
+    /// Starts the work-lifetime targets and agents. Releasing the agents' commands produces
     /// [`Event::WorkStarted`]. Each agent reports its own exit or failure.
     StartAgents,
     /// Answers op `op`.
@@ -393,8 +393,8 @@ fn agent_startup(placed: &Placed) -> Duration {
         .chain(
             placed
                 .workflow()
-                .shared_targets()
-                .map(|(id, _)| placed.startup(id.role())),
+                .work_targets()
+                .map(|id| placed.startup(id.role())),
         )
         .max()
         .unwrap_or_default()
@@ -418,13 +418,13 @@ pub struct Core<'w> {
     hard_end: Duration,
     phase: Phase,
     agents: BTreeMap<AgentId, AgentWork>,
-    shared: BTreeMap<TargetId, Service>,
+    shared: BTreeMap<TargetId, Availability>,
     jobs: jobs::Jobs,
     leases: leases::Leases,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Service {
+enum Availability {
     Available,
     Failed,
     Stopping,
@@ -455,8 +455,8 @@ impl<'w> Core<'w> {
                 .map(|agent| (agent.id, AgentWork::default()))
                 .collect(),
             shared: workflow
-                .shared_targets()
-                .map(|(id, _)| (id, Service::Available))
+                .work_targets()
+                .map(|id| (id, Availability::Available))
                 .collect(),
             jobs: jobs::Jobs::default(),
             leases: leases::Leases::default(),
@@ -487,15 +487,15 @@ impl<'w> Core<'w> {
                 }
             }
             Event::SharedFailed { target, .. } => {
-                if let Some(state @ Service::Available) = self.shared.get_mut(&target) {
-                    *state = Service::Failed;
+                if let Some(state @ Availability::Available) = self.shared.get_mut(&target) {
+                    *state = Availability::Failed;
                     if let Some(job) = self.jobs.active_on(self.workflow, target) {
                         actions.push(Action::StopCall { job });
                     }
                 }
             }
             Event::SharedTornDown { target } => {
-                if self.shared.get(&target) == Some(&Service::Stopping) {
+                if self.shared.get(&target) == Some(&Availability::Stopping) {
                     self.shared.remove(&target);
                 }
             }
