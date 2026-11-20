@@ -38,6 +38,15 @@ impl Core<'_> {
                 "`{name}` has no calls left of the {calls} it allows: make no more calls to it"
             ));
         }
+        let cumulative = function.cumulative();
+        if let Some(total) = cumulative
+            && usage.used >= total
+        {
+            return Err(format!(
+                "`{name}` has no call time left of the {} s it allows: make no more calls to it",
+                total.as_secs()
+            ));
+        }
         // A call has ended only once every lease it held has.
         let holding = (self.jobs)
             .of(JobOf::Function(id))
@@ -53,25 +62,22 @@ impl Core<'_> {
                 .active_on(self.workflow, function.target)
                 .is_some()
             {
-                return Err(format!(
-                    "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
-                ));
+                return Ok(OpReply::Refused {
+                    busy: true,
+                    message: format!(
+                        "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
+                    ),
+                });
             }
         }
         if usage.busy || holding {
-            return Err(format!(
-                "`{name}` runs one call at a time, and already has one queued or running: call \
+            return Ok(OpReply::Refused {
+                busy: true,
+                message: format!(
+                    "`{name}` runs one call at a time, and already has one queued or running: call \
                  again once it has finished; this call is not charged"
-            ));
-        }
-        let cumulative = function.cumulative();
-        if let Some(total) = cumulative
-            && usage.used >= total
-        {
-            return Err(format!(
-                "`{name}` has no call time left of the {} s it allows: make no more calls to it",
-                total.as_secs()
-            ));
+                ),
+            });
         }
         // Ending an agent's work stops its calls (`end_work`), so a call is given at most the time
         // its caller has left when it is accepted; after a wait in the queue, its timeout can

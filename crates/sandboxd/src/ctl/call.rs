@@ -19,12 +19,19 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
         timeout,
         seconds,
         replace,
+        wait,
         arg,
     } = call;
     if let Some(op) = function
         .to_str()
         .and_then(|function| function.split_once('.'))
     {
+        if wait.is_some() {
+            return Err(format!(
+                "a session's `{}` takes no `--wait`: give its own words and flags",
+                op.1
+            ));
+        }
         if !arg.is_empty() {
             return Err(format!(
                 "a session's `{}` takes no `--arg`: give its own words and flags",
@@ -45,8 +52,8 @@ pub(super) fn call(call: flags::Call) -> Result<(OpCall, Vec<u8>), String> {
             Ok((call, payload_path(Path::new(file))?))
         }
         _ => Err(format!(
-            "`{function}` takes the file that holds the payload, and no flag but `--arg`: call it \
-             as `sandboxctl call {function} <file> [--arg <name>=<value>]…`"
+            "`{function}` takes the file that holds the payload: call it \
+             as `sandboxctl call {function} <file> [--arg <name>=<value>]… [--wait <seconds>]`"
         )),
     }
 }

@@ -26,6 +26,7 @@ use crate::commands::Commands;
 use crate::files::{self, Puts};
 use crate::model::{Model, Part};
 use crate::ops::Ops;
+use crate::until::Until;
 
 /// Where `sandboxd` meets its gateway.
 pub(crate) enum Gateway {
@@ -198,55 +199,12 @@ fn greet(
     stdx::net::set_options(stream).context("setting the connection's options failed")?;
     // No later than `by`, past which no gateway claims the sandbox.
     let left = by.remaining().unwrap_or_default();
-    let mut peer = Until {
-        stream,
-        by: Deadline::after(left.min(HELLO_TIMEOUT)),
-    };
+    let mut peer = Until::new(stream, Deadline::after(left.min(HELLO_TIMEOUT)));
     open(&mut peer, hello, Some(grant))?;
     let lifted = stream
         .set_read_timeout(None)
         .and_then(|()| stream.set_write_timeout(None));
     lifted.context("lifting the bound on the connection's reads and writes failed")
-}
-
-/// Reads and writes `stream` until `by`, after which each read and write fails as timed out.
-struct Until<'a> {
-    stream: &'a TcpStream,
-    by: Deadline,
-}
-
-impl Until<'_> {
-    // The time left until `by`, as the socket's timeout bounds each call on its own; failing once
-    // it has passed, which a socket's `None` would take for no timeout at all.
-    fn left(&self) -> io::Result<Duration> {
-        self.by.remaining().ok_or(io::ErrorKind::TimedOut.into())
-    }
-}
-
-fn timed_out(error: io::Error) -> io::Error {
-    match error.kind() {
-        // A call that passes its socket's timeout fails as a non-blocking one would.
-        io::ErrorKind::WouldBlock => io::ErrorKind::TimedOut.into(),
-        _ => error,
-    }
-}
-
-impl Read for Until<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.left()?))?;
-        self.stream.read(buf).map_err(timed_out)
-    }
-}
-
-impl Write for Until<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.left()?))?;
-        self.stream.write(buf).map_err(timed_out)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush()
-    }
 }
 
 fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Writer), String> {

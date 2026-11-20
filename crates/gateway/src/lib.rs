@@ -385,7 +385,7 @@ impl Session {
         match self.answer(number, reply, by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                 let message = format!("the reply was too long to send: {error}");
-                self.answer(number, OpReply::Refused { message }, by)?;
+                self.answer(number, OpReply::refused(message), by)?;
                 Err(error)
             }
             answered => answered,
@@ -411,7 +411,7 @@ impl Session {
             payload_limit: _,
         } = refused;
         self.clear_flight(session, number);
-        match self.answer(number, OpReply::Refused { message }, by) {
+        match self.answer(number, OpReply::refused(message), by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => unreachable!(
                 "the refusal of op {number} is too long, though its message is \
                  `RefusedOp::message`, which names only the payload's size, a `u64`, and the \

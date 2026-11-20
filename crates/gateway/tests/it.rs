@@ -484,7 +484,7 @@ fn answer_elsewhere(session: &mut Session, arrivals: &Receiver<Arrival>, dir: &P
             (next_op(arrivals), process)
         });
     let message = "from another session".to_owned();
-    let elsewhere = panicked(|| other.reply(mine, OpReply::Refused { message }, hung()));
+    let elsewhere = panicked(|| other.reply(mine, OpReply::refused(message), hung()));
     let own = outcome(other.reply(own, no_grants(), hung()));
     let refused = match next(&others) {
         Some(Arrival::Refused(refused)) => refused,
@@ -512,7 +512,7 @@ fn too_long_reply(session: &mut Session, arrivals: &Receiver<Arrival>, _: &Path)
         let op = next_op(arrivals);
         lines.push(outcome(session.reply(
             op,
-            OpReply::Refused { message },
+            OpReply::refused(message),
             hung(),
         )));
     }

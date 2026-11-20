@@ -2310,23 +2310,15 @@ const AGENT: &str = r#"#!/bin/sh
         out=$(SANDBOXCTL "$@" 2>&1)
         echo "sandboxctl $*: exit $?: $out" | sed 's/"remaining_seconds":[0-9]*/"remaining_seconds":"<s>"/'
     }
-    # Waits while job $1 is queued or running, then shows its status.
-    await() {
-        while SANDBOXCTL status "$1" | grep -qE '"state":"(queued|running)"'; do
-            sleep 1
-        done
-        ctl status "$1"
-    }
     ctl ops
     ctl status 0
-    ctl call nope six
+    ctl call nope six --wait 15
     ctl call train nine
     ctl call train seventeen
-    ctl call train six
-    await 0
-    ctl call train slow
-    await 1
-    ctl call submit six --arg finalize=true"#;
+    ctl call train slow --wait 1
+    ctl call train six --wait 60
+    ctl status 0
+    ctl call submit six --arg finalize=true --wait 15"#;
 
 /// The workflow of the run whose agent makes ops: [`workflow`]'s, whose agent runs
 /// [`AGENT`], which the run puts in its sandbox with the fixture's directories, files and
@@ -2608,23 +2600,23 @@ fn ops_on_docker() {
             pumpkin:    <t> agent started on local/container
             pumpkin:    <t> train job 0 of agent 0 asked on local/container
             pumpkin:    <t> train job 0 of agent 0 started
-            pumpkin:    <t> train job 0 of agent 0 ended: bytes=6
+            pumpkin:    <t> train job 0 of agent 0 ended: failed: the call's timeout passed
             pumpkin:    <t> train job 1 of agent 0 asked on local/container
             pumpkin:    <t> train job 1 of agent 0 started
-            pumpkin:    <t> train job 1 of agent 0 ended: failed: the call's timeout passed
+            pumpkin:    <t> train job 1 of agent 0 ended: bytes=6
             pumpkin:    <t> the work phase ended
             pumpkin:    <t> final call job 2 asked on local/container
             pumpkin:    <t> final call job 2 started
             pumpkin:    <t> final call job 2 ended: score=6
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
-                 <t> train job 0 of agent 0 on local/container, started after <t>, ran <t>: bytes=6
-                 <t> train job 1 of agent 0 on local/container, started after <t>, ran <t>: failed: the call's timeout passed (timed out)
+                 <t> train job 0 of agent 0 on local/container, started after <t>, ran <t>: failed: the call's timeout passed (timed out)
+                 <t> train job 1 of agent 0 on local/container, started after <t>, ran <t>: bytes=6
                  <t> final call job 2 on local/container, started after <t>, ran <t>: score=6
               sandboxes: 4 on local/container, <t> in all, 4 created, all deleted
             pumpkin: run <id> finished with a result (score=6); its record is <scratch>/<runs>/<id>
             pumpkin: to run it again: pumpkin run --runs '<scratch>/<runs>' --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/ops/task.star
-            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/, jobs/1/sandbox.json, jobs/2/got/1/result.json, jobs/2/log/0/command.stderr, jobs/2/log/0/command.stdout, jobs/2/out/evidence.txt, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json, sources/task/lib/train.star, sources/task/ops/final.star, sources/task/ops/submit.star, sources/task/ops/task.star
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/got/1/result.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/, jobs/1/sandbox.json, jobs/2/got/1/result.json, jobs/2/log/0/command.stderr, jobs/2/log/0/command.stdout, jobs/2/out/evidence.txt, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json, sources/task/lib/train.star, sources/task/ops/final.star, sources/task/ops/submit.star, sources/task/ops/task.star
             agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
@@ -2643,14 +2635,13 @@ fn ops_on_docker() {
             standard input: Solve the task in /task/README.md.
             sandboxctl ops: exit 0: {"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"train","payload_max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":5},{"kind":"now","name":"submit","payload_max_bytes":16,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             sandboxctl status 0: exit 1: {"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}
-            sandboxctl call nope six: exit 1: {"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}
+            sandboxctl call nope six --wait 15: exit 1: {"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}
             sandboxctl call train nine: exit 1: {"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}
             sandboxctl call train seventeen: exit 1: {"kind":"refused","message":"the payload is 17 bytes, more than the limit of 16: send at most 16"}
-            sandboxctl call train six: exit 0: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":null}}
-            sandboxctl status 0: exit 0: {"kind":"status","job":0,"state":"completed","returned":{"bytes":6},"remaining":{"calls":99,"seconds":null}}
-            sandboxctl call train slow: exit 0: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":null}}
-            sandboxctl status 1: exit 2: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":98,"seconds":null}}
-            sandboxctl call submit six --arg finalize=true: exit 0: {"kind":"call","returned":{},"remaining_seconds":"<s>"}
+            sandboxctl call train slow --wait 1: exit 124: sandboxctl: wait expired after job 0 was admitted: inspect it with `sandboxctl status 0`
+            sandboxctl call train six --wait 60: exit 0: {"kind":"status","job":1,"state":"completed","returned":{"bytes":6},"remaining":{"calls":98,"seconds":null}}
+            sandboxctl status 0: exit 2: {"kind":"status","job":0,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":98,"seconds":null}}
+            sandboxctl call submit six --arg finalize=true --wait 15: exit 0: {"kind":"call","returned":{},"remaining_seconds":"<s>"}
             job 0's command 0's standard output:
             job 1's command 0's standard output:
             job 2's command 0's standard output:
