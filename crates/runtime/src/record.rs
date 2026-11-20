@@ -14,7 +14,7 @@
 //!   lacks.
 //! - `log.jsonl`, the run log (`log`); `payloads/<digest>`, the payload of each op the core
 //!   accepted, by the SHA-256 of its bytes; `model/`, each model exchange (`model`).
-//! - `agent/`, `jobs/<n>/` and `leases/<n>/`, a sandbox each, with its `sandbox.json`: `provider`,
+//! - `agents/<role>/`, `jobs/<n>/` and `leases/<n>/`, each with its `sandbox.json`:
 //!   `id`, `gpus` once known, and `delete.state`, `deleted` or `failed`, once tried; its `out/`,
 //!   `log/` and a body's `got/` as far as collected.
 //! - `outcome.json`, the run's end: `state` is `finished`, with what `log::outcome_json` gives,
@@ -64,7 +64,7 @@ const LOST: &str = "its driver ended without an outcome";
 
 // A build refuses a record of another version instead of misreading it. Until Pumpkin's first
 // release the form changes under this version, so an older record may lack what a newer one has.
-const RECORD_VERSION: &str = "pumpkin.record/v0";
+const RECORD_VERSION: &str = "pumpkin.record/v1";
 
 /// This build of Pumpkin, which `pumpkin --version` prints, and each record names.
 pub const BUILD: Build = Build {
@@ -633,8 +633,8 @@ impl Record {
     /// The `sandbox.json` of each sandbox that has one, with its directory below the record, in
     /// order.
     pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
-        let mut dirs = vec![PathBuf::from("agent")];
-        for of in ["jobs", "leases"] {
+        let mut dirs = Vec::new();
+        for of in ["agents", "jobs", "leases"] {
             let path = self.dir.join(of);
             match fs::read_dir(&path) {
                 Ok(entries) => {

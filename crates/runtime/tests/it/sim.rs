@@ -59,6 +59,8 @@ pub(crate) const MUTE: &str = "/sim/mute";
 
 /// A sandbox that never dials, and lasts until it is deleted.
 pub(crate) const HUNG: &str = "/sim/hung";
+pub(crate) const HUNG_LAST: &str = "/sim/hung-last";
+pub(crate) const HUNG_REFUSED: &str = "/sim/hung-refused";
 
 /// A sandbox that never dials, and that its provider's list leaves out once it has ended.
 pub(crate) const VANISHING: &str = "/sim/vanishing";
@@ -952,7 +954,7 @@ impl Faults {
         } else {
             Made::Named
         };
-        let dialing = if unlistable || names(HUNG) {
+        let dialing = if unlistable || names(HUNG) || names(HUNG_LAST) || names(HUNG_REFUSED) {
             Dialing::Hung
         } else if lost || vanishing || names(MUTE) {
             Dialing::Mute
@@ -962,14 +964,14 @@ impl Faults {
         let refusals = if names(UNDELETABLE) {
             u32::MAX
         } else {
-            u32::from(names(REFUSED_ONCE))
+            u32::from(names(REFUSED_ONCE) || names(HUNG_REFUSED))
         };
         Self {
             made,
             dialing,
             listing,
             refusals,
-            last: names(LAST),
+            last: names(LAST) || names(HUNG_LAST),
             freezing: if names(SCRIBBLED) {
                 Freezing::Scribbler
             } else if names(UNFREEZABLE) {
@@ -1075,7 +1077,10 @@ enum Step {
         less: Option<u64>,
     },
     /// A `status` or a session's `status` made until its reply gives `state`.
-    Await { call: OpCall, state: String },
+    Await {
+        call: OpCall,
+        state: String,
+    },
     /// A model request, whose response's part or end the next step waits for.
     Model {
         model: String,
@@ -1088,6 +1093,7 @@ enum Step {
     Sleep(u64),
     /// The `<kind>` of `await_log <kind>`.
     Logged(String),
+    File(String),
     /// The command's exit with 0.
     Exit,
     /// The answer to the collects of a `held` directory.
@@ -1218,11 +1224,14 @@ impl Caller {
                     thread::sleep(Duration::from_secs(seconds));
                     continue;
                 }
-                Some(Step::Logged(kind)) => {
-                    let Some(record) = &self.record else {
-                        panic!("`await_log` reads the run's record, which `Sim::records` names")
-                    };
-                    logged(record, &format!(r#""kind":"{kind}""#));
+                Some(Step::File(path)) => {
+                    let record = self.record.as_ref().unwrap();
+                    await_file(&record.join(path));
+                    continue;
+                }
+                Some(Step::Logged(part)) => {
+                    let record = self.record.as_ref().unwrap();
+                    logged(record, &part);
                     continue;
                 }
                 Some(Step::Exit) => {
@@ -1423,8 +1432,8 @@ fn state_name(reply: &OpReply) -> String {
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
 // <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
 // <lease> moved|failed` until its last transfer ended so. `await_log <kind>` waits until the run
-// log holds an entry of kind `kind`, in the record that `Sim::records` named: what a run's other
-// children log has an order against the agent's acts only through it.
+// log holds an entry of kind `kind`, in the record that `Sim::records` named. An optional caller
+// limits that wait to the named caller's event.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -1443,6 +1452,7 @@ fn step(arg: &str) -> Step {
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
     let payload = || match words[2].parse() {
         Ok(size) => vec![b'x'; size],
+        Err(_) if words[2] == "binary" => vec![0, 255, 1],
         Err(_) => words[2].as_bytes().to_vec(),
     };
     let (call, payload, less) = match words[..] {
@@ -1488,7 +1498,11 @@ fn step(arg: &str) -> Step {
             return model_step(kind, model, &words[2..]);
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
-        ["await_log", kind] => return Step::Logged((*kind).to_owned()),
+        ["await_file", path] => return Step::File((*path).to_owned()),
+        ["await_log", kind] => return Step::Logged(format!(r#""kind":"{kind}""#)),
+        ["await_log", kind, caller] => {
+            return Step::Logged(format!(r#""caller":"{caller}","kind":"{kind}""#));
+        }
         ["exit"] => return Step::Exit,
         ["release"] => return Step::Release,
         ["result"] => return Step::Result,
@@ -1526,6 +1540,18 @@ fn model_step(kind: &str, model: &str, words: &[&str]) -> Step {
         said: said.into_iter().map(str::to_owned).collect(),
         fields,
         wait,
+    }
+}
+
+fn await_file(path: &Path) {
+    let by = Deadline::after(LAST_WAITS);
+    while !path.exists() {
+        assert!(
+            by.remaining().is_some(),
+            "no recorded file {}",
+            path.display()
+        );
+        thread::sleep(AWAIT_POLL);
     }
 }
 
@@ -1795,6 +1821,7 @@ fn send_file(
 
 #[derive(Default)]
 struct Served {
+    pending_start: Option<u32>,
     caller: Option<Caller>,
     files: Files,
     result: Option<Vec<u8>>,
@@ -1812,7 +1839,6 @@ impl Served {
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
         shared: &Mutex<Status>,
     ) -> bool {
-        replies.push((FromSandbox::Done { stream }, Vec::new()));
         match launch.argv.program() {
             "exit" => {
                 let code = launch.argv.args()[0].parse().unwrap();
@@ -1821,7 +1847,10 @@ impl Served {
             }
             "stall" => status(shared).stalled = true,
             "crash" => return true,
-            "ops" => {
+            "mark" => {
+                fs::write(status(shared).record.as_ref().unwrap().join("launched"), "").unwrap();
+            }
+            "ops" | "ops_before_started" => {
                 let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
                 let record = status(shared).record.clone();
                 let made = (self.caller).insert(Caller::new(stream, steps, model, record));
@@ -1856,6 +1885,13 @@ impl Served {
                 let status = ExitStatus::Code(0);
                 replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
             }
+            "bytes" => {
+                let bytes = self.files.by_path.get(&launch.argv.args()[0]);
+                self.printed
+                    .insert(launch.stdout.to_string(), json!(bytes).to_string());
+                let status = ExitStatus::Code(0);
+                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+            }
             "print" | "fill" => {
                 let mut args = launch.argv.args();
                 let mut text = String::new();
@@ -1873,6 +1909,25 @@ impl Served {
             }
         }
         false
+    }
+
+    fn answered(
+        &mut self,
+        op: u32,
+        reply: &OpReply,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+        shared: &Mutex<Status>,
+    ) -> Option<bool> {
+        let caller = self.caller.as_mut().filter(|caller| caller.op == op)?;
+        if let Some(stream) = self.pending_start.take() {
+            replies.push((FromSandbox::Done { stream }, Vec::new()));
+        }
+        if let Some(journal) = &status(shared).journal {
+            let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
+            // The session numbers its ops from 1, the run log from 0.
+            journal.tell(format!("a session read op {}'s reply: {kind}", op - 1));
+        }
+        Some(caller.answered(reply, replies))
     }
 
     fn kill(&mut self, stream: u32, command: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
@@ -1900,25 +1955,26 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             // session's writes fill the connection's buffers.
             return;
         }
-        let Served {
-            caller,
-            files,
-            result: _,
-            printed: _,
-            running: _,
-            held: _,
-        } = &mut served;
         match request {
-            ToSandbox::Put { stream, dir, root } => files.begin(stream, dir, root, &mut replies),
-            ToSandbox::Entry { entry, .. } => files.entry(entry),
-            ToSandbox::Data { .. } => files.data(&body),
-            ToSandbox::End { stream } => files.end(stream, &mut replies),
+            ToSandbox::Put { stream, dir, root } => {
+                served.files.begin(stream, dir, root, &mut replies);
+            }
+            ToSandbox::Entry { entry, .. } => served.files.entry(entry),
+            ToSandbox::Data { .. } => served.files.data(&body),
+            ToSandbox::End { stream } => served.files.end(stream, &mut replies),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;
                 replies.push((reply, Vec::new()));
             }
             ToSandbox::Start { stream, launch } => {
+                if launch.argv.program() == "ops_before_started" {
+                    served.pending_start = Some(stream);
+                } else if frame::write(&mut connection, &FromSandbox::Done { stream }, &[]).is_err()
+                {
+                    return;
+                }
+                // The command can wait for the run to record its start before making an op.
                 crashed = served.start(stream, &launch, model, &mut replies, shared);
             }
             ToSandbox::Kill { stream, command } => served.kill(stream, command, &mut replies),
@@ -1930,22 +1986,17 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             ToSandbox::Collect { stream, path } => {
                 collect(stream, &path, &mut served, &mut replies);
             }
-            ToSandbox::OpReply { op, reply } => match caller {
-                Some(caller) if caller.op == op => {
-                    if let Some(journal) = &status(shared).journal {
-                        let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
-                        // The session numbers its ops from 1 (`Caller::op`), the run log from 0.
-                        journal.tell(format!("a session read op {}'s reply: {kind}", op - 1));
-                    }
-                    crashed = caller.answered(&reply, &mut replies);
-                }
-                // A reply to no op in flight breaks the protocol, which ends the session.
-                Some(_) | None => return,
-            },
+            ToSandbox::OpReply { op, reply } => {
+                let Some(next) = served.answered(op, &reply, &mut replies, shared) else {
+                    return;
+                };
+                crashed = next;
+            }
             response @ (ToSandbox::ModelResponse { .. }
             | ToSandbox::ModelData { .. }
             | ToSandbox::ModelEnd { .. }) => {
-                let heard = caller
+                let heard = served
+                    .caller
                     .as_mut()
                     .map(|caller| caller.heard(response, &body, &mut replies));
                 // An answer to no model request in flight breaks the protocol, which ends the

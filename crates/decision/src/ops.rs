@@ -8,7 +8,7 @@
 //! - An op names a grant its caller's role holds: a call one of the agent's job functions, a
 //!   session's function one of its role's sessions, and a now function's call one of the agent's
 //!   now functions.
-//! - Its payload isn't empty, and fits its function's `payload_max_bytes`; a job function's
+//! - Its payload fits its function's `payload_max_bytes`; a job function's
 //!   caller's arguments read as its body's parameters are typed.
 //! - A job function has calls left, none of its calls queued or running, and call time left. A
 //!   refused call is not charged.
@@ -41,22 +41,13 @@ use schema::workflow::{AgentId, JobFunctionId, JobOf, NowFunctionId, RoleId, Ses
 
 use super::jobs::{Job, State};
 use super::leases::{self, Work};
-use super::{
-    Action, Caller, Core, Direction, JobId, LeaseId, OpId, Outcome, PayloadRef, Phase, Request,
-    WorkEnd,
-};
+use super::{Action, Caller, Core, Direction, JobId, LeaseId, OpId, PayloadRef, Phase, Request};
 
-#[derive(Clone)]
 /// A caller whose ops the run takes now, with the role whose grants it holds, and when its work
 /// ends, unless it ends it first, as a time since the run started.
 pub(super) enum Working {
-    /// The agent, in the work phase, which ends at the deadline, with the payload it selected
-    /// last, if any.
-    Agent {
-        id: AgentId,
-        deadline: Duration,
-        latest: Option<PayloadRef>,
-    },
+    /// The agent during its work, before the finalize grace.
+    Agent { id: AgentId, deadline: Duration },
     /// A call, while its command runs, which its timeout ends at `end`.
     Job {
         job: JobId,
@@ -88,12 +79,10 @@ impl Working {
     }
 }
 
-/// A grant of the caller's; a job function or a now function carries the work phase's deadline,
-/// and a now function the agent's selection so far.
 pub(super) enum Held {
-    Job(JobFunctionId, Duration),
+    Job(JobFunctionId),
     Session(SessionId),
-    Now(NowFunctionId, Duration, Option<PayloadRef>),
+    Now(NowFunctionId),
 }
 
 impl Core<'_> {
@@ -115,52 +104,47 @@ impl Core<'_> {
     /// `caller`, if it works: the agent in the work phase, a call while it runs. Else
     /// why the run takes no more ops of `caller`'s.
     pub(super) fn working(&self, caller: Caller) -> Result<Working, String> {
-        let work_end = match (&self.phase, caller) {
+        match (&self.phase, caller) {
             (Phase::Abandoned, _) => {
-                return Err("the run has passed its hard end: make no more ops".to_owned());
+                Err("the run has passed its hard end: make no more ops".to_owned())
             }
-            (_, Caller::Job(job)) => {
-                return match self.jobs.get(job) {
-                    Some(Job {
-                        call,
-                        timeout,
-                        state: State::Running { started },
-                    }) => Ok(Working::Job {
-                        job,
-                        role: match *call {
-                            JobOf::Function(function) => {
-                                self.workflow.job_function(function).target.role()
-                            }
-                            JobOf::Final => self.workflow.final_call().target.role(),
-                        },
-                        end: started.saturating_add(*timeout),
-                    }),
-                    Some(Job {
-                        state: State::Queued | State::Ending { .. } | State::Ended { .. },
-                        ..
-                    })
-                    | None => Err("the call has ended: make no more ops".to_owned()),
+            (_, Caller::Job(job)) => match self.jobs.get(job) {
+                Some(Job {
+                    call,
+                    timeout,
+                    state: State::Running { started },
+                }) => {
+                    let body_end = started.saturating_add(*timeout);
+                    let (role, end) = match *call {
+                        JobOf::Function(function) => {
+                            let function = self.workflow.job_function(function);
+                            (
+                                function.target.role(),
+                                self.agent_due(function.holder).min(body_end),
+                            )
+                        }
+                        JobOf::Final => (self.workflow.final_call().target.role(), body_end),
+                    };
+                    Ok(Working::Job { job, role, end })
+                }
+                Some(Job {
+                    state: State::Queued | State::Ending { .. } | State::Ended { .. },
+                    ..
+                })
+                | None => Err("the call has ended: make no more ops".to_owned()),
+            },
+            (_, Caller::Agent(id)) => {
+                let Some(work) = self.agents.get(&id) else {
+                    return Err("this agent is outside the workflow: make no ops".to_owned());
                 };
-            }
-            (Phase::Work { deadline, latest }, Caller::Agent(id)) => {
-                return Ok(Working::Agent {
-                    id,
-                    deadline: *deadline,
-                    latest: latest.clone(),
-                });
-            }
-            (Phase::Finalized { .. }, Caller::Agent(_)) => &WorkEnd::Finalized,
-            (
-                Phase::Teardown { work_end, .. }
-                | Phase::Final { work_end, .. }
-                | Phase::Finished(Outcome { work_end, .. }),
-                Caller::Agent(_),
-            ) => work_end,
-        };
-        match work_end {
-            WorkEnd::Finalized => Err("the work was ended: make no more ops".to_owned()),
-            WorkEnd::Deadline | WorkEnd::AgentExited(_) | WorkEnd::AgentFailed(_) => {
-                Err("the work phase has ended: make no more ops".to_owned())
+                if work.ended.is_some() || work.grace_end.is_some() {
+                    Err("your work has ended: make no more ops".to_owned())
+                } else {
+                    Ok(Working::Agent {
+                        id,
+                        deadline: self.phase_due(),
+                    })
+                }
             }
         }
     }
@@ -290,26 +274,15 @@ impl Core<'_> {
 
     pub(super) fn held(&self, working: &Working, name: &Name) -> Result<Held, String> {
         let role = working.role();
-        // A call's target holds sessions alone (`ir::TargetRuntime`).
-        let agent = match working {
-            Working::Agent {
-                deadline, latest, ..
-            } => Some((*deadline, latest)),
-            Working::Job { .. } => None,
-        };
-        let job = agent.and_then(|(deadline, _)| {
-            (self.workflow.job_functions_of(role))
-                .find(|(_, function)| function.name == *name)
-                .map(|(id, _)| Held::Job(id, deadline))
-        });
+        let job = (self.workflow.job_functions_of(role))
+            .find(|(_, function)| function.name == *name)
+            .map(|(id, _)| Held::Job(id));
         let lease = (self.workflow.sessions())
             .find(|(_, grant)| grant.holder.role() == role && grant.name == *name)
             .map(|(id, _)| Held::Session(id));
-        let now = agent.and_then(|(deadline, latest)| {
-            (self.workflow.now_functions_of(role))
-                .find(|(_, now)| now.name == *name)
-                .map(|(id, _)| Held::Now(id, deadline, latest.clone()))
-        });
+        let now = (self.workflow.now_functions_of(role))
+            .find(|(_, function)| function.name == *name)
+            .map(|(id, _)| Held::Now(id));
         let held = (job.or(lease)).or(now);
         held.ok_or_else(|| format!("you hold no grant named `{name}`: call one that `ops` lists"))
     }
@@ -681,13 +654,9 @@ fn rerun((session, lease): (&Name, u64), timeout: Option<NonZeroU64>, argv: &Arg
     )
 }
 
-// Refuses a payload that is empty, or over `max_bytes`.
+// Refuses a payload over `max_bytes`.
 pub(crate) fn fits(name: &Name, payload: &PayloadRef, max_bytes: NonZeroU64) -> Result<(), String> {
-    if payload.size == 0 {
-        Err(format!(
-            "the payload is empty: send `{name}` at least one byte"
-        ))
-    } else if payload.size <= max_bytes.get() {
+    if payload.size <= max_bytes.get() {
         Ok(())
     } else {
         Err(format!(

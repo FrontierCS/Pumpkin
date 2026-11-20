@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::{fs, io, iter};
+use std::{fs, io};
 
 use schema::sandbox::{command_stdout, log_dir};
 use stdx::Deadline;
@@ -228,8 +228,21 @@ fn sandbox_dirs(record: &Path) -> impl Iterator<Item = (String, String, Sandbox)
         let dir = move |n| (format!("{whose} {n}'s"), format!("{kind}/{n}"), sandbox);
         numbers.into_iter().map(dir)
     };
-    let agent = ("the agent's".to_owned(), "agent".to_owned(), Sandbox::Agent);
-    iter::once(agent)
+    let mut agents: Vec<_> = fs::read_dir(record.join("agents"))
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    agents.sort_unstable();
+    agents
+        .into_iter()
+        .map(|role| {
+            (
+                format!("agent `{role}`'s"),
+                format!("agents/{role}"),
+                Sandbox::Agent,
+            )
+        })
         .chain(numbered("jobs", "job", Sandbox::Job))
         .chain(numbered("leases", "lease", Sandbox::Lease))
 }

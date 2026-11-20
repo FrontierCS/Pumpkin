@@ -13,16 +13,14 @@
 //! Every `..._ns` is a string of decimal digits: nanoseconds since the run started, but the
 //! `unix_ns` of `run_started`, since the Unix epoch by the driving machine's clock; `u64::MAX`
 //! stands for anything longer. Grants appear by name, jobs, ops and leases by number, payloads by
-//! size and digest, and a `caller` or `holder` as `agent` or `job-<n>`.
+//! size and digest, and a `caller` or `holder` as `agent-<role index>` or `job-<n>`.
 //!
 //! A line that leads to an act, an event with actions or an `op_refused`, is synced with all before
 //! it ahead of the act; any other lasts with the next sync. The run's end syncs the log before
 //! `outcome.json`, so a crash cuts a lost run's log only after its last synced line.
 //!
 //! A reader takes a line only once it ends in a newline, skips an event or action `kind` it doesn't
-//! know, lists a part it can't read as unread rather than failing, and takes as optional what an
-//! older log lacks: `observed_ns`, `hard_end_ns`, `first_token_ns`, `model` and `kept`; an older
-//! log's note of the agent's collect stands for its `agent_collected`.
+//! know, and counts any part it can't read so the operator can find it.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -38,7 +36,7 @@ use provider::UnixTime;
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
-use schema::workflow::Workflow;
+use schema::workflow::{AgentId, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
@@ -119,12 +117,13 @@ impl<'h, H: Host> Log<'h, H> {
         self.decided(workflow, observed, event_json(event), actions)
     }
 
-    pub(super) fn refused(&mut self, refused: &RefusedOp) -> Result<(), String> {
+    pub(super) fn refused(&mut self, caller: Caller, refused: &RefusedOp) -> Result<(), String> {
         let mut request = json!(refused.call());
         let (size, over) = (refused.size(), refused.payload_limit().bytes());
         request["payload"] = json!({ "size": size, "over": over });
         let event = json!({
             "kind": "op_refused",
+            "caller": logged::CallerName::from(caller),
             "request": request,
             "message": refused.message(),
         });
@@ -260,7 +259,10 @@ impl<'h, H: Host> Log<'h, H> {
     pub(super) fn entry(&mut self, entry: Entry) -> Result<(), String> {
         match entry {
             Entry::Note(note) => self.note(&note),
-            Entry::AgentCollected => self.told(json!({ "kind": "agent_collected" })),
+            Entry::AgentCollected(id) => self.told(agent_event("agent_collected", id)),
+            Entry::AgentLaunched(id, at) => {
+                self.observed(at, agent_event("agent_started", id), &[])
+            }
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
@@ -370,7 +372,8 @@ pub(super) enum Entry {
     Note(String),
     /// The agent's sandbox frozen and what it left collected, as `agent_collected`: the run is
     /// done with it.
-    AgentCollected,
+    AgentCollected(AgentId),
+    AgentLaunched(AgentId, Duration),
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
@@ -450,11 +453,28 @@ pub(super) fn nanos(duration: Duration) -> String {
         .to_string()
 }
 
+fn agent_event(kind: &str, agent: AgentId) -> Value {
+    json!({"kind": kind, "caller": logged::CallerName::Agent(agent.role().index())})
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per decision event, as in action_json"
+)]
 fn event_json(event: &Event) -> Value {
     match event {
-        Event::AgentStarted => json!({ "kind": "agent_started" }),
-        Event::AgentExited { status } => json!({ "kind": "agent_exited", "status": status }),
-        Event::AgentFailed { reason } => json!({ "kind": "agent_failed", "reason": reason }),
+        Event::WorkStarted => json!({ "kind": "work_started" }),
+        Event::AgentTornDown { agent } => agent_event("agent_torn_down", *agent),
+        Event::AgentExited { agent, status } => {
+            let mut event = agent_event("agent_exited", *agent);
+            event["status"] = json!(status);
+            event
+        }
+        Event::AgentFailed { agent, reason } => {
+            let mut event = agent_event("agent_failed", *agent);
+            event["reason"] = json!(reason);
+            event
+        }
         Event::OpArrived {
             op,
             caller,
@@ -471,24 +491,20 @@ fn event_json(event: &Event) -> Value {
             job,
             result,
             model_requests_over_budget,
-        } => {
-            let mut json = json!({
-                "kind": "call_returned",
-                "job": job.0,
-                "returned": shown_json(result.values()),
-            });
-            over_budget(&mut json, *model_requests_over_budget);
-            json
-        }
+        } => with_budget_count(
+            json!({
+                "kind": "call_returned", "job": job.0, "returned": shown_json(result.values()),
+            }),
+            *model_requests_over_budget,
+        ),
         Event::CallFailed {
             job,
             reason,
             model_requests_over_budget,
-        } => {
-            let mut json = json!({ "kind": "call_failed", "job": job.0, "reason": reason });
-            over_budget(&mut json, *model_requests_over_budget);
-            json
-        }
+        } => with_budget_count(
+            json!({ "kind": "call_failed", "job": job.0, "reason": reason }),
+            *model_requests_over_budget,
+        ),
         Event::LeaseReady { lease } => json!({ "kind": "lease_ready", "lease": lease.0 }),
         Event::CommandEnded {
             lease,
@@ -522,10 +538,11 @@ fn event_json(event: &Event) -> Value {
 }
 
 // Gives a call's end `event` its count of model requests over budget, if it has one.
-fn over_budget(event: &mut Value, model_requests_over_budget: Option<NonZeroU64>) {
+fn with_budget_count(mut event: Value, model_requests_over_budget: Option<NonZeroU64>) -> Value {
     if let Some(count) = model_requests_over_budget {
         event["model_requests_over_budget"] = json!(count);
     }
+    event
 }
 
 // A now function's evaluation: its effects and what it returned, or why it gave neither.
@@ -534,7 +551,7 @@ fn evaluated_json(evaluated: &Result<Evaluated, Unevaluated>) -> Value {
         Ok(Evaluated { effects, returned }) => {
             let effects: Vec<&str> = (effects.iter())
                 .map(|effect| match effect {
-                    Effect::Select => "select",
+                    Effect::SetSubmission => "set_submission",
                     Effect::EndWork => "end_work",
                 })
                 .collect();
@@ -630,7 +647,7 @@ fn session_json(grant: &Name, op: &SessionOp) -> Value {
 #[expect(clippy::too_many_lines, reason = "one arm per action")]
 fn action_json(workflow: &Workflow, action: &Action) -> Value {
     match action {
-        Action::StartAgent => json!({ "kind": "start_agent" }),
+        Action::StartAgents => json!({ "kind": "start_agents" }),
         Action::Reply { op: _, reply } => {
             // A poll's reply says how a job or a lease stood, which the job's and the lease's own
             // events in the log say too.
@@ -651,23 +668,24 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             // The call's request holds them, as its caller gave them.
             arguments: _,
             timeout,
-        } => json!({
-            "kind": "start_call",
-            "job": job.0,
-            "grant": workflow.job_function(*function).name,
-            "payload": payload_json(payload),
-            "timeout_ns": nanos(*timeout),
-        }),
+        } => {
+            let grant = workflow.job_function(*function);
+            json!({
+                "kind": "start_call", "job": job.0, "grant": grant.name,
+                "caller": logged::CallerName::Agent(grant.holder.role().index()),
+                "payload": payload_json(payload), "timeout_ns": nanos(*timeout),
+            })
+        }
         Action::StartFinalCall {
             job,
-            payload,
+            selections,
             timeout,
-        } => json!({
-            "kind": "start_final_call",
-            "job": job.0,
-            "payload": payload_json(payload),
-            "timeout_ns": nanos(*timeout),
-        }),
+        } => {
+            let selections: Vec<_> = selections.iter().map(|(agent, selected)| {
+                json!({"role": workflow.sandbox(agent.role()).name, "selection": selected.as_ref().map(payload_json)})
+            }).collect();
+            json!({"kind":"start_final_call", "job":job.0, "selections":selections, "timeout_ns":nanos(*timeout)})
+        }
         Action::StopCall { job } => json!({ "kind": "stop_call", "job": job.0 }),
         Action::StartLease {
             lease,
@@ -715,7 +733,7 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
             })
         }
         Action::CloseLease { lease } => json!({ "kind": "close_lease", "lease": lease.0 }),
-        Action::TearDownAgent => json!({ "kind": "tear_down_agent" }),
+        Action::TearDownAgent { agent } => agent_event("tear_down_agent", *agent),
         // `outcome.json` holds the outcome.
         Action::Finish { outcome: _ } => json!({ "kind": "finish" }),
         Action::Abandon => json!({ "kind": "abandon" }),
@@ -723,8 +741,8 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
 }
 
 /// How a run ended, for `outcome.json`, in the form of [`outcome::Ended`].
-pub(super) fn outcome_json(ended: &Result<Outcome, Stopped>) -> Value {
-    json!(outcome::Ended::from(ended))
+pub(super) fn outcome_json(workflow: &Workflow, ended: &Result<Outcome, Stopped>) -> Value {
+    json!(outcome::Ended::of(workflow, ended))
 }
 
 /// `values` in order, each as `{"name": …, "value": …}`.

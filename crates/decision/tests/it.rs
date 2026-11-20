@@ -3,16 +3,16 @@
 //! changes. Each role is placed in a class whose sandboxes may take [`STARTUP`] to start, or
 //! [`SLOW_STARTUP`] for a role that needs the CPU model `slow`, which sets the run's hard end.
 //!
-//! A script has one event per line: the time in milliseconds since the run started, then one
-//! of these:
+//! Each line gives milliseconds since the start and an event:
 //!
-//! - `agent_started`, `agent_exited <code>`, `agent_failed <reason>`;
+//! - `work_started`, `agent_exited <code>`, `agent_failed <reason>`;
 //! - `ops`, `call <function> <bytes> [<name>=<value>]…`, `now <function> <bytes> <effect>…|failed|
 //!   unread` and `status <job>`, each an op from the agent, its payload named by its number;
 //! - `<session>.open [<seconds>]`, `.run <lease> <seconds>|- <argv>...`, `.put <lease> <tree> <to>
 //!   [replace]`, `.get <lease> <from> <to>`, `.status <lease>` and `.close <lease>`, each an op
 //!   from the agent, `-` for a command without a timeout;
-//! - any op after `@<job>`, from that job's call instead;
+//! - an event after `@<role>`, from that agent, or an op after `@<job>`, from that call;
+//! - `agent_torn_down`, the end of the agent's teardown;
 //! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
 //!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
 //!   barred `n` of the call's model requests over budget;
@@ -21,7 +21,8 @@
 //!   `lease_ended <lease>`, `lease_failed <lease> <reason>`;
 //! - `tick`;
 //! - `model`, no event, but the question whether the agent's model requests are allowed then,
-//!   or, after `@<job>`, that job's call's.
+//!   or, after `@<job>`, that job's call's;
+//! - `locked`, whether the agent ended its work with a call.
 
 #![expect(
     clippy::unwrap_used,
@@ -36,13 +37,13 @@ use std::time::Duration;
 
 use decision::{
     Action, CallResult, Caller, Core, Direction, Effect, Evaluated, Event, JobId, LeaseId, OpId,
-    Outcome, PayloadRef, Request, Submission, Unevaluated, Verdict, WorkEnd,
+    Outcome, PayloadRef, Request, Submission, Unevaluated,
 };
 use expect_test::{Expect, expect};
 use schema::ir::{self, AbsolutePath, ArgumentValue, Argv, CpuModel, Name, Sha256Digest};
 use schema::sandbox::op::{CommandEnd, OpReply, REASON_BYTES, SessionOp, TransferEnd};
 use schema::sandbox::{ExitStatus, RESULT_MAX_BYTES};
-use schema::workflow::{Class, JobOf, Offers, Workflow};
+use schema::workflow::{Class, Offers, Workflow};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -66,8 +67,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let mut run = Run {
         workflow: placed.workflow(),
         ops: 0,
-        caller: Caller::Agent(placed.workflow().agent().id),
-        jobs: BTreeMap::new(),
+        caller: Caller::Agent(placed.workflow().agents().next().unwrap().id),
         tick_due: None,
         transcript: String::new(),
     };
@@ -78,23 +78,41 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        if let Some(asked) = line.strip_suffix(" model") {
-            let (at, caller) = match asked.split_once(" @") {
-                Some((at, job)) => (at, Caller::Job(JobId(job.parse().unwrap()))),
-                None => (asked, Caller::Agent(run.workflow.agent().id)),
-            };
-            let at = Duration::from_millis(at.parse().unwrap());
-            let allowed = if core.model_requests_allowed(caller, at) {
-                "allowed"
-            } else {
-                "refused"
-            };
-            writeln!(run.transcript, "{line}\n  model requests {allowed}").unwrap();
-        } else {
-            let (at, event) = line.split_once(' ').unwrap();
-            let event = run.event(event);
-            let actions = core.handle(Duration::from_millis(at.parse().unwrap()), event);
-            run.note(line, &actions, core.tick_due());
+        let (at, event) = line.split_once(' ').unwrap();
+        let at = Duration::from_millis(at.parse().unwrap());
+        let (caller, event) = match event.strip_prefix('@') {
+            Some(named) => {
+                let (name, event) = named.split_once(' ').unwrap();
+                (run.named_caller(name), event)
+            }
+            None => (run.default_caller(), event),
+        };
+        run.caller = caller;
+        match event {
+            "model" => {
+                let allowed = if core.model_requests_allowed(caller, at) {
+                    "allowed"
+                } else {
+                    "refused"
+                };
+                writeln!(run.transcript, "{line}\n  model requests {allowed}").unwrap();
+            }
+            "locked" => {
+                let Caller::Agent(agent) = caller else {
+                    panic!("only agents submit payloads")
+                };
+                writeln!(
+                    run.transcript,
+                    "{line}\n  submission locked: {}",
+                    core.submission_locked(agent)
+                )
+                .unwrap();
+            }
+            event => {
+                let event = run.event(event);
+                let actions = core.handle(at, event);
+                run.note(line, &actions, core.tick_due());
+            }
         }
     }
     expect.assert_eq(&run.transcript);
@@ -133,8 +151,6 @@ struct Run<'w> {
     ops: u64,
     /// Who makes the line's op: the agent, unless the line names a job's call.
     caller: Caller,
-    /// What each job was made under, for its result's spec.
-    jobs: BTreeMap<JobId, JobOf>,
     /// When the core last said it next wants a tick, once it has.
     tick_due: Option<Duration>,
     transcript: String,
@@ -180,15 +196,24 @@ fn call_event(words: &[&str]) -> Event {
 }
 
 impl Run<'_> {
+    fn named_caller(&self, name: &str) -> Caller {
+        if let Ok(number) = name.parse() {
+            Caller::Job(JobId(number))
+        } else {
+            let agent = self
+                .workflow
+                .agents()
+                .find(|agent| self.workflow.sandbox(agent.id.role()).name.as_str() == name)
+                .unwrap();
+            Caller::Agent(agent.id)
+        }
+    }
+
+    fn default_caller(&self) -> Caller {
+        Caller::Agent(self.workflow.agents().next().unwrap().id)
+    }
+
     fn event(&mut self, event: &str) -> Event {
-        let (caller, event) = match event.strip_prefix('@') {
-            Some(called) => {
-                let (job, event) = called.split_once(' ').unwrap();
-                (Caller::Job(JobId(job.parse().unwrap())), event)
-            }
-            None => (Caller::Agent(self.workflow.agent().id), event),
-        };
-        self.caller = caller;
         let words: Vec<&str> = event.splitn(3, ' ').collect();
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
         if let Some((grant, op)) = words[0].split_once('.') {
@@ -196,12 +221,19 @@ impl Run<'_> {
             let op = session_op(op, &words);
             return self.op(Request::Session { grant, op });
         }
+        let agent = || match self.caller {
+            Caller::Agent(agent) => agent,
+            Caller::Job(_) => panic!("a job cannot send an agent event"),
+        };
         match words[0] {
-            "agent_started" => Event::AgentStarted,
+            "work_started" => Event::WorkStarted,
+            "agent_torn_down" => Event::AgentTornDown { agent: agent() },
             "agent_exited" => Event::AgentExited {
+                agent: agent(),
                 status: code(words[1]),
             },
             "agent_failed" => Event::AgentFailed {
+                agent: agent(),
                 reason: words[1..].join(" "),
             },
             "ops" => self.op(Request::Ops),
@@ -248,7 +280,7 @@ impl Run<'_> {
         let words: Vec<&str> = words.iter().flat_map(|w| w.split(' ')).collect();
         let (function, payload) = self.call(&words[..2]);
         let effects = words[2..].iter().map(|word| match *word {
-            "select" => Ok(Effect::Select),
+            "set_submission" => Ok(Effect::SetSubmission),
             "end_work" => Ok(Effect::EndWork),
             "failed" => Err(Unevaluated::Failed("the body failed".to_owned())),
             "unread" => Err(Unevaluated::Unread(
@@ -296,9 +328,9 @@ impl Run<'_> {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per action")]
-    fn action(&mut self, action: &Action) -> String {
+    fn action(&self, action: &Action) -> String {
         match action {
-            Action::StartAgent => "start the agent".to_owned(),
+            Action::StartAgents => "start agents".to_owned(),
             Action::Reply {
                 op: OpId(op),
                 reply:
@@ -317,13 +349,22 @@ impl Run<'_> {
             } => format!("refuse op {op}: {message}"),
             Action::StartFinalCall {
                 job,
-                payload,
+                selections,
                 timeout,
             } => {
-                self.jobs.insert(*job, JobOf::Final);
-                let payload = payload_name(payload);
+                let selections = selections
+                    .iter()
+                    .map(|(agent, selection)| {
+                        let name = &self.workflow.sandbox(agent.role()).name;
+                        let selection = selection
+                            .as_ref()
+                            .map_or_else(|| "missing".to_owned(), payload_name);
+                        format!("{name}={selection}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
-                    "start call {} of final on {payload}, with a timeout of {timeout:?}",
+                    "start call {} of final on {selections}, with a timeout of {timeout:?}",
                     job.0
                 )
             }
@@ -334,7 +375,6 @@ impl Run<'_> {
                 arguments,
                 timeout,
             } => {
-                self.jobs.insert(*job, JobOf::Function(*function));
                 let name = &self.workflow.job_function(*function).name;
                 let payload = payload_name(payload);
                 let given: String = (arguments.iter())
@@ -381,8 +421,12 @@ impl Run<'_> {
                 max_bytes,
             } => transfer_text((*lease, *holder), *transfer, direction, *max_bytes),
             Action::CloseLease { lease } => format!("close lease {}", lease.0),
-            Action::TearDownAgent => "tear down the agent".to_owned(),
-            Action::Finish { outcome } => format!("finish: {}", outcome_text(outcome)),
+            Action::TearDownAgent { agent } => {
+                format!("tear down {}", self.workflow.sandbox(agent.role()).name)
+            }
+            Action::Finish { outcome } => {
+                format!("finish: {}", outcome_text(outcome, self.workflow))
+            }
             Action::Abandon => "abandon the run at its hard end".to_owned(),
         }
     }
@@ -523,32 +567,32 @@ fn payload_name(payload: &PayloadRef) -> String {
     format!("op {op}'s payload of {} bytes", payload.size)
 }
 
-fn outcome_text(outcome: &Outcome) -> String {
-    let work_end = match &outcome.work_end {
-        WorkEnd::Deadline => "the deadline".to_owned(),
-        WorkEnd::Finalized => "a finalize".to_owned(),
-        WorkEnd::AgentExited(status) => format!("the agent's exit, {status:?}"),
-        WorkEnd::AgentFailed(reason) => format!("the agent's failure, {reason}"),
-    };
-    let verdict = match &outcome.verdict {
-        Verdict::NoSubmission => "no submission".to_owned(),
-        Verdict::Returned { submission, result } => {
-            let values = result.values().iter();
-            let values: Vec<String> = values
+fn outcome_text(outcome: &Outcome, workflow: &Workflow) -> String {
+    let agents = outcome
+        .agents
+        .iter()
+        .map(|agent| {
+            let name = &workflow.sandbox(agent.agent.role()).name;
+            let selection = agent
+                .submission
+                .as_ref()
+                .map_or_else(|| "missing".to_owned(), submission_text);
+            format!("{name}: {:?}, {selection}", agent.work_end)
+        })
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    let result = match &outcome.result {
+        Ok(result) => {
+            let values = result
+                .values()
+                .iter()
                 .map(|(name, value)| format!("{name}={value}"))
-                .collect();
-            format!(
-                "{} returned, showing [{}]",
-                submission_text(submission),
-                values.join(" ")
-            )
+                .collect::<Vec<_>>();
+            format!("returned [{}]", values.join(" "))
         }
-        Verdict::NoResult {
-            submission,
-            failure,
-        } => format!("{} got no result, {failure:?}", submission_text(submission)),
+        Err(failure) => format!("failed: {failure:?}"),
     };
-    format!("work ended at {work_end}; {verdict}")
+    format!("{agents}\n  final {result}")
 }
 
 fn submission_text(submission: &Submission) -> String {
@@ -557,10 +601,7 @@ fn submission_text(submission: &Submission) -> String {
     } else {
         "stored"
     };
-    format!(
-        "the {kind} submission, {},",
-        payload_name(&submission.payload)
-    )
+    format!("{kind} {}", payload_name(&submission.payload))
 }
 
 #[test]
@@ -568,7 +609,7 @@ fn whole_run() {
     check(
         |_| {},
         r#"
-        0 agent_started
+        0 work_started
         1000 ops
         2000 call train 10240
         2100 status 0
@@ -576,17 +617,18 @@ fn whole_run() {
         3000 status 0
         9600 call_returned 0 raw_score=0 metrics={"solved":0}
         10000 status 0
-        11000 now submit 10240 select
-        12000 now submit 10240 select end_work
+        11000 now submit 10240 set_submission
+        12000 now submit 10240 set_submission end_work
         12100 agent_exited 0
+        12100 agent_torn_down
         13500 call_started 1
         20100 call_returned 1 score=0 metrics={"solved":0}
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
@@ -601,18 +643,20 @@ fn whole_run() {
             9600 call_returned 0 raw_score=0 metrics={"solved":0}
             10000 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11992}}
-            11000 now submit 10240 select
+            11000 now submit 10240 set_submission
               reply to op 6: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17989}
-            12000 now submit 10240 select end_work
+            12000 now submit 10240 set_submission end_work
               reply to op 7: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 72000)
             12100 agent_exited 0
-              tear down the agent
-              start call 1 of final on op 7's payload of 10240 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 18210000)
+            12100 agent_torn_down
+              start call 1 of final on agent=op 7's payload of 10240 bytes, with a timeout of 120s
             13500 call_started 1
             20100 call_returned 1 score=0 metrics={"solved":0}
-              finish: work ended at the agent's exit, Code(0); the finalized submission, op 7's payload of 10240 bytes, returned, showing [score=0 metrics={"solved":0}]
+              finish: agent: AgentExited(Code(0)), finalized op 7's payload of 10240 bytes
+              final returned [score=0 metrics={"solved":0}]
         "#]],
     );
 }
@@ -626,10 +670,10 @@ fn quotas() {
             train["call_timeout_seconds"] = json!(6);
         },
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 4194305
         1000 call nothing 10
-        1000 now submit 4194305 select
+        1000 now submit 4194305 set_submission
         1000 call train 10
         2000 call_started 0
         6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
@@ -640,19 +684,19 @@ fn quotas() {
         13700 call_failed 1 +2 the call's timeout passed
         14000 status 1
         14100 call train 10
-        14200 now submit 0 select
+        14200 now submit 0 set_submission
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 4194305
               refuse op 1: the payload is 4194305 bytes, over `train`'s limit of 4194304: send a smaller one
             1000 call nothing 10
               refuse op 2: you hold no grant named `nothing`: call one that `ops` lists
-            1000 now submit 4194305 select
+            1000 now submit 4194305 set_submission
               refuse op 3: the payload is 4194305 bytes, over `submit`'s limit of 4194304: send a smaller one
             1000 call train 10
               reply to op 4: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":10}}
@@ -671,8 +715,8 @@ fn quotas() {
               reply to op 7: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"model_requests_over_budget":2,"remaining":{"calls":98,"seconds":0}}
             14100 call train 10
               refuse op 8: `train` has no call time left of the 10 s it allows: make no more calls to it
-            14200 now submit 0 select
-              refuse op 9: the payload is empty: send `submit` at least one byte
+            14200 now submit 0 set_submission
+              reply to op 9: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17985}
         "#]],
     );
 }
@@ -698,7 +742,7 @@ fn job_functions() {
                 .push(function);
         },
         r#"
-        0 agent_started
+        0 work_started
         1000 ops
         1050 call check 10
         1060 call check 10 n=x
@@ -714,9 +758,9 @@ fn job_functions() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"job","name":"check","payload_max_bytes":20,"calls":2,"cumulative_seconds":null,"call_timeout_seconds":60,"arguments":{"mode":{"type":"str","default":"fast"},"n":{"type":"int"}}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
@@ -750,7 +794,7 @@ fn one_call_at_a_time() {
     check(
         |ir| ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["calls"] = json!(2),
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1100 call train 10
         1200 status 0
@@ -765,9 +809,9 @@ fn one_call_at_a_time() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":1,"seconds":12000}}
@@ -802,16 +846,17 @@ fn one_call_at_a_time() {
 )]
 fn deadline() {
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        |ir| ir["deadline_seconds"] = json!(60),
         r#"
-        0 agent_started
-        50000 now submit 10 select
+        0 work_started
+        50000 now submit 10 set_submission
         55000 call train 10
         55500 call_started 0
         59999 tick
         59999 model
         60000 model
         60000 tick
+        60000 agent_torn_down
         60100 status 0
         60200 agent_exited 137
         60400 call_failed 0 stopped
@@ -821,11 +866,11 @@ fn deadline() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
-            50000 now submit 10 select
+            50000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             55000 call train 10
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -838,109 +883,118 @@ fn deadline() {
               model requests refused
             60000 tick
               stop call 0
-              tear down the agent
+              tear down agent
               (tick due at 270000)
+            60000 agent_torn_down
             60100 status 0
-              refuse op 3: the work phase has ended: make no more ops
+              refuse op 3: your work has ended: make no more ops
             60200 agent_exited 137
             60400 call_failed 0 stopped
-              start call 1 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             60500 call_started 1
             180500 call_timed_out 1
             180600 call_returned 1 score=7
-              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, got no result, Timeout
+              finish: agent: Deadline, stored op 1's payload of 10 bytes
+              final failed: Timeout
         "#]],
     );
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        |ir| ir["deadline_seconds"] = json!(60),
         r"
-        0 agent_started
-        50000 now submit 10 select
+        0 work_started
+        50000 now submit 10 set_submission
         59999 call train 10
         60000 call_failed 0 the target's sandbox didn't start
+        60000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
-            50000 now submit 10 select
+            50000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             59999 call train 10
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 2's payload of 10 bytes, with a timeout of 1ms
             60000 call_failed 0 the target's sandbox didn't start
               stop call 0
-              tear down the agent
-              start call 1 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 270000)
+            60000 agent_torn_down
+              start call 1 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
 }
 
 #[test]
-fn deadline_from_the_agent_start() {
-    let deadline =
-        |ir: &mut Value| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
+fn deadline_from_work_start() {
+    let deadline = |ir: &mut Value| ir["deadline_seconds"] = json!(60);
     check(
         deadline,
         r"
-        8000 agent_started
+        8000 work_started
         8000 ops
-        9000 agent_started
+        9000 work_started
         67999 tick
         68000 tick
+        68000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            8000 agent_started
+            8000 work_started
               (tick due at 68000)
             8000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":60,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
-            9000 agent_started
+            9000 work_started
             67999 tick
             68000 tick
-              tear down the agent
-              finish: work ended at the deadline; no submission
+              tear down agent
               (tick due at 270000)
+            68000 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
         "#]],
     );
     check(
         deadline,
         r"
-        12000 agent_started
+        12000 work_started
         12000 ops
         70000 tick
+        70000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            12000 agent_started
+            12000 work_started
             12000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":58,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             70000 tick
-              tear down the agent
-              finish: work ended at the deadline; no submission
+              tear down agent
               (tick due at 270000)
+            70000 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
         "#]],
     );
     check(
         deadline,
         r"
         70000 tick
+        70000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
             70000 tick
-              tear down the agent
-              finish: work ended at the deadline; no submission
+              tear down agent
               (tick due at 270000)
+            70000 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
         "#]],
     );
 }
@@ -950,28 +1004,31 @@ fn hard_end_covers_the_run() {
     // Each step takes as long as it may: the agent starts at its startup and works to the deadline,
     // its teardown takes the grace and its startup again, and the final call's target its own.
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        |ir| ir["deadline_seconds"] = json!(60),
         r#"
-        10000 agent_started
-        69999 now submit 10 select
+        10000 work_started
+        69999 now submit 10 set_submission
         70000 tick
+        140000 agent_torn_down
         150000 call_started 0
         269999 call_returned 0 score=7
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            10000 agent_started
-            69999 now submit 10 select
+            10000 work_started
+            69999 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
             70000 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 270000)
+            140000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             150000 call_started 0
             269999 call_returned 0 score=7
-              finish: work ended at the deadline; the stored submission, op 1's payload of 10 bytes, returned, showing [score=7]
+              finish: agent: Deadline, stored op 1's payload of 10 bytes
+              final returned [score=7]
         "#]],
     );
 }
@@ -981,11 +1038,12 @@ fn agent_ends() {
     check(
         |_| {},
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 call_started 0
-        3100 now submit 10 select
+        3100 now submit 10 set_submission
         3200 agent_exited 0
+        3200 agent_torn_down
         3400 call_returned 0 raw_score=1
         3500 call_started 1
         4000 call_failed 0 its report came again
@@ -993,62 +1051,65 @@ fn agent_ends() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
-            3100 now submit 10 select
+            3100 now submit 10 set_submission
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
             3200 agent_exited 0
               stop call 0
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            3200 agent_torn_down
             3400 call_returned 0 raw_score=1
-              start call 1 of final on op 2's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on agent=op 2's payload of 10 bytes, with a timeout of 120s
             3500 call_started 1
             4000 call_failed 0 its report came again
             5100 call_returned 1 score="high"
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 2's payload of 10 bytes, returned, showing [score="high"]
+              finish: agent: AgentExited(Code(0)), stored op 2's payload of 10 bytes
+              final returned [score="high"]
         "#]],
     );
     check(
         |_| {},
         r"
         30000 agent_failed the agent's sandbox did not connect
+        30000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
             30000 agent_failed the agent's sandbox did not connect
-              tear down the agent
-              finish: work ended at the agent's failure, the agent's sandbox did not connect; no submission
+              tear down agent
               (tick due at 18210000)
+            30000 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
         "#]],
     );
 }
 
 #[test]
 fn hard_end() {
-    let deadline =
-        |ir: &mut Value| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
+    let deadline = |ir: &mut Value| ir["deadline_seconds"] = json!(60);
     check(
         deadline,
         r"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 call_started 0
         270000 ops
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -1063,17 +1124,17 @@ fn hard_end() {
     check(
         deadline,
         r"
-        0 agent_started
-        1000 now submit 10 select end_work
+        0 work_started
+        1000 now submit 10 set_submission end_work
         270000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
-            1000 now submit 10 select end_work
+            1000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             270000 tick
               abandon the run at its hard end
@@ -1085,20 +1146,21 @@ fn hard_end() {
 #[test]
 fn hard_end_after_work() {
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        |ir| ir["deadline_seconds"] = json!(60),
         r"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 call_started 0
         60000 tick
+        60000 agent_torn_down
         269999 tick
         270000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -1106,8 +1168,9 @@ fn hard_end_after_work() {
             1500 call_started 0
             60000 tick
               stop call 0
-              tear down the agent
+              tear down agent
               (tick due at 270000)
+            60000 agent_torn_down
             269999 tick
             270000 tick
               abandon the run at its hard end
@@ -1115,14 +1178,14 @@ fn hard_end_after_work() {
     );
     check(
         |ir| {
-            let agent = &mut ir["roles"][0]["runtime"]["agent"];
-            agent["deadline_seconds"] = json!(60);
-            agent["finalize_grace_seconds"] = json!(30);
+            ir["deadline_seconds"] = json!(60);
+            ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(30);
         },
         r#"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         2000 agent_exited 0
+        2000 agent_torn_down
         2500 call_started 0
         122500 call_timed_out 0
         239999 tick
@@ -1130,16 +1193,17 @@ fn hard_end_after_work() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             2000 agent_exited 0
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 240000)
+            2000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             2500 call_started 0
             122500 call_timed_out 0
             239999 tick
@@ -1150,72 +1214,83 @@ fn hard_end_after_work() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
 fn hard_end_bounds() {
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60),
+        |ir| ir["deadline_seconds"] = json!(60),
         r"
-        0 agent_started
+        0 work_started
         1000 agent_exited 0
+        1000 agent_torn_down
+        1500 call_returned 0
         270000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
             1000 agent_exited 0
-              tear down the agent
-              finish: work ended at the agent's exit, Code(0); no submission
+              tear down agent
               (tick due at 270000)
+            1000 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
+            1500 call_returned 0
+              finish: agent: AgentExited(Code(0)), missing
+              final returned []
             270000 tick
         "#]],
     );
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(5),
+        |ir| ir["deadline_seconds"] = json!(5),
         r"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         5000 tick
+        5000 agent_torn_down
         214999 tick
         215000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 15000)
-            0 agent_started
+            0 work_started
               (tick due at 5000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 215000)
+            5000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             214999 tick
             215000 tick
               abandon the run at its hard end
         "#]],
     );
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(u64::MAX),
+        |ir| ir["deadline_seconds"] = json!(u64::MAX),
         r"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         2000 agent_exited 0
+        2000 agent_torn_down
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18446744073709551615999.999999)
-            0 agent_started
+            0 work_started
               (tick due at 18446744073709551615000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":18446744073709551614}
             2000 agent_exited 0
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 18446744073709551615999.999999)
+            2000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
 }
@@ -1225,28 +1300,30 @@ fn hard_end_startups() {
     // In the slow class, the agent's startup counts twice.
     check(
         |ir| {
-            ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(5);
+            ir["deadline_seconds"] = json!(5);
             ir["roles"][0]["needs"]["cpu_model"] = json!("slow");
         },
         r"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         5000 tick
+        5000 agent_torn_down
         254999 tick
         255000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 35000)
-            0 agent_started
+            0 work_started
               (tick due at 5000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 255000)
+            5000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             254999 tick
             255000 tick
               abandon the run at its hard end
@@ -1255,28 +1332,30 @@ fn hard_end_startups() {
     // In the slow class, the final call's target's startup counts once.
     check(
         |ir| {
-            ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(60);
+            ir["deadline_seconds"] = json!(60);
             ir["roles"][2]["needs"]["cpu_model"] = json!("slow");
         },
         r"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         60000 tick
+        60000 agent_torn_down
         289999 tick
         290000 tick
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 70000)
-            0 agent_started
+            0 work_started
               (tick due at 60000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             60000 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 290000)
+            60000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             289999 tick
             290000 tick
               abandon the run at its hard end
@@ -1289,21 +1368,22 @@ fn exact_scores() {
     check(
         |_| {},
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 call_started 0
         2100 call_returned 0 raw_score=22.833062975103598
         2200 status 0
-        3000 now submit 10 select end_work
+        3000 now submit 10 set_submission end_work
         3100 agent_exited 0
+        3100 agent_torn_down
         3500 call_started 1
         4100 call_returned 1 score=22.830584316865718
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -1312,16 +1392,18 @@ fn exact_scores() {
             2100 call_returned 0 raw_score=22.833062975103598
             2200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
-            3000 now submit 10 select end_work
+            3000 now submit 10 set_submission end_work
               reply to op 3: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 63000)
             3100 agent_exited 0
-              tear down the agent
-              start call 1 of final on op 3's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 18210000)
+            3100 agent_torn_down
+              start call 1 of final on agent=op 3's payload of 10 bytes, with a timeout of 120s
             3500 call_started 1
             4100 call_returned 1 score=22.830584316865718
-              finish: work ended at the agent's exit, Code(0); the finalized submission, op 3's payload of 10 bytes, returned, showing [score=22.830584316865718]
+              finish: agent: AgentExited(Code(0)), finalized op 3's payload of 10 bytes
+              final returned [score=22.830584316865718]
         "#]],
     );
 }
@@ -1352,45 +1434,56 @@ fn now_calls() {
     check(
         |ir| ir["final"]["payload_max_bytes"] = 10.into(),
         r"
-        0 agent_started
-        1000 now submit 10 end_work
-        1100 now submit 11 select
+        0 work_started
+        1100 now submit 11 set_submission
         1200 now submit 10 failed
         1300 now submit 10 unread
-        1400 now submit 10 select end_work select
-        1450 now submit 10 end_work
+        1400 now submit 10 set_submission end_work set_submission
         1500 now submit 10
-        1600 now submit 10 select
-        1700 now submit 10 end_work
+        1600 locked
+        1700 now submit 0 end_work
+        1700 locked
         1800 ops
+        1810 agent_exited 0
+        1810 locked
+        1820 agent_torn_down
+        1850 call_returned 0
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
-            1000 now submit 10 end_work
-              refuse op 1: `run.end_work()` needs a selection, and nothing is selected: call `run.select(payload)` first
-            1100 now submit 11 select
-              refuse op 2: the payload is 11 bytes, over the final call's limit of 10: send a smaller one
+            1100 now submit 11 set_submission
+              refuse op 1: the payload is 11 bytes, over the final call's limit of 10: send a smaller one
             1200 now submit 10 failed
-              refuse op 3: the call's body failed: the run's record says why
+              refuse op 2: the call's body failed: the run's record says why
             1300 now submit 10 unread
-              refuse op 4: `--arg finalize` didn't read
-            1400 now submit 10 select end_work select
-              refuse op 5: `run.end_work()` ended the work, and the call has more effects after it: end the work last
-            1450 now submit 10 end_work
-              refuse op 6: `run.end_work()` needs a selection, and nothing is selected: call `run.select(payload)` first
+              refuse op 3: `--arg finalize` didn't read
+            1400 now submit 10 set_submission end_work set_submission
+              refuse op 4: `run.end_work()` ended the work, and the call has more effects after it: end the work last
             1500 now submit 10
-              reply to op 7: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17998}
-            1600 now submit 10 select
-              reply to op 8: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17998}
-            1700 now submit 10 end_work
-              reply to op 9: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
+              reply to op 5: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17998}
+            1600 locked
+              submission locked: false
+            1700 now submit 0 end_work
+              reply to op 6: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 61700)
+            1700 locked
+              submission locked: true
             1800 ops
-              refuse op 10: the work was ended: make no more ops
+              refuse op 7: your work has ended: make no more ops
+            1810 agent_exited 0
+              tear down agent
+              (tick due at 18210000)
+            1810 locked
+              submission locked: true
+            1820 agent_torn_down
+              start call 0 of final on agent=missing, with a timeout of 120s
+            1850 call_returned 0
+              finish: agent: AgentExited(Code(0)), missing
+              final returned []
         "#]],
     );
 }
@@ -1404,38 +1497,39 @@ fn finalize_lock() {
     check(
         |_| {},
         r"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 call_started 0
-        2000 now submit 10 select end_work
+        2000 now submit 10 set_submission end_work
         2100 ops
         2200 status 0
-        2300 now submit 10 select
+        2300 now submit 10 set_submission
         61999 tick
         61999 model
         62000 model
         62000 tick
+        62000 agent_torn_down
         62200 call_failed 0 stopped
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
-            2000 now submit 10 select end_work
+            2000 now submit 10 set_submission end_work
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 62000)
             2100 ops
-              refuse op 3: the work was ended: make no more ops
+              refuse op 3: your work has ended: make no more ops
             2200 status 0
-              refuse op 4: the work was ended: make no more ops
-            2300 now submit 10 select
-              refuse op 5: the work was ended: make no more ops
+              refuse op 4: your work has ended: make no more ops
+            2300 now submit 10 set_submission
+              refuse op 5: your work has ended: make no more ops
             61999 tick
             61999 model
               model requests allowed
@@ -1443,35 +1537,38 @@ fn finalize_lock() {
               model requests refused
             62000 tick
               stop call 0
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            62000 agent_torn_down
             62200 call_failed 0 stopped
-              start call 1 of final on op 2's payload of 10 bytes, with a timeout of 120s
+              start call 1 of final on agent=op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
     check(
         |ir| ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0),
         r"
-        0 agent_started
-        2000 now submit 10 select end_work
+        0 work_started
+        2000 now submit 10 set_submission end_work
+        2000 agent_torn_down
         2000 model
         2100 ops
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
-            2000 now submit 10 select end_work
+            2000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 18150000)
+            2000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             2000 model
               model requests refused
             2100 ops
-              refuse op 2: the work was ended: make no more ops
+              refuse op 2: your work has ended: make no more ops
         "#]],
     );
 }
@@ -1483,20 +1580,20 @@ fn finalize_lock() {
 )]
 fn finalize_near_deadline() {
     check(
-        |ir| ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(30),
+        |ir| ir["deadline_seconds"] = json!(30),
         r"
-        0 agent_started
-        10000 now submit 10 select end_work
+        0 work_started
+        10000 now submit 10 set_submission end_work
         29999 model
         30000 model
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 40000)
-            0 agent_started
+            0 work_started
               (tick due at 30000)
-            10000 now submit 10 select end_work
+            10000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":20}
             29999 model
               model requests allowed
@@ -1505,62 +1602,66 @@ fn finalize_near_deadline() {
         "#]],
     );
     let grace = |ir: &mut Value| {
-        let agent = &mut ir["roles"][0]["runtime"]["agent"];
-        agent["deadline_seconds"] = json!(30);
-        agent["finalize_grace_seconds"] = json!(10);
+        ir["deadline_seconds"] = json!(30);
+        ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(10);
     };
     check(
         grace,
         r#"
-        0 agent_started
-        19950 now submit 10 select end_work
+        0 work_started
+        19950 now submit 10 set_submission end_work
         30100 tick
+        30100 agent_torn_down
         30150 ops
         30200 call_started 0
         30400 call_returned 0 score=1
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 40000)
-            0 agent_started
+            0 work_started
               (tick due at 30000)
-            19950 now submit 10 select end_work
+            19950 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
               (tick due at 29950)
             30100 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 190000)
+            30100 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             30150 ops
-              refuse op 2: the work was ended: make no more ops
+              refuse op 2: your work has ended: make no more ops
             30200 call_started 0
             30400 call_returned 0 score=1
-              finish: work ended at a finalize; the finalized submission, op 1's payload of 10 bytes, returned, showing [score=1]
+              finish: agent: Finalized, finalized op 1's payload of 10 bytes
+              final returned [score=1]
         "#]],
     );
     check(
         grace,
         r"
-        0 agent_started
-        20000 now submit 10 select end_work
+        0 work_started
+        20000 now submit 10 set_submission end_work
         30000 tick
+        30000 agent_torn_down
         30000 ops
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 40000)
-            0 agent_started
+            0 work_started
               (tick due at 30000)
-            20000 now submit 10 select end_work
+            20000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             30000 tick
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 190000)
+            30000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             30000 ops
-              refuse op 2: the work phase has ended: make no more ops
+              refuse op 2: your work has ended: make no more ops
         "#]],
     );
 }
@@ -1570,15 +1671,15 @@ fn unknown_jobs() {
     check(
         |_| {},
         r"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1400 status 2
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -1614,7 +1715,7 @@ fn leases() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 ops
         2000 gpu.open
         2100 gpu.status 0
@@ -1638,9 +1739,9 @@ fn leases() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 ops
               reply to op 1: {"kind":"ops","remaining_seconds":17999,"resources":{"cpu_millis":8000,"memory_bytes":34359738368},"grants":[{"kind":"job","name":"train","payload_max_bytes":4194304,"calls":100,"cumulative_seconds":12000,"call_timeout_seconds":12000},{"kind":"session","name":"gpu","instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3,"transfer_bytes":4096,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}},{"kind":"now","name":"submit","payload_max_bytes":4194304,"arguments":{"finalize":{"type":"bool","default":false}}}]}
@@ -1693,7 +1794,7 @@ fn lease_quotas() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.open
         1200 gpu.open
@@ -1720,9 +1821,9 @@ fn lease_quotas() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -1781,7 +1882,7 @@ fn lease_own_time() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.open
         1200 lease_failed 1 the runner's sandbox didn't start
@@ -1797,9 +1898,9 @@ fn lease_own_time() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -1836,7 +1937,7 @@ fn lease_asked_time() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open 901
         1100 gpu.open 300
         1200 gpu.open 900
@@ -1848,9 +1949,9 @@ fn lease_asked_time() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open 901
               refuse op 1: the time of 901 s is longer than `gpu` lets a lease last, 900 s: open it again as `sandboxctl call gpu.open --seconds 900`
@@ -1879,7 +1980,7 @@ fn lease_times() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         2000 lease_ready 0
         3300 gpu.open
@@ -1894,9 +1995,9 @@ fn lease_times() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -1930,13 +2031,14 @@ fn leases_end_with_work() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.open
         2000 lease_ready 0
         3000 gpu.run 0 - train
-        4000 now submit 10 select
+        4000 now submit 10 set_submission
         5000 agent_exited 0
+        5000 agent_torn_down
         6000 lease_ended 1
         7000 lease_failed 0 the runner's session ended
         7100 gpu.status 0
@@ -1944,9 +2046,9 @@ fn leases_end_with_work() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -1959,18 +2061,19 @@ fn leases_end_with_work() {
             3000 gpu.run 0 - train
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["train"], with a timeout of None
-            4000 now submit 10 select
+            4000 now submit 10 set_submission
               reply to op 4: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
             5000 agent_exited 0
               close lease 0
               close lease 1
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            5000 agent_torn_down
             6000 lease_ended 1
             7000 lease_failed 0 the runner's session ended
-              start call 0 of final on op 4's payload of 10 bytes, with a timeout of 120s
+              start call 0 of final on agent=op 4's payload of 10 bytes, with a timeout of 120s
             7100 gpu.status 0
-              refuse op 5: the work phase has ended: make no more ops
+              refuse op 5: your work has ended: make no more ops
             8000 call_started 0
         "#]],
     );
@@ -1984,7 +2087,7 @@ fn lease_shares() {
             ir["roles"][0]["runtime"]["agent"]["grants"][1]["session"]["instances"] = json!(3);
         },
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.open
         1200 gpu.open
@@ -1996,9 +2099,9 @@ fn lease_shares() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":2,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2043,7 +2146,7 @@ fn sessions_apart() {
                 .insert(2, cpu);
         },
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 cpu.open
         1200 gpu.open
@@ -2051,9 +2154,9 @@ fn sessions_apart() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2075,7 +2178,7 @@ fn lease_start_bounds() {
     check(
         holders_leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.close 0
         1200 gpu.status 0
@@ -2089,13 +2192,14 @@ fn lease_start_bounds() {
         53100 call_failed 0 the call's timeout passed
         54000 gpu.open
         18000000 tick
+        18000000 agent_torn_down
         18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2124,10 +2228,11 @@ fn lease_start_bounds() {
               open lease 2 of gpu, as instance 0, started by 18000000
             18000000 tick
               close lease 2
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            18000000 agent_torn_down
             18000000 lease_failed 2 the runner's sandbox didn't start: it was given up
-              finish: work ended at the deadline; no submission
+              start call 1 of final on agent=missing, with a timeout of 120s
         "#]],
     );
 }
@@ -2137,7 +2242,7 @@ fn lease_busy() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         11000 lease_ready 0
         21000 gpu.run 0 - make
@@ -2157,9 +2262,9 @@ fn lease_busy() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2208,7 +2313,7 @@ fn lease_failure() {
         leasing,
         &format!(
             "
-            0 agent_started
+            0 work_started
             1000 gpu.open
             2000 lease_failed 0 {reason}
             2100 gpu.status 0
@@ -2216,9 +2321,9 @@ fn lease_failure() {
         ),
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2238,7 +2343,7 @@ fn lease_transfers() {
         leasing,
         &format!(
             "
-            0 agent_started
+            0 work_started
             1000 gpu.open
             1100 gpu.put 0 /workspace/repo /work/repo
             2000 lease_ready 0
@@ -2266,9 +2371,9 @@ fn lease_transfers() {
         ),
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2327,7 +2432,7 @@ fn lease_slots() {
     check(
         leasing,
         r"
-        0 agent_started
+        0 work_started
         1000 gpu.open
         1100 gpu.open
         2000 lease_ready 0
@@ -2343,9 +2448,9 @@ fn lease_slots() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 gpu.open
               reply to op 1: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
@@ -2413,7 +2518,7 @@ fn call_model_routes() {
             train["call_timeout_seconds"] = json!(10);
         },
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1500 @0 model
         2000 call_started 0
@@ -2432,8 +2537,9 @@ fn call_model_routes() {
         14100 call_failed 1 the call's timeout passed
         14200 call train 10
         15000 call_started 2
-        15100 now submit 10 select
+        15100 now submit 10 set_submission
         15200 agent_exited 0
+        15200 agent_torn_down
         15200 @2 model
         15200 model
         15300 call_failed 2 the call was stopped
@@ -2444,9 +2550,9 @@ fn call_model_routes() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -2481,18 +2587,19 @@ fn call_model_routes() {
               reply to op 3: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11988}}
               start call 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
             15000 call_started 2
-            15100 now submit 10 select
+            15100 now submit 10 set_submission
               reply to op 4: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17984}
             15200 agent_exited 0
               stop call 2
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            15200 agent_torn_down
             15200 @2 model
               model requests refused
             15200 model
               model requests refused
             15300 call_failed 2 the call was stopped
-              start call 3 of final on op 4's payload of 10 bytes, with a timeout of 120s
+              start call 3 of final on agent=op 4's payload of 10 bytes, with a timeout of 120s
             16000 call_started 3
             16000 @3 model
               model requests allowed
@@ -2510,7 +2617,7 @@ fn target_leases() {
     check(
         holders_leasing,
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         1100 @0 ops
         2000 call_started 0
@@ -2518,7 +2625,7 @@ fn target_leases() {
         2200 @0 box.open
         2300 @0 gpu.open
         2400 @0 status 0
-        2500 @0 now submit 10 select
+        2500 @0 now submit 10 set_submission
         2600 @0 call train 10
         2700 gpu.status 0
         2800 gpu.open
@@ -2537,9 +2644,9 @@ fn target_leases() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -2556,7 +2663,7 @@ fn target_leases() {
               refuse op 5: you hold no grant named `gpu`: call one that `ops` lists
             2400 @0 status 0
               refuse op 6: you have no job 0: ask about a job that one of your calls returned
-            2500 @0 now submit 10 select
+            2500 @0 now submit 10 set_submission
               refuse op 7: you hold no grant named `submit`: call one that `ops` lists
             2600 @0 call train 10
               refuse op 8: you hold no grant named `train`: call one that `ops` lists
@@ -2599,7 +2706,7 @@ fn call_leases() {
     check(
         holders_leasing,
         r#"
-        0 agent_started
+        0 work_started
         1000 call train 10
         2000 call_started 0
         2100 @0 box.open
@@ -2628,16 +2735,17 @@ fn call_leases() {
         9000 call_started 2
         9100 @2 box.open
         9200 lease_ready 2
-        9250 now submit 10 select
+        9250 now submit 10 set_submission
         9300 agent_exited 0
+        9300 agent_torn_down
         9400 call_failed 2 the call was stopped
         9500 lease_ended 2
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
             1000 call train 10
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -2699,16 +2807,17 @@ fn call_leases() {
               open lease 2 of box for job 2, as instance 0, started by 59000
             9200 lease_ready 2
               (tick due at 109200)
-            9250 now submit 10 select
+            9250 now submit 10 set_submission
               reply to op 17: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17990}
             9300 agent_exited 0
               stop call 2
               close lease 2
-              tear down the agent
+              tear down agent
               (tick due at 18210000)
+            9300 agent_torn_down
             9400 call_failed 2 the call was stopped
             9500 lease_ended 2
-              start call 3 of final on op 17's payload of 10 bytes, with a timeout of 120s
+              start call 3 of final on agent=op 17's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
 }
@@ -2718,9 +2827,10 @@ fn final_call_leases() {
     check(
         holders_leasing,
         r#"
-        0 agent_started
-        1000 now submit 10 select
+        0 work_started
+        1000 now submit 10 set_submission
         2000 agent_exited 0
+        2000 agent_torn_down
         3000 call_started 0
         3100 @0 ops
         3200 @0 box.open
@@ -2735,16 +2845,17 @@ fn final_call_leases() {
         "#,
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 18010000)
-            0 agent_started
+            0 work_started
               (tick due at 18000000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17999}
             2000 agent_exited 0
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 18210000)
+            2000 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             3000 call_started 0
             3100 @0 ops
               reply to op 2: {"kind":"ops","remaining_seconds":119,"resources":{"cpu_millis":8000,"memory_bytes":2147483648},"grants":[{"kind":"session","name":"box","instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null,"transfer_bytes":4096,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}]}
@@ -2768,7 +2879,8 @@ fn final_call_leases() {
             35100 call_returned 0 score=7
               close lease 1
             36000 lease_ended 1
-              finish: work ended at the agent's exit, Code(0); the stored submission, op 1's payload of 10 bytes, returned, showing [score=7]
+              finish: agent: AgentExited(Code(0)), stored op 1's payload of 10 bytes
+              final returned [score=7]
         "#]],
     );
 }
@@ -2778,15 +2890,15 @@ fn abandoned_final_call_leases() {
     check(
         |ir| {
             holders_leasing(ir);
-            let agent = &mut ir["roles"][0]["runtime"]["agent"];
-            agent["deadline_seconds"] = json!(1);
-            agent["finalize_grace_seconds"] = json!(0);
+            ir["deadline_seconds"] = json!(1);
+            ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0);
             ir["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["instances"] = json!(2);
         },
         r"
-        10000 agent_started
-        10500 now submit 10 select
+        10000 work_started
+        10500 now submit 10 set_submission
         10999 agent_exited 0
+        10999 agent_torn_down
         30999 call_started 0
         120000 @0 box.open
         121000 lease_ready 0
@@ -2800,15 +2912,16 @@ fn abandoned_final_call_leases() {
         ",
         &expect![[r#"
             start
-              start the agent
+              start agents
               (tick due at 11000)
-            10000 agent_started
-            10500 now submit 10 select
+            10000 work_started
+            10500 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
             10999 agent_exited 0
-              tear down the agent
-              start call 0 of final on op 1's payload of 10 bytes, with a timeout of 120s
+              tear down agent
               (tick due at 151000)
+            10999 agent_torn_down
+              start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             30999 call_started 0
             120000 @0 box.open
               reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":1,"instance_seconds":30,"cumulative_seconds":null,"commands":null}}
@@ -2825,6 +2938,212 @@ fn abandoned_final_call_leases() {
             151003 call_returned 0 score=7
             151004 lease_ended 0
             151005 lease_ended 1
+        "#]],
+    );
+}
+
+fn two_agents(ir: &mut Value) {
+    holders_leasing(ir);
+    ir["deadline_seconds"] = json!(20);
+    let zoe = &mut ir["roles"][0];
+    zoe["name"] = json!("zoe");
+    zoe["runtime"]["agent"]["finalize_grace_seconds"] = json!(3);
+    let mut bob = zoe.clone();
+    bob["name"] = json!("bob");
+    bob["runtime"]["agent"]["finalize_grace_seconds"] = json!(10);
+    ir["roles"].as_array_mut().unwrap().push(bob);
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn agents_work_until_their_own_end() {
+    check(
+        two_agents,
+        r#"
+        100 work_started
+        200 @zoe call train 12
+        201 @bob call train 22
+        204 call_started 0
+        205 call_started 1
+        210 @0 box.open
+        211 @1 box.open
+        220 @zoe gpu.open
+        225 @bob status 0
+        226 @bob gpu.close 2
+        230 @zoe now submit 12 set_submission end_work
+        235 @zoe now submit 15 set_submission
+        300 @zoe model
+        3230 @0 model
+        3230 @1 model
+        3230 tick
+        3240 @zoe model
+        3250 @bob model
+        3260 @bob status 1
+        3200 @zoe agent_exited 0
+        3300 @bob now submit 0 set_submission
+        3400 @bob agent_exited 0
+        3500 @bob agent_torn_down
+        3600 call_failed 0 stopped
+        3601 call_failed 1 stopped
+        3700 lease_ended 0
+        3701 lease_ended 1
+        3702 lease_ended 2
+        3800 @zoe agent_torn_down
+        3900 call_returned 2 score=1
+    "#,
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 30000)
+            100 work_started
+              (tick due at 20100)
+            200 @zoe call train 12
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 12 bytes, with a timeout of 19.9s
+            201 @bob call train 22
+              reply to op 2: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+              start call 1 of train on op 2's payload of 22 bytes, with a timeout of 19.899s
+            204 call_started 0
+            205 call_started 1
+            210 @0 box.open
+              reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 0 of box for job 0, as instance 0, started by 20100
+            211 @1 box.open
+              reply to op 4: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 1 of box for job 1, as instance 0, started by 20100
+            220 @zoe gpu.open
+              reply to op 5: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
+              open lease 2 of gpu, as instance 0, started by 20100
+            225 @bob status 0
+              refuse op 6: you have no job 0: ask about a job that one of your calls returned
+            226 @bob gpu.close 2
+              refuse op 7: you have no lease 2: name one that `gpu.open` returned
+            230 @zoe now submit 12 set_submission end_work
+              reply to op 8: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
+              (tick due at 3230)
+            235 @zoe now submit 15 set_submission
+              refuse op 9: your work has ended: make no more ops
+            300 @zoe model
+              model requests allowed
+            3230 @0 model
+              model requests refused
+            3230 @1 model
+              model requests allowed
+            3230 tick
+              stop call 0
+              close lease 0
+              close lease 2
+              tear down zoe
+              (tick due at 20100)
+            3240 @zoe model
+              model requests refused
+            3250 @bob model
+              model requests allowed
+            3260 @bob status 1
+              reply to op 10: {"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}
+            3200 @zoe agent_exited 0
+            3300 @bob now submit 0 set_submission
+              reply to op 11: {"kind":"call","returned":{"state":"done"},"remaining_seconds":16}
+            3400 @bob agent_exited 0
+              stop call 1
+              close lease 1
+              tear down bob
+              (tick due at 180000)
+            3500 @bob agent_torn_down
+            3600 call_failed 0 stopped
+            3601 call_failed 1 stopped
+            3700 lease_ended 0
+            3701 lease_ended 1
+            3702 lease_ended 2
+            3800 @zoe agent_torn_down
+              start call 2 of final on zoe=op 8's payload of 12 bytes, bob=op 11's payload of 0 bytes, with a timeout of 120s
+            3900 call_returned 2 score=1
+              finish: zoe: Finalized, finalized op 8's payload of 12 bytes
+              bob: AgentExited(Code(0)), stored op 11's payload of 0 bytes
+              final returned [score=1]
+        "#]],
+    );
+}
+
+#[test]
+fn common_deadline_wins_a_tie() {
+    check(
+        |ir| {
+            two_agents(ir);
+            let bob = ir["roles"].as_array_mut().unwrap().last_mut().unwrap();
+            bob["needs"]["cpu_model"] = json!("slow");
+        },
+        r#"
+        35000 work_started
+        46000 @zoe now submit 2 set_submission
+        47000 @zoe now submit 0 end_work
+        49999 @bob model
+        50000 @zoe agent_exited 0
+        49999 @bob now submit 1 set_submission
+        50100 @zoe agent_torn_down
+        50200 @bob agent_torn_down
+        50500 call_failed 0 judge failed
+    "#,
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 50000)
+            35000 work_started
+            46000 @zoe now submit 2 set_submission
+              reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
+            47000 @zoe now submit 0 end_work
+              reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
+            49999 @bob model
+              model requests allowed
+            50000 @zoe agent_exited 0
+              tear down zoe
+              tear down bob
+              (tick due at 220000)
+            49999 @bob now submit 1 set_submission
+              refuse op 3: your work has ended: make no more ops
+            50100 @zoe agent_torn_down
+            50200 @bob agent_torn_down
+              start call 0 of final on zoe=op 1's payload of 2 bytes, bob=missing, with a timeout of 120s
+            50500 call_failed 0 judge failed
+              finish: zoe: Deadline, finalized op 1's payload of 2 bytes
+              bob: Deadline, missing
+              final failed: Error("judge failed")
+        "#]],
+    );
+}
+
+#[test]
+fn agents_without_submissions_are_judged() {
+    check(
+        two_agents,
+        r#"
+        50 @bob agent_failed could not start
+        60 @bob agent_torn_down
+        100 work_started
+        150 @zoe agent_exited 0
+        150 @bob agent_exited 0
+        200 @zoe agent_torn_down
+        250 call_returned 0 score=null
+    "#,
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 30000)
+            50 @bob agent_failed could not start
+              tear down bob
+            60 @bob agent_torn_down
+            100 work_started
+              (tick due at 20100)
+            150 @zoe agent_exited 0
+              tear down zoe
+              (tick due at 180000)
+            150 @bob agent_exited 0
+            200 @zoe agent_torn_down
+              start call 0 of final on zoe=missing, bob=missing, with a timeout of 120s
+            250 call_returned 0 score=null
+              finish: zoe: AgentExited(Code(0)), missing
+              bob: AgentFailed("could not start"), missing
+              final returned [score=null]
         "#]],
     );
 }

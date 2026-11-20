@@ -4,6 +4,7 @@
 use decision::{CallResult, Outcome, PayloadRef};
 use schema::ir::{Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
+use schema::workflow::Workflow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,11 +20,20 @@ pub(crate) enum Ended {
     Interrupted { signal: Signal },
 }
 
-/// How a finished run ended: how its work phase did, and the verdict on its selection.
+/// The recorded ending and optional submission of every agent, plus the final body's result.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Finished {
-    pub(crate) work_end: WorkEnd,
+    agents: Vec<AgentEnding>,
     pub(crate) verdict: Verdict,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AgentEnding {
+    role: Name,
+    work_end: WorkEnd,
+    submission: Option<Submission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_failure: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,16 +48,8 @@ pub(crate) enum WorkEnd {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    NoSubmission,
-    /// The final call returned `result`.
-    Returned {
-        submission: Submission,
-        result: Returned,
-    },
-    NoResult {
-        submission: Submission,
-        failure: Failure,
-    },
+    Returned { result: Returned },
+    NoResult { failure: Failure },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,10 +84,29 @@ pub(crate) enum Failure {
     Error { reason: String },
 }
 
-impl From<&Result<Outcome, Stopped>> for Ended {
-    fn from(ended: &Result<Outcome, Stopped>) -> Self {
+impl Ended {
+    pub(super) fn of(workflow: &Workflow, ended: &Result<Outcome, Stopped>) -> Self {
         match ended {
-            Ok(outcome) => Self::Finished(outcome.into()),
+            Ok(Outcome { agents, result }) => {
+                let agents = agents
+                    .iter()
+                    .map(|outcome| AgentEnding {
+                        role: workflow.sandbox(outcome.agent.role()).name.clone(),
+                        work_end: (&outcome.work_end).into(),
+                        submission: outcome.submission.as_ref().map(Into::into),
+                        route_failure: outcome.route_failure.clone(),
+                    })
+                    .collect();
+                let verdict = match result {
+                    Ok(result) => Verdict::Returned {
+                        result: result.into(),
+                    },
+                    Err(failure) => Verdict::NoResult {
+                        failure: failure.into(),
+                    },
+                };
+                Self::Finished(Finished { agents, verdict })
+            }
             Err(Stopped::Failed(reason)) => Self::Failed {
                 reason: reason.clone(),
             },
@@ -94,37 +115,27 @@ impl From<&Result<Outcome, Stopped>> for Ended {
     }
 }
 
-impl From<&Outcome> for Finished {
-    fn from(outcome: &Outcome) -> Self {
-        let Outcome { work_end, verdict } = outcome;
-        let work_end = match work_end {
-            decision::WorkEnd::Deadline => WorkEnd::Deadline,
-            decision::WorkEnd::Finalized => WorkEnd::Finalized,
-            decision::WorkEnd::AgentExited(status) => WorkEnd::AgentExited { status: *status },
-            decision::WorkEnd::AgentFailed(reason) => WorkEnd::AgentFailed {
+impl From<&decision::WorkEnd> for WorkEnd {
+    fn from(end: &decision::WorkEnd) -> Self {
+        match end {
+            decision::WorkEnd::Deadline => Self::Deadline,
+            decision::WorkEnd::Finalized => Self::Finalized,
+            decision::WorkEnd::AgentExited(status) => Self::AgentExited { status: *status },
+            decision::WorkEnd::AgentFailed(reason) => Self::AgentFailed {
                 reason: reason.clone(),
             },
-        };
-        let verdict = match verdict {
-            decision::Verdict::NoSubmission => Verdict::NoSubmission,
-            decision::Verdict::Returned { submission, result } => Verdict::Returned {
-                submission: submission.into(),
-                result: result.into(),
+        }
+    }
+}
+
+impl From<&decision::Failure> for Failure {
+    fn from(failure: &decision::Failure) -> Self {
+        match failure {
+            decision::Failure::Timeout => Self::Timeout,
+            decision::Failure::Error(reason) => Self::Error {
+                reason: reason.clone(),
             },
-            decision::Verdict::NoResult {
-                submission,
-                failure,
-            } => Verdict::NoResult {
-                submission: submission.into(),
-                failure: match failure {
-                    decision::Failure::Timeout => Failure::Timeout,
-                    decision::Failure::Error(reason) => Failure::Error {
-                        reason: reason.clone(),
-                    },
-                },
-            },
-        };
-        Self { work_end, verdict }
+        }
     }
 }
 

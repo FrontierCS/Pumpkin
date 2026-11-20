@@ -103,8 +103,8 @@ impl End {
     /// The end of `which`'s child, failed for `reason`.
     pub(super) fn failed(which: Which, reason: String) -> Self {
         match which {
-            Which::Agent(_) => Self::Event(Event::AgentFailed { reason }),
-            Which::Call(job, _) => Self::Call(job, Err(reason)),
+            Which::Agent(agent) => Self::Event(Event::AgentFailed { agent, reason }),
+            Which::Call(job, ..) => Self::Call(job, Err(reason)),
             Which::Lease(lease, ..) => Self::Event(Event::LeaseFailed { lease, reason }),
         }
     }
@@ -143,10 +143,13 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     let started = (child.sandboxes).start(which, ops, by, child.hard_end, inbox, Message::Session);
     let mut sandbox = match started {
         Ok(sandbox) => sandbox,
-        Err(error) => {
-            let reason = format!("{noun} sandbox didn't start: {error}");
-            return child.end(End::failed(which, reason));
-        }
+        Err(failure) => match failure.dispose(child.sandboxes) {
+            Ok(reason) => {
+                let reason = format!("{noun} sandbox didn't start: {reason}");
+                return child.end(End::failed(which, reason));
+            }
+            Err(reason) => return child.report(Report::Undeleted(reason)),
+        },
     };
     let last = drive(child, &mut sandbox.session);
     let (logged, deleted) = child.sandboxes.delete(sandbox);

@@ -118,8 +118,8 @@ pub fn evaluate(
 /// # Errors
 ///
 /// An evaluation's problem; no function `body.def` in the file; or, in source order, each parameter
-/// that doesn't fit: the handle or the payload, first, with a default or another type; one after
-/// them, in a final call's body, or one not annotated `str`, `int` or `bool`; a keyword-only one
+/// that doesn't fit: a default or incorrect annotation on the handle, payload or submissions;
+/// an extra positional parameter in a final body, or one not annotated `str`, `int` or `bool`; one
 /// without a default that `body.keywords` misses; each keyword that names none, or doesn't fit.
 pub fn check(
     body: &Body<'_>,
@@ -140,8 +140,8 @@ pub fn check(
 
 /// Calls the body that `body` names, on an evaluation of its file as [`check`] has it.
 ///
-/// It passes the handle on `host`, the payload, then `body.keywords` and the caller's `arguments`
-/// (none: an empty map) by name; it gives each name of the returned dict with its value's JSON.
+/// The second argument is the payload for a job or the per-role submissions for a final call.
+/// The returned dictionary gives each name with its JSON value.
 ///
 /// # Errors
 ///

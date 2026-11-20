@@ -16,7 +16,7 @@ use super::{Body, Name};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobFunction {
-    /// The target role that each call starts afresh, which no other job function names.
+    /// The target role that each call starts afresh. Distinct agents may name the same target.
     pub target: Name,
     pub body: Body,
     /// The keyword arguments that each call passes the body, by the keyword-only parameter each

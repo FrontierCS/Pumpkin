@@ -1,8 +1,8 @@
-//! The workflow IR, v0: the JSON form of a workflow.
+//! The workflow IR: the JSON form of a workflow.
 //!
-//! A workflow is data: [`Role`]s (one agent, the targets its calls start, and the runners that
-//! sessions lease), the [`Grant`]s each role holds, and the [`Final`] call, which judges what the
-//! agent submits.
+//! A workflow is data: [`Role`]s (the agents, the targets their calls start, and the runners that
+//! sessions lease), the [`Grant`]s each role holds, and the [`Final`] call that judges the
+//! submissions.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -41,20 +41,20 @@ pub use values::{
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
 ///
-/// A run has two phases. In the work phase, the run starts the agent, which works until it
-/// exits, ends its work or reaches its deadline, calls its job functions and the now functions
-/// that select a payload, and leases runners. In the final phase, which starts once the
-/// agent's sandbox and every call and lease it made, and every lease its calls made, are gone,
-/// the [`Final`] call judges the selection: the last payload selected. Only the run, which keeps
-/// the selection, lives through both phases.
+/// During work each agent calls its grants, leases runners and may submit a payload. The
+/// work deadline bounds all agents. Once their sandboxes, calls and leases are gone, the
+/// [`Final`] call judges the submissions kept by the run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
     pub ir_version: IrVersion,
     pub name: WorkflowName,
-    /// Exactly one of them has an agent runtime: the agent. The others are targets and runners.
+    /// How long all agents may work, counted from their start, at the latest from the longest
+    /// agent startup bound after run start.
+    pub deadline_seconds: NonZeroU64,
+    /// The sandboxes in declaration order, including at least one agent.
     pub roles: Vec<Role>,
-    /// How the selected submission is judged.
+    /// How the submissions are judged.
     #[serde(rename = "final")]
     pub final_call: Final,
 }
@@ -68,8 +68,8 @@ pub struct Workflow {
 /// instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrVersion {
-    #[serde(rename = "pumpkin.ir/v0")]
-    V0,
+    #[serde(rename = "pumpkin.ir/v1")]
+    V1,
 }
 
 /// A sandbox template. Every instance of a role is a sandbox.
@@ -183,19 +183,10 @@ pub struct AgentRuntime {
     /// [`command_stdin()`](crate::sandbox::command_stdin); absent, its standard input is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin: Option<String>,
-    /// How long the work phase may last.
-    ///
-    /// The clock starts once the agent's sandbox and its command have started, or, at the latest,
-    /// once its class's [`startup_seconds`](crate::workflow::Class::startup_seconds) have passed
-    /// since the run's start, so the time the sandbox takes to start, which that startup bounds
-    /// instead, doesn't count against it.
-    /// Judging the selected submission comes after the deadline, bounded instead by the
-    /// final call's [`timeout_seconds`](Final::timeout_seconds).
-    pub deadline_seconds: NonZeroU64,
     /// How long the agent may keep running after a call of its ends its work. Its ops are
-    /// refused meanwhile, while its [model route](ModelRoute) stays open, and the work phase,
-    /// with the route, ends when it exits, when this runs out, or at the deadline, whichever
-    /// comes first. 0 ends the work phase in that call's step.
+    /// refused meanwhile, while its [model route](ModelRoute) stays open. The agent ends on exit,
+    /// at the end of its grace or at the shared deadline, whichever comes first. 0 ends its work
+    /// in that call's step.
     pub finalize_grace_seconds: u64,
     /// The agent's routes out, open while it works; absent, it has none.
     #[serde(default, skip_serializing_if = "Egress::is_empty")]

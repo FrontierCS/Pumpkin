@@ -48,7 +48,7 @@ impl runtime::Bodies for Bodies<'_> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "check" => {
-                target.put(&AbsolutePath::from_static("/work/payload"))?;
+                target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 let dir = keywords["dir"].as_str().unwrap();
                 target.run(&argv(&["list", dir]))?;
                 let stdout = AbsolutePath::from_static("/pumpkin/log/0/command.stdout");
@@ -63,7 +63,7 @@ impl runtime::Bodies for Bodies<'_> {
                 ])
             }
             "train" => {
-                target.put(&AbsolutePath::from_static("/work/payload"))?;
+                target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 target.run(&argv(&["judge", "/work/payload", "/work/result.json"]))?;
                 let result = target.get(&AbsolutePath::from_static("/work/result.json"))?;
                 let result: Value = serde_json::from_str(&result).unwrap();
@@ -71,7 +71,7 @@ impl runtime::Bodies for Bodies<'_> {
                 Ok(vec![(Name::from_static("raw_score"), score)])
             }
             "run" => {
-                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"))?;
+                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"), 0)?;
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
                 Ok(Vec::new())
             }
@@ -97,7 +97,7 @@ impl runtime::Bodies for Bodies<'_> {
                 // The core stops the run's calls as the agent's work ends, before the agent's
                 // teardown, whose delete of its sandbox the record then shows.
                 let deleted =
-                    r#""kind":"sandbox_deleted","provider":"simulated","sandbox":"agent""#;
+                    r#""kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0""#;
                 sim::logged(self.record, deleted);
                 target.run(&argv(&["print", "two"]))?;
                 Ok(Vec::new())
@@ -123,16 +123,41 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "final_call" => {
                 let payload = AbsolutePath::from_static("/pumpkin/in/payload/raw");
-                target.put(&payload)?;
+                let Some(slot) = submissions[0].1 else {
+                    return Ok(vec![(Name::from_static("score"), json!(0))]);
+                };
+                target.put(&payload, slot)?;
                 target.run(&argv(&["judge", payload.as_str()]))?;
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
+            }
+            "submissions" => {
+                let mut files = Map::new();
+                let path = AbsolutePath::from_static("/work/submission");
+                let mut command = 0;
+                for (role, slot) in submissions {
+                    let bytes = if let Some(slot) = slot {
+                        target.put(&path, *slot)?;
+                        target.run(&argv(&["bytes", path.as_str()]))?;
+                        let stdout = AbsolutePath::try_from(format!(
+                            "/pumpkin/log/{command}/command.stdout"
+                        ))
+                        .unwrap();
+                        command += 1;
+                        serde_json::from_str(&target.get(&stdout)?).unwrap()
+                    } else {
+                        Value::Null
+                    };
+                    files.insert(role.to_string(), bytes);
+                }
+                Ok(vec![(Name::from_static("files"), json!(files))])
             }
             "routed" => {
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
@@ -159,7 +184,7 @@ impl runtime::Bodies for Bodies<'_> {
         match body.def.as_str() {
             "submit" => {
                 deep(DEEP_BYTES / FRAME_BYTES);
-                run.select();
+                run.set_submission();
                 let finalize = arguments.get(&Name::from_static("finalize"))
                     == Some(&ir::ArgumentValue::Bool(true));
                 if finalize {

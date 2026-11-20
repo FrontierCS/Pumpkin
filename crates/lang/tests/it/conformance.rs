@@ -70,7 +70,7 @@ def freeze(x):
 const ENTRY: &str = r#"load("//case.star", "conformance_done")
 load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 
-workflow(name = "conformance/chunk", roles = [AGENT, FINAL_TARGET], final = FINAL)
+workflow(name = "conformance/chunk", roles = [AGENT, FINAL_TARGET], final = FINAL, deadline_seconds = 1)
 "#;
 
 #[derive(Clone, Copy)]

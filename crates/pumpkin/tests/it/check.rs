@@ -80,11 +80,11 @@ def bench_task(
         tools = "native",
         workspace = "/workspace",
         prompt = PROMPT,
-        deadline_seconds = DEADLINE,
         finalize_grace_seconds = 60,
     )
     workflow(
         name = "neutral/" + task.replace("_", "-"),
+        deadline_seconds = DEADLINE,
         roles = [
             {
                 "name": "agent",
@@ -149,14 +149,14 @@ def train(target: Target, payload: Payload, *, metrics: list[str]):
     return {"score": found["score"]} | {name: found["metrics"][name] for name in metrics}
 
 def submit(run: Run, payload: Payload, finalize: bool = False):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {}
 
-def final_call(target: Target, payload: Payload):
+def final_call(target: Target, submissions):
     """Judges the submission in its target, and shows its score."""
-    target.put("/pumpkin/in/payload/raw", payload)
+    target.put("/pumpkin/in/payload/raw", submissions["agent"])
     target.run(["/opt/judge/run"])
     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["score"]}
 "##;
@@ -997,7 +997,7 @@ fn bodies() {
     // The `def` line of `LIBRARY`'s now function's body.
     const SUBMIT: &str = "def submit(run: Run, payload: Payload, finalize: bool = False):";
     // The `def` line of `LIBRARY`'s final call's body.
-    const FINAL: &str = "def final_call(target: Target, payload: Payload):";
+    const FINAL: &str = "def final_call(target: Target, submissions):";
     let scratch = Scratch::new();
     // A task below `dir` whose library gives the agent a job function, `check`, whose body is
     // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image,
@@ -1047,11 +1047,11 @@ fn bodies() {
     write("int/", VERIFY, "3", (SUBMIT, FINAL));
     let submit = "def submit(run: Run, payload: Payload, finalize: float = 0.0):";
     write("now/", VERIFY, "verify", (submit, FINAL));
-    let final_call = "def final_call(target: Run, payload: Payload):";
+    let final_call = "def final_call(target: Run, submissions):";
     write("final/", VERIFY, "verify", (SUBMIT, final_call));
-    let final_call = "def final_call(target: Target, payload: Payload, level: int = 1):";
+    let final_call = "def final_call(target: Target, submissions, level: int = 1):";
     write("after/", VERIFY, "verify", (SUBMIT, final_call));
-    let final_call = "def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):";
+    let final_call = "def final_call(target: Target, submissions, *, mode: str, extra = 0):";
     write("keywords/", VERIFY, "verify", (SUBMIT, final_call));
     let bench = scratch.0.join("keywords/lib/bench.star");
     let library = fs::read_to_string(&bench).unwrap().replace(
@@ -1104,25 +1104,25 @@ fn bodies() {
             $ pumpkin check final/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:151:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
-                151 | def final_call(target: Run, payload: Payload):
+                151 | def final_call(target: Run, submissions):
                     |                ^^^^^^
             pumpkin: final/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/final/tasks/bench/task.star
             $ pumpkin check after/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:151:50: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
-                151 | def final_call(target: Target, payload: Payload, level: int = 1):
-                    |                                                  ^^^^^
+            lib/bench.star:151:45: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
+                151 | def final_call(target: Target, submissions, level: int = 1):
+                    |                                             ^^^^^
             pumpkin: after/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/after/tasks/bench/task.star
             $ pumpkin check keywords/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:151:5: the final call's `keywords` gives `level`, which is no keyword-only parameter of `final_call`: remove it
-                151 | def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):
+                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
                     |     ^^^^^^^^^^
-            lib/bench.star:151:53: the final call's keyword `mode` can't be `3`: `final_call` takes a string
-                151 | def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):
-                    |                                                     ^^^^
+            lib/bench.star:151:48: the final call's keyword `mode` can't be `3`: `final_call` takes a string
+                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
+                    |                                                ^^^^
             pumpkin: keywords/tasks/bench/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/keywords/tasks/bench/task.star"#]],
     );

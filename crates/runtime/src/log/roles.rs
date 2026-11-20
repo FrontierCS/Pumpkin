@@ -8,16 +8,15 @@ use schema::ir::{self, Gpu, Name};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::Place;
 use super::progress::{Sandbox, places};
+use super::{CallerName, Place};
 use crate::TokenPrices;
 use crate::read_error::{ReadError, read_optional};
 
 /// What the IR and `provider.json` say of a run's roles: what the log's lines refer to by name.
 #[derive(Default)]
 pub(super) struct Roles {
-    pub(super) agent_role: String,
-    pub(super) routed: bool,
+    pub(super) agents: BTreeMap<CallerName, Agent>,
     pub(super) grants: BTreeMap<(String, String), Grant>,
     pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
@@ -33,10 +32,22 @@ impl Roles {
         let roles = ir.map_or(&[][..], |ir| ir.roles.as_slice());
         let gpus = (roles.iter())
             .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
-        let agent = roles.iter().find_map(|role| match &role.runtime {
-            ir::Runtime::Agent(agent) => Some((&role.name, agent)),
-            ir::Runtime::Target(_) | ir::Runtime::Runner(_) => None,
-        });
+        let agents = roles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, role)| {
+                let ir::Runtime::Agent(agent) = &role.runtime else {
+                    return None;
+                };
+                Some((
+                    CallerName::Agent(index),
+                    Agent {
+                        name: role.name.to_string(),
+                        routed: agent.egress.model.is_some(),
+                    },
+                ))
+            })
+            .collect();
         let grants = roles.iter().flat_map(|role| {
             held(&role.runtime)
                 .map(|(name, grant)| ((role.name.to_string(), name.to_string()), grant))
@@ -68,17 +79,20 @@ impl Roles {
             Some((model.clone(), prices))
         });
         Self {
-            agent_role: agent.map(|(name, _)| name.to_string()).unwrap_or_default(),
-            routed: agent.is_some_and(|(_, agent)| agent.egress.model.is_some()),
+            agents,
             grants: grants.collect(),
             final_target,
             places: places(provided),
             gpus: gpus.collect(),
-            deadline: agent.map(|(_, agent)| Duration::from_secs(agent.deadline_seconds.get())),
+            deadline: ir.map(|ir| Duration::from_secs(ir.deadline_seconds.get())),
             startups,
             prices,
             token_prices: token_prices.collect(),
         }
+    }
+
+    pub(super) fn agent_name(&self, caller: CallerName) -> Option<&str> {
+        self.agents.get(&caller).map(|role| role.name.as_str())
     }
 
     pub(super) fn sandbox(&self, role: Option<&str>, asked: Duration) -> Sandbox {
@@ -91,6 +105,12 @@ impl Roles {
             ..Sandbox::default()
         }
     }
+}
+
+#[derive(Default)]
+pub(super) struct Agent {
+    pub(super) name: String,
+    pub(super) routed: bool,
 }
 
 #[derive(Clone, Default)]
