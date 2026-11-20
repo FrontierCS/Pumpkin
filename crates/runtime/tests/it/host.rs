@@ -36,14 +36,15 @@ pub(crate) struct SimHost {
 struct State {
     now: Duration,
     late: Option<LateTake>,
-    ops_answered: bool,
+    late_armed: bool,
+    after_take: Option<fn()>,
     slow: VecDeque<SlowSync>,
     failed: Option<u64>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
 }
 
-/// The first take after the agent's initial ops query comes late: once `behind`
+/// A take comes late, after setup or the agent's initial ops query: once `behind`
 /// more inputs are queued behind it, and at `at`, as if the loop had been busy until then. Then
 /// each of the next `then` takes from that inbox waits for an input, whatever the time, as if the
 /// loop had been busy until one came.
@@ -77,7 +78,8 @@ impl SimHost {
         let state = State {
             now: Duration::ZERO,
             late: None,
-            ops_answered: false,
+            late_armed: false,
+            after_take: None,
             slow: VecDeque::new(),
             failed: None,
             failed_file: None,
@@ -87,6 +89,14 @@ impl SimHost {
             state: Arc::new(Mutex::new(state)),
             journal: None,
         }
+    }
+
+    pub(crate) fn during_setup(self, late: LateTake, after: fn()) -> Self {
+        let mut state = stdx::unpoisoned(self.state.lock());
+        state.late_armed = true;
+        state.after_take = Some(after);
+        drop(state);
+        self.late_take(late)
     }
 
     pub(crate) fn late_take(self, late: LateTake) -> Self {
@@ -143,7 +153,7 @@ impl Host for SimHost {
             && path.ends_with("log.jsonl")
             && holds(r#""request":{"kind":"ops"}"#)
         {
-            state.ops_answered = true;
+            state.late_armed = true;
         }
         let slow = state.slow.pop_front_if(|slow| match slow.record {
             Synced::Seq(record) => lasts(record),
@@ -302,10 +312,11 @@ impl<T: Send> SimInbox<T> {
 
     fn late(&mut self, input: T) -> T {
         let mut state = stdx::unpoisoned(self.clock.state.lock());
-        if !state.ops_answered {
+        if !state.late_armed {
             return input;
         }
         let late = state.late.take();
+        let after = state.after_take.take();
         drop(state);
         let Some(LateTake { behind, at, then }) = late else {
             return input;
@@ -314,6 +325,9 @@ impl<T: Send> SimInbox<T> {
         // Without the clock's lock, so that the run's other threads read the clock as they wait.
         self.queue.fill(behind, SCRIPTED);
         stdx::unpoisoned(self.clock.state.lock()).now = at;
+        if let Some(after) = after {
+            after();
+        }
         input
     }
 }

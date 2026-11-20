@@ -251,7 +251,6 @@ impl<'r, H: Host> Run<'r, H> {
             payloads: Payloads::create(host, &self.dir)?,
             agents: BTreeMap::new(),
             starting: BTreeMap::new(),
-            arrivals: VecDeque::new(),
             unanswered: BTreeMap::new(),
             next_op: 0,
             next_model_request: 0,
@@ -341,8 +340,8 @@ struct Runtime<'r, H: Host> {
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
     agents: BTreeMap<AgentId, Agent>,
-    starting: BTreeMap<AgentId, agent::Starting>,
-    arrivals: VecDeque<Input>,
+    // Whether teardown was requested before setup handed over the session or disposed of it.
+    starting: BTreeMap<AgentId, bool>,
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
@@ -361,18 +360,18 @@ struct Runtime<'r, H: Host> {
 }
 
 enum Input {
-    Launched(AgentId, Duration, Option<Box<Agent>>, Result<(), String>),
+    Prepared(AgentId, Result<Box<Agent>, String>),
+    Launched(AgentId, Duration, Result<(), String>),
     Agent(AgentId, Duration, Arrival),
     Child(Report),
     Logged(Entry),
 }
 
 impl Input {
-    // A successful launch only installs the session: arrivals buffered before its confirmation
-    // still reach the core at their own times.
+    // Setup and a successful launch have no core event; arrivals carry their own times.
     fn reached(&self) -> Option<Duration> {
         match self {
-            Self::Launched(_, at, _, Err(_))
+            Self::Launched(_, at, Err(_))
             | Self::Agent(_, at, _)
             | Self::Child(
                 Report::Event(at, _)
@@ -380,7 +379,8 @@ impl Input {
                 | Report::Op { at, .. }
                 | Report::Model { at, .. },
             ) => Some(*at),
-            Self::Launched(_, _, _, Ok(()))
+            Self::Prepared(..)
+            | Self::Launched(_, _, Ok(()))
             | Self::Child(Report::Undeleted(_))
             | Self::Logged(_) => None,
         }
@@ -478,6 +478,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
+    fn launched(&mut self, id: AgentId, at: Duration) -> Result<(), String> {
+        if self.agents.get_mut(&id).is_some_and(Agent::record_start) {
+            self.log.entry(Entry::AgentLaunched(id, at))?;
+        }
+        Ok(())
+    }
+
     fn hard_end(&self) -> Duration {
         lasts(self.placed)
     }
@@ -502,15 +509,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
         let due = core.tick_due();
         loop {
-            let input = self
-                .held
-                .take()
-                .or_else(|| self.arrivals.pop_front())
-                .or_else(|| {
-                    // Waited in slices, so that a signal ends the wait within `LOOK`.
-                    let slice = due.min(self.clock.now().saturating_add(LOOK));
-                    self.inbox.wait(slice)
-                });
+            let input = self.held.take().or_else(|| {
+                // Waited in slices, so that a signal ends the wait within `LOOK`.
+                let slice = due.min(self.clock.now().saturating_add(LOOK));
+                self.inbox.wait(slice)
+            });
             // Before what arrived is taken, so that the core takes nothing once a signal has come.
             if let Err(stopped) = interruption::check() {
                 self.held = input;
@@ -549,38 +552,36 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         input: Input,
     ) -> Result<Option<(Duration, Event)>, String> {
         let (id, at, arrival) = match input {
-            Input::Launched(id, at, agent, result) => {
-                self.agents.extend(agent.map(|agent| (id, *agent)));
-                if let Some(starting) = self.starting.remove(&id) {
-                    self.arrivals.extend(
-                        starting
-                            .arrivals
-                            .into_iter()
-                            .map(|(at, arrival)| Input::Agent(id, at, arrival)),
-                    );
-                    if starting.tear_down {
-                        if let Err(reason) = result {
-                            self.log.note(&format!(
-                                "agent `{}`: {reason}",
-                                self.workflow().sandbox(id.role()).name
-                            ))?;
-                        }
-                        if let Some(scope) = scope {
-                            self.tear_down_agent(scope, id)?;
-                        }
-                        return Ok(None);
+            Input::Prepared(id, agent) => {
+                match agent {
+                    Ok(agent) => {
+                        self.agents.insert(id, *agent);
+                    }
+                    Err(detail) => {
+                        let role = &self.workflow().sandbox(id.role()).name;
+                        self.log.note(&format!(
+                            "agent `{role}`: the agent's sandbox didn't start: {detail}"
+                        ))?;
                     }
                 }
+                if self.starting.remove(&id) == Some(true)
+                    && let Some(scope) = scope
+                {
+                    self.tear_down_agent(scope, id)?;
+                }
+                return Ok(None);
+            }
+            Input::Launched(id, at, result) => {
                 match result {
-                    Ok(()) => self.log.entry(Entry::AgentLaunched(id, at))?,
+                    Ok(()) => self.launched(id, at)?,
                     Err(reason) => return Ok(Some((at, Event::AgentFailed { agent: id, reason }))),
                 }
                 return Ok(None);
             }
             Input::Agent(id, at, arrival) => {
-                if let Some(starting) = self.starting.get_mut(&id) {
-                    starting.arrivals.push((at, arrival));
-                    return Ok(None);
+                // An op or exit can beat the launch worker's confirmation into the inbox.
+                if !matches!(arrival, Arrival::Ended { .. }) {
+                    self.launched(id, at)?;
                 }
                 (id, at, arrival)
             }
@@ -701,12 +702,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // this drops it then, its sandbox left to the sweep: either way, its reader has handed
         // over all it will.
         self.agents.clear();
-        while let Some(input) = self
-            .held
-            .take()
-            .or_else(|| self.arrivals.pop_front())
-            .or_else(|| self.inbox.take())
-        {
+        while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
             let Some((at, event)) = self.arrived(None, core, input)? else {
                 continue;
             };
@@ -964,16 +960,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
     fn settle(&mut self) -> Result<(), String> {
         let mut failures = Vec::new();
-        while let Some(input) = self
-            .held
-            .take()
-            .or_else(|| self.arrivals.pop_front())
-            .or_else(|| self.inbox.take())
-        {
+        while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
             let logged = match input {
                 Input::Logged(entry) => self.log.entry(entry),
                 Input::Child(Report::Undeleted(reason)) => Err(reason),
                 Input::Agent(..)
+                | Input::Prepared(..)
                 | Input::Launched(..)
                 | Input::Child(
                     Report::Event(..)

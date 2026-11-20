@@ -4650,6 +4650,61 @@ fn judged(
 }
 
 #[test]
+fn op_arriving_before_launch_confirmation_can_select() {
+    let mut ir = selections_workflow(&["ops_before_started", "call submit 6 finalize=true"]);
+    ir["deadline_seconds"] = json!(1);
+    let dir = TestDir::new();
+    let (_, agents, result) = judged(ir, &dir);
+    assert!(agents[0].submission.as_ref().unwrap().finalized);
+    assert_eq!(
+        result.values()[0].1,
+        json!({"alpha":[120,120,120,120,120,120]})
+    );
+}
+
+#[test]
+fn releases_agents_ready_before_a_delayed_driver_takes_their_notices() {
+    let mut ir = selections_workflow(&["ops", "call submit 6 finalize=true"]);
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("beta");
+    ir["roles"].as_array_mut().unwrap().push(peer);
+    let wait = LateTake {
+        behind: 1,
+        at: Duration::from_secs(3),
+        then: 0,
+    };
+    let host = SimHost::new().during_setup(wait, || {});
+    let dir = TestDir::new();
+    let (_, result) = execute_agents(&host, 2, ir, &dir);
+    assert!(
+        result
+            .unwrap()
+            .agents
+            .iter()
+            .all(|agent| agent.submission.is_some())
+    );
+}
+
+#[test]
+fn interrupt_during_peer_setup_keeps_ready_commands_unlaunched() {
+    let mut ir = selections_workflow(&["mark"]);
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("beta");
+    peer["image"] = json!(sim::image(HUNG).as_str());
+    ir["roles"].as_array_mut().unwrap().push(peer);
+    let wait = LateTake {
+        behind: 0,
+        at: Duration::ZERO,
+        then: 0,
+    };
+    let host = SimHost::new().during_setup(wait, interrupt);
+    let dir = TestDir::new();
+    let (record, result) = execute_agents(&host, 2, ir, &dir);
+    assert!(matches!(result, Err(runtime::Stopped::Interrupted(_))));
+    assert!(!record.join("launched").exists());
+}
+
+#[test]
 fn final_body_reads_selected_bytes_after_one_agent_fails_to_start() {
     let mut ir = selections_workflow(&["ops", "call train 1", "call submit binary finalize=true"]);
     let roles = ir["roles"].as_array_mut().unwrap();

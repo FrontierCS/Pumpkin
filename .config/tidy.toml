@@ -1,5 +1,5 @@
 # The source files over tidy's cap on a file's lines, each with its ceiling, the most lines it may
 # hold (`FILE_CAP` and `CEILINGS` in `xtask/src/tidy.rs`).
 [long_files]
-"crates/gateway/src/lib.rs" = 1289
+"crates/gateway/src/lib.rs" = 1242
 "crates/runtime/src/record.rs" = 1214

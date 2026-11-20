@@ -9,7 +9,7 @@ use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::Event;
-use gateway::{Arrival, IncomingOp, Process, Put, RefusedOp, Session, Trees};
+use gateway::{IncomingOp, Process, Put, RefusedOp, Session, Trees};
 use provider::UnixTime;
 use schema::ir::{AbsolutePath, Dir, File};
 use schema::sandbox::op::OpReply;
@@ -26,9 +26,10 @@ use super::{Clock, Host, Inbox, Input, Report, Runtime, deadline, record};
 /// The agent's sandbox, from when it starts until it is deleted.
 pub(super) struct Agent {
     sandbox: Started,
-    /// The agent's command, until its end, or its session's, has been reported; `None` if it
-    /// didn't start.
+    /// The reserved command, until the driver has reported its exit or the end of its session.
     process: Option<Process>,
+    // The start is recorded once, even when the command sends an op before its confirmation.
+    launched: bool,
 }
 
 impl Agent {
@@ -54,6 +55,7 @@ impl Agent {
             Self {
                 sandbox,
                 process: None,
+                launched: false,
             },
             launch,
         ))
@@ -86,6 +88,10 @@ impl Agent {
         Some(Event::AgentFailed { agent, reason })
     }
 
+    pub(super) fn record_start(&mut self) -> bool {
+        self.process.is_some() && !std::mem::replace(&mut self.launched, true)
+    }
+
     pub(super) fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Deadline) -> io::Result<()> {
         self.sandbox.session.reply(op, reply, by)
     }
@@ -115,14 +121,6 @@ impl Agent {
     }
 }
 
-/// Arrivals can reach the driver before its launch thread returns the session. A deadline can
-/// also ask for teardown then; the session is collected as soon as the thread returns it.
-#[derive(Default)]
-pub(super) struct Starting {
-    pub(super) arrivals: Vec<(Duration, Arrival)>,
-    pub(super) tear_down: bool,
-}
-
 impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(super) fn tear_down_agent<'s>(
         &mut self,
@@ -130,7 +128,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         id: AgentId,
     ) -> Result<(), String> {
         if let Some(starting) = self.starting.get_mut(&id) {
-            starting.tear_down = true;
+            *starting = true;
             return Ok(());
         }
         let Some(mut agent) = self.agents.remove(&id) else {
@@ -179,7 +177,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let workflow = self.workflow();
         let sandboxes = self.sandboxes;
         let hard_end = self.unix_hard_end;
-        let (notices, ready) = mpsc::channel();
+        let mut ready = self.clock.inbox();
         let mut gates = BTreeMap::new();
         let mut startup = Duration::ZERO;
         for role in workflow.agents() {
@@ -191,22 +189,21 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let by = deadline(&clock, bound);
             let prepare = move || Agent::prepare(sandboxes, role, by, hard_end, inbox, clock);
             startup = startup.max(bound);
-            self.starting.insert(id, Starting::default());
+            self.starting.insert(id, false);
             let (release, gate) = mpsc::channel();
             let worker = Worker {
                 id,
                 clock: self.clock.clone(),
-                notices: notices.clone(),
+                notices: ready.sender(),
                 inbox: self.inbox.sender(),
                 gate,
             };
             thread::Builder::new()
-                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes))
+                .spawn_scoped(scope, move || worker.start(prepare(), sandboxes, by))
                 .context("starting the agent's setup thread")?;
             gates.insert(id, release);
         }
-        drop(notices);
-        self.release_agents(startup, gates, &ready);
+        self.release_agents(startup, gates, &mut ready);
         Ok(())
     }
 
@@ -214,31 +211,37 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         startup: Duration,
         mut gates: BTreeMap<AgentId, Sender<Duration>>,
-        ready: &Receiver<(AgentId, Result<(), String>)>,
+        ready: &mut impl Inbox<(AgentId, Duration, Result<(), String>)>,
     ) {
-        let by = deadline(&self.clock, startup);
         let mut releases = Vec::new();
         let mut failures = Vec::new();
         while !gates.is_empty() {
-            let Some(left) = by.remaining() else { break };
-            let Ok((id, status)) = ready.recv_timeout(left) else {
-                break;
+            if super::interruption::signal().is_some() {
+                return;
+            }
+            // Even after the driver wakes past the bound, take notices already queued.
+            let now = self.clock.now();
+            let until = startup.min(now.saturating_add(super::LOOK));
+            let Some((id, at, status)) = ready.wait(until) else {
+                if now >= startup {
+                    break;
+                }
+                continue;
             };
             if let Some(release) = gates.remove(&id) {
                 match status {
-                    Ok(()) => releases.push((id, release)),
+                    Ok(()) if at <= self.placed.startup(id.role()) => releases.push((id, release)),
+                    Ok(()) => failures.push((id, SETUP_EXPIRED.to_owned())),
                     Err(reason) => failures.push((id, reason)),
                 }
             }
         }
+        if super::interruption::signal().is_some() {
+            return;
+        }
         let at = self.clock.now();
         self.pending.push_back((at, Event::WorkStarted));
-        failures.extend(gates.into_keys().map(|id| {
-            (
-                id,
-                "the agent's setup missed the startup deadline".to_owned(),
-            )
-        }));
+        failures.extend(gates.into_keys().map(|id| (id, SETUP_EXPIRED.to_owned())));
         self.pending.extend(
             failures
                 .into_iter()
@@ -253,10 +256,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 }
 
+const SETUP_EXPIRED: &str = "the agent's setup missed the startup deadline";
+
 struct Worker<C> {
     id: AgentId,
     clock: C,
-    notices: Sender<(AgentId, Result<(), String>)>,
+    notices: Sender<(AgentId, Duration, Result<(), String>)>,
     inbox: Sender<Input>,
     gate: Receiver<Duration>,
 }
@@ -266,47 +271,48 @@ impl<C: Clock> Worker<C> {
         self,
         prepared: Result<(Agent, Result<Launch, String>), Unstarted>,
         sandboxes: &Sandboxes<'_, impl Host>,
+        by: Deadline,
     ) {
         let id = self.id;
-        let (agent, result) = match prepared {
-            Ok((mut agent, launch)) => {
-                let status = launch.as_ref().map(|_| ()).map_err(Clone::clone);
-                let _ = self.notices.send((id, status));
-                let result = launch.and_then(|launch| {
-                    let end = self
-                        .gate
-                        .recv()
-                        .map_err(|_| "the agent's setup missed the startup deadline".to_owned())?;
-                    agent
-                        .sandbox
-                        .session
-                        .start(launch, deadline(&self.clock, end))
-                        .context("the agent's command didn't start")
-                        .map(|process| agent.process = Some(process))
-                });
-                (Some(agent), result)
-            }
+        let (mut agent, launch) = match prepared {
+            Ok(prepared) => prepared,
             Err(failure) => {
                 let reason = format!("the agent's sandbox didn't start: {}", failure.reason());
-                let _ = self.notices.send((id, Err(reason)));
+                let _ = self.notices.send((id, self.clock.now(), Err(reason)));
                 match failure.dispose(sandboxes) {
-                    Ok(detail) => (
-                        None,
-                        Err(format!("the agent's sandbox didn't start: {detail}")),
-                    ),
+                    Ok(detail) => {
+                        let _ = self.inbox.send(Input::Prepared(id, Err(detail)));
+                    }
                     Err(reason) => {
                         let _ = self.inbox.send(Input::Child(Report::Undeleted(reason)));
-                        return;
                     }
                 }
+                return;
             }
         };
-        let _ = self.inbox.send(Input::Launched(
-            id,
-            self.clock.now(),
-            agent.map(Box::new),
-            result,
-        ));
+        let start = launch.and_then(|launch| {
+            let (process, send) = agent
+                .sandbox
+                .session
+                .prepare_start(by)
+                .context("reserving the agent's command")?;
+            agent.process = Some(process);
+            Ok(move |by| send(launch, by))
+        });
+        // The driver owns the session before any command may send an op or exit.
+        let _ = self.inbox.send(Input::Prepared(id, Ok(Box::new(agent))));
+        let status = start.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = self.notices.send((id, self.clock.now(), status));
+        if let Ok(start) = start
+            && let Ok(end) = self.gate.recv()
+            && super::interruption::signal().is_none()
+        {
+            let result =
+                start(deadline(&self.clock, end)).context("the agent's command didn't start");
+            let _ = self
+                .inbox
+                .send(Input::Launched(id, self.clock.now(), result));
+        }
     }
 }
 

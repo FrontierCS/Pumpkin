@@ -1818,6 +1818,7 @@ fn send_file(
 
 #[derive(Default)]
 struct Served {
+    pending_start: Option<u32>,
     caller: Option<Caller>,
     files: Files,
     result: Option<Vec<u8>>,
@@ -1835,7 +1836,6 @@ impl Served {
         replies: &mut Vec<(FromSandbox, Vec<u8>)>,
         shared: &Mutex<Status>,
     ) -> bool {
-        replies.push((FromSandbox::Done { stream }, Vec::new()));
         match launch.argv.program() {
             "exit" => {
                 let code = launch.argv.args()[0].parse().unwrap();
@@ -1844,7 +1844,10 @@ impl Served {
             }
             "stall" => status(shared).stalled = true,
             "crash" => return true,
-            "ops" => {
+            "mark" => {
+                fs::write(status(shared).record.as_ref().unwrap().join("launched"), "").unwrap();
+            }
+            "ops" | "ops_before_started" => {
                 let steps = launch.argv.args().iter().map(|arg| step(arg)).collect();
                 let record = status(shared).record.clone();
                 let made = (self.caller).insert(Caller::new(stream, steps, model, record));
@@ -1905,6 +1908,25 @@ impl Served {
         false
     }
 
+    fn answered(
+        &mut self,
+        op: u32,
+        reply: &OpReply,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+        shared: &Mutex<Status>,
+    ) -> Option<bool> {
+        let caller = self.caller.as_mut().filter(|caller| caller.op == op)?;
+        if let Some(stream) = self.pending_start.take() {
+            replies.push((FromSandbox::Done { stream }, Vec::new()));
+        }
+        if let Some(journal) = &status(shared).journal {
+            let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
+            // The session numbers its ops from 1, the run log from 0.
+            journal.tell(format!("a session read op {}'s reply: {kind}", op - 1));
+        }
+        Some(caller.answered(reply, replies))
+    }
+
     fn kill(&mut self, stream: u32, command: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
         if self.running.remove(&command) {
             let status = ExitStatus::Signal(9);
@@ -1931,6 +1953,7 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             return;
         }
         let Served {
+            pending_start,
             caller,
             files,
             result: _,
@@ -1949,6 +1972,12 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
                 replies.push((reply, Vec::new()));
             }
             ToSandbox::Start { stream, launch } => {
+                if launch.argv.program() == "ops_before_started" {
+                    *pending_start = Some(stream);
+                } else {
+                    replies.push((FromSandbox::Done { stream }, Vec::new()));
+                }
+
                 crashed = served.start(stream, &launch, model, &mut replies, shared);
             }
             ToSandbox::Kill { stream, command } => served.kill(stream, command, &mut replies),
@@ -1960,18 +1989,12 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             ToSandbox::Collect { stream, path } => {
                 collect(stream, &path, &mut served, &mut replies);
             }
-            ToSandbox::OpReply { op, reply } => match caller {
-                Some(caller) if caller.op == op => {
-                    if let Some(journal) = &status(shared).journal {
-                        let kind = json!(reply)["kind"].as_str().unwrap().to_owned();
-                        // The session numbers its ops from 1 (`Caller::op`), the run log from 0.
-                        journal.tell(format!("a session read op {}'s reply: {kind}", op - 1));
-                    }
-                    crashed = caller.answered(&reply, &mut replies);
-                }
-                // A reply to no op in flight breaks the protocol, which ends the session.
-                Some(_) | None => return,
-            },
+            ToSandbox::OpReply { op, reply } => {
+                let Some(next) = served.answered(op, &reply, &mut replies, shared) else {
+                    return;
+                };
+                crashed = next;
+            }
             response @ (ToSandbox::ModelResponse { .. }
             | ToSandbox::ModelData { .. }
             | ToSandbox::ModelEnd { .. }) => {
