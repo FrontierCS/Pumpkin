@@ -152,7 +152,7 @@ def verify(record, omit):
     peer_read = alice_finished = None
     finals = []
     read_ids = {}
-    deleted, selected = {}, {}
+    deleted, selected, finalized = {}, {}, {}
     eval_jobs, evaluated, final_leases = {}, set(), []
     refusals = set()
     responses = {"alice": 0, "bob": 0}
@@ -181,7 +181,7 @@ def verify(record, omit):
                     ]
                     if action["selections"] != entries:
                         raise ValueError(
-                            "final call received different sources than the agents finalized"
+                            "final call received different sources than the agents selected"
                         )
                 if (
                     action["kind"] == "start_lease"
@@ -208,7 +208,9 @@ def verify(record, omit):
                             args,
                             payload(record, action["payload"]),
                         )
-                if action["kind"] == "reply" and action["reply"]["kind"] == "refused":
+                if action["kind"] != "reply":
+                    continue
+                if action["reply"]["kind"] == "refused":
                     message = action["reply"]["message"]
                     if (
                         grant == "post"
@@ -218,16 +220,18 @@ def verify(record, omit):
                         refusals.add((callers[event["caller"]], "post"))
                     if grant == "submit" and "`--arg role`" in message:
                         refusals.add((callers[event["caller"]], "submit"))
-                if (
-                    action["kind"] == "reply"
-                    and action["reply"].get("returned", {}).get("state") == "accepted"
-                ):
+                state = action["reply"].get("returned", {}).get("state")
+                if state in ("stored", "accepted"):
                     role = callers[event["caller"]]
                     if grant != "submit":
-                        raise ValueError(f"{role} finalized with the wrong grant")
+                        raise ValueError(
+                            f"{role} selected a source with the wrong grant"
+                        )
                     selected[role] = request["payload"]
-                    if role == "alice":
-                        alice_finished = line["seq"]
+                    if state == "accepted":
+                        finalized[role] = request["payload"]
+                        if role == "alice":
+                            alice_finished = line["seq"]
             if event.get("kind") == "sandbox_deleted":
                 label = event["sandbox"]
                 if label in deleted:
@@ -309,15 +313,21 @@ def verify(record, omit):
             raise ValueError(
                 f"expected successful Responses output from both members: {responses}"
             )
-        if evaluated != responses.keys():
-            raise ValueError("expected a draft evaluation from each agent")
+        missing = []
+        for role in responses:
+            if role not in finalized:
+                missing.append(f"{role} did not finalize its source")
+            if role not in evaluated:
+                missing.append(f"{role} had no completed draft evaluation")
+        if missing:
+            raise ValueError(", ".join(missing))
         print(f"Successful model responses: {responses}")
     elif refusals != {("alice", "post"), ("alice", "submit"), ("bob", "submit")}:
         raise ValueError(
             "expected refusals of Alice's forged post and both submission role overrides"
         )
     best = check_scores(
-        record, outcome["agents"], result, selected, final_leases, codex, omit
+        record, outcome["agents"], result, finalized, final_leases, codex, omit
     )
     (final,) = finals
     paths = {
