@@ -1240,9 +1240,9 @@ impl Caller {
                     await_file(&record.join(path));
                     continue;
                 }
-                Some(Step::Logged(kind)) => {
+                Some(Step::Logged(part)) => {
                     let record = self.record.as_ref().unwrap();
-                    logged(record, &format!(r#""kind":"{kind}""#));
+                    logged(record, &part);
                     continue;
                 }
                 Some(Step::Exit) => {
@@ -1443,8 +1443,8 @@ fn state_name(reply: &OpReply) -> String {
 // `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
 // <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
 // <lease> moved|failed` until its last transfer ended so. `await_log <kind>` waits until the run
-// log holds an entry of kind `kind`, in the record that `Sim::records` named: what a run's other
-// children log has an order against the agent's acts only through it.
+// log holds an entry of kind `kind`, in the record that `Sim::records` named. An optional caller
+// limits that wait to the named caller's event.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -1510,7 +1510,10 @@ fn step(arg: &str) -> Step {
         }
         ["sleep", seconds] => return Step::Sleep(seconds.parse().unwrap()),
         ["await_file", path] => return Step::File((*path).to_owned()),
-        ["await_log", kind] => return Step::Logged((*kind).to_owned()),
+        ["await_log", kind] => return Step::Logged(format!(r#""kind":"{kind}""#)),
+        ["await_log", kind, caller] => {
+            return Step::Logged(format!(r#""caller":"{caller}","kind":"{kind}""#));
+        }
         ["exit"] => return Step::Exit,
         ["release"] => return Step::Release,
         ["result"] => return Step::Result,
@@ -1964,20 +1967,13 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             // session's writes fill the connection's buffers.
             return;
         }
-        let Served {
-            pending_start,
-            caller,
-            files,
-            result: _,
-            printed: _,
-            running: _,
-            held: _,
-        } = &mut served;
         match request {
-            ToSandbox::Put { stream, dir, root } => files.begin(stream, dir, root, &mut replies),
-            ToSandbox::Entry { entry, .. } => files.entry(entry),
-            ToSandbox::Data { .. } => files.data(&body),
-            ToSandbox::End { stream } => files.end(stream, &mut replies),
+            ToSandbox::Put { stream, dir, root } => {
+                served.files.begin(stream, dir, root, &mut replies);
+            }
+            ToSandbox::Entry { entry, .. } => served.files.entry(entry),
+            ToSandbox::Data { .. } => served.files.data(&body),
+            ToSandbox::End { stream } => served.files.end(stream, &mut replies),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;
@@ -1985,11 +1981,12 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             }
             ToSandbox::Start { stream, launch } => {
                 if launch.argv.program() == "ops_before_started" {
-                    *pending_start = Some(stream);
-                } else {
-                    replies.push((FromSandbox::Done { stream }, Vec::new()));
+                    served.pending_start = Some(stream);
+                } else if frame::write(&mut connection, &FromSandbox::Done { stream }, &[]).is_err()
+                {
+                    return;
                 }
-
+                // The command can wait for the run to record its start before making an op.
                 crashed = served.start(stream, &launch, model, &mut replies, shared);
             }
             ToSandbox::Kill { stream, command } => served.kill(stream, command, &mut replies),
@@ -2010,7 +2007,8 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             response @ (ToSandbox::ModelResponse { .. }
             | ToSandbox::ModelData { .. }
             | ToSandbox::ModelEnd { .. }) => {
-                let heard = caller
+                let heard = served
+                    .caller
                     .as_mut()
                     .map(|caller| caller.heard(response, &body, &mut replies));
                 // An answer to no model request in flight breaks the protocol, which ends the
