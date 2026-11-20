@@ -158,6 +158,7 @@ pub(super) enum Event {
     ModelAnswered {
         caller: Option<CallerName>,
         request: u64,
+        entry: Option<usize>,
         api: Option<Api>,
         model: Option<String>,
         #[serde(default, deserialize_with = "optional_nanos")]

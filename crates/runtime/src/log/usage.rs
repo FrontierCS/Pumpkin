@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use schema::ir::{Api, ApiRoute};
+use schema::workflow::Workflow;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -115,28 +116,13 @@ impl ModelUse {
         prices: &BTreeMap<String, TokenPrices>,
         counted: impl Fn(&(Api, String)) -> bool,
     ) -> TokensCost {
-        let mut cost = TokensCost {
-            usd: None,
-            unpriced: Vec::new(),
-            unreported: 0,
-        };
+        let mut cost = TokensCost::default();
         let keys = self.by_model.keys().chain(self.unreported.keys());
         let keys: BTreeSet<&(Api, String)> = keys.filter(|key| counted(key)).collect();
         for key in keys {
             let (_, model) = key;
             let unreported = self.unreported.get(key).copied().unwrap_or(0);
-            match (prices.get(model), self.by_model.get(key)) {
-                (None, _) => cost.unpriced.push(model.clone()),
-                (Some(prices), Some(tokens)) => match prices.usd(tokens) {
-                    Some(usd) => {
-                        *cost.usd.get_or_insert(0.0) += usd;
-                        cost.unreported += unreported;
-                    }
-                    None => cost.unpriced.push(model.clone()),
-                },
-                // Its responses reported no tokens, whose cost is unknown, never zero.
-                (Some(_), None) => cost.unreported += unreported,
-            }
+            cost.add(model, prices.get(model), self.by_model.get(key), unreported);
         }
         // A model may have answered through entries of two APIs.
         cost.unpriced.sort_unstable();
@@ -146,7 +132,7 @@ impl ModelUse {
 }
 
 /// What the tokens that responses reported cost, and what that leaves out.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TokensCost {
     /// What the tokens that responses reported cost, in US dollars; `None` if no model that
     /// reported tokens has a price.
@@ -157,6 +143,25 @@ pub struct TokensCost {
     /// How many responses of the models that have a price went with tokens unreported
     /// ([`ModelUse::unreported`]), whose cost `usd` leaves out in whole or in part.
     pub unreported: u64,
+}
+
+impl TokensCost {
+    fn add(
+        &mut self,
+        model: &str,
+        prices: Option<&TokenPrices>,
+        tokens: Option<&Tokens>,
+        missing: u64,
+    ) {
+        match (prices, tokens) {
+            (Some(_), None) => self.unreported += missing,
+            (Some(prices), Some(tokens)) if let Some(usd) = prices.usd(tokens) => {
+                *self.usd.get_or_insert(0.0) += usd;
+                self.unreported += missing;
+            }
+            _ => self.unpriced.push(model.to_owned()),
+        }
+    }
 }
 
 /// A run's cost in US dollars, and what the total leaves out.
@@ -227,9 +232,10 @@ impl PlaceUse {
 /// them, `cached`, `cache_write` and `reasoning`; `sandboxes`, one object a place, with `provider`,
 /// `class`, `count`, `lasted_ns`, `charged_ns` and `busy_ns` if a lease ran there, `undeleted` if
 /// some weren't deleted, and `usd_per_hour` and `usd` if its class is priced; `calls`, if a call
-/// made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; and `usd`
+/// made model requests, each with its `job`, `grant`, `model_requests` and `tokens`; `routes` for
+/// the used entries of each role, as `docs/record.md` describes; and `usd`
 /// with `unpriced_models` and `unreported_responses` ([`Cost`]), unless nothing is priced.
-pub(crate) fn usage_of(progress: &Progress) -> Value {
+pub(crate) fn usage_of(progress: &Progress, workflow: &Workflow) -> Value {
     let sandboxes = progress.sandboxes().into_iter().map(|(place, used)| {
         let mut sandboxes = json!({
             "provider": place.provider,
@@ -272,7 +278,11 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
         })
         .collect();
     if !calls.is_empty() {
-        usage["calls"] = json!(calls);
+        usage["calls"] = Value::Array(calls);
+    }
+    let routes = routes(progress, workflow);
+    if !routes.is_empty() {
+        usage["routes"] = Value::Array(routes);
     }
     if let Some(cost) = progress.cost() {
         usage["usd"] = json!(cost.usd());
@@ -284,6 +294,88 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
         }
     }
     usage
+}
+
+fn routes(progress: &Progress, workflow: &Workflow) -> Vec<Value> {
+    if progress.route_requests.is_empty() {
+        return Vec::new();
+    }
+    let mut callers: BTreeMap<&str, Vec<&ModelUse>> = BTreeMap::new();
+    if let Some(agent) = &progress.agent.model {
+        let name = &workflow.sandbox(workflow.agent().role).name;
+        callers.entry(name.as_str()).or_default().push(agent);
+    }
+    for call in &progress.calls {
+        if let Some(role) = &call.role {
+            callers.entry(role).or_default().push(&call.model);
+        }
+    }
+    let mut routes = Vec::new();
+    for (role, sandbox) in workflow.roles() {
+        let name = sandbox.name.as_str();
+        let Some(entries) = progress.route_requests.get(name) else {
+            continue;
+        };
+        let Some((route, callers)) = workflow.model(role).zip(callers.get(name)) else {
+            continue;
+        };
+        for (index, entry) in route.as_slice().iter().enumerate() {
+            if let Some(requests) = entries.get(&index) {
+                let mut row = route_usage(entry, callers, &progress.token_prices);
+                row["role"] = json!(name);
+                row["entry"] = json!(index);
+                row["model_requests"] = json!(requests);
+                routes.push(row);
+            }
+        }
+    }
+    routes
+}
+
+fn route_usage(
+    entry: &ApiRoute,
+    callers: &[&ModelUse],
+    prices: &BTreeMap<String, TokenPrices>,
+) -> Value {
+    let mut tokens = Tokens::default();
+    let mut cost = TokensCost::default();
+    let mut unreported = 0;
+    for model in entry.models.as_slice() {
+        let key = (entry.api, model.to_string());
+        let mut reported = None::<Tokens>;
+        let mut missing = 0;
+        for caller in callers {
+            if let Some(used) = caller.by_model.get(&key) {
+                reported.get_or_insert_default().plus(used);
+            }
+            missing += caller.unreported.get(&key).copied().unwrap_or(0);
+        }
+        if let Some(reported) = &reported {
+            tokens.plus(reported);
+        } else if missing == 0 {
+            continue;
+        }
+        cost.add(
+            model.as_str(),
+            prices.get(model.as_str()),
+            reported.as_ref(),
+            missing,
+        );
+        unreported += missing;
+    }
+    let mut row = json!({ "api": entry.api, "tokens": tokens_json(&tokens) });
+    if unreported == 0 && tokens.reported == 0 {
+        row["usd"] = json!(0.0);
+    } else if let Some(usd) = cost.usd {
+        row["usd"] = json!(usd);
+    }
+    if !cost.unpriced.is_empty() {
+        row["unpriced_models"] = json!(cost.unpriced);
+    }
+    if unreported > 0 {
+        row["unreported_responses"] = json!(unreported);
+    }
+    row
 }
 
 /// What a finished run used, as the `usage` of its `outcome.json` says.

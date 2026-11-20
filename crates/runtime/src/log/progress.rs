@@ -53,6 +53,7 @@ pub struct Progress {
     pub leases: Vec<LeaseSpan>,
     /// The model requests of every role.
     pub model: ModelUse,
+    pub(super) route_requests: BTreeMap<String, BTreeMap<usize, u64>>,
     /// When the work phase ended: when the agent's teardown began.
     pub work_end: Option<Duration>,
     /// When the core finished or abandoned the run.
@@ -355,6 +356,7 @@ pub(super) fn readout(
         calls,
         leases,
         model,
+        route_requests,
         work_end,
         end,
     } = reading;
@@ -375,6 +377,7 @@ pub(super) fn readout(
         calls,
         leases,
         model,
+        route_requests,
         work_end,
         end,
         prices: roles.prices.clone(),
@@ -429,6 +432,7 @@ pub(super) struct Reading {
     calls: Vec<CallSpan>,
     leases: Vec<LeaseSpan>,
     model: ModelUse,
+    route_requests: BTreeMap<String, BTreeMap<usize, u64>>,
     work_end: Option<Duration>,
     end: Option<Duration>,
 }
@@ -439,7 +443,7 @@ impl Reading {
         let at = line.when();
         let event = line.event.as_ref();
         if let Some(event) = event {
-            self.event(at, event);
+            self.event(at, event, roles);
         }
         let request = event.and_then(logged::Event::request);
         let closed = if matches!(request, Some(logged::Request::LeaseClose)) {
@@ -492,7 +496,7 @@ impl Reading {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per kind of event")]
-    fn event(&mut self, at: Duration, event: &logged::Event) {
+    fn event(&mut self, at: Duration, event: &logged::Event, roles: &Roles) {
         match event {
             logged::Event::RunStarted {
                 unix_ns,
@@ -583,6 +587,7 @@ impl Reading {
             logged::Event::ModelAnswered {
                 caller,
                 request,
+                entry,
                 api,
                 model,
                 first_token_ns,
@@ -604,16 +609,21 @@ impl Reading {
                 };
                 self.model.take(at, &answered);
                 // The caller's own, which the run's count too.
-                match caller {
+                let role = match caller {
                     Some(logged::CallerName::Agent) => {
                         self.agent.model.get_or_insert_default().take(at, &answered);
+                        Some(roles.agent_role.as_str())
                     }
-                    Some(logged::CallerName::Job(job)) => {
-                        if let Some(call) = self.call(*job) {
-                            call.model.take(at, &answered);
-                        }
-                    }
-                    None => {}
+                    Some(logged::CallerName::Job(job)) => self.call(*job).and_then(|call| {
+                        call.model.take(at, &answered);
+                        call.role.as_deref()
+                    }),
+                    None => None,
+                };
+                if let Some((role, entry)) = role.zip(*entry) {
+                    let role = role.to_owned();
+                    let requests = self.route_requests.entry(role).or_default();
+                    *requests.entry(entry).or_default() += 1;
                 }
             }
             logged::Event::SandboxGpus { sandbox, gpus } => {
@@ -845,16 +855,27 @@ impl ModelUse {
 
 impl Tokens {
     pub(crate) fn add(&mut self, usage: &route::Usage) {
-        self.reported += 1;
-        self.input += usage.input_tokens;
-        self.output += usage.output_tokens;
-        if let Some(cached) = usage.cached_tokens {
+        self.plus(&Self {
+            reported: 1,
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            cached: usage.cached_tokens,
+            cache_write: usage.cache_write_tokens,
+            reasoning: usage.reasoning_tokens,
+        });
+    }
+
+    pub(super) fn plus(&mut self, other: &Self) {
+        self.reported += other.reported;
+        self.input += other.input;
+        self.output += other.output;
+        if let Some(cached) = other.cached {
             *self.cached.get_or_insert(0) += cached;
         }
-        if let Some(written) = usage.cache_write_tokens {
+        if let Some(written) = other.cache_write {
             *self.cache_write.get_or_insert(0) += written;
         }
-        if let Some(reasoning) = usage.reasoning_tokens {
+        if let Some(reasoning) = other.reasoning {
             *self.reasoning.get_or_insert(0) += reasoning;
         }
     }

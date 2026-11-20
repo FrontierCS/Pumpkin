@@ -184,7 +184,13 @@ impl<'r, H: Host> Run<'r, H> {
         let outcome = self.run_on(sandboxd, (private, dialer), bodies, started);
         // None if the run never began its log.
         let (outcome, usage) = match log::progress(&self.dir) {
-            Ok(readout) => (outcome, readout.progress.as_ref().map(log::usage_of)),
+            Ok(readout) => {
+                let usage = readout
+                    .progress
+                    .as_ref()
+                    .map(|progress| log::usage_of(progress, self.placed.workflow()));
+                (outcome, usage)
+            }
             Err(error) => (failed_also(outcome, Err(error.into())), None),
         };
         let mut recorded = log::outcome_json(&outcome);
