@@ -75,6 +75,7 @@ impl runtime::Bodies for Bodies<'_> {
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
                 Ok(Vec::new())
             }
+            "board" => board(target),
             "slow" => {
                 target.run(&argv(&["slow"]))?;
                 Ok(Vec::new())
@@ -139,6 +140,7 @@ impl runtime::Bodies for Bodies<'_> {
                 Ok(vec![(Name::from_static("score"), score)])
             }
             "submissions" => {
+                assert_eq!(target.caller(), None);
                 let mut files = Map::new();
                 let path = AbsolutePath::from_static("/work/submission");
                 let mut command = 0;
@@ -226,4 +228,15 @@ fn raw_score(target: &mut dyn runtime::Target) -> Result<Value, String> {
     let result = target.get(&AbsolutePath::from_static("/pumpkin/out/result.json"))?;
     let mut result: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
     Ok(result["raw_score"].take())
+}
+
+fn board(target: &mut dyn runtime::Target) -> Result<Vec<(Name, Value)>, String> {
+    let caller = target.caller().unwrap().to_owned();
+    let path = AbsolutePath::from_static("/work/message");
+    if caller == "alpha" {
+        target.put(&path, 0)?;
+    }
+    target.run(&serde_json::from_value(json!(["print", caller])).unwrap())?;
+    let message = target.get(&path)?;
+    Ok(vec![(Name::from_static("message"), json!(message))])
 }

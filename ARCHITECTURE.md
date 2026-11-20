@@ -139,6 +139,10 @@ down. Work ends at the common deadline or once every agent has ended its work. T
 receives every agent role's last submission, an opaque payload or `None`. Its calls to `put`
 determine which payloads enter the target and where they go.
 
+A shared target has one sandbox across its work-phase grants. The core admits one complete
+body at a time across all those grants. The runtime supplies the caller’s role from its session
+and confirms disposal of work sandboxes before it starts the final call.
+
 ### `crates/recipe`
 
 Image recipes, Dockerfiles. `check` refuses a recipe that may have Docker fetch what no digest

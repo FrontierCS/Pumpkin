@@ -213,6 +213,14 @@ impl Run<'_> {
         Caller::Agent(self.workflow.agents().next().unwrap().id)
     }
 
+    fn shared_target(&self, name: &str) -> schema::workflow::TargetId {
+        self.workflow
+            .shared_targets()
+            .find(|(id, _)| self.workflow.sandbox(id.role()).name.as_str() == name)
+            .unwrap()
+            .0
+    }
+
     fn event(&mut self, event: &str) -> Event {
         let words: Vec<&str> = event.splitn(3, ' ').collect();
         let code = |word: &str| ExitStatus::Code(word.parse().unwrap());
@@ -226,6 +234,17 @@ impl Run<'_> {
             Caller::Job(_) => panic!("a job cannot send an agent event"),
         };
         match words[0] {
+            "shared_failed" | "shared_torn_down" => {
+                let target = self.shared_target(words[1]);
+                if words[0] == "shared_failed" {
+                    Event::SharedFailed {
+                        target,
+                        reason: words[2].to_owned(),
+                    }
+                } else {
+                    Event::SharedTornDown { target }
+                }
+            }
             "work_started" => Event::WorkStarted,
             "agent_torn_down" => Event::AgentTornDown { agent: agent() },
             "agent_exited" => Event::AgentExited {
@@ -421,6 +440,10 @@ impl Run<'_> {
                 max_bytes,
             } => transfer_text((*lease, *holder), *transfer, direction, *max_bytes),
             Action::CloseLease { lease } => format!("close lease {}", lease.0),
+            Action::TearDownShared { target } => format!(
+                "tear down shared {}",
+                self.workflow.sandbox(target.role()).name
+            ),
             Action::TearDownAgent { agent } => {
                 format!("tear down {}", self.workflow.sandbox(agent.role()).name)
             }
@@ -3145,5 +3168,88 @@ fn agents_without_submissions_are_judged() {
               bob: AgentFailed("could not start"), missing
               final returned [score=null]
         "#]],
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the transcript")]
+fn shared_calls_serialize_across_grants_and_drain_before_judging() {
+    check(
+        |ir| {
+            two_agents(ir);
+            let roles = ir["roles"].as_array_mut().unwrap();
+            let mut board = roles[1].clone();
+            board["name"] = json!("board");
+            board["runtime"] = json!({"shared":{"cwd":"/","command":{"argv":["board"],"cwd":"/"}}});
+            for role in &mut *roles {
+                if let Some(grants) = role["runtime"]
+                    .get_mut("agent")
+                    .and_then(|agent| agent["grants"].as_array_mut())
+                {
+                    let mut board_call = grants
+                        .iter()
+                        .find(|grant| grant["name"] == "train")
+                        .unwrap()
+                        .clone();
+                    board_call["name"] = json!("board");
+                    board_call["job"]["target"] = json!("board");
+                    grants.push(board_call);
+                }
+            }
+            roles.push(board);
+        },
+        r#"
+        100 work_started
+        200 @zoe call board 3
+        210 @bob call board 7
+        220 call_started 0
+        230 call_returned 0 count=1
+        240 @bob call board 7
+        250 shared_failed board exited
+        260 call_failed 1 lost
+        270 @zoe call board 1
+        300 @zoe agent_exited 0
+        310 @bob agent_exited 0
+        320 @bob agent_torn_down
+        330 @zoe agent_torn_down
+        340 shared_torn_down board
+        350 call_returned 2 score=0
+    "#,
+        &expect![[r#"
+        start
+          start agents
+          (tick due at 30000)
+        100 work_started
+          (tick due at 20100)
+        200 @zoe call board 3
+          reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+          start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
+        210 @bob call board 7
+          refuse op 2: `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
+        220 call_started 0
+        230 call_returned 0 count=1
+        240 @bob call board 7
+          reply to op 3: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+          start call 1 of board on op 3's payload of 7 bytes, with a timeout of 19.86s
+        250 shared_failed board exited
+          stop call 1
+        260 call_failed 1 lost
+        270 @zoe call board 1
+          refuse op 4: `board` cannot run because its shared sandbox is unavailable
+        300 @zoe agent_exited 0
+          tear down zoe
+        310 @bob agent_exited 0
+          tear down bob
+          (tick due at 180000)
+        320 @bob agent_torn_down
+        330 @zoe agent_torn_down
+          tear down shared board
+        340 shared_torn_down board
+          start call 2 of final on zoe=missing, bob=missing, with a timeout of 120s
+        350 call_returned 2 score=0
+          finish: zoe: AgentExited(Code(0)), missing
+          bob: AgentExited(Code(0)), missing
+          final returned [score=0]
+    "#]],
     );
 }

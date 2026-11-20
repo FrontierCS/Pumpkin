@@ -1,7 +1,7 @@
 //! The agent's sandbox, which runs the agent's IR command, once its directories, files and
 //! standard input are in place, and whose session takes its ops.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,7 +16,7 @@ use schema::sandbox::op::OpReply;
 use schema::sandbox::{
     ExitStatus, Launch, OpPayloadLimit, command_stdin, file_mode, log_dir, out_dir, pumpkin_dir,
 };
-use schema::workflow::{self, AgentId, Workflow};
+use schema::workflow::{self, AgentId, TargetId, Workflow};
 use stdx::{Context, Deadline};
 
 use super::log::Entry;
@@ -122,6 +122,31 @@ impl Agent {
 }
 
 impl<'r, H: Host + 'r> Runtime<'r, H> {
+    pub(super) fn prepared<'s>(
+        &mut self,
+        scope: Option<&'s Scope<'s, 'r>>,
+        id: AgentId,
+        agent: Result<Box<Agent>, String>,
+    ) -> Result<(), String> {
+        match agent {
+            Ok(agent) => {
+                self.agents.insert(id, *agent);
+            }
+            Err(detail) => {
+                let role = &self.workflow().sandbox(id.role()).name;
+                self.log.note(&format!(
+                    "agent `{role}`: the agent's sandbox didn't start: {detail}"
+                ))?;
+            }
+        }
+        if self.starting.remove(&id) == Some(true)
+            && let Some(scope) = scope
+        {
+            self.tear_down_agent(scope, id)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn tear_down_agent<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
@@ -179,7 +204,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let hard_end = self.unix_hard_end;
         let mut ready = self.clock.inbox();
         let mut gates = BTreeMap::new();
-        let mut startup = Duration::ZERO;
+        self.start_services(scope, &ready.sender())?;
+        let mut startup = self
+            .services
+            .keys()
+            .map(|target| self.placed.startup(target.role()))
+            .max()
+            .unwrap_or_default();
         for role in workflow.agents() {
             let id = role.id;
             self.serve(decision::Caller::Agent(id));
@@ -211,28 +242,51 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         &mut self,
         startup: Duration,
         mut gates: BTreeMap<AgentId, Sender<Duration>>,
-        ready: &mut impl Inbox<(AgentId, Duration, Result<(), String>)>,
+        ready: &mut impl Inbox<(Duration, Ready)>,
     ) {
         let mut releases = Vec::new();
         let mut failures = Vec::new();
-        while !gates.is_empty() {
+        let mut waiting: BTreeSet<_> = self.services.keys().copied().collect();
+        while !gates.is_empty() || !waiting.is_empty() {
             if super::interruption::signal().is_some() {
                 return;
             }
             // Even after the driver wakes past the bound, take notices already queued.
             let now = self.clock.now();
             let until = startup.min(now.saturating_add(super::LOOK));
-            let Some((id, at, status)) = ready.wait(until) else {
+            let Some((at, notice)) = ready.wait(until) else {
                 if now >= startup {
                     break;
                 }
                 continue;
             };
-            if let Some(release) = gates.remove(&id) {
-                match status {
-                    Ok(()) if at <= self.placed.startup(id.role()) => releases.push((id, release)),
-                    Ok(()) => failures.push((id, SETUP_EXPIRED.to_owned())),
-                    Err(reason) => failures.push((id, reason)),
+            match notice {
+                Ready::Agent(id, status) => {
+                    if let Some(release) = gates.remove(&id) {
+                        let reason = match status {
+                            Ok(()) if at <= self.placed.startup(id.role()) => {
+                                releases.push((id, release));
+                                continue;
+                            }
+                            Ok(()) => SETUP_EXPIRED.to_owned(),
+                            Err(reason) => reason,
+                        };
+                        failures.push(Event::AgentFailed { agent: id, reason });
+                    }
+                }
+                Ready::Shared(target, status) => {
+                    waiting.remove(&target);
+                    if let Some(service) = self.services.get_mut(&target) {
+                        match status {
+                            Ok(process) if at <= self.placed.startup(target.role()) => {
+                                service.process = Some(process);
+                            }
+                            Ok(_) => {
+                                failures.extend(service.fail(target, SHARED_EXPIRED.to_owned()));
+                            }
+                            Err(reason) => failures.extend(service.fail(target, reason)),
+                        }
+                    }
                 }
             }
         }
@@ -241,12 +295,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
         let at = self.clock.now();
         self.pending.push_back((at, Event::WorkStarted));
-        failures.extend(gates.into_keys().map(|id| (id, SETUP_EXPIRED.to_owned())));
-        self.pending.extend(
-            failures
-                .into_iter()
-                .map(|(agent, reason)| (at, Event::AgentFailed { agent, reason })),
-        );
+        failures.extend(gates.into_keys().map(|agent| Event::AgentFailed {
+            agent,
+            reason: SETUP_EXPIRED.to_owned(),
+        }));
+        for target in waiting {
+            if let Some(service) = self.services.get_mut(&target) {
+                failures.extend(service.fail(target, SHARED_EXPIRED.to_owned()));
+            }
+        }
+        self.pending
+            .extend(failures.into_iter().map(|event| (at, event)));
         let end = at
             .min(startup)
             .saturating_add(self.workflow().work_deadline());
@@ -258,10 +317,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
 const SETUP_EXPIRED: &str = "the agent's setup missed the startup deadline";
 
+const SHARED_EXPIRED: &str = "the shared role's setup missed the startup deadline";
+
+pub(super) enum Ready {
+    Agent(AgentId, Result<(), String>),
+    Shared(TargetId, Result<Process, String>),
+}
+
 struct Worker<C> {
     id: AgentId,
     clock: C,
-    notices: Sender<(AgentId, Duration, Result<(), String>)>,
+    notices: Sender<(Duration, Ready)>,
     inbox: Sender<Input>,
     gate: Receiver<Duration>,
 }
@@ -278,7 +344,9 @@ impl<C: Clock> Worker<C> {
             Ok(prepared) => prepared,
             Err(failure) => {
                 let reason = format!("the agent's sandbox didn't start: {}", failure.reason());
-                let _ = self.notices.send((id, self.clock.now(), Err(reason)));
+                let _ = self
+                    .notices
+                    .send((self.clock.now(), Ready::Agent(id, Err(reason))));
                 match failure.dispose(sandboxes) {
                     Ok(detail) => {
                         let _ = self.inbox.send(Input::Prepared(id, Err(detail)));
@@ -302,7 +370,9 @@ impl<C: Clock> Worker<C> {
         // The driver owns the session before any command may send an op or exit.
         let _ = self.inbox.send(Input::Prepared(id, Ok(Box::new(agent))));
         let status = start.as_ref().map(|_| ()).map_err(Clone::clone);
-        let _ = self.notices.send((id, self.clock.now(), status));
+        let _ = self
+            .notices
+            .send((self.clock.now(), Ready::Agent(id, status)));
         if let Ok(start) = start
             && let Ok(end) = self.gate.recv()
             && super::interruption::signal().is_none()

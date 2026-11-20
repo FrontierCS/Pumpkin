@@ -66,6 +66,13 @@ impl Workflow {
         &self.targets[&id.0]
     }
 
+    /// One command per shared sandbox, in declaration order.
+    pub fn shared_targets(&self) -> impl Iterator<Item = (TargetId, &Command)> {
+        self.targets
+            .iter()
+            .filter_map(|(role, target)| Some((TargetId(*role), target.shared.as_ref()?)))
+    }
+
     pub fn runner(&self, id: RunnerId) -> &Runner {
         &self.runners[&id.0]
     }
@@ -380,6 +387,8 @@ pub struct Agent {
 /// A target role; see [`ir::TargetRuntime`](crate::ir::TargetRuntime).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    /// The resident command of a shared target, absent for a fresh call sandbox.
+    pub shared: Option<Command>,
     pub cwd: AbsolutePath,
     pub env: Env,
     /// The target's model route, with the budgets of its entries, if it has one.

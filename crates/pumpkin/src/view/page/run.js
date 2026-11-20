@@ -82,7 +82,8 @@ import { drawTalk, laneRole } from "./talk.js";
  * @typedef {object} Lane a sandbox's lane: an agent's, a call's (`job <n>`) or a lease's
  * @property {string} lane
  * @property {string} [caller] the caller that the lane's trace is of, `agent-<n>` or `job-<n>`; none for a lease
- * @property {"agent" | "target" | "runner"} kind
+ * @property {"agent" | "target" | "runner" | "shared"} kind
+ * @property {string} [service] the resident sandbox that ran this job
  * @property {string | null} [role]
  * @property {{ function: string } | "final"} [of] whose body a call's lane calls: a job function's, by its name, or the final call's
  * @property {string | null} [grant] a lease's session

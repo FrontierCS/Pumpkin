@@ -25,7 +25,7 @@ use core::num::NonZeroU64;
 use core::time::Duration;
 
 use schema::sandbox::op::{self, FailureCode};
-use schema::workflow::JobOf;
+use schema::workflow::{JobOf, TargetId, Workflow};
 
 use super::{CallResult, JobId};
 
@@ -168,6 +168,14 @@ impl Jobs {
         let jobs = self.0.iter().enumerate();
         jobs.filter(move |(_, job)| job.call == call)
             .map(|(index, _)| JobId(index as u64))
+    }
+
+    pub(super) fn active_on(&self, workflow: &Workflow, target: TargetId) -> Option<JobId> {
+        let index = self.0.iter().position(|job| {
+            matches!(job.call, JobOf::Function(id) if workflow.job_function(id).target == target)
+                && !matches!(job.state, State::Ended { .. })
+        })?;
+        Some(JobId(index as u64))
     }
 
     pub(super) fn get(&self, job: JobId) -> Option<&Job> {

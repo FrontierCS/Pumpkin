@@ -12,7 +12,36 @@ use schema::sandbox::tree::{self, Limits, Modes};
 use schema::sandbox::{Entry, RelativePath, Root, ToSandbox};
 use stdx::Deadline;
 
-use crate::{Part, Put, Reply, Route, Shared, broke, context, out_of_turn};
+use crate::{Part, Put, Reply, Route, Shared, Trees, broke, context, out_of_turn};
+
+impl Trees {
+    /// As [`crate::Session::put`], with `root` saying how `dir` is made. [`Root::New`] requires
+    /// a new directory.
+    pub fn put<'a>(
+        &self,
+        dir: &AbsolutePath,
+        root: Root,
+        entries: impl IntoIterator<Item = Put<'a>>,
+        by: Deadline,
+    ) -> io::Result<()> {
+        self.shared.put(dir, root, entries, by)
+    }
+
+    /// Collects as [`crate::Session::collect`] does. Once `stopped` returns true before a part
+    /// of the tree, returns [`io::ErrorKind::Interrupted`] and keeps the session open.
+    /// Returns the tree's entries, each with its mode as the sandbox sent it, which the host's
+    /// umask may have narrowed in `into`.
+    pub fn collect(
+        &self,
+        path: &AbsolutePath,
+        into: &Path,
+        limits: Limits,
+        by: Deadline,
+        stopped: &mut dyn FnMut() -> bool,
+    ) -> io::Result<Vec<Entry>> {
+        self.shared.collect(path, into, limits, by, stopped)
+    }
+}
 
 impl Shared {
     pub(crate) fn put<'a>(

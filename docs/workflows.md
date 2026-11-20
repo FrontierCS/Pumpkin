@@ -40,7 +40,7 @@ Every role has these keys:
 | `image` | what `image()` returns, which `pumpkin run` builds |
 | `user` | `{"uid": …, "gid": …}`, the user its commands run as, neither of them 0 |
 | `needs` | what each of its sandboxes needs, from which the run picks its class of sandbox |
-| `runtime` | its kind and what the kind holds: `{"agent": {…}}`, `{"target": {…}}` or `{"runner": {…}}` |
+| `runtime` | its kind and what the kind holds: `{"agent": {…}}`, `{"target": {…}}`, `{"shared": {…}}` or `{"runner": {…}}` |
 
 `needs` holds `cpu_millis`, thousandths of a CPU, and `memory_bytes`, both required; `gpu`,
 `{"count": …, "model": …}` with the model as `nvidia-smi` names it; `cpu_features`, flags as
@@ -92,6 +92,17 @@ call is exclusive to it. Every target must be reached.
 | `egress` | its model route, open while a call's body runs |
 | `sessions` | the sessions it may call while a call's body runs, written as a grant of one is; each call uses them afresh |
 
+### Shared targets
+
+A shared role starts one sandbox alongside the agents. Its `command` runs for the work phase.
+Job grants that name this role send their bodies to that sandbox. All grants use the same
+files and resident process. The role's `cwd` and optional `env` apply to commands run by bodies.
+
+Only one body can use the sandbox at a time. A competing call receives a busy refusal and
+keeps its quota. A failed body can leave changes in the sandbox. If the resident process or
+session ends, further calls fail and agents can still select their results. The driver deletes
+the shared sandbox before starting the final call.
+
 ### Runners
 
 A sandbox that a session leases for its holder, which sends it commands and copies. Distinct
@@ -110,13 +121,13 @@ is refused, and so is a grant with none.
 
 | Key | What it is |
 | --- | --- |
-| `target` | the target that each call starts afresh |
+| `target` | the role whose fresh or shared sandbox runs the body |
 | `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
 | `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
 | `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
 | `calls` | the most calls the agent may make; left out, no bound |
 | `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
-| `call_timeout_seconds` | each call's timeout, counted from its target's start |
+| `call_timeout_seconds` | each call's timeout, counted from its body's start |
 
 An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
 cumulative time, or with the work phase, whichever comes first.
@@ -188,6 +199,7 @@ The two handles' methods:
 
 | Method | What it does |
 | --- | --- |
+| `target.caller()` | returns the issuing agent's role name, authenticated by its session; available in a job body |
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |

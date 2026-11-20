@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
 use schema::ir::{ArgumentValue, Name};
-use schema::sandbox::op::OpReply;
 use schema::workflow::{AgentId, JobFunctionId, SessionId};
 use stdx::Context;
 
@@ -27,7 +26,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         (payload, arguments): (&PayloadRef, BTreeMap<Name, ArgumentValue>),
         timeout: Duration,
     ) -> Result<(), String> {
-        let instance = self.sandboxes.capacity.functions[&function];
+        let instance = self.sandboxes.capacity.functions.get(&function).copied();
         let function = self.workflow().job_function(function);
         let role = function.target.role();
         // A call ends with the work phase, which ends by the core's next act of its own, and what
@@ -59,6 +58,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
     ) -> Result<(), String> {
+        self.sandboxes
+            .finish_work()
+            .context("cleaning up work sandboxes before the final call")?;
         let final_call = self.workflow().final_call();
         let role = final_call.target.role();
         // The final call's body starts in time to run its whole timeout before the hard end, by
@@ -93,35 +95,49 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             inputs,
             timeout,
         };
-        self.start_body(scope, call, deadlines, 0)
+        self.start_body(scope, call, deadlines, Some(0))
     }
 
-    /// Starts `call` on a fresh sandbox of its target, on a thread of its own.
+    /// Runs a call on its reserved fresh instance or the work phase's shared instance.
     fn start_body<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         call: call::job::Call<'r>,
         deadlines: Deadlines,
-        instance: u32,
+        instance: Option<u32>,
     ) -> Result<(), String> {
         let (job, target) = (call.job, call.of.target());
         let owner = match &call.of {
             body::Of::Function { function, .. } => Some(function.holder),
             body::Of::Final { .. } => None,
         };
-        let bodies = self.bodies;
-        let run = move |mut child: Child<'r, H, OpReply>| {
-            call::job::run(call, bodies, &mut child);
+        let which = Which::Call(job, target, instance.unwrap_or(0));
+        let orders = if instance.is_some() {
+            let bodies = self.bodies;
+            self.start_child(
+                scope,
+                which,
+                deadlines,
+                Some(bodies.stack_bytes()),
+                move |mut child| {
+                    call::job::run(call, bodies, &mut child);
+                },
+            )?
+        } else {
+            let child = self.child(which, deadlines)?;
+            let orders = child.inbox.sender();
+            self.services
+                .get_mut(&target)
+                .ok_or_else(|| "the shared role has no worker".to_owned())?
+                .call(call, child)?;
+            orders
         };
-        let stack = Some(bodies.stack_bytes());
-        let which = Which::Call(job, target, instance);
-        let orders = self.start_child(scope, which, deadlines, stack, run)?;
         let called = Called {
             orders,
             collect: deadlines.collect,
             trees: None,
-            role: target.role(),
-            instance,
+            target,
+            instance: instance.unwrap_or(0),
             owner,
             model_requests_over_budget: 0,
         };
@@ -185,22 +201,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         stack_bytes: Option<usize>,
         run: impl FnOnce(Child<'r, H, O>) + Send + 's,
     ) -> Result<Sender<Message<O>>, String> {
-        let dir = self.dir.join(which.record_dir(self.workflow()));
-        let parent = dir.parent().unwrap_or(self.dir);
-        fs::create_dir_all(parent).context(parent.display())?;
-        fs::create_dir(&dir).context(dir.display())?;
-        let inbox = self.clock.inbox();
-        let sender = inbox.sender();
-        let child = Child {
-            which,
-            deadlines,
-            hard_end: self.unix_hard_end,
-            dir,
-            sandboxes: self.sandboxes,
-            clock: self.clock.clone(),
-            inbox,
-            reports: self.inbox.sender(),
-        };
+        let child = self.child(which, deadlines)?;
+        let sender = child.inbox.sender();
         let mut builder = thread::Builder::new().name(which.name().to_string());
         if let Some(bytes) = stack_bytes {
             builder = builder.stack_size(bytes);
@@ -214,5 +216,27 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let _ = self.inbox.sender().send(Input::Child(failed));
         }
         Ok(sender)
+    }
+
+    fn child<O: Send + 'static>(
+        &self,
+        which: Which,
+        deadlines: Deadlines,
+    ) -> Result<Child<'r, H, O>, String> {
+        let dir = self.dir.join(which.record_dir(self.workflow()));
+        let parent = dir.parent().unwrap_or(self.dir);
+        fs::create_dir_all(parent).context(parent.display())?;
+        fs::create_dir(&dir).context(dir.display())?;
+        let inbox = self.clock.inbox();
+        Ok(Child {
+            which,
+            deadlines,
+            hard_end: self.unix_hard_end,
+            dir,
+            sandboxes: self.sandboxes,
+            clock: self.clock.clone(),
+            inbox,
+            reports: self.inbox.sender(),
+        })
     }
 }

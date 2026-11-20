@@ -1183,6 +1183,11 @@ fn job_functions() {
         .as_array_mut()
         .unwrap()
         .push(again);
+    let mut resident = twice.clone();
+    resident["roles"][4]["runtime"] =
+        json!({"shared": {"cwd": "/", "command": {"argv": ["server"], "cwd": "/"}}});
+    let mut resident_final = resident.clone();
+    resident_final["final"]["target"] = json!("verifier");
     let mut uncalled = calling();
     let grants = &mut uncalled["roles"][0]["runtime"]["agent"]["grants"];
     grants.as_array_mut().unwrap().remove(3);
@@ -1201,6 +1206,8 @@ fn job_functions() {
             uncalled,
             target_holding(),
             shared,
+            resident,
+            resident_final,
         ],
         &expect![[r#"
             parsed
@@ -1217,6 +1224,9 @@ fn job_functions() {
             /roles/4: `verifier` is a target that no job function or final call names: name it from one
             parsed
             /final/target: `verifier` is the final call's target and `check`'s: give the final call a role no job names
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            parsed
+            /final/target: `verifier` is a shared work sandbox: give the final call a fresh target
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one"#]],
     );
 }

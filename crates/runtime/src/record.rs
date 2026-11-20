@@ -634,7 +634,7 @@ impl Record {
     /// order.
     pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
         let mut dirs = Vec::new();
-        for of in ["agents", "jobs", "leases"] {
+        for of in ["agents", "shared", "jobs", "leases"] {
             let path = self.dir.join(of);
             match fs::read_dir(&path) {
                 Ok(entries) => {

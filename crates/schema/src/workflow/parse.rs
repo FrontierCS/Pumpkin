@@ -113,6 +113,17 @@ impl<'ir> Parser<'ir> {
             match runtime {
                 ir::Runtime::Agent(agent) => self.agent(runtime_at.token("agent"), id, agent),
                 ir::Runtime::Target(target) => self.target(&runtime_at.token("target"), id, target),
+                ir::Runtime::Shared(ir::SharedRuntime { command, cwd, env }) => {
+                    self.targets.insert(
+                        id,
+                        Target {
+                            shared: Some(command.clone()),
+                            cwd: cwd.clone(),
+                            env: env.clone(),
+                            model: None,
+                        },
+                    );
+                }
                 ir::Runtime::Runner(ir::RunnerRuntime { cwd, env }) => {
                     let runner = Runner {
                         cwd: cwd.clone(),
@@ -202,6 +213,7 @@ impl<'ir> Parser<'ir> {
         } = target;
         self.hold(at, TargetId(role), sessions);
         let target = Target {
+            shared: None,
             cwd: cwd.clone(),
             env: env.clone(),
             model: egress.model.clone(),
@@ -260,7 +272,8 @@ impl<'ir> Parser<'ir> {
         let first = self
             .called
             .iter()
-            .find(|(target, agent, _)| *target == target_id && *agent == holder);
+            .find(|(target, agent, _)| *target == target_id && *agent == holder)
+            .filter(|_| self.targets[&target_id.0].shared.is_none());
         let shared = match first {
             Some((_, _, first)) => Err(self.errors.report(
                 target_at,
@@ -498,6 +511,12 @@ impl<'ir> Parser<'ir> {
     fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
         let at = JsonPointer::root().token("final").token("target");
         let id = self.call_target(&at, target, "the final call's target")?;
+        if self.targets[&id.0].shared.is_some() {
+            return Err(self.errors.report(
+                at,
+                format!("`{target}` is a shared work sandbox: give the final call a fresh target"),
+            ));
+        }
         // So that the final call, like a job, has its target to itself.
         if let Some((_, _, function)) = self.called.iter().find(|(target, _, _)| *target == id) {
             let message = format!(

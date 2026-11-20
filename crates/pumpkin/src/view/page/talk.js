@@ -43,7 +43,7 @@ export function drawTalk(node, data, lit, picked, pick) {
   const { roles, edges } = data.talk;
   const grants = data.talk.grants || [];
   /** @type {Record<string, number>} */
-  const order = { agent: 0, target: 1, runner: 2 };
+  const order = { agent: 0, target: 1, shared: 1, runner: 2 };
   const shown = roles.map((role, index) => ({ ...role, index }));
   if (roles.some((role) => role.routed) || edges.some((edge) => edge.to === MODEL)) {
     shown.push({ name: MODEL, kind: "model", place: "The route's upstream", routed: false, final_target: false, routes: [], index: roles.length });
@@ -100,7 +100,7 @@ export function drawTalk(node, data, lit, picked, pick) {
   const running = new Map();
   for (const lane of data.lanes || []) {
     const role = laneRole(lane, data);
-    if (!role) continue;
+    if (!role || lane.service) continue;
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
   }
