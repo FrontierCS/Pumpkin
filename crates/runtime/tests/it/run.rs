@@ -155,7 +155,7 @@ fn agent_servings(
     url: &str,
     models: Option<&[&str]>,
 ) -> ByRole<Vec<Serving>> {
-    let agent = workflow.agent().role;
+    let agent = workflow.agent().id.role();
     let servings = workflow.by_role(|(role, _)| {
         let served = models.filter(|_| role == agent).into_iter();
         Ok::<_, Infallible>(served.map(|models| serving(dir, url, models)).collect())

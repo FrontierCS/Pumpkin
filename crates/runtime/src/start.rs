@@ -129,7 +129,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of
             // a phase, and what it left is collected by the agent's teardown's end, as a call's
             // is.
-            Caller::Agent => (core.phase_due(), self.teardown_end()),
+            Caller::Agent(_) => (core.phase_due(), self.teardown_end()),
             // A call's ends with the call's body, and what it left is collected by when the
             // call's is.
             Caller::Job(job) => {

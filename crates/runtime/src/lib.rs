@@ -24,7 +24,7 @@ use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
-use schema::workflow::{ByProvider, ByRole, Placed, RoleId, Workflow};
+use schema::workflow::{AgentId, ByProvider, ByRole, Placed, RoleId, Workflow};
 use stdx::{Context, Deadline};
 
 mod agent;
@@ -245,7 +245,7 @@ impl<'r, H: Host> Run<'r, H> {
             unix_hard_end: unix.saturating_add(lasts(&self.placed)),
             log,
             payloads: Payloads::create(host, &self.dir)?,
-            agent: None,
+            agents: BTreeMap::new(),
             unanswered: BTreeMap::new(),
             next_op: 0,
             next_model_request: 0,
@@ -316,7 +316,7 @@ struct Called {
 }
 
 enum Asked {
-    Agent(Unanswered),
+    Agent(AgentId, Unanswered),
     Job(JobId),
 }
 
@@ -333,7 +333,7 @@ struct Runtime<'r, H: Host> {
     unix_hard_end: UnixTime,
     log: Log<'r, H>,
     payloads: Payloads<'r, H>,
-    agent: Option<Agent>,
+    agents: BTreeMap<AgentId, Agent>,
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
@@ -352,7 +352,7 @@ struct Runtime<'r, H: Host> {
 }
 
 enum Input {
-    Agent(Duration, Arrival),
+    Agent(AgentId, Duration, Arrival),
     Child(Report),
     Logged(Entry),
 }
@@ -362,7 +362,7 @@ impl Input {
     // couldn't be deleted, which fails the run.
     fn reached(&self) -> Option<Duration> {
         match self {
-            Self::Agent(at, _)
+            Self::Agent(_, at, _)
             | Self::Child(
                 Report::Event(at, _)
                 | Report::CallEnded { at, .. }
@@ -383,7 +383,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let (mut core, actions) = Core::start(self.placed);
         self.log
             .start(self.workflow(), unix, self.hard_end(), &actions)?;
-        self.serve(Caller::Agent, self.workflow().agent().role);
         // The threads of calls borrow the run's workflow and sandboxes, and the scope ends
         // once each has, so that no sandbox starts after the run's end, and the drain takes all
         // they reported. A stop waits so for a child whose provider's create is under way, which
@@ -434,8 +433,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             // A call's route is open from its command's or its body's start, as the agent's is
             // from the run's.
             if let Event::CallStarted { job } = event {
-                let role = self.call(job).role;
-                self.serve(Caller::Job(job), role);
+                self.serve(Caller::Job(job));
             }
             // The keys' refusals are read as the core locks the selection, before the record of it
             // is written, so that a refusal heard after the lock leaves the run to be judged.
@@ -517,8 +515,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         core: &Core<'_>,
         input: Input,
     ) -> Result<Option<(Duration, Event)>, String> {
-        let (at, arrival) = match input {
-            Input::Agent(at, arrival) => (at, arrival),
+        let (id, at, arrival) = match input {
+            Input::Agent(id, at, arrival) => (id, at, arrival),
             Input::Child(report) => return self.report(scope, core, report),
             Input::Logged(entry) => {
                 self.count(&entry);
@@ -533,14 +531,14 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 let (workflow, bodies) = (self.workflow(), self.bodies);
                 // The agent's now function's body is evaluated as its call arrives.
                 let (request, unanswered) = request(incoming, |function, arguments| {
-                    let mut now = workflow.now_functions();
+                    let mut now = workflow.now_functions_of(id.role());
                     let (_, now) = now.find(|(_, now)| now.name == *function)?;
                     Some(call::now::evaluate(now, arguments, bodies))
                 });
-                Some(self.op(Asked::Agent(unanswered), request))
+                Some(self.op(Asked::Agent(id, unanswered), request))
             }
             Arrival::Refused(refused) => {
-                self.refuse(refused, core.phase_due())?;
+                self.refuse(id, refused, core.phase_due())?;
                 None
             }
             // With no agent, the core waits on neither. The loop tears the agent down in the batch
@@ -550,13 +548,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             // command whose start failed at its deadline as the sandbox said it started. So
             // does the end of a session that the start path dropped after its set-up failed.
             Arrival::Exited { process, status } => {
-                (self.agent.as_mut()).and_then(|agent| agent.exited(process, status))
+                (self.agents.get_mut(&id)).and_then(|agent| agent.exited(process, status))
             }
             Arrival::Ended { reason } => {
-                (self.agent.as_mut()).and_then(|agent| agent.ended(&reason))
+                (self.agents.get_mut(&id)).and_then(|agent| agent.ended(&reason))
             }
             Arrival::ModelRequest(incoming) => {
-                self.model_request(scope, core, (Caller::Agent, at), incoming)?;
+                self.model_request(scope, core, (Caller::Agent(id), at), incoming)?;
                 None
             }
         };
@@ -612,7 +610,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let op = OpId(self.next_op);
         self.next_op += 1;
         let caller = match asked {
-            Asked::Agent(_) => Caller::Agent,
+            Asked::Agent(id, _) => Caller::Agent(id),
             Asked::Job(job) => Caller::Job(job),
         };
         self.unanswered.insert(op, asked);
@@ -623,10 +621,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    fn refuse(&mut self, refused: RefusedOp, by: Duration) -> Result<(), String> {
+    fn refuse(&mut self, id: AgentId, refused: RefusedOp, by: Duration) -> Result<(), String> {
         self.log.refused(&refused)?;
         let what = "the refusal of an op whose payload was over the agent's limit";
-        self.answer(what, by, |agent, by| agent.refuse(refused, by))
+        self.answer(id, what, by, |agent, by| agent.refuse(refused, by))
     }
 
     // Takes what the threads sent before they ended, so that each op that still arrived is
@@ -635,7 +633,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // Its teardown has dropped the agent's session, unless the run was abandoned first, and
         // this drops it then, its sandbox left to the sweep: either way, its reader has handed
         // over all it will.
-        self.agent = None;
+        self.agents.clear();
         while let Some(input) = self.held.take().or_else(|| self.inbox.take()) {
             let Some((at, event)) = self.arrived(None, core, input)? else {
                 continue;
@@ -760,14 +758,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     fn start_agent(&mut self) {
         // From the run's start, where the core counts the agent's startup from: a start past it
         // would silently shorten the agent's deadline, so it fails.
-        let agent = self.workflow().agent().role;
-        let by = deadline(&self.clock, self.placed.startup(agent));
+        let agent = self.workflow().agent();
+        let id = agent.id;
+        self.serve(Caller::Agent(id));
+        let by = deadline(&self.clock, self.placed.startup(id.role()));
         let sender = self.inbox.sender();
         let hard_end = self.unix_hard_end;
         let clock = self.clock.clone();
-        let (agent, event) =
-            Agent::start(self.sandboxes, self.workflow(), by, hard_end, sender, clock);
-        self.agent = agent;
+        let (agent, event) = Agent::start(self.sandboxes, agent, by, hard_end, sender, clock);
+        if let Some(agent) = agent {
+            self.agents.insert(id, agent);
+        }
         self.pending.push_back((self.clock.now(), event));
     }
 
@@ -782,8 +783,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 op.0
             )
         };
-        let unanswered = match asked {
-            Asked::Agent(unanswered) => unanswered,
+        let (id, unanswered) = match asked {
+            Asked::Agent(id, unanswered) => (id, unanswered),
             Asked::Job(job) => {
                 // A call whose thread has ended has no op left to answer.
                 let _ = self.call(job).orders.send(Message::Order(reply));
@@ -806,16 +807,17 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
         };
         let what = format!("op {}'s reply", op.0);
-        self.answer(&what, by, |agent, by| agent.reply(incoming, reply, by))
+        self.answer(id, &what, by, |agent, by| agent.reply(incoming, reply, by))
     }
 
     fn answer(
         &mut self,
+        id: AgentId,
         what: &str,
         by: Duration,
         write: impl FnOnce(&mut Agent, Deadline) -> io::Result<()>,
     ) -> Result<(), String> {
-        let sent = match &mut self.agent {
+        let sent = match self.agents.get_mut(&id) {
             // A write past `by` would end the session, which the agent's teardown still needs, for
             // a delay of the host's own, such as hashing the payload, the log's sync or storing the
             // payload. The op stays in flight, which wedges the agent's ops, but only until the
@@ -860,7 +862,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     fn holder_trees(&mut self, lease: LeaseId, holder: Caller) -> Trees {
         let trees = match holder {
             // The core takes the agent's ops only while the agent works, its sandbox started.
-            Caller::Agent => self.agent.as_ref().map(Agent::trees),
+            Caller::Agent(id) => self.agents.get(&id).map(Agent::trees),
             // The op came with them.
             Caller::Job(job) => self.call(job).trees.take(),
         };
@@ -900,7 +902,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     fn tear_down_agent(&mut self) -> Result<(), String> {
-        let Some(mut agent) = self.agent.take() else {
+        let Some(mut agent) = self.agents.remove(&self.workflow().agent().id) else {
             let note = "the agent's sandbox never started: nothing was collected";
             return self.log.note(note);
         };

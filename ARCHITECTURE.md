@@ -127,8 +127,9 @@ so the same events give the same actions, and time reaches it only with each eve
 reachable through it.
 
 **Architecture Invariant:** only the core authorizes ops. `sandboxd` carries any op that any code
-in its sandbox makes, the gateway hands each to the session's owner as an `Arrival`, and the
-runtime answers each with the core's `Action::Reply`.
+in its sandbox makes. The gateway hands each to the session's owner as an `Arrival`. The runtime
+identifies the caller by the agent role or job registered for that session and sends the core's
+`Action::Reply` back to that caller.
 
 **Architecture Invariant:** the agent learns of a call only its state, what its function has left,
 how many of its target's model requests a budget barred, and what its body returns, so the

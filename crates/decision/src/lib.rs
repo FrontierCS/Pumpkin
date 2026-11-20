@@ -27,7 +27,7 @@ use core::time::Duration;
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{JobFunctionId, JobOf, Placed, SessionId, Workflow};
+use schema::workflow::{AgentId, JobFunctionId, JobOf, Placed, SessionId, Workflow};
 
 mod call;
 mod jobs;
@@ -55,8 +55,8 @@ pub struct LeaseId(pub u64);
 /// Who made an op, whose grants it may use, and who holds the leases it opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Caller {
-    /// The agent, from its sandbox.
-    Agent,
+    /// The agent whose sandbox issued the request.
+    Agent(AgentId),
     /// A call, from its target's sandbox, while the call's body runs.
     Job(JobId),
 }
@@ -351,7 +351,7 @@ pub enum Verdict {
 pub fn lasts(placed: &Placed) -> Duration {
     let workflow = placed.workflow();
     let final_call = workflow.final_call();
-    let agent_startup = placed.startup(workflow.agent().role);
+    let agent_startup = placed.startup(workflow.agent().id.role());
     let final_startup = placed.startup(final_call.target.role());
     // Each start is attempted once (a failed start isn't retried), which is why the hard
     // end counts one startup per start. The core ends the work phase by the first two shares
@@ -372,7 +372,9 @@ pub fn lasts(placed: &Placed) -> Duration {
 /// from its startup ([`Event::AgentStarted`]).
 fn latest_deadline(placed: &Placed) -> Duration {
     let agent = placed.workflow().agent();
-    placed.startup(agent.role).saturating_add(agent.deadline)
+    placed
+        .startup(agent.id.role())
+        .saturating_add(agent.deadline)
 }
 
 /// A run's decision core.
@@ -580,7 +582,7 @@ impl<'w> Core<'w> {
         match caller {
             // A harness asks its model after each command, the finalize's too, and fails its turn
             // if refused; the locked selection keeps any answer off the result.
-            Caller::Agent => self.work_end_due().is_some_and(|(end, _)| at < end),
+            Caller::Agent(_) => self.work_end_due().is_some_and(|(end, _)| at < end),
             // A call's route is open while it may make ops, which its timeout bounds.
             Caller::Job(_) => self.working(caller).is_ok_and(|working| at < working.end()),
         }

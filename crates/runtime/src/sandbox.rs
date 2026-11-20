@@ -27,7 +27,9 @@ use schema::sandbox::{
     Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
-use schema::workflow::{ByProvider, ByRole, Holder, Placed, RoleId, RunnerId, TargetId, Workflow};
+use schema::workflow::{
+    AgentId, ByProvider, ByRole, Holder, Placed, RoleId, RunnerId, TargetId, Workflow,
+};
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
@@ -54,7 +56,7 @@ pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
             .filter(move |(_, grant)| (grant.holder == Holder::Target(target)) == last)
             .map(|(_, grant)| grant.runner.role())
     };
-    let agent = iter::once(workflow.agent().role);
+    let agent = iter::once(workflow.agent().id.role());
     let targets = (workflow.job_functions()).map(|(_, function)| function.target.role());
     let work: Vec<RoleId> = (agent.chain(targets)).chain(runners(false)).collect();
     let last: Vec<RoleId> = iter::once(target.role()).chain(runners(true)).collect();
@@ -159,15 +161,15 @@ impl Meets<'_> {
 /// Whose sandbox: the agent's, a call's target, or an instance of a lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
-    Agent,
+    Agent(AgentId),
     Call(JobId, TargetId),
     Lease(LeaseId, RunnerId, u32),
 }
 
 impl Which {
-    fn role(self, workflow: &Workflow) -> RoleId {
+    fn role(self) -> RoleId {
         match self {
-            Self::Agent => workflow.agent().role,
+            Self::Agent(agent) => agent.role(),
             Self::Call(_, target) => target.role(),
             Self::Lease(_, runner, _) => runner.role(),
         }
@@ -175,14 +177,14 @@ impl Which {
 
     fn instance(self) -> u32 {
         match self {
-            Self::Agent | Self::Call(..) => 0,
+            Self::Agent(_) | Self::Call(..) => 0,
             Self::Lease(_, _, instance) => instance,
         }
     }
 
     pub(super) fn record_dir(self) -> String {
         match self {
-            Self::Agent => "agent".to_owned(),
+            Self::Agent(_) => "agent".to_owned(),
             Self::Call(job, _) => format!("jobs/{}", job.0),
             Self::Lease(lease, ..) => format!("leases/{}", lease.0),
         }
@@ -190,7 +192,7 @@ impl Which {
 
     pub(super) fn noun(self) -> &'static str {
         match self {
-            Self::Agent => "the agent's",
+            Self::Agent(_) => "the agent's",
             Self::Call(..) => "the job's",
             Self::Lease(..) => "the runner's",
         }
@@ -200,7 +202,7 @@ impl Which {
     /// `lease-<n>`.
     pub(super) fn name(self) -> Name {
         let name = match self {
-            Self::Agent => SandboxName::Agent,
+            Self::Agent(_) => SandboxName::Agent,
             Self::Call(job, _) => SandboxName::Job(job.0),
             Self::Lease(lease, ..) => SandboxName::Lease(lease.0),
         };
@@ -390,7 +392,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
         let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
-        let role = which.role(self.workflow());
+        let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
         let hosting = self.providers.get(&placement.provider);
@@ -510,7 +512,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     }
 
     fn on(&self, which: Which) -> &'p Name {
-        &self.placed.placement(which.role(self.workflow())).provider
+        &self.placed.placement(which.role()).provider
     }
 
     fn provider(&self, which: Which) -> &'p dyn Provider {

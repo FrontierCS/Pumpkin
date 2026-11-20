@@ -55,7 +55,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // needs, so it is due by then; the core's stop of its requests ends it before that
         // (`end_routes`).
         let by = match caller {
-            Caller::Agent => self.teardown_end(),
+            Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
         let by = deadline(&self.clock, by);
@@ -129,12 +129,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
     fn role(&mut self, caller: Caller) -> RoleId {
         match caller {
-            Caller::Agent => self.workflow().agent().role,
+            Caller::Agent(agent) => agent.role(),
             Caller::Job(job) => self.call(job).role,
         }
     }
 
-    pub(crate) fn serve(&mut self, caller: Caller, role: RoleId) {
+    pub(crate) fn serve(&mut self, caller: Caller) {
+        let role = self.role(caller);
         if let Some(served) = Served::new(self.routes.get(role)) {
             self.served.insert(caller, Arc::new(served));
         }
@@ -160,7 +161,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 && !self.held_at_lock.contains(caller)
             {
                 let route = match caller {
-                    Caller::Agent => "the agent's".to_owned(),
+                    Caller::Agent(_) => "the agent's".to_owned(),
                     Caller::Job(job) => format!("job {}'s", job.0),
                 };
                 return Err(format!(
@@ -169,7 +170,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 ));
             }
         }
-        match self.served.get(&Caller::Agent) {
+        match self.served.get(&Caller::Agent(self.workflow().agent().id)) {
             Some(agent) => agent.failed_last(outcome),
             None => Ok(()),
         }

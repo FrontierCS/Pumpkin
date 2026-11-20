@@ -688,7 +688,7 @@ impl Case for Parsed {
         let final_call = workflow.final_call();
         format!(
             "agent `{}`, now functions {:?}, final call on `{}` with keywords {}, route {apis:?}",
-            name(workflow.agent().role),
+            name(workflow.agent().id.role()),
             now.collect::<Vec<_>>(),
             name(final_call.target.role()),
             serde_json::to_string(&final_call.keywords).unwrap(),
