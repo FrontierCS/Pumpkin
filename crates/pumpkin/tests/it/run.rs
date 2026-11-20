@@ -2633,7 +2633,7 @@ fn ops_on_docker() {
             700 .tmp
             755 agent
             standard input: Solve the task in /task/README.md.
-            sandboxctl ops: exit 0: {"kind":"ops","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"train","payload_max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":5},{"kind":"now","name":"submit","payload_max_bytes":16,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+            sandboxctl ops: exit 0: {"kind":"ops","role":"agent","remaining_seconds":"<s>","resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"train","payload_max_bytes":8,"calls":100,"cumulative_seconds":null,"call_timeout_seconds":5},{"kind":"now","name":"submit","payload_max_bytes":16,"arguments":{"finalize":{"type":"bool","default":false}}}]}
             sandboxctl status 0: exit 1: {"kind":"refused","message":"you have no job 0: ask about a job that one of your calls returned"}
             sandboxctl call nope six --wait 15: exit 1: {"kind":"refused","message":"you hold no grant named `nope`: call one that `ops` lists"}
             sandboxctl call train nine: exit 1: {"kind":"refused","message":"the payload is 9 bytes, over `train`'s limit of 8: send a smaller one"}

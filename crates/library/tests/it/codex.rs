@@ -117,6 +117,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 8b9052558987320592d412af9c564e0809e5f8688dc1f409457077c3478c5db0:
         model = "model-small"
         model_reasoning_effort = "high"
@@ -175,6 +176,7 @@ fn roles() {
         cwd: /home/agent
         dir 0700 /home/agent/.codex
         dir 0700 /home/agent/.tmp
+        grant help /home/agent/.codex/AGENTS.md
         file 0600 /home/agent/.codex/config.toml, sha256 4df80c6bdae7f455bd02fd17b9e36e63651851b279ea7615b7f1929ce579ad51:
           model = "model-large"
           model_reasoning_effort = "low"
@@ -186,6 +188,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 05e4d40af7a92a2f7dab9367df5b86cde8e1839dcef2350c22a2e6acaf4adc1e:
           model = "gpt-6.1-terra"
           model_reasoning_effort = "xhigh"
@@ -205,6 +208,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 26ba3c05bfc017461924b58f04cb4d3b7e31444656530c9b5a18d69622fdfc32:
           model = "glm-5.3"
           model_reasoning_effort = "xhigh"
@@ -224,6 +228,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 05e4d40af7a92a2f7dab9367df5b86cde8e1839dcef2350c22a2e6acaf4adc1e:
           model = "gpt-6.1-terra"
           model_reasoning_effort = "xhigh"
@@ -243,6 +248,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 6850fb3b65c5554f2cfc88d4e1f281f5b6244a70211d3805b5638c78d8d66ded:
           model = "glm-5.3"
           model_reasoning_effort = "high"
@@ -262,6 +268,7 @@ fn roles() {
         cwd: /workspace
         dir 0700 /workspace/.codex
         dir 0700 /workspace/.tmp
+        grant help /workspace/.codex/AGENTS.md
         file 0600 /workspace/.codex/config.toml, sha256 0bddd09dc5bcb3cb9a03537325a5bc5ac6208006e284b692172b279132e5c748:
           model = "model-small"
           model_reasoning_effort = "xhigh"
@@ -273,6 +280,7 @@ fn roles() {
         cwd: /srv/work
         dir 0700 /srv/work/.codex
         dir 0700 /srv/work/.tmp
+        grant help /srv/work/.codex/AGENTS.md
         file 0600 /srv/work/.codex/config.toml, sha256 043e1021813f1a6efcaa3769d68032cc1ef810fdbc284783ef6c8e1994a8312e:
           model = "vendor/\"quoted\"\\model"
           model_reasoning_effort = "xhigh"
@@ -284,6 +292,7 @@ fn roles() {
         cwd: /
         dir 0700 /.codex
         dir 0700 /.tmp
+        grant help /.codex/AGENTS.md
         file 0600 /.codex/config.toml, sha256 d0df3a4fc969805e18c18c7c1a66c5367bfd12f62464ef7e1726d293e73fdc09:
           model = "glm-5.3"
           model_reasoning_effort = "high"

@@ -233,6 +233,9 @@ def codex(
             },
             "dirs": [{"path": home, "mode": "0700"}, {"path": tmp, "mode": "0700"}],
             "files": files,
+            # Codex loads home instructions before the task prompt (codex-home/src/instructions).
+            # https://github.com/openai/codex/blob/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/codex-home/src/instructions/mod.rs#L43-L76
+            "grant_help": home + "/AGENTS.md",
             "stdin": prompt,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
