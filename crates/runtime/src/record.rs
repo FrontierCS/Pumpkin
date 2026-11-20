@@ -1147,7 +1147,7 @@ impl<'h, H: Host> Payloads<'h, H> {
 
 pub(super) struct Stored {
     path: PathBuf,
-    reference: PayloadRef,
+    pub(super) reference: PayloadRef,
 }
 
 impl Stored {

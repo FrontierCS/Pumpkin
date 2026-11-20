@@ -168,8 +168,8 @@ as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
 The final body's second parameter, conventionally named `submissions`, is a dictionary in agent
 declaration order. Each role name maps to its last submitted opaque `Payload`, or to `None`
 if it submitted nothing. A submitted zero-byte file is still a `Payload`. The body runs even
-when every value is `None`. It chooses which submissions to put in the target and what result
-to return.
+when every value is `None`. It chooses which submissions to send to files or commands in the target
+and what result to return.
 For example, a task with a scoring function for the role named `agent` can write:
 
 ```python
@@ -202,6 +202,7 @@ The two handles' methods:
 | `target.caller()` | returns the issuing agent's role name, authenticated by its session; available in a job body |
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
+| `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
 | `run.set_submission(payload)` | sets or replaces the caller’s submission |
 | `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
@@ -368,5 +369,5 @@ A body's own statements run only when it is called, so a misspelt method fails t
 reaches it, not the check:
 
 ```text
-lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
+lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
 ```
