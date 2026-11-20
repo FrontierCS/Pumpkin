@@ -21,7 +21,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -77,11 +77,15 @@ struct Sandbox {
 
 impl Sandbox {
     fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
+        let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+        Self::start_with(meeting, nvidia_smi, sandboxd)
+    }
+
+    fn start_with(meeting: Meeting, nvidia_smi: Option<&str>, mut sandboxd: Command) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
         let root = fs::canonicalize(dir.path()).unwrap();
-        let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
         if let Some(script) = nvidia_smi {
             sandboxd.env("PATH", stand_in(&root, script));
         }
@@ -566,6 +570,18 @@ fn modes_and_stdin() {
 // So that a frame lost, repeated or out of order shows.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
+}
+
+#[test]
+fn inherited_ignored_child_signal() {
+    // Linux reaps children itself when their parent explicitly ignores SIGCHLD.
+    let mut command = stdx::process::command("env", PATH_ONLY);
+    command.args(["--ignore-signal=CHLD", env!("CARGO_BIN_EXE_sandboxd")]);
+    let mut sandbox = Sandbox::start_with(Meeting::Socket, None, command);
+    let launch = sandbox.sh("exit 0", &[]);
+    sandbox.session.start(launch, hung()).unwrap();
+    let status = exited(&mut sandbox.sandboxd);
+    expect!["exit status: 1"].assert_eq(&status.to_string());
 }
 
 #[test]
