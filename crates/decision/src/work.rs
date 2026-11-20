@@ -1,4 +1,4 @@
-//! Each agent owns its selection and finalize grace. The final body receives every selection,
+//! Each agent owns its submission and finalize grace. The final body receives every submission,
 //! in declaration order, once all agents, jobs and leases have ended.
 
 use alloc::vec::Vec;
@@ -12,8 +12,8 @@ use crate::{
 
 #[derive(Debug, Default)]
 pub(super) struct AgentWork {
-    pub(super) selection: Option<PayloadRef>,
-    /// Set by `run.end_work()`, even if the agent selected nothing.
+    pub(super) submission: Option<PayloadRef>,
+    /// Set by `run.end_work()`, even if the agent submitted nothing.
     pub(super) grace_end: Option<Duration>,
     pub(super) ended: Option<Ended>,
 }
@@ -32,7 +32,7 @@ impl AgentWork {
         AgentOutcome {
             agent,
             work_end: end.reason.clone(),
-            submission: self.selection.clone().map(|payload| Submission {
+            submission: self.submission.clone().map(|payload| Submission {
                 payload,
                 finalized: self.grace_end.is_some(),
             }),
@@ -111,7 +111,7 @@ impl Core<'_> {
                     let selections = self
                         .agents
                         .iter()
-                        .map(|(&agent, work)| (agent, work.selection.clone()))
+                        .map(|(&agent, work)| (agent, work.submission.clone()))
                         .collect();
                     let timeout = self.workflow.final_call().timeout;
                     let job = self.jobs.add(JobOf::Final, timeout);

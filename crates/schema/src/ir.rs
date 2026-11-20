@@ -2,7 +2,7 @@
 //!
 //! A workflow is data: [`Role`]s (the agents, the targets their calls start, and the runners that
 //! sessions lease), the [`Grant`]s each role holds, and the [`Final`] call that judges the
-//! selections.
+//! submissions.
 //!
 //! The IR states every value. An optional field that is absent means what its doc says, such
 //! as no limit or no route, never a default decided elsewhere; defaults belong to whatever
@@ -41,9 +41,9 @@ pub use values::{
 
 /// The IR's root: a workflow as written, which [`crate::workflow::Workflow::parse`] checks.
 ///
-/// During work each agent calls its grants, leases runners and may select a payload. The
+/// During work each agent calls its grants, leases runners and may submit a payload. The
 /// work deadline bounds all agents. Once their sandboxes, calls and leases are gone, the
-/// [`Final`] call judges the selections kept by the run.
+/// [`Final`] call judges the submissions kept by the run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workflow {
@@ -54,7 +54,7 @@ pub struct Workflow {
     pub deadline_seconds: NonZeroU64,
     /// The sandboxes in declaration order, including at least one agent.
     pub roles: Vec<Role>,
-    /// How the selections are judged.
+    /// How the submissions are judged.
     #[serde(rename = "final")]
     pub final_call: Final,
 }

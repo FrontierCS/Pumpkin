@@ -154,15 +154,16 @@ target's start. The body drives a fresh sandbox once all agents, calls and lease
 The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
 as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
 
-The final body's second parameter is a dictionary in agent declaration order. Each role name maps
-to its last selected `Payload`, or to `None` if it selected nothing. A selected zero-byte file is
-still a `Payload`. The body runs even when every value is `None`. It chooses which selections to
-put in the target and what result to return.
+The final body's second parameter, conventionally named `submissions`, is a dictionary in agent
+declaration order. Each role name maps to its last submitted opaque `Payload`, or to `None`
+if it submitted nothing. A submitted zero-byte file is still a `Payload`. The body runs even
+when every value is `None`. It chooses which submissions to put in the target and what result
+to return.
 For example, a task with a scoring function for the role named `agent` can write:
 
 ```python
-def final_score(target: Target, selections):
-    payload = selections["agent"]
+def final_score(target: Target, submissions):
+    payload = submissions["agent"]
     if payload == None:
         return {"score": 0}
     return score(target, payload)
@@ -177,7 +178,7 @@ the text the record keeps. Its parameters, in order:
 1. The handle, which only the host makes: a `Target` for a job function's body and the final
    call's, a `Run` for a now function's.
 2. A job or now function receives the caller’s bytes as an opaque `Payload`. A final body receives
-   the dictionary of selections described above. Leave that parameter unannotated.
+   the dictionary of submissions described above. Leave that parameter unannotated.
 3. The caller's parameters, if any: each annotated `str`, `int` or `bool`, with or without a
    default. The final call's body has none, as no caller gives it an argument.
 4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
@@ -190,12 +191,12 @@ The two handles' methods:
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
-| `run.select(payload)` | replaces the caller’s selection with the payload |
-| `run.end_work()` | ends the caller's work, its selection locked, once its grace has run out |
+| `run.set_submission(payload)` | sets or replaces the caller’s submission |
+| `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
 
-A now function's body only proposes: the run applies its `select` and `end_work`, in order, once
-the body has returned, each checked against the state the ones before it leave, and applies none
-if one is refused. `end_work()` can end a caller that selected nothing, and must come last.
+A now function's body proposes these operations. When the body returns, the run applies them
+in order if they all pass validation. A refused operation leaves the state unchanged.
+`end_work()` can end a caller that submitted nothing and must come last.
 
 A body returns a dict whose keys are names, as a role's are, and whose values JSON can hold; it is
 encoded as `json.encode` would, and takes at most 1 MiB as JSON. Within a body, annotations are checked on entry and on return of
@@ -337,7 +338,7 @@ parameters don't fit its kind, is refused at the parameter:
 ```text
 lib/submit.star:1:12: `submit`'s first parameter is a `Target`, and a now function's body takes its `Run`: write `def submit(target: Run, …)`
 lib/submit.star:1:47: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
-lib/final.star:1:38: `final_call`'s `level` follows the selections, and the final call has no caller to give it: remove it
+lib/final.star:1:38: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
 lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
 ```
 

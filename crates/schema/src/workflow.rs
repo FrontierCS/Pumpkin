@@ -142,7 +142,7 @@ impl Workflow {
         &self.now_functions[id.0]
     }
 
-    /// How the selected submission is judged.
+    /// How submissions are judged.
     pub fn final_call(&self) -> &Final {
         &self.final_call
     }
@@ -495,7 +495,7 @@ impl NowFunction {
 }
 
 /// The parsed [`ir::Final`](crate::ir::Final): a body on a target that no job function names,
-/// whose `payload_max_bytes` caps every selection.
+/// whose `payload_max_bytes` caps every submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Final {
     pub target: TargetId,

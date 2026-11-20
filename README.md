@@ -187,17 +187,17 @@ def count(target: Target, payload: Payload) -> dict[str, int]:
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the calling agent, replacing its last selection.
+    """Sets the calling agent's submission, replacing its previous payload.
 
     Args:
       run: the run's state.
       payload: the agent's submission.
-      finalize: whether the call also ends the agent's work.
+      finalize: whether the call also locks the submission and ends the agent's work.
 
     Returns:
-      The selection's state: `stored`, or `accepted` once the work has ended.
+      `stored`, or `accepted` if the call locks the submission.
     """
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
@@ -209,17 +209,17 @@ and [`examples/hello/final.star`](examples/hello/final.star):
 ```python
 """The hello example's final call: it counts the greeting's bytes and lines in its target."""
 
-def final_call(target: Target, selections) -> dict[str, int]:
+def final_call(target: Target, submissions) -> dict[str, int]:
     """Shows the greeting's size as its score, and its lines.
 
     Args:
       target: the call's target.
-      selections: the greeting by agent role, or None if absent.
+      submissions: the greeting by agent role, or None if absent.
 
     Returns:
       The score and the lines, in the order the run shows them.
     """
-    payload = selections["agent"]
+    payload = submissions["agent"]
     if payload == None:
         return {"score": 0, "lines": 0}
     target.put("/workspace/greeting", payload)
@@ -255,12 +255,12 @@ learns only the job's state, what the grant has left, and the dict.
 
 **A now function's body**, here `submit`, answers in the call's reply, with no sandbox. The agent
 calls it as `final`, the name of its grant, which is not the final call. Its handle is a `Run`, the
-run's state: `run.select(payload)` makes the payload the selection, the one the final call gets for that role,
-and `run.end_work()` ends the agent's work, after which the agent has `finalize_grace_seconds` to
-exit. The run applies what the body asked once it has returned, all of it or none. A parameter
-after the payload is the caller's: annotated `str`, `int` or `bool`, it is given as
-`--arg finalize=true` and read as its type before the body runs. `sandboxctl ops` lists each grant
-with its bounds and its caller's parameters.
+run's state. `run.set_submission(payload)` replaces the payload the final call receives for that
+role. `run.end_work()` locks the submission immediately and gives the agent
+`finalize_grace_seconds` to exit. The run applies what the body asked once it has returned, all
+of it or none. A parameter after the payload is the caller's. It is annotated `str`, `int` or
+`bool`, given as `--arg finalize=true` and read as its type before the body runs.
+`sandboxctl ops` lists each grant with its bounds and its caller's parameters.
 
 **Sessions** are the third kind of function, for work that one call of a body can't hold, such as
 training on a GPU. A session grant names a runner and bounds its leases: how many are open at once,
@@ -271,7 +271,7 @@ and ends it with `.close`.
 
 **The final call** runs once the agent's work has ended and everything it started has ended too:
 its body runs as a job's does, on a fresh sandbox of its `target`, which no job function may name,
-with a dictionary mapping each agent role to its selected payload or `None`. The dict it returns
+with a dictionary mapping each agent role to its submitted payload or `None`. The dict it returns
 is the run's result. The run shows its entries in their order, as `score=6 lines=1` in
 `pumpkin ls`. A failed final call leaves the run without a result.
 

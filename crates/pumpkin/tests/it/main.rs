@@ -63,17 +63,17 @@ fn final_running(command: &str) -> String {
     format!(
         r#""""The final call of a task that a test writes."""
 
-def final_call(target: Target, selections):
+def final_call(target: Target, submissions):
     """Runs a command on the submission, and shows the score it wrote.
 
     Args:
       target: the call's target.
-      selections: each agent's submission.
+      submissions: each agent's submission.
 
     Returns:
       The score.
     """
-    payload = selections.values()[0]
+    payload = submissions.values()[0]
     if payload == None:
         return {{"score": 0}}
     target.put("/pumpkin/in/payload/raw", payload)
@@ -93,7 +93,7 @@ struct Scratch(
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {}
@@ -889,7 +889,7 @@ fn whole_log() -> Vec<Value> {
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
     let final_call = json!([{
-        "kind": "start_final_call", "job": 4, "selections": [{"role":"solver","selection":payload()}], "timeout_ns": "900000000000",
+        "kind": "start_final_call", "job": 4, "submissions": [{"role":"solver","selection":payload()}], "timeout_ns": "900000000000",
     }]);
     let values = json!([
         { "name": "score", "value": 49.36 },

@@ -123,14 +123,14 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
-        selections: &[(Name, Option<usize>)],
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "final_call" => {
                 let payload = AbsolutePath::from_static("/pumpkin/in/payload/raw");
-                let Some(slot) = selections[0].1 else {
+                let Some(slot) = submissions[0].1 else {
                     return Ok(vec![(Name::from_static("score"), json!(0))]);
                 };
                 target.put(&payload, slot)?;
@@ -138,11 +138,11 @@ impl runtime::Bodies for Bodies<'_> {
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
             }
-            "selections" => {
+            "submissions" => {
                 let mut files = Map::new();
-                let path = AbsolutePath::from_static("/work/selection");
+                let path = AbsolutePath::from_static("/work/submission");
                 let mut command = 0;
-                for (role, slot) in selections {
+                for (role, slot) in submissions {
                     let bytes = if let Some(slot) = slot {
                         target.put(&path, *slot)?;
                         target.run(&argv(&["bytes", path.as_str()]))?;
@@ -184,7 +184,7 @@ impl runtime::Bodies for Bodies<'_> {
         match body.def.as_str() {
             "submit" => {
                 deep(DEEP_BYTES / FRAME_BYTES);
-                run.select();
+                run.set_submission();
                 let finalize = arguments.get(&Name::from_static("finalize"))
                     == Some(&ir::ArgumentValue::Bool(true));
                 if finalize {

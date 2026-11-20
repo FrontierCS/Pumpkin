@@ -2900,7 +2900,7 @@ fn times_a_callers_ops() {
             "agent-0",
             3,
             json!({ "kind": "now", "grant": "final", "evaluated": {
-                "effects": ["select"], "returned": [{ "name": "state", "value": "stored" }],
+                "effects": ["set_submission"], "returned": [{ "name": "state", "value": "stored" }],
             } }),
             json!([reply(
                 3,

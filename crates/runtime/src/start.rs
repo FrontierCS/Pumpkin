@@ -72,7 +72,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             collect: self.hard_end(),
         };
         let mut inputs = Vec::new();
-        let selections = selections
+        let submissions = selections
             .into_iter()
             .map(|(agent, selected)| {
                 let role = self.workflow().sandbox(agent.role()).name.clone();
@@ -88,7 +88,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             job,
             of: body::Of::Final {
                 final_call,
-                selections,
+                submissions,
             },
             inputs,
             timeout,

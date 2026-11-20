@@ -1,16 +1,16 @@
 """The hello example's final call: it counts the greeting's bytes and lines in its target."""
 
-def final_call(target: Target, selections) -> dict[str, int]:
+def final_call(target: Target, submissions) -> dict[str, int]:
     """Shows the greeting's size as its score, and its lines.
 
     Args:
       target: the call's target.
-      selections: the greeting by agent role, or None if absent.
+      submissions: the greeting by agent role, or None if absent.
 
     Returns:
       The score and the lines, in the order the run shows them.
     """
-    payload = selections["agent"]
+    payload = submissions["agent"]
     if payload == None:
         return {"score": 0, "lines": 0}
     target.put("/workspace/greeting", payload)

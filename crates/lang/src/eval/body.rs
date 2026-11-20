@@ -57,7 +57,7 @@ pub enum BodyKind {
 pub enum Host<'h> {
     Job(&'h mut dyn Target),
     Now(&'h mut dyn Run),
-    /// Each agent in declaration order and the slot of its selected payload, if any.
+    /// Each agent in declaration order and the slot of its submitted payload, if any.
     Final(&'h mut dyn Target, &'h [(ir::Name, Option<usize>)]),
 }
 
@@ -88,10 +88,10 @@ pub trait Target {
 
 /// What a now function's body proposes effects on through its `Run`: the run's state.
 pub trait Run {
-    /// Proposes that the call's payload become the caller's selection, replacing the last.
-    fn select(&mut self);
+    /// Proposes that the call's payload become the caller's submission, replacing the last.
+    fn set_submission(&mut self);
 
-    /// Proposes that the caller's work end, its selection locked.
+    /// Proposes locking the caller's submission and ending its work.
     fn end_work(&mut self);
 }
 
@@ -143,7 +143,7 @@ impl BodyKind {
         let param = &input.name.text;
         match self {
             Self::Final => Some(format!(
-                "`{name}` takes the selections by role: leave `{param}` unannotated"
+                "`{name}` takes the submissions by role: leave `{param}` unannotated"
             )),
             Self::Job | Self::Now if *annotation != Type::Hosted(Hosted::Payload(())) => {
                 Some(format!(
@@ -167,15 +167,15 @@ impl BodyKind {
     }
 }
 
-fn selected_payloads(
-    selections: &[(ir::Name, Option<usize>)],
+fn submission_dict(
+    submissions: &[(ir::Name, Option<usize>)],
     at: Span,
     budget: &Budget,
 ) -> Result<value::Dict, Fault> {
-    let mut entries = Vec::with_capacity(selections.len());
-    for (role, selected) in selections {
+    let mut entries = Vec::with_capacity(submissions.len());
+    for (role, slot) in submissions {
         let key = Text::new(role.as_str(), at, budget)?;
-        let kind = selected.map_or(value::Kind::None, |slot| {
+        let kind = slot.map_or(value::Kind::None, |slot| {
             value::Kind::Hosted(Hosted::Payload(slot))
         });
         entries.push(value::Entry {
@@ -221,8 +221,8 @@ impl<L: Loader> Evaluation<'_, '_, L> {
         let (handle, _, _) = read.kind.handle();
         let at = read.function.def.name.span;
         let input = match &self.purpose {
-            Purpose::Call(Host::Final(_, selections)) => {
-                value::Kind::Dict(selected_payloads(selections, at, self.budget)?)
+            Purpose::Call(Host::Final(_, submissions)) => {
+                value::Kind::Dict(submission_dict(submissions, at, self.budget)?)
             }
             _ => value::Kind::Hosted(Hosted::Payload(0)),
         };
@@ -453,7 +453,7 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
     let words = kind.words();
     let (input, parameter) = match kind {
         BodyKind::Job | BodyKind::Now => ("payload", "payload: Payload"),
-        BodyKind::Final => ("selections", "selections"),
+        BodyKind::Final => ("submissions", "submissions"),
     };
     let positional = &def.params[..def.positional];
     let [first, second, caller @ ..] = positional else {
@@ -492,7 +492,7 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
     for param in caller {
         if let BodyKind::Final = kind {
             let message = format!(
-                "`{name}`'s `{}` follows the selections, and the final call has no caller to give \
+                "`{name}`'s `{}` follows the submissions, and the final call has no caller to give \
                  it: remove it",
                 param.name.text
             );
@@ -525,9 +525,9 @@ impl Hosted<usize> {
             ]),
             Self::Run => Ok(&[
                 ("end_work", Method::Run(end_work)),
-                ("select", Method::Run(select)),
+                ("set_submission", Method::Run(set_submission)),
             ]),
-            Self::Payload(_) => Err("pass it to a `Target`'s `put` or a `Run`'s `select`"),
+            Self::Payload(_) => Err("pass it to a `Target`'s `put` or a `Run`'s `set_submission`"),
         }
     }
 }
@@ -624,11 +624,11 @@ fn get(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
     Ok(value::Kind::Str(Text::new(&text, call.at, call.budget)?))
 }
 
-fn select(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+fn set_submission(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [payload] = positional::<1>(&name.text, Takes::exactly(1), call)?;
     if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload(_))) {
         let message = format!(
-            "`select` can't select {}: give it the payload",
+            "`set_submission` can't use {}: give it the payload",
             payload.1.kind.describe()
         );
         return Err(origin(
@@ -637,7 +637,7 @@ fn select(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind
             &payload.1,
         ));
     }
-    run.select();
+    run.set_submission();
     Ok(value::Kind::None)
 }
 

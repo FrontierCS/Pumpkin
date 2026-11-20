@@ -8,17 +8,17 @@ the language of Bazel's files, with type annotations on a `def`'s parameters and
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the calling agent, replacing its last selection.
+    """Sets the calling agent's submission, replacing its previous payload.
 
     Args:
       run: the run's state.
       payload: the agent's submission.
-      finalize: whether the call also ends the agent's work.
+      finalize: whether the call also locks the submission and ends the agent's work.
 
     Returns:
-      The selection's state: `stored`, or `accepted` once the work has ended.
+      `stored`, or `accepted` if the call locks the submission.
     """
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
@@ -140,8 +140,8 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 | Handle | Methods |
 | --- | --- |
 | `Target`, a job's or the final call's target | `put(path, payload)`, `run(argv)`, `get(path)` |
-| `Run`, the calling agent’s state | `select(payload)`, `end_work()` |
-| `Payload`, an opaque file supplied to the call | none: it is passed to `put` or `select` |
+| `Run`, the calling agent’s state | `set_submission(payload)`, `end_work()` |
+| `Payload`, an opaque file supplied to the call | none: it is passed to `put` or `set_submission` |
 
 [Workflows](workflows.md#bodies) says what each method does. A handle may be passed to a function
 of the body's file, whose parameter it fits if annotated so.

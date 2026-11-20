@@ -1,17 +1,17 @@
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the calling agent, replacing its last selection.
+    """Sets the calling agent's submission, replacing its previous payload.
 
     Args:
       run: the run's state.
       payload: the agent's submission.
-      finalize: whether the call also ends the agent's work.
+      finalize: whether the call also locks the submission and ends the agent's work.
 
     Returns:
-      The selection's state: `stored`, or `accepted` once the work has ended.
+      `stored`, or `accepted` if the call locks the submission.
     """
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}

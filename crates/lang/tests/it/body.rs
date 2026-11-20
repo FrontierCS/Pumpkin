@@ -47,8 +47,8 @@ impl lang::Target for Logged {
 }
 
 impl lang::Run for Logged {
-    fn select(&mut self) {
-        self.0.push(String::from("select the payload"));
+    fn set_submission(&mut self) {
+        self.0.push(String::from("set the submission"));
     }
 
     fn end_work(&mut self) {
@@ -123,12 +123,12 @@ fn check_within(
         };
         let checked = lang::check(&body, kind, &mut sources, &args, bounds);
         let mut host = Logged::default();
-        let selections = [("z", Some(1)), ("a", None), ("b", Some(0))]
+        let submissions = [("z", Some(1)), ("a", None), ("b", Some(0))]
             .map(|(role, slot)| (Name::try_from(role.to_owned()).unwrap(), slot));
         let host_of_kind = match kind {
             BodyKind::Job => Host::Job(&mut host),
             BodyKind::Now => Host::Now(&mut host),
-            BodyKind::Final => Host::Final(&mut host, &selections),
+            BodyKind::Final => Host::Final(&mut host, &submissions),
         };
         let called = lang::call(&body, host_of_kind, &arguments, &mut sources, &args, bounds);
         match (checked, called) {
@@ -197,11 +197,11 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
         json!({}),
         r#"
 #- //lib/verify.star
-def final_call(target: Target, selections, *, mode: str = "final"):
-    _ = [target.put("/in/" + name, selections[name]) for name in selections if selections[name] != None]
-    target.put("/another", selections["z"])
+def final_call(target: Target, submissions, *, mode: str = "final"):
+    _ = [target.put("/in/" + name, submissions[name]) for name in submissions if submissions[name] != None]
+    target.put("/another", submissions["z"])
     target.run(["/opt/frontier/verifier", mode])
-    return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"], "missing": selections["a"]}
+    return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"], "missing": submissions["a"]}
 "#,
         &expect![[r#"
             put payload 1 at /in/z
@@ -218,7 +218,7 @@ fn arguments() {
     let submit = r#"
 #- //lib/submit.star
 def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {"note": note}
@@ -238,7 +238,7 @@ def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
     check(
         json!({"finalize": true, "note": "last"}),
         &expect![[r#"
-            select the payload
+            set the submission
             end the work
             returns note="last""#]],
     );
@@ -286,14 +286,14 @@ fn now() {
         r#"
 #- //lib/submit.star
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
     return {"state": "stored"}
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             returns state="stored""#]],
     );
     check(
@@ -303,12 +303,12 @@ def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]
         r#"
 #- //lib/submit.star
 def final(run, payload):
-    run.select(payload)
+    run.set_submission(payload)
     run.end_work()
     return {}
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             end the work
             returns"#]],
     );
@@ -326,13 +326,13 @@ fn refusals() {
         json!({}),
         r#"
 #- //lib/judge.star
-def judge(target: Target, selections: Payload):
+def judge(target: Target, submissions: Payload):
     return {}
 "#,
         &expect![[r#"
-            lib/judge.star:1:27: `judge` takes the selections by role: leave `selections` unannotated
-                1 | def judge(target: Target, selections: Payload):
-                  |                           ^^^^^^^^^^"#]],
+            lib/judge.star:1:27: `judge` takes the submissions by role: leave `submissions` unannotated
+                1 | def judge(target: Target, submissions: Payload):
+                  |                           ^^^^^^^^^^^"#]],
     );
     check(
         "train_call",
@@ -468,10 +468,10 @@ def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = 
             lib/final.star:1:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                ^^^^^^
-            lib/final.star:1:38: `final_call`'s `level` follows the selections, and the final call has no caller to give it: remove it
+            lib/final.star:1:38: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                                      ^^^^^
-            lib/final.star:1:50: `final_call`'s `mode` follows the selections, and the final call has no caller to give it: remove it
+            lib/final.star:1:50: `final_call`'s `mode` follows the submissions, and the final call has no caller to give it: remove it
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                                                  ^^^^
             lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
@@ -508,14 +508,14 @@ fn failures() {
         json!({}),
         r#"
 #- //lib/judge.star
-def judge(target: Target, selections):
-    target.put("/in/absent", selections["a"])
+def judge(target: Target, submissions):
+    target.put("/in/absent", submissions["a"])
     return {}
 "#,
         &expect![[r#"
             lib/judge.star:2:30: `put` can't put `None`: give it the payload
-                2 |     target.put("/in/absent", selections["a"])
-                  |                              ^^^^^^^^^^^^^^^
+                2 |     target.put("/in/absent", submissions["a"])
+                  |                              ^^^^^^^^^^^^^^^^
                 the argument, `None`, is made at lib/judge.star:1:5
                 in `judge()`, called at lib/judge.star:1:5"#]],
     );
@@ -594,7 +594,7 @@ def submit(run, payload):
     return payload.read()
 "#,
         &expect![[r#"
-            lib/submit.star:2:20: the payload has no method `read`: pass it to a `Target`'s `put` or a `Run`'s `select`
+            lib/submit.star:2:20: the payload has no method `read`: pass it to a `Target`'s `put` or a `Run`'s `set_submission`
                 2 |     return payload.read()
                   |                    ^^^^
                 the receiver, the payload, is made at lib/submit.star:1:5
@@ -607,12 +607,28 @@ def submit(run, payload):
         r#"
 #- //lib/submit.star
 def submit(run, payload):
-    run.select("text")
+    run.select(payload)
 "#,
         &expect![[r#"
-            lib/submit.star:2:16: `select` can't select a string: give it the payload
-                2 |     run.select("text")
-                  |                ^^^^^^
+            lib/submit.star:2:9: `select` is no method of a `Run`: call one of `end_work`, `set_submission`
+                2 |     run.select(payload)
+                  |         ^^^^^^
+                the receiver, a `Run`, is made at lib/submit.star:1:5
+                in `submit()`, called at lib/submit.star:1:5"#]],
+    );
+    check(
+        "submit",
+        BodyKind::Now,
+        json!({}),
+        r#"
+#- //lib/submit.star
+def submit(run, payload):
+    run.set_submission("text")
+"#,
+        &expect![[r#"
+            lib/submit.star:2:24: `set_submission` can't use a string: give it the payload
+                2 |     run.set_submission("text")
+                  |                        ^^^^^^
                 in `submit()`, called at lib/submit.star:1:5"#]],
     );
     check(
@@ -687,10 +703,10 @@ def train_call(target, payload):
         r#"
 #- //lib/submit.star
 def submit(run, payload):
-    run.select(payload)
+    run.set_submission(payload)
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             lib/submit.star:1:5: `submit` returns `None`, and a body returns a dict of names to values: return a dict
                 1 | def submit(run, payload):
                   |     ^^^^^^"#]],

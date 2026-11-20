@@ -99,12 +99,12 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
             }
             "locked" => {
                 let Caller::Agent(agent) = caller else {
-                    panic!("only agents select payloads")
+                    panic!("only agents submit payloads")
                 };
                 writeln!(
                     run.transcript,
-                    "{line}\n  selection locked: {}",
-                    core.selection_locked(agent)
+                    "{line}\n  submission locked: {}",
+                    core.submission_locked(agent)
                 )
                 .unwrap();
             }
@@ -280,7 +280,7 @@ impl Run<'_> {
         let words: Vec<&str> = words.iter().flat_map(|w| w.split(' ')).collect();
         let (function, payload) = self.call(&words[..2]);
         let effects = words[2..].iter().map(|word| match *word {
-            "select" => Ok(Effect::Select),
+            "set_submission" => Ok(Effect::SetSubmission),
             "end_work" => Ok(Effect::EndWork),
             "failed" => Err(Unevaluated::Failed("the body failed".to_owned())),
             "unread" => Err(Unevaluated::Unread(
@@ -617,8 +617,8 @@ fn whole_run() {
         3000 status 0
         9600 call_returned 0 raw_score=0 metrics={"solved":0}
         10000 status 0
-        11000 now submit 10240 select
-        12000 now submit 10240 select end_work
+        11000 now submit 10240 set_submission
+        12000 now submit 10240 set_submission end_work
         12100 agent_exited 0
         12100 agent_torn_down
         13500 call_started 1
@@ -643,9 +643,9 @@ fn whole_run() {
             9600 call_returned 0 raw_score=0 metrics={"solved":0}
             10000 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11992}}
-            11000 now submit 10240 select
+            11000 now submit 10240 set_submission
               reply to op 6: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17989}
-            12000 now submit 10240 select end_work
+            12000 now submit 10240 set_submission end_work
               reply to op 7: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 72000)
             12100 agent_exited 0
@@ -673,7 +673,7 @@ fn quotas() {
         0 work_started
         1000 call train 4194305
         1000 call nothing 10
-        1000 now submit 4194305 select
+        1000 now submit 4194305 set_submission
         1000 call train 10
         2000 call_started 0
         6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
@@ -684,7 +684,7 @@ fn quotas() {
         13700 call_failed 1 +2 the call's timeout passed
         14000 status 1
         14100 call train 10
-        14200 now submit 0 select
+        14200 now submit 0 set_submission
         "#,
         &expect![[r#"
             start
@@ -696,7 +696,7 @@ fn quotas() {
               refuse op 1: the payload is 4194305 bytes, over `train`'s limit of 4194304: send a smaller one
             1000 call nothing 10
               refuse op 2: you hold no grant named `nothing`: call one that `ops` lists
-            1000 now submit 4194305 select
+            1000 now submit 4194305 set_submission
               refuse op 3: the payload is 4194305 bytes, over `submit`'s limit of 4194304: send a smaller one
             1000 call train 10
               reply to op 4: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":10}}
@@ -715,7 +715,7 @@ fn quotas() {
               reply to op 7: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"model_requests_over_budget":2,"remaining":{"calls":98,"seconds":0}}
             14100 call train 10
               refuse op 8: `train` has no call time left of the 10 s it allows: make no more calls to it
-            14200 now submit 0 select
+            14200 now submit 0 set_submission
               reply to op 9: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17985}
         "#]],
     );
@@ -849,7 +849,7 @@ fn deadline() {
         |ir| ir["deadline_seconds"] = json!(60),
         r#"
         0 work_started
-        50000 now submit 10 select
+        50000 now submit 10 set_submission
         55000 call train 10
         55500 call_started 0
         59999 tick
@@ -870,7 +870,7 @@ fn deadline() {
               (tick due at 70000)
             0 work_started
               (tick due at 60000)
-            50000 now submit 10 select
+            50000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             55000 call train 10
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -902,7 +902,7 @@ fn deadline() {
         |ir| ir["deadline_seconds"] = json!(60),
         r"
         0 work_started
-        50000 now submit 10 select
+        50000 now submit 10 set_submission
         59999 call train 10
         60000 call_failed 0 the target's sandbox didn't start
         60000 agent_torn_down
@@ -913,7 +913,7 @@ fn deadline() {
               (tick due at 70000)
             0 work_started
               (tick due at 60000)
-            50000 now submit 10 select
+            50000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             59999 call train 10
               reply to op 2: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
@@ -1007,7 +1007,7 @@ fn hard_end_covers_the_run() {
         |ir| ir["deadline_seconds"] = json!(60),
         r#"
         10000 work_started
-        69999 now submit 10 select
+        69999 now submit 10 set_submission
         70000 tick
         140000 agent_torn_down
         150000 call_started 0
@@ -1018,7 +1018,7 @@ fn hard_end_covers_the_run() {
               start agents
               (tick due at 70000)
             10000 work_started
-            69999 now submit 10 select
+            69999 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
             70000 tick
               tear down agent
@@ -1041,7 +1041,7 @@ fn agent_ends() {
         0 work_started
         1000 call train 10
         1500 call_started 0
-        3100 now submit 10 select
+        3100 now submit 10 set_submission
         3200 agent_exited 0
         3200 agent_torn_down
         3400 call_returned 0 raw_score=1
@@ -1059,7 +1059,7 @@ fn agent_ends() {
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
-            3100 now submit 10 select
+            3100 now submit 10 set_submission
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
             3200 agent_exited 0
               stop call 0
@@ -1125,7 +1125,7 @@ fn hard_end() {
         deadline,
         r"
         0 work_started
-        1000 now submit 10 select end_work
+        1000 now submit 10 set_submission end_work
         270000 tick
         ",
         &expect![[r#"
@@ -1134,7 +1134,7 @@ fn hard_end() {
               (tick due at 70000)
             0 work_started
               (tick due at 60000)
-            1000 now submit 10 select end_work
+            1000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             270000 tick
               abandon the run at its hard end
@@ -1183,7 +1183,7 @@ fn hard_end_after_work() {
         },
         r#"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         2000 agent_exited 0
         2000 agent_torn_down
         2500 call_started 0
@@ -1197,7 +1197,7 @@ fn hard_end_after_work() {
               (tick due at 70000)
             0 work_started
               (tick due at 60000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             2000 agent_exited 0
               tear down agent
@@ -1246,7 +1246,7 @@ fn hard_end_bounds() {
         |ir| ir["deadline_seconds"] = json!(5),
         r"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         5000 tick
         5000 agent_torn_down
         214999 tick
@@ -1258,7 +1258,7 @@ fn hard_end_bounds() {
               (tick due at 15000)
             0 work_started
               (tick due at 5000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
               tear down agent
@@ -1274,7 +1274,7 @@ fn hard_end_bounds() {
         |ir| ir["deadline_seconds"] = json!(u64::MAX),
         r"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         2000 agent_exited 0
         2000 agent_torn_down
         ",
@@ -1284,7 +1284,7 @@ fn hard_end_bounds() {
               (tick due at 18446744073709551615999.999999)
             0 work_started
               (tick due at 18446744073709551615000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":18446744073709551614}
             2000 agent_exited 0
               tear down agent
@@ -1305,7 +1305,7 @@ fn hard_end_startups() {
         },
         r"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         5000 tick
         5000 agent_torn_down
         254999 tick
@@ -1317,7 +1317,7 @@ fn hard_end_startups() {
               (tick due at 35000)
             0 work_started
               (tick due at 5000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             5000 tick
               tear down agent
@@ -1337,7 +1337,7 @@ fn hard_end_startups() {
         },
         r"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         60000 tick
         60000 agent_torn_down
         289999 tick
@@ -1349,7 +1349,7 @@ fn hard_end_startups() {
               (tick due at 70000)
             0 work_started
               (tick due at 60000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":59}
             60000 tick
               tear down agent
@@ -1373,7 +1373,7 @@ fn exact_scores() {
         1500 call_started 0
         2100 call_returned 0 raw_score=22.833062975103598
         2200 status 0
-        3000 now submit 10 select end_work
+        3000 now submit 10 set_submission end_work
         3100 agent_exited 0
         3100 agent_torn_down
         3500 call_started 1
@@ -1392,7 +1392,7 @@ fn exact_scores() {
             2100 call_returned 0 raw_score=22.833062975103598
             2200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
-            3000 now submit 10 select end_work
+            3000 now submit 10 set_submission end_work
               reply to op 3: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 63000)
             3100 agent_exited 0
@@ -1435,10 +1435,10 @@ fn now_calls() {
         |ir| ir["final"]["payload_max_bytes"] = 10.into(),
         r"
         0 work_started
-        1100 now submit 11 select
+        1100 now submit 11 set_submission
         1200 now submit 10 failed
         1300 now submit 10 unread
-        1400 now submit 10 select end_work select
+        1400 now submit 10 set_submission end_work set_submission
         1500 now submit 10
         1600 locked
         1700 now submit 0 end_work
@@ -1455,30 +1455,30 @@ fn now_calls() {
               (tick due at 18010000)
             0 work_started
               (tick due at 18000000)
-            1100 now submit 11 select
+            1100 now submit 11 set_submission
               refuse op 1: the payload is 11 bytes, over the final call's limit of 10: send a smaller one
             1200 now submit 10 failed
               refuse op 2: the call's body failed: the run's record says why
             1300 now submit 10 unread
               refuse op 3: `--arg finalize` didn't read
-            1400 now submit 10 select end_work select
+            1400 now submit 10 set_submission end_work set_submission
               refuse op 4: `run.end_work()` ended the work, and the call has more effects after it: end the work last
             1500 now submit 10
               reply to op 5: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17998}
             1600 locked
-              selection locked: false
+              submission locked: false
             1700 now submit 0 end_work
               reply to op 6: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 61700)
             1700 locked
-              selection locked: true
+              submission locked: true
             1800 ops
               refuse op 7: your work has ended: make no more ops
             1810 agent_exited 0
               tear down agent
               (tick due at 18210000)
             1810 locked
-              selection locked: true
+              submission locked: true
             1820 agent_torn_down
               start call 0 of final on agent=missing, with a timeout of 120s
             1850 call_returned 0
@@ -1500,10 +1500,10 @@ fn finalize_lock() {
         0 work_started
         1000 call train 10
         1500 call_started 0
-        2000 now submit 10 select end_work
+        2000 now submit 10 set_submission end_work
         2100 ops
         2200 status 0
-        2300 now submit 10 select
+        2300 now submit 10 set_submission
         61999 tick
         61999 model
         62000 model
@@ -1521,14 +1521,14 @@ fn finalize_lock() {
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
-            2000 now submit 10 select end_work
+            2000 now submit 10 set_submission end_work
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
               (tick due at 62000)
             2100 ops
               refuse op 3: your work has ended: make no more ops
             2200 status 0
               refuse op 4: your work has ended: make no more ops
-            2300 now submit 10 select
+            2300 now submit 10 set_submission
               refuse op 5: your work has ended: make no more ops
             61999 tick
             61999 model
@@ -1548,7 +1548,7 @@ fn finalize_lock() {
         |ir| ir["roles"][0]["runtime"]["agent"]["finalize_grace_seconds"] = json!(0),
         r"
         0 work_started
-        2000 now submit 10 select end_work
+        2000 now submit 10 set_submission end_work
         2000 agent_torn_down
         2000 model
         2100 ops
@@ -1559,7 +1559,7 @@ fn finalize_lock() {
               (tick due at 18010000)
             0 work_started
               (tick due at 18000000)
-            2000 now submit 10 select end_work
+            2000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
               tear down agent
               (tick due at 18150000)
@@ -1583,7 +1583,7 @@ fn finalize_near_deadline() {
         |ir| ir["deadline_seconds"] = json!(30),
         r"
         0 work_started
-        10000 now submit 10 select end_work
+        10000 now submit 10 set_submission end_work
         29999 model
         30000 model
         ",
@@ -1593,7 +1593,7 @@ fn finalize_near_deadline() {
               (tick due at 40000)
             0 work_started
               (tick due at 30000)
-            10000 now submit 10 select end_work
+            10000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":20}
             29999 model
               model requests allowed
@@ -1609,7 +1609,7 @@ fn finalize_near_deadline() {
         grace,
         r#"
         0 work_started
-        19950 now submit 10 select end_work
+        19950 now submit 10 set_submission end_work
         30100 tick
         30100 agent_torn_down
         30150 ops
@@ -1622,7 +1622,7 @@ fn finalize_near_deadline() {
               (tick due at 40000)
             0 work_started
               (tick due at 30000)
-            19950 now submit 10 select end_work
+            19950 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
               (tick due at 29950)
             30100 tick
@@ -1642,7 +1642,7 @@ fn finalize_near_deadline() {
         grace,
         r"
         0 work_started
-        20000 now submit 10 select end_work
+        20000 now submit 10 set_submission end_work
         30000 tick
         30000 agent_torn_down
         30000 ops
@@ -1653,7 +1653,7 @@ fn finalize_near_deadline() {
               (tick due at 40000)
             0 work_started
               (tick due at 30000)
-            20000 now submit 10 select end_work
+            20000 now submit 10 set_submission end_work
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":10}
             30000 tick
               tear down agent
@@ -2036,7 +2036,7 @@ fn leases_end_with_work() {
         1100 gpu.open
         2000 lease_ready 0
         3000 gpu.run 0 - train
-        4000 now submit 10 select
+        4000 now submit 10 set_submission
         5000 agent_exited 0
         5000 agent_torn_down
         6000 lease_ended 1
@@ -2061,7 +2061,7 @@ fn leases_end_with_work() {
             3000 gpu.run 0 - train
               reply to op 3: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":899,"cumulative_seconds":1199,"commands":2}}
               run command 0 of lease 0, ["train"], with a timeout of None
-            4000 now submit 10 select
+            4000 now submit 10 set_submission
               reply to op 4: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17996}
             5000 agent_exited 0
               close lease 0
@@ -2537,7 +2537,7 @@ fn call_model_routes() {
         14100 call_failed 1 the call's timeout passed
         14200 call train 10
         15000 call_started 2
-        15100 now submit 10 select
+        15100 now submit 10 set_submission
         15200 agent_exited 0
         15200 agent_torn_down
         15200 @2 model
@@ -2587,7 +2587,7 @@ fn call_model_routes() {
               reply to op 3: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11988}}
               start call 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
             15000 call_started 2
-            15100 now submit 10 select
+            15100 now submit 10 set_submission
               reply to op 4: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17984}
             15200 agent_exited 0
               stop call 2
@@ -2625,7 +2625,7 @@ fn target_leases() {
         2200 @0 box.open
         2300 @0 gpu.open
         2400 @0 status 0
-        2500 @0 now submit 10 select
+        2500 @0 now submit 10 set_submission
         2600 @0 call train 10
         2700 gpu.status 0
         2800 gpu.open
@@ -2663,7 +2663,7 @@ fn target_leases() {
               refuse op 5: you hold no grant named `gpu`: call one that `ops` lists
             2400 @0 status 0
               refuse op 6: you have no job 0: ask about a job that one of your calls returned
-            2500 @0 now submit 10 select
+            2500 @0 now submit 10 set_submission
               refuse op 7: you hold no grant named `submit`: call one that `ops` lists
             2600 @0 call train 10
               refuse op 8: you hold no grant named `train`: call one that `ops` lists
@@ -2735,7 +2735,7 @@ fn call_leases() {
         9000 call_started 2
         9100 @2 box.open
         9200 lease_ready 2
-        9250 now submit 10 select
+        9250 now submit 10 set_submission
         9300 agent_exited 0
         9300 agent_torn_down
         9400 call_failed 2 the call was stopped
@@ -2807,7 +2807,7 @@ fn call_leases() {
               open lease 2 of box for job 2, as instance 0, started by 59000
             9200 lease_ready 2
               (tick due at 109200)
-            9250 now submit 10 select
+            9250 now submit 10 set_submission
               reply to op 17: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17990}
             9300 agent_exited 0
               stop call 2
@@ -2828,7 +2828,7 @@ fn final_call_leases() {
         holders_leasing,
         r#"
         0 work_started
-        1000 now submit 10 select
+        1000 now submit 10 set_submission
         2000 agent_exited 0
         2000 agent_torn_down
         3000 call_started 0
@@ -2849,7 +2849,7 @@ fn final_call_leases() {
               (tick due at 18010000)
             0 work_started
               (tick due at 18000000)
-            1000 now submit 10 select
+            1000 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":17999}
             2000 agent_exited 0
               tear down agent
@@ -2896,7 +2896,7 @@ fn abandoned_final_call_leases() {
         },
         r"
         10000 work_started
-        10500 now submit 10 select
+        10500 now submit 10 set_submission
         10999 agent_exited 0
         10999 agent_torn_down
         30999 call_started 0
@@ -2915,7 +2915,7 @@ fn abandoned_final_call_leases() {
               start agents
               (tick due at 11000)
             10000 work_started
-            10500 now submit 10 select
+            10500 now submit 10 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":0}
             10999 agent_exited 0
               tear down agent
@@ -2970,8 +2970,8 @@ fn agents_work_until_their_own_end() {
         220 @zoe gpu.open
         225 @bob status 0
         226 @bob gpu.close 2
-        230 @zoe now submit 12 select end_work
-        235 @zoe now submit 15 select
+        230 @zoe now submit 12 set_submission end_work
+        235 @zoe now submit 15 set_submission
         300 @zoe model
         3230 @0 model
         3230 @1 model
@@ -2980,7 +2980,7 @@ fn agents_work_until_their_own_end() {
         3250 @bob model
         3260 @bob status 1
         3200 @zoe agent_exited 0
-        3300 @bob now submit 0 select
+        3300 @bob now submit 0 set_submission
         3400 @bob agent_exited 0
         3500 @bob agent_torn_down
         3600 call_failed 0 stopped
@@ -3018,10 +3018,10 @@ fn agents_work_until_their_own_end() {
               refuse op 6: you have no job 0: ask about a job that one of your calls returned
             226 @bob gpu.close 2
               refuse op 7: you have no lease 2: name one that `gpu.open` returned
-            230 @zoe now submit 12 select end_work
+            230 @zoe now submit 12 set_submission end_work
               reply to op 8: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
               (tick due at 3230)
-            235 @zoe now submit 15 select
+            235 @zoe now submit 15 set_submission
               refuse op 9: your work has ended: make no more ops
             300 @zoe model
               model requests allowed
@@ -3042,7 +3042,7 @@ fn agents_work_until_their_own_end() {
             3260 @bob status 1
               reply to op 10: {"kind":"status","job":1,"state":"running","remaining":{"calls":99,"seconds":12000}}
             3200 @zoe agent_exited 0
-            3300 @bob now submit 0 select
+            3300 @bob now submit 0 set_submission
               reply to op 11: {"kind":"call","returned":{"state":"done"},"remaining_seconds":16}
             3400 @bob agent_exited 0
               stop call 1
@@ -3075,11 +3075,11 @@ fn common_deadline_wins_a_tie() {
         },
         r#"
         35000 work_started
-        46000 @zoe now submit 2 select
+        46000 @zoe now submit 2 set_submission
         47000 @zoe now submit 0 end_work
         49999 @bob model
         50000 @zoe agent_exited 0
-        49999 @bob now submit 1 select
+        49999 @bob now submit 1 set_submission
         50100 @zoe agent_torn_down
         50200 @bob agent_torn_down
         50500 call_failed 0 judge failed
@@ -3089,7 +3089,7 @@ fn common_deadline_wins_a_tie() {
               start agents
               (tick due at 50000)
             35000 work_started
-            46000 @zoe now submit 2 select
+            46000 @zoe now submit 2 set_submission
               reply to op 1: {"kind":"call","returned":{"state":"done"},"remaining_seconds":4}
             47000 @zoe now submit 0 end_work
               reply to op 2: {"kind":"call","returned":{"state":"done"},"remaining_seconds":3}
@@ -3099,7 +3099,7 @@ fn common_deadline_wins_a_tie() {
               tear down zoe
               tear down bob
               (tick due at 220000)
-            49999 @bob now submit 1 select
+            49999 @bob now submit 1 set_submission
               refuse op 3: your work has ended: make no more ops
             50100 @zoe agent_torn_down
             50200 @bob agent_torn_down
@@ -3113,7 +3113,7 @@ fn common_deadline_wins_a_tie() {
 }
 
 #[test]
-fn agents_without_selections_are_judged() {
+fn agents_without_submissions_are_judged() {
     check(
         two_agents,
         r#"

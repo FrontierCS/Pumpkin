@@ -122,9 +122,9 @@ pub enum Unevaluated {
 /// An effect on the run's state that a now function's body proposes, which its call applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
-    /// The call's payload becomes the selection, replacing the last: `run.select(payload)`.
-    Select,
-    /// The caller's work ends once its grace has run out, the selection locked: `run.end_work()`.
+    /// The call's payload becomes the caller's submission, replacing the last.
+    SetSubmission,
+    /// Locks the caller's submission and ends its work once its grace has run out.
     EndWork,
 }
 
@@ -218,11 +218,11 @@ pub enum Action {
     StartAgents,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
-    /// Runs the final body on a fresh sandbox of its target with the agents' selections.
+    /// Runs the final body on a fresh sandbox of its target with the agents' submissions.
     /// Its timeout and the runtime's reports are as for [`Action::StartCall`].
     StartFinalCall {
         job: JobId,
-        /// One entry for each agent in declaration order, including those that selected nothing.
+        /// One entry for each agent in declaration order, including those that submitted nothing.
         selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
     },
@@ -321,7 +321,7 @@ pub enum WorkEnd {
     Deadline,
     /// A call ended the agent's work, and the agent was still running when the grace after it ran
     /// out ([`finalize_grace`](schema::workflow::Agent::finalize_grace)). An agent that exits
-    /// within it ends its work with [`AgentExited`](Self::AgentExited), and its selection
+    /// within it ends its work with [`AgentExited`](Self::AgentExited), and its submission
     /// is still the locked one.
     Finalized,
     AgentExited(ExitStatus),
@@ -548,8 +548,8 @@ impl<'w> Core<'w> {
         self.leases_due().map_or(phase, |lease| phase.min(lease))
     }
 
-    /// Whether this agent locked its selection with `run.end_work()`.
-    pub fn selection_locked(&self, agent: AgentId) -> bool {
+    /// Whether this agent locked its submission with `run.end_work()`.
+    pub fn submission_locked(&self, agent: AgentId) -> bool {
         self.agents
             .get(&agent)
             .is_some_and(|work| work.grace_end.is_some())
@@ -577,7 +577,7 @@ impl<'w> Core<'w> {
     pub fn model_requests_allowed(&self, caller: Caller, at: Duration) -> bool {
         match caller {
             // A harness asks its model after each command, the finalize's too, and fails its turn
-            // if refused; the locked selection keeps any answer off the result.
+            // if refused; the locked submission keeps any answer off the result.
             Caller::Agent(agent) => self.work_due(agent).is_some_and(|(end, _)| at < end),
             // A call's route is open while it may make ops, which its timeout bounds.
             Caller::Job(_) => self.working(caller).is_ok_and(|working| at < working.end()),

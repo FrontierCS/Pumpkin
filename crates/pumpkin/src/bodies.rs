@@ -144,11 +144,11 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
-        selections: &[(Name, Option<usize>)],
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let body = self::body(&body.file, &body.def, keywords);
-        let host = Host::Final(&mut Driven(target), selections);
+        let host = Host::Final(&mut Driven(target), submissions);
         let mut sources = self.sources;
         let bounds = Bounds::WORKFLOW;
         let arguments = BTreeMap::new();
@@ -176,8 +176,8 @@ impl runtime::Bodies for Bodies<'_> {
 struct Proposing<'r>(&'r mut dyn runtime::RunState);
 
 impl lang::Run for Proposing<'_> {
-    fn select(&mut self) {
-        self.0.select();
+    fn set_submission(&mut self) {
+        self.0.set_submission();
     }
 
     fn end_work(&mut self) {

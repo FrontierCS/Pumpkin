@@ -445,7 +445,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Event::OpArrived {
                     caller: Caller::Agent(agent),
                     ..
-                } if !core.selection_locked(*agent) => Some(*agent),
+                } if !core.submission_locked(*agent) => Some(*agent),
                 _ => None,
             };
             actions = core.handle(at, event.clone());
@@ -454,9 +454,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             if let Event::CallStarted { job } = event {
                 self.serve(Caller::Job(job));
             }
-            // The keys' refusals are read as the core locks the selection, before the record of it
+            // The keys' refusals are read as the core locks the submission, before the record of it
             // is written, so that a refusal heard after the lock leaves the run to be judged.
-            if let Some(agent) = locking.filter(|id| core.selection_locked(*id)) {
+            if let Some(agent) = locking.filter(|id| core.submission_locked(*id)) {
                 let held = self
                     .served
                     .iter()

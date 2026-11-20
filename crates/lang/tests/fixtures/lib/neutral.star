@@ -38,9 +38,9 @@ def _final_target(*, needs, env, max_bytes):
         "runtime": {"target": {"cwd": "/pumpkin/home", "env": _env(env, "eval", max_bytes)}},
     }
 
-def final_call(target: Target, selections):
-    """Runs the judge in eval mode on the selection, and shows the result it wrote."""
-    target.put("/pumpkin/in/payload", selections["agent"])
+def final_call(target: Target, submissions):
+    """Runs the judge in eval mode on the submission, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", submissions["agent"])
     target.run(["/opt/judge/run", "--mode", "eval"])
     return {"result": target.get("/pumpkin/out/result.json")}
 

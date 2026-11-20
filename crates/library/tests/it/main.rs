@@ -203,7 +203,7 @@ fn entry(function: &str, own: &[(&str, &str)]) -> String {
 /// The task's library of its now function, which the entry's workflow grants the agent.
 const SUBMIT: &str = r#"
 def submit(run: Run, payload: Payload):
-    run.select(payload)
+    run.set_submission(payload)
     return {}
 "#;
 
@@ -233,8 +233,8 @@ workflow(
 
 /// The file that the entry loads the final call's body from.
 const FINAL_CALL: &str = r#"
-def final_call(target: Target, selections):
-    target.put("/pumpkin/in/payload", selections["agent"])
+def final_call(target: Target, submissions):
+    target.put("/pumpkin/in/payload", submissions["agent"])
     target.run(["true"])
     return {}
 "#;

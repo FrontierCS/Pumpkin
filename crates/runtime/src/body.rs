@@ -53,8 +53,8 @@ pub trait Bodies: Sync {
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
 
-    /// Calls the final body with one entry per agent, in role order. Each selected input names
-    /// a slot for [`Target::put`] on this call.
+    /// Calls the final body with one entry per agent, in role order. Each submission names
+    /// an input slot for [`Target::put`] on this call.
     ///
     /// # Errors
     ///
@@ -63,7 +63,7 @@ pub trait Bodies: Sync {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
-        selections: &[(Name, Option<usize>)],
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
 
@@ -84,10 +84,10 @@ pub trait Bodies: Sync {
 
 /// The run's state, as a now function's body proposes effects on it, which the core applies.
 pub trait RunState {
-    /// Proposes that the call's payload become the run's selection, replacing the last.
-    fn select(&mut self);
+    /// Proposes that the call's payload become the caller's submission, replacing the last.
+    fn set_submission(&mut self);
 
-    /// Proposes that the caller's work end, its selection locked.
+    /// Proposes locking the caller's submission and ending its work.
     fn end_work(&mut self);
 }
 
@@ -130,7 +130,7 @@ pub(crate) enum Of<'r> {
     },
     Final {
         final_call: &'r Final,
-        selections: Vec<(Name, Option<usize>)>,
+        submissions: Vec<(Name, Option<usize>)>,
     },
 }
 
@@ -189,11 +189,11 @@ pub(crate) fn evaluate<H: Host>(
         } => bodies.job(&function.body, &function.keywords, arguments, &mut target),
         Of::Final {
             final_call,
-            selections,
+            submissions,
         } => bodies.final_call(
             &final_call.body,
             &final_call.keywords,
-            selections,
+            submissions,
             &mut target,
         ),
     };

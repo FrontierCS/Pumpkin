@@ -136,7 +136,7 @@ workflow decides the agent's feedback. The status reply's types hold nothing els
 
 **Architecture Invariant:** the final call starts once the work sandboxes and their leases have been torn
 down. Work ends at the common deadline or once every agent has ended its work. The final body
-receives every agent role's last selection, an opaque payload or `None`. Its calls to `put`
+receives every agent role's last submission, an opaque payload or `None`. Its calls to `put`
 determine which payloads enter the target and where they go.
 
 ### `crates/recipe`

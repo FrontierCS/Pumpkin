@@ -551,7 +551,7 @@ fn evaluated_json(evaluated: &Result<Evaluated, Unevaluated>) -> Value {
         Ok(Evaluated { effects, returned }) => {
             let effects: Vec<&str> = (effects.iter())
                 .map(|effect| match effect {
-                    Effect::Select => "select",
+                    Effect::SetSubmission => "set_submission",
                     Effect::EndWork => "end_work",
                 })
                 .collect();

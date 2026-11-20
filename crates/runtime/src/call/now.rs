@@ -42,8 +42,8 @@ pub(crate) fn evaluate(
 struct Proposed(Vec<Effect>);
 
 impl RunState for Proposed {
-    fn select(&mut self) {
-        self.0.push(Effect::Select);
+    fn set_submission(&mut self) {
+        self.0.push(Effect::SetSubmission);
     }
 
     fn end_work(&mut self) {

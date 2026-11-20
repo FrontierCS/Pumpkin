@@ -29,9 +29,9 @@ FINAL_TARGET = {
     "runtime": {"target": {"cwd": "/pumpkin/home"}},
 }
 
-def final_call(target: Target, selections):
-    """Runs the judge on the selection, and shows the result it wrote."""
-    target.put("/pumpkin/in/payload", selections["agent"])
+def final_call(target: Target, submissions):
+    """Runs the judge on the submission, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", submissions["agent"])
     target.run(["/opt/judge/run"])
     return {"result": target.get("/pumpkin/out/result.json")}
 

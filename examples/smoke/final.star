@@ -1,16 +1,16 @@
 """The smoke's final call: it runs the smoke's judge on the submission in its target."""
 
-def final_call(target: Target, selections):
+def final_call(target: Target, submissions):
     """Shows how many lines of the submission's and of the judge's own probe say `ok`.
 
     Args:
       target: the call's target, whose image holds the smoke's judge.
-      selections: the agent’s submitted probe output by role, or None if absent.
+      submissions: the agent’s submitted probe output by role, or None if absent.
 
     Returns:
       The score, the count of those lines, and the detail, every line of them.
     """
-    payload = selections["agent"]
+    payload = submissions["agent"]
     if payload == None:
         return {"score": 0, "detail": []}
     target.put("/pumpkin/in/payload/raw", payload)

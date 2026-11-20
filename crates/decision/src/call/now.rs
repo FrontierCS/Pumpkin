@@ -59,7 +59,7 @@ impl Core<'_> {
         deadline: Duration,
         then: &mut Vec<Action>,
     ) -> Result<Duration, String> {
-        let mut select = false;
+        let mut set_submission = false;
         let mut end_work = false;
         for effect in effects {
             if end_work {
@@ -70,9 +70,9 @@ impl Core<'_> {
                 );
             }
             match effect {
-                Effect::Select => {
-                    self.selectable(payload)?;
-                    select = true;
+                Effect::SetSubmission => {
+                    self.check_submission_size(payload)?;
+                    set_submission = true;
                 }
                 Effect::EndWork => end_work = true,
             }
@@ -80,8 +80,8 @@ impl Core<'_> {
         let Some(work) = self.agents.get_mut(&agent) else {
             unreachable!("a now function's holder is one of the workflow's agent roles")
         };
-        if select {
-            work.selection = Some(payload.clone());
+        if set_submission {
+            work.submission = Some(payload.clone());
         }
         if !end_work {
             return Ok(deadline);
@@ -95,8 +95,8 @@ impl Core<'_> {
         Ok(end)
     }
 
-    // Refuses a payload that the final call can't take, so that whatever is selected fits it.
-    fn selectable(&self, payload: &PayloadRef) -> Result<(), String> {
+    // Refuses a payload that the final call can't take, so that every submission fits it.
+    fn check_submission_size(&self, payload: &PayloadRef) -> Result<(), String> {
         let max_bytes = self.workflow.final_call().payload_max_bytes();
         if payload.size <= max_bytes.get() {
             Ok(())

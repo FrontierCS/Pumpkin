@@ -17,7 +17,7 @@ it ran. This page says where to look in a record, and what the page shows.
 | each agent's output, and what it left in its `out/` | `agents/<role>/log/`, `agents/<role>/out/` |
 | each call's target, a job function's or the final call's: each command's output, each file its body got, and what the target held in `/pumpkin/out` as the call ended | `jobs/<n>/log/<c>/`, `jobs/<n>/got/<k>/`, `jobs/<n>/out/` |
 | each lease's runner sandbox: its output and what it wrote | `leases/<n>/log/`, `leases/<n>/out/` |
-| each call's payload, the selection among them | `payloads/<digest>`, by the SHA-256 that the log and `outcome.json` name |
+| each call's payload, including each agent's submission | `payloads/<digest>`, by the SHA-256 that the log and `outcome.json` name |
 | each model request and response, as they went through the route | `model/` |
 | the arguments that started the run, and the Pumpkin that ran it | `record.json` |
 
@@ -30,8 +30,8 @@ line to `reaps.jsonl` for each sandbox it deleted, removes `sockets/`, and write
 
 A finished `outcome.json` has `state: "finished"`. Its `agents` array lists every agent in
 declaration order. Each entry names the role, the reason its work ended, and its submission.
-A submission gives the selected payload's digest and byte size and whether the agent finalized
-it. A role that selected nothing has a JSON `null` submission. An empty file has a digest
+A submission gives the submitted payload's digest and byte size and whether the agent finalized
+it. A role that submitted nothing has a JSON `null` submission. An empty file has a digest
 and a size of zero.
 
 The `verdict` records the final call. If its `kind` is `returned`, the result holds the values

@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::logged::{Action, CallerName};
 use super::progress::{ModelUse, Sandbox};
 
-/// A call: the final call, which judges the selection, or the agent's call of a job function.
+/// A call: the final call, which judges the submissions, or an agent's call of a job function.
 #[derive(Clone, Debug)]
 pub struct CallSpan {
     /// The agent that requested the job, absent for the final call.
@@ -75,7 +75,7 @@ impl CallSpan {
 pub enum CallOf {
     /// The agent's job function of this name.
     Function(String),
-    /// The final call, which judges the selection.
+    /// The final call, which judges the submissions.
     Final,
 }
 
