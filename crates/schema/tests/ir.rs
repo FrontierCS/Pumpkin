@@ -587,22 +587,22 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":0}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddee"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeefg"}"#),
-            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":1}"#),
+            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":1,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
+            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddee"}"#),
+            HelloJson(r#"{"version":1,"grant":"00112233445566778899aabbccddeefg"}"#),
+            HelloJson(r#"{"version":1,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":1,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { grant: None, gpus: None }
             Hello { grant: Some(RegistrationGrant(..)), gpus: None }
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 1's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             Hello { grant: None, gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 0's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 1's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [

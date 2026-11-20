@@ -1,4 +1,4 @@
-//! The sandbox protocol, v0: what the gateway and `sandboxd` say to each other over a session, and
+//! The sandbox protocol, v1: what the gateway and `sandboxd` say to each other over a session, and
 //! the contract of the sandbox that a role's commands run in.
 //!
 //! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
@@ -220,7 +220,7 @@ pub fn model_url() -> String {
 }
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
-pub const PROTOCOL_VERSION: u32 = 0;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox)); its
 /// body holds none.

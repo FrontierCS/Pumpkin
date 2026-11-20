@@ -1315,7 +1315,7 @@ fn turns() {
             Code(0)
             the caller of status 1, which left with its op in flight: exit 143
             the caller of status 4, which left as it waited its turn: exit 143
-            waiting on the held connection: exit 124: sandboxctl: wait expired before the admission reply: the call may have started
+            waiting on the held connection: exit 124: sandboxctl: wait expired before the reply: the call may have started
             status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a call returned"}
             call train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
