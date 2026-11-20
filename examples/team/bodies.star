@@ -19,16 +19,22 @@ COMPILE = "sha256sum src/solution.cpp && exec g++ --std=c++17 src/solution.cpp -
 # The extra byte lets the judge reject an oversized answer, within the runner's stdout tail.
 SOLVE = 'ulimit -f 1; printf "%s" "$1" | ./solution > answer && head --bytes=1025 answer'
 
-def _answer(runner, graph):
-    result = runner.run(["sh", "-c", SOLVE, "solve", graph], timeout_seconds = 3)
-    return result["stdout_tail"] if result["end"] == {"exited": {"code": 0}} else None
+def _case(target, runner, inputs, name):
+    result = runner.run(["sh", "-c", SOLVE, "solve", inputs[name]], timeout_seconds = 3)
+    if result["end"] != {"exited": {"code": 0}}:
+        return None
+    return json.decode(target.capture(["python3", JUDGE, "check", name, json.encode(result["stdout_tail"])]))
 
-def _run_source(runner, directory, inputs):
+def _run_source(runner, target, directory, inputs):
     runner.put(directory, "/pumpkin/home/src")
     built = runner.run(["sh", "-c", COMPILE], timeout_seconds = 20)
     if built["end"] != {"exited": {"code": 0}}:
         return None
-    return [_answer(runner, graph) for graph in inputs]
+    repeated = _case(target, runner, inputs, "repeated_edge")
+    if repeated == None:
+        return None
+    fixture = _case(target, runner, inputs, "fixture")
+    return None if fixture == None else repeated + fixture
 
 def _score_source(target, role, source):
     if source == None:
@@ -38,9 +44,10 @@ def _score_source(target, role, source):
     target.put(path, source)
     prepared = json.decode(target.capture(["python3", JUDGE, "prepare", path]))
     inputs = prepared["inputs"]
-    outputs = target.with_runner("cpp", _run_source, directory, inputs) if inputs != None else None
-    grade = json.decode(target.capture(["python3", JUDGE, "grade", json.encode(outputs)]))
-    return {"role": role, "digest": prepared["digest"]} | grade
+    points = target.with_runner("cpp", _run_source, target, directory, inputs) if inputs != None else None
+    if points == None:
+        return {"role": role, "digest": prepared["digest"], "status": "invalid", "score": 0}
+    return {"role": role, "digest": prepared["digest"], "status": "scored" if points == 2 else "wrong", "score": points}
 
 def evaluate(target: Target, payload: Payload):
     """Compiles and grades the caller's draft in a fresh runner.
