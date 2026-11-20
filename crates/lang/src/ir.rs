@@ -21,6 +21,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+use core::num::NonZeroU64;
 
 use schema::ir::{self, JsonPointer};
 use schema::workflow::ParseError;
@@ -47,6 +48,7 @@ pub(crate) fn workflow(
     #[serde(deny_unknown_fields)]
     struct Fields {
         name: ir::WorkflowName,
+        deadline_seconds: NonZeroU64,
         roles: Vec<ir::Role>,
         #[serde(rename = "final")]
         final_call: ir::Final,
@@ -58,6 +60,7 @@ pub(crate) fn workflow(
     };
     let Fields {
         name,
+        deadline_seconds,
         roles,
         final_call,
     } = Fields::deserialize(de).map_err(|error| {
@@ -75,8 +78,9 @@ pub(crate) fn workflow(
         Fault::new(at.unwrap_or(fields.span), message).note(place(&pointer), None)
     })?;
     Ok(ir::Workflow {
-        ir_version: ir::IrVersion::V0,
+        ir_version: ir::IrVersion::V1,
         name,
+        deadline_seconds,
         roles,
         final_call,
     })

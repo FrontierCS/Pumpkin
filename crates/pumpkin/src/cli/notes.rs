@@ -138,10 +138,10 @@ Exit status:
      an outcome.json, which `pumpkin cancel` then records; or another error.
   2  A usage error.
 While the run goes on, `wait` says on the standard error each of its milestones
-as its record logs it: the agent's start, each call's start and end, each
+as its record logs it: the start of work, each call's start and end, each
 lease's start, its runner's readiness and its end, and the end of the work
 phase. Once the run has ended, it says its summary: when it started, how long it
-ran, the agent's start and end, each call with how long it took and how it
+ran, each agent's start and end, each call with how long it took and how it
 ended, each lease with how long its runner lived and was charged for, and how
 much of that a command or transfer ran, its commands and how it ended, the model
 requests of an agent with a model route and the tokens reported, what each role
@@ -170,9 +170,9 @@ Exit status:
      others all the same.
   2  A usage error.
 
-A live run's phase is `publishing` what its sandboxes run, `starting` its agent,
-`agent` at work, `ending` the work phase, or `final call`; under it, a line for
-each call the agent made, by its function, and each lease, by its grant and
+A live run's phase is `publishing` what its sandboxes run, `starting` its agents,
+`work`, `ending` the work phase, or `final call`; under it, a line for
+each call, by function, and each lease, by its grant and
 state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
 ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
 `lost`, if its driver ended without an outcome.json. Its task is its workflow's
@@ -230,7 +230,7 @@ another site that the browser has open. It reads the records as `ls` and `wait`
 do, and of the providers asks only EC2, for a controller's state and its start,
 as below.
 
-A run's page links to the trace of each caller that used a model, the agent or
+A run's page links to the trace of each caller that used a model, an agent or
 a call: its model requests as threads of steps, each with the entries it
 added and the model's answer, as the record's log and the bodies it keeps say.
 

@@ -87,8 +87,8 @@ browser. The record is `.pumpkin/runs/<id>/`.
 
 ## Workflow in Pumpkin
 
-A workflow is the one `workflow()` call of a task's entry file: the workflow's name, its roles,
-and the final call that gives a run its result. `examples/hello` needs no model, so it runs
+A task's entry file calls `workflow()` once, giving its name, work deadline, roles and the
+final call that gives a run its result. `examples/hello` needs no model, so it runs
 wherever Docker does. Its agent is a shell script: it has a job function count the lines and bytes
 of its greeting, then submits the greeting, and the final call scores the greeting by its size.
 
@@ -116,6 +116,7 @@ SANDBOXCTL call final greeting --arg finalize=true
 """.replace("SANDBOXCTL", SANDBOXCTL)
 
 workflow(
+    deadline_seconds = 300,
     name = "examples/hello",
     roles = [
         {
@@ -128,7 +129,6 @@ workflow(
                     "argv": ["sh", "-c", "set -e" + AGENT],
                     "cwd": "/workspace",
                 },
-                "deadline_seconds": 300,
                 "finalize_grace_seconds": 30,
                 "grants": [
                     {"name": "count", "job": {
@@ -187,7 +187,7 @@ def count(target: Target, payload: Payload) -> dict[str, int]:
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the final call, replacing the last.
+    """Selects `payload` for the calling agent, replacing its last selection.
 
     Args:
       run: the run's state.
@@ -209,16 +209,19 @@ and [`examples/hello/final.star`](examples/hello/final.star):
 ```python
 """The hello example's final call: it counts the greeting's bytes and lines in its target."""
 
-def final_call(target: Target, payload: Payload) -> dict[str, int]:
+def final_call(target: Target, selections) -> dict[str, int]:
     """Shows the greeting's size as its score, and its lines.
 
     Args:
       target: the call's target.
-      payload: the greeting the agent submitted.
+      selections: the greeting by agent role, or None if absent.
 
     Returns:
       The score and the lines, in the order the run shows them.
     """
+    payload = selections["agent"]
+    if payload == None:
+        return {"score": 0, "lines": 0}
     target.put("/workspace/greeting", payload)
     target.run(["sh", "-c", "printf '{\"score\": %s, \"lines\": %s}' $(wc -c < /workspace/greeting) $(wc -l < /workspace/greeting) > /pumpkin/out/result.json"])
     result = json.decode(target.get("/pumpkin/out/result.json"))
@@ -252,7 +255,7 @@ learns only the job's state, what the grant has left, and the dict.
 
 **A now function's body**, here `submit`, answers in the call's reply, with no sandbox. The agent
 calls it as `final`, the name of its grant, which is not the final call. Its handle is a `Run`, the
-run's state: `run.select(payload)` makes the payload the selection, the one the final call gets,
+run's state: `run.select(payload)` makes the payload the selection, the one the final call gets for that role,
 and `run.end_work()` ends the agent's work, after which the agent has `finalize_grace_seconds` to
 exit. The run applies what the body asked once it has returned, all of it or none. A parameter
 after the payload is the caller's: annotated `str`, `int` or `bool`, it is given as
@@ -268,9 +271,9 @@ and ends it with `.close`.
 
 **The final call** runs once the agent's work has ended and everything it started has ended too:
 its body runs as a job's does, on a fresh sandbox of its `target`, which no job function may name,
-with the last payload selected. The dict it returns is the run's result, and its entries, in their
-order, are the values the run shows: `score=6 lines=1` in `pumpkin ls`. A run with nothing
-selected, or whose final call fails, finishes without a result.
+with a dictionary mapping each agent role to its selected payload or `None`. The dict it returns
+is the run's result. The run shows its entries in their order, as `score=6 lines=1` in
+`pumpkin ls`. A failed final call leaves the run without a result.
 
 **Egress** is what a role reaches beyond its session. This agent has none; one that uses a model
 has a model route, whose entries each name an API, the models it allows and, if it is bounded, a

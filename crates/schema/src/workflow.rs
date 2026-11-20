@@ -31,7 +31,7 @@ pub struct Workflow {
     ir: crate::ir::Workflow,
     /// Each role's sandbox, by its id.
     roles: Vec<Sandbox>,
-    agent: Agent,
+    agents: BTreeMap<AgentId, Agent>,
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     job_functions: Vec<JobFunction>,
@@ -49,9 +49,17 @@ impl Workflow {
         &self.ir.name
     }
 
-    /// The workflow's one agent.
-    pub fn agent(&self) -> &Agent {
-        &self.agent
+    /// Each agent in the IR's role order.
+    pub fn agents(&self) -> impl ExactSizeIterator<Item = &Agent> {
+        self.agents.values()
+    }
+
+    pub fn agent_by_id(&self, id: AgentId) -> &Agent {
+        &self.agents[&id]
+    }
+
+    pub fn work_deadline(&self) -> Duration {
+        Duration::from_secs(self.ir.deadline_seconds.get())
     }
 
     pub fn target(&self, id: TargetId) -> &Target {
@@ -69,8 +77,8 @@ impl Workflow {
     /// The model route of `role`, the agent's or a target's, with the budgets of its entries, if
     /// it has one.
     pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
-        if role == self.agent.id.role() {
-            return self.agent.model.as_ref();
+        if let Some(agent) = self.agents.get(&AgentId(role)) {
+            return agent.model.as_ref();
         }
         let target = self.targets.get(&role).map(|target| &target.model);
         target.and_then(Option::as_ref)
@@ -90,7 +98,7 @@ impl Workflow {
         self.roles().map(f).collect::<Result<_, _>>().map(ByRole)
     }
 
-    /// The agent's job functions, in the IR's order.
+    /// Each agent's job functions, in the IR's order.
     pub fn job_functions(&self) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
         let functions = self.job_functions.iter().enumerate();
         functions.map(|(index, function)| (JobFunctionId(index), function))
@@ -108,7 +116,7 @@ impl Workflow {
         &self.job_functions[id.0]
     }
 
-    /// Every role's sessions: the agent's, then each target's, each in the IR's order.
+    /// Every role's sessions: each agent's, then each target's, each in the IR's order.
     pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> {
         (self.sessions.iter().enumerate()).map(|(index, grant)| (SessionId(index), grant))
     }
@@ -117,7 +125,7 @@ impl Workflow {
         &self.sessions[id.0]
     }
 
-    /// The agent's now functions, in the IR's order.
+    /// Each agent's now functions, in the IR's order.
     pub fn now_functions(&self) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
         (self.now_functions.iter().enumerate()).map(|(index, now)| (NowFunctionId(index), now))
     }
@@ -279,6 +287,13 @@ impl<T> ByProvider<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleId(usize);
 
+impl RoleId {
+    /// The role's index in the workflow's IR declaration order.
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AgentId(RoleId);
 
@@ -355,8 +370,6 @@ pub struct Agent {
     pub dirs: Vec<Dir>,
     pub files: Vec<File>,
     pub stdin: Option<String>,
-    /// See [`ir::AgentRuntime::deadline_seconds`](crate::ir::AgentRuntime::deadline_seconds).
-    pub deadline: Duration,
     /// See
     /// [`ir::AgentRuntime::finalize_grace_seconds`](crate::ir::AgentRuntime::finalize_grace_seconds).
     pub finalize_grace: Duration,
@@ -385,7 +398,7 @@ pub struct Runner {
 pub struct JobFunction {
     pub holder: AgentId,
     pub name: Name,
-    /// The target that each call starts afresh, which no other job function names.
+    /// The target that each call starts afresh.
     pub target: TargetId,
     pub body: crate::ir::Body,
     pub keywords: serde_json::Map<String, serde_json::Value>,
@@ -425,8 +438,8 @@ impl JobFunction {
 pub struct Session {
     pub name: Name,
     pub holder: Holder,
-    /// The runner, which no other session names, and whose image, if the agent holds the
-    /// session, is no target's ([`ir::Session::runner`](crate::ir::Session::runner)).
+    /// An agent's runner has an image no target has
+    /// ([`ir::Session::runner`](crate::ir::Session::runner)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,

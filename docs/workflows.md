@@ -12,19 +12,20 @@ chosen elsewhere.
 ## The entry file
 
 A task is an entry file below a root, the nearest directory at or above it that holds a
-`PUMPKIN.star`. The entry file makes one `workflow()` call, with three keyword arguments:
+`PUMPKIN.star`. The entry file makes one `workflow()` call, with these keyword arguments:
 
 | Key | What it is |
 | --- | --- |
 | `name` | what `pumpkin ls` and the page show: 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/` |
-| `roles` | the run's roles, exactly one of them an agent |
+| `roles` | the run's roles in declaration order, including at least one agent |
+| `deadline_seconds` | how long all agents may work, from their start or, at the latest, when the longest agent startup bound has passed since the run started |
 | `final` | the final call, which gives the run its result |
 
 `workflow()` is called once, while the entry file's own statements run; the files it loads give it
 values and bodies. A missing key is refused at the call:
 
 ```text
-text.star:1:1: `workflow` lacks `roles`, `final`: give them
+text.star:1:1: `workflow` lacks `roles`, `final`, `deadline_seconds`: give them
     1 | workflow(name = "")
       | ^^^^^^^^^^^^^^^^^^^
 ```
@@ -57,22 +58,22 @@ bad/zero/task.star:3:14: `cpu_millis` can't be `0`: expected a positive int
     the IR's /roles/1/needs/cpu_millis
 ```
 
-### The agent
+### Agents
 
-The one role that works on the task. Its sandbox starts first, and its command runs once.
+Each agent works in its own sandbox and runs its command once. Agents may differ in resources,
+command, model route and grants. They work under one deadline.
 
 | Key | What it is |
 | --- | --- |
 | `command` | `{"argv": [...], "cwd": …, "env": [...]}`: the whole command line, as the image's entrypoint is not used; the directory it starts in; and `NAME=value` entries added to the image's environment, which may be left out |
-| `deadline_seconds` | how long the work phase may last, counted once the sandbox and its command have started or, at the latest, once its class's `startup_seconds` have passed since the run's start |
 | `finalize_grace_seconds` | how long the agent may keep running once a call has ended its work, its ops refused meanwhile; 0 ends the work in that call's step |
 | `dirs`, `files` | directories (`{"path", "mode"}`) and text files (`{"path", "mode", "content"}`) made before the command starts, as the role's user, with modes written as `"0644"` |
 | `stdin` | the text the command reads on its standard input; absent, it reads nothing |
 | `egress` | its routes out: `{"model": [...]}`, a model route ([models](models.md)) |
 | `grants` | the functions it may call |
 
-The work phase ends when the command exits, when the grace after an `end_work()` runs out, or at
-the deadline, whichever comes first. Like every sandbox, the agent's has `/pumpkin`, which holds
+Each agent ends when its command exits, when its grace after an `end_work()` runs out, or at
+the shared deadline, whichever comes first. Its peers can keep working. Like every sandbox, the agent's has `/pumpkin`, which holds
 Pumpkin's own files: `in/`, which holds its `stdin`, `out/`, which is collected into the record
 when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A path of `dirs` or
 `files` below `/pumpkin` or `/.pumpkin` is refused.
@@ -81,8 +82,8 @@ when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A 
 
 A role that a function's body drives: each call of the job function that names it, and the final
 call if it names it, starts a fresh sandbox of it, which runs no command of its own and ends with
-the call. Each target is named by one job function or by the final call, and by no other: a target
-that nothing names is refused, so that every role of a workflow is reached.
+the call. Each agent may name a given target from one job function. A target used by the final
+call is exclusive to it. Every target must be reached.
 
 | Key | What it is |
 | --- | --- |
@@ -93,8 +94,9 @@ that nothing names is refused, so that every role of a workflow is reached.
 
 ### Runners
 
-A sandbox that a session leases for its holder, which sends it commands and copies. Each runner is
-named by one session. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
+A sandbox that a session leases for its holder, which sends it commands and copies. Distinct
+agents may lease the same runner role. Every lease starts its own sandbox. A target's session
+names a runner no other session names. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
 runner of an agent's session has an image that no target has, so that the agent never runs what a
 target's image holds.
 
@@ -108,7 +110,7 @@ is refused, and so is a grant with none.
 
 | Key | What it is |
 | --- | --- |
-| `target` | the target that each call starts afresh, which no other job function names |
+| `target` | the target that each call starts afresh |
 | `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
 | `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
 | `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
@@ -116,7 +118,7 @@ is refused, and so is a grant with none.
 | `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
 | `call_timeout_seconds` | each call's timeout, counted from its target's start |
 
-A job function runs one call at a time. A call ends with its timeout, with the function's
+An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
 cumulative time, or with the work phase, whichever comes first.
 
 ### A now function
@@ -133,7 +135,7 @@ asked of it.
 
 | Key | What it is |
 | --- | --- |
-| `runner` | the runner that each lease starts afresh, which no other session names |
+| `runner` | the runner that each lease starts afresh |
 | `instances` | the most leases open at once |
 | `instance_seconds` | the most time each lease may last, from when its runner is ready |
 | `cumulative_seconds` | the most time its leases may last in all, each open lease counting; left out, no bound |
@@ -148,12 +150,23 @@ bounds each call afresh.
 
 `final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which
 may be left out, `payload_max_bytes`, at most 64 MiB, and `timeout_seconds`, counted from its
-target's start. The final call runs once the agent's sandbox and every call and lease it made have
-ended: its body drives a fresh sandbox of the target, as a job's body does, with the last payload
-selected. The dict it returns is the run's
-result: each entry is a value the run shows, in the body's order, as `pumpkin wait`, `pumpkin ls`
-and the page show `score=6 lines=1`. A run with nothing selected makes no final call; a run whose
-final call fails or times out finishes without a result, and `pumpkin wait` exits 3 for both.
+target's start. The body drives a fresh sandbox once all agents, calls and leases have ended.
+The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
+as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
+
+The final body's second parameter is a dictionary in agent declaration order. Each role name maps
+to its last selected `Payload`, or to `None` if it selected nothing. A selected zero-byte file is
+still a `Payload`. The body runs even when every value is `None`. It chooses which selections to
+put in the target and what result to return.
+For example, a task with a scoring function for the role named `agent` can write:
+
+```python
+def final_score(target: Target, selections):
+    payload = selections["agent"]
+    if payload == None:
+        return {"score": 0}
+    return score(target, payload)
+```
 
 ## Bodies
 
@@ -163,8 +176,8 @@ the text the record keeps. Its parameters, in order:
 
 1. The handle, which only the host makes: a `Target` for a job function's body and the final
    call's, a `Run` for a now function's.
-2. The payload, a `Payload`: the bytes the caller sent, which the body can only pass on, to
-   `put` or `select`.
+2. A job or now function receives the caller’s bytes as an opaque `Payload`. A final body receives
+   the dictionary of selections described above. Leave that parameter unannotated.
 3. The caller's parameters, if any: each annotated `str`, `int` or `bool`, with or without a
    default. The final call's body has none, as no caller gives it an argument.
 4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
@@ -177,12 +190,12 @@ The two handles' methods:
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
-| `run.select(payload)` | makes the payload the selection, the one the final call gets, replacing the last |
+| `run.select(payload)` | replaces the caller’s selection with the payload |
 | `run.end_work()` | ends the caller's work, its selection locked, once its grace has run out |
 
 A now function's body only proposes: the run applies its `select` and `end_work`, in order, once
 the body has returned, each checked against the state the ones before it leave, and applies none
-if one is refused. `end_work()` needs a selection, and must come last.
+if one is refused. `end_work()` can end a caller that selected nothing, and must come last.
 
 A body returns a dict whose keys are names, as a role's are, and whose values JSON can hold; it is
 encoded as `json.encode` would, and takes at most 1 MiB as JSON. Within a body, annotations are checked on entry and on return of
@@ -298,10 +311,10 @@ column; a problem in how the parts fit is said with its place in the IR. Among t
 - a key the IR doesn't take, or a value its type refuses, as above, a kind that holds what it
   can't among them;
 - a function defined in the entry file;
-- a workflow with no agent, or with two;
+- a workflow with no agent;
 - a name that names no role, or a role of another kind than its place takes;
-- a target that two job functions name, or that a job function and the final call both name, and
-  a runner that two sessions name;
+- a target that two grants of one agent name or that a job and the final call both name;
+- a runner that two sessions name unless their holders are distinct agents;
 - a target or a runner that nothing names;
 - an agent's runner whose image a target has;
 - a payload or transfer bound past the protocol's.
@@ -311,7 +324,6 @@ Each in the words `check` says it:
 ```text
 `egress` is no field of `runner`: expected one of `cwd`, `env`
 a function defined in an entry file is not in Pumpkin's Starlark: define it in a library, and load it
-`helper` is a second agent, after `agent`: a workflow has exactly one
 `agent` is an agent: name a target as the final call's target
 `final_judge` is the final call's target and `check`'s: give the final call a role no job names
 `gpu` is a runner that no session names: name it from one
@@ -325,7 +337,7 @@ parameters don't fit its kind, is refused at the parameter:
 ```text
 lib/submit.star:1:12: `submit`'s first parameter is a `Target`, and a now function's body takes its `Run`: write `def submit(target: Run, …)`
 lib/submit.star:1:47: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
-lib/final.star:1:38: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
+lib/final.star:1:38: `final_call`'s `level` follows the selections, and the final call has no caller to give it: remove it
 lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
 ```
 

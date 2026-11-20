@@ -12,7 +12,13 @@ use super::{placed, result, span};
 
 pub(super) fn call_name(call: &CallSpan) -> String {
     match &call.of {
-        CallOf::Function(function) => format!("{function} job {}", call.job),
+        CallOf::Function(function) => {
+            let mut name = format!("{function} job {}", call.job);
+            if let Some(caller) = call.caller {
+                let _ = write!(name, " of {}", super::caller_lane(caller));
+            }
+            name
+        }
         CallOf::Final => format!("final call job {}", call.job),
     }
 }
@@ -92,10 +98,7 @@ pub(crate) fn leased(lease: &LeaseSpan, now: Duration) -> String {
 
 pub(super) fn lease_name(lease: &LeaseSpan) -> String {
     let name = format!("{} lease {}", lease.grant, lease.lease);
-    match lease.holder {
-        Some(job) => format!("{name} of job {job}"),
-        None => name,
-    }
+    format!("{name} of {}", super::caller_lane(lease.holder))
 }
 
 /// How a sandbox that the core never ended ended: deleted as the run stopped short of the core's

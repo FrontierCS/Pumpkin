@@ -673,8 +673,7 @@ fn in_sandbox_contract() {
     );
 }
 
-/// A valid IR, parsed: its agent, its `now` functions, the role of its final call with that call's
-/// keywords, and the agent's model route, by API.
+/// The work deadline, each agent's local functions and route, and the final call's input.
 struct Parsed(Value);
 
 impl Case for Parsed {
@@ -682,18 +681,56 @@ impl Case for Parsed {
         let ir: ir::Workflow = serde_json::from_value(self.0).unwrap();
         let workflow = Workflow::parse(&ir).unwrap();
         let name = |role| workflow.sandbox(role).name.as_str();
-        let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
-        let route = workflow.agent().model.as_ref().unwrap();
-        let apis: Vec<ir::Api> = route.as_slice().iter().map(|entry| entry.api).collect();
+        let mut lines = vec![format!("work {:?}", workflow.work_deadline())];
+        for agent in workflow.agents() {
+            assert_eq!(workflow.agent_by_id(agent.id), agent);
+            let role = agent.id.role();
+            let jobs: Vec<_> = workflow
+                .job_functions_of(role)
+                .map(|(id, job)| {
+                    assert_eq!(workflow.job_function(id), job);
+                    (job.name.as_str(), job.calls.map(std::num::NonZeroU64::get))
+                })
+                .collect();
+            let now: Vec<_> = workflow
+                .now_functions_of(role)
+                .map(|(_, now)| now.name.as_str())
+                .collect();
+            let sessions: Vec<_> = workflow
+                .sessions()
+                .filter(|(_, session)| session.holder.role() == role)
+                .map(|(_, session)| session.name.as_str())
+                .collect();
+            let apis: Vec<_> = workflow
+                .model(role)
+                .iter()
+                .flat_map(|route| route.as_slice())
+                .map(|entry| entry.api)
+                .collect();
+            lines.push(format!(
+                "{}: jobs {jobs:?}, now {now:?}, sessions {sessions:?}, route {apis:?}",
+                name(role)
+            ));
+        }
         let final_call = workflow.final_call();
-        format!(
-            "agent `{}`, now functions {:?}, final call on `{}` with keywords {}, route {apis:?}",
-            name(workflow.agent().id.role()),
-            now.collect::<Vec<_>>(),
+        lines.push(format!(
+            "final on {} with {}",
             name(final_call.target.role()),
-            serde_json::to_string(&final_call.keywords).unwrap(),
-        )
+            serde_json::to_string(&final_call.keywords).unwrap()
+        ));
+        lines.join("\n")
     }
+}
+
+fn agents() -> Value {
+    let mut ir = leasing();
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("alpha");
+    let agent = &mut peer["runtime"]["agent"];
+    agent.as_object_mut().unwrap().remove("egress");
+    agent["grants"][0]["job"]["calls"] = json!(1);
+    ir["roles"].as_array_mut().unwrap().push(peer);
+    ir
 }
 
 #[test]
@@ -702,10 +739,23 @@ fn parsed() {
         [
             Parsed(fixture()),
             Parsed(fixture_with("/final/keywords", json!({ "mode": "final" }))),
+            Parsed(leasing()),
+            Parsed(agents()),
         ],
         &expect![[r#"
-            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {}, route [Responses]
-            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {"mode":"final"}, route [Responses]"#]],
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions [], route [Responses]
+            final on final_judge with {}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions [], route [Responses]
+            final on final_judge with {"mode":"final"}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions ["gpu"], route [Responses]
+            final on final_judge with {}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions ["gpu"], route [Responses]
+            alpha: jobs [("train", Some(1))], now ["submit"], sessions ["gpu"], route []
+            final on final_judge with {}"#]],
     );
 }
 
@@ -1230,12 +1280,11 @@ fn broken_roles() {
     check(
         [ir, none],
         &expect![[r#"
-            /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
             /final/target: `trainer` is the final call's target and `train`'s: give the final call a role no job names
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles: no role is an agent: a workflow has exactly one"#]],
+            /roles: no role is an agent: declare an agent"#]],
     );
 }
 

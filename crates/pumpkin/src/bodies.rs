@@ -144,10 +144,11 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
+        selections: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let body = self::body(&body.file, &body.def, keywords);
-        let host = Host::Final(&mut Driven(target));
+        let host = Host::Final(&mut Driven(target), selections);
         let mut sources = self.sources;
         let bounds = Bounds::WORKFLOW;
         let arguments = BTreeMap::new();
@@ -188,8 +189,8 @@ impl lang::Run for Proposing<'_> {
 struct Driven<'t>(&'t mut dyn runtime::Target);
 
 impl lang::Target for Driven<'_> {
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
-        self.0.put(path)
+    fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String> {
+        self.0.put(path, input)
     }
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {

@@ -29,7 +29,7 @@ use super::{Evaluation, Purpose};
 use crate::builtins::{Call, Takes, origin, positional, string};
 use crate::problem::{Fault, Problem, count, list};
 use crate::syntax::{Def, Misfit, Name, Type};
-use crate::value::{self, FileId, Function, Hosted, Key, Span, Text, Value};
+use crate::value::{self, Budget, FileId, Function, Hosted, Key, Span, Text, Value};
 use crate::{Label, Loader, json};
 
 /// A `def` of a loaded file, which a host calls by its file and name, and the keyword arguments
@@ -57,7 +57,8 @@ pub enum BodyKind {
 pub enum Host<'h> {
     Job(&'h mut dyn Target),
     Now(&'h mut dyn Run),
-    Final(&'h mut dyn Target),
+    /// Each agent in declaration order and the slot of its selected payload, if any.
+    Final(&'h mut dyn Target, &'h [(ir::Name, Option<usize>)]),
 }
 
 impl Host<'_> {
@@ -65,7 +66,7 @@ impl Host<'_> {
         match self {
             Self::Job(_) => BodyKind::Job,
             Self::Now(_) => BodyKind::Now,
-            Self::Final(_) => BodyKind::Final,
+            Self::Final(..) => BodyKind::Final,
         }
     }
 }
@@ -73,8 +74,8 @@ impl Host<'_> {
 /// What a job's body drives through its `Target`: the call's target. A method's `Err` is why it
 /// failed, which ends the call with that message.
 pub trait Target {
-    /// Puts the call's payload at `path`, one file, its parents made.
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String>;
+    /// Puts the payload in slot `input` at `path`, one file, its parents made.
+    fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String>;
 
     /// Runs `argv`, and waits for it to end, whatever its exit status.
     fn run(&mut self, argv: &Argv) -> Result<(), String>;
@@ -87,7 +88,7 @@ pub trait Target {
 
 /// What a now function's body proposes effects on through its `Run`: the run's state.
 pub trait Run {
-    /// Proposes that the call's payload become the run's selection, replacing the last.
+    /// Proposes that the call's payload become the caller's selection, replacing the last.
     fn select(&mut self);
 
     /// Proposes that the caller's work end, its selection locked.
@@ -137,14 +138,53 @@ impl BodyKind {
         }
     }
 
+    fn input_error(self, name: &str, input: &crate::syntax::Param) -> Option<String> {
+        let annotation = input.annotation.as_ref()?;
+        let param = &input.name.text;
+        match self {
+            Self::Final => Some(format!(
+                "`{name}` takes the selections by role: leave `{param}` unannotated"
+            )),
+            Self::Job | Self::Now if *annotation != Type::Hosted(Hosted::Payload(())) => {
+                Some(format!(
+                    "`{name}`'s second parameter is {}, and {} takes the payload second: annotate \
+                     `{param}` `Payload`",
+                    annotation.describe(),
+                    self.words(),
+                ))
+            }
+            Self::Job | Self::Now => None,
+        }
+    }
+
     // The handle that a body of this kind takes first, how an annotation writes its type, and the
     // name that a message gives its parameter.
-    fn handle(self) -> (Hosted, &'static str, &'static str) {
+    fn handle(self) -> (Hosted<usize>, &'static str, &'static str) {
         match self {
             Self::Job | Self::Final => (Hosted::Target, "Target", "target"),
             Self::Now => (Hosted::Run, "Run", "run"),
         }
     }
+}
+
+fn selected_payloads(
+    selections: &[(ir::Name, Option<usize>)],
+    at: Span,
+    budget: &Budget,
+) -> Result<value::Dict, Fault> {
+    let mut entries = Vec::with_capacity(selections.len());
+    for (role, selected) in selections {
+        let key = Text::new(role.as_str(), at, budget)?;
+        let kind = selected.map_or(value::Kind::None, |slot| {
+            value::Kind::Hosted(Hosted::Payload(slot))
+        });
+        entries.push(value::Entry {
+            key: Key::Str(key),
+            key_span: at,
+            value: Value { kind, span: at },
+        });
+    }
+    value::Dict::new(entries, at, budget)
 }
 
 impl<L: Loader> Evaluation<'_, '_, L> {
@@ -180,12 +220,15 @@ impl<L: Loader> Evaluation<'_, '_, L> {
     ) -> Result<Vec<(ir::Name, serde_json::Value)>, Fault> {
         let (handle, _, _) = read.kind.handle();
         let at = read.function.def.name.span;
-        let positional = Vec::from([handle, Hosted::Payload]);
-        let positional = (positional.into_iter())
-            .map(|hosted| {
-                let kind = value::Kind::Hosted(hosted);
-                (at, Value { kind, span: at })
-            })
+        let input = match &self.purpose {
+            Purpose::Call(Host::Final(_, selections)) => {
+                value::Kind::Dict(selected_payloads(selections, at, self.budget)?)
+            }
+            _ => value::Kind::Hosted(Hosted::Payload(0)),
+        };
+        let positional = [value::Kind::Hosted(handle), input]
+            .into_iter()
+            .map(|kind| (at, Value { kind, span: at }))
             .collect();
         let mut keywords: Vec<(&Name, Value)> = (read.keywords.iter())
             .map(|(name, value)| (name, value.clone()))
@@ -408,11 +451,15 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
     let name = &def.name.text;
     let (handle, written, handle_name) = kind.handle();
     let words = kind.words();
+    let (input, parameter) = match kind {
+        BodyKind::Job | BodyKind::Now => ("payload", "payload: Payload"),
+        BodyKind::Final => ("selections", "selections"),
+    };
     let positional = &def.params[..def.positional];
     let [first, second, caller @ ..] = positional else {
         let message = format!(
-            "`{name}` takes {}, and {words} takes its `{written}` and the payload first: write \
-             `def {name}({handle_name}: {written}, payload: Payload, …)`",
+            "`{name}` takes {}, and {words} takes its `{written}` and the {input} first: write \
+             `def {name}({handle_name}: {written}, {parameter}, …)`",
             count(positional.len(), "positional parameter"),
         );
         return Vec::from([Fault::new(def.name.span, message)]);
@@ -422,14 +469,14 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
         if let Some(default) = &param.default {
             let message = format!(
                 "`{name}`'s `{}` has a default, and {words} is always given its `{written}` and \
-                 the payload: drop the default",
+                 the {input}: drop the default",
                 param.name.text
             );
             faults.push(Fault::new(default.span, message));
         }
     }
     if let Some(annotation) = &first.annotation
-        && *annotation != Type::Hosted(handle)
+        && *annotation != Type::Hosted(handle.ty())
     {
         let message = format!(
             "`{name}`'s first parameter is {}, and {words} takes its `{written}`: write `def \
@@ -439,21 +486,13 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
         );
         faults.push(Fault::new(first.name.span, message));
     }
-    if let Some(annotation) = &second.annotation
-        && *annotation != Type::Hosted(Hosted::Payload)
-    {
-        let message = format!(
-            "`{name}`'s second parameter is {}, and {words} takes the payload second: annotate \
-             `{}` `Payload`",
-            annotation.describe(),
-            second.name.text
-        );
+    if let Some(message) = kind.input_error(name, second) {
         faults.push(Fault::new(second.name.span, message));
     }
     for param in caller {
         if let BodyKind::Final = kind {
             let message = format!(
-                "`{name}`'s `{}` follows the payload, and the final call has no caller to give \
+                "`{name}`'s `{}` follows the selections, and the final call has no caller to give \
                  it: remove it",
                 param.name.text
             );
@@ -476,7 +515,7 @@ pub(crate) enum Method {
     Run(fn(&mut dyn Run, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
 }
 
-impl Hosted {
+impl Hosted<usize> {
     pub(crate) fn methods(self) -> Result<&'static [(&'static str, Method)], &'static str> {
         match self {
             Self::Target => Ok(&[
@@ -488,7 +527,7 @@ impl Hosted {
                 ("end_work", Method::Run(end_work)),
                 ("select", Method::Run(select)),
             ]),
-            Self::Payload => Err("pass it to a `Target`'s `put` or a `Run`'s `select`"),
+            Self::Payload(_) => Err("pass it to a `Target`'s `put` or a `Run`'s `select`"),
         }
     }
 }
@@ -502,7 +541,7 @@ impl Method {
     ) -> Result<Value, Fault> {
         let kind = match self {
             Self::Target(method) => {
-                let Purpose::Call(Host::Job(target) | Host::Final(target)) = purpose else {
+                let Purpose::Call(Host::Job(target) | Host::Final(target, _)) = purpose else {
                     unreachable!(
                         "a `Target`'s method is called outside a call of a job's or the final \
                          call's body, though only such a call makes a `Target`, and the value it \
@@ -532,7 +571,7 @@ impl Method {
 fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [path, payload] = positional::<2>(&name.text, Takes::exactly(2), call)?;
     let path = absolute("`put`'s path", path)?;
-    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload)) {
+    let value::Kind::Hosted(Hosted::Payload(slot)) = payload.1.kind else {
         let message = format!(
             "`put` can't put {}: give it the payload",
             payload.1.kind.describe()
@@ -542,9 +581,9 @@ fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
             "the argument",
             &payload.1,
         ));
-    }
+    };
     target
-        .put(&path)
+        .put(&path, slot)
         .map_err(|message| Fault::new(call.at, message))?;
     Ok(value::Kind::None)
 }
@@ -587,7 +626,7 @@ fn get(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
 
 fn select(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [payload] = positional::<1>(&name.text, Takes::exactly(1), call)?;
-    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload)) {
+    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload(_))) {
         let message = format!(
             "`select` can't select {}: give it the payload",
             payload.1.kind.describe()

@@ -4,7 +4,7 @@
 //! same [`Action`]s; [`Core`] says how a runtime drives it.
 //!
 //! The core runs a workflow's two phases ([`schema::ir::Workflow`]). Its [`Action`]s ask the
-//! runtime to start the agent, answer ops, run calls, open, drive and close leases, collect
+//! runtime to start the agents, answer ops, run calls, open, drive and close leases, collect
 //! outputs and destroy sandboxes, and [`Event`]s report what the runtime observed.
 //! [`Action::Finish`] carries the run's [`Outcome`], or [`Action::Abandon`] ends it without one.
 
@@ -27,16 +27,18 @@ use core::time::Duration;
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{AgentId, JobFunctionId, JobOf, Placed, SessionId, Workflow};
+use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, Workflow};
 
 mod call;
 mod jobs;
 mod leases;
 mod ops;
 mod result;
+mod work;
 
 pub use jobs::Failure;
 pub use result::CallResult;
+use work::AgentWork;
 
 /// The runtime's number for an op it took from a session, which the op's reply names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -129,17 +131,22 @@ pub enum Effect {
 /// What the runtime observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The agent's command has started in its sandbox.
-    ///
-    /// The work phase's deadline counts from the first such report while the agent works, so the
-    /// time its sandbox takes to start doesn't count against it, but from the agent's startup
-    /// ([`Placed::startup`]) at the latest: until a report comes, and after one that comes later,
-    /// the deadline is the agent's deadline after the startup.
-    AgentStarted,
-    /// The agent's command has exited.
-    AgentExited { status: ExitStatus },
-    /// The agent's sandbox or its command could not start, or its session ended.
-    AgentFailed { reason: String },
+    /// The work commands have been released. Their common deadline counts from this report,
+    /// capped at the longest agent startup plus the work duration.
+    WorkStarted,
+    AgentExited {
+        agent: AgentId,
+        status: ExitStatus,
+    },
+    /// The agent's sandbox or command could not start, or its session ended.
+    AgentFailed {
+        agent: AgentId,
+        reason: String,
+    },
+    /// The agent's teardown has completed, including collection and destruction.
+    AgentTornDown {
+        agent: AgentId,
+    },
     /// `caller`'s sandbox made an op. The core answers it with an [`Action::Reply`] naming `op`.
     OpArrived {
         op: OpId,
@@ -147,9 +154,13 @@ pub enum Event {
         request: Request,
     },
     /// A call has started its body on its target.
-    CallStarted { job: JobId },
+    CallStarted {
+        job: JobId,
+    },
     /// A call reached its timeout, and the runtime stops it.
-    CallTimedOut { job: JobId },
+    CallTimedOut {
+        job: JobId,
+    },
     /// A call's body returned, as [`CallResult::returned_by`] takes its return, and the call's
     /// target has been destroyed. `model_requests_over_budget` is how many of the target's model
     /// requests the route barred for a spent model budget, if any.
@@ -166,7 +177,9 @@ pub enum Event {
         model_requests_over_budget: Option<NonZeroU64>,
     },
     /// A lease's runner has started, and runs the commands it is given from now.
-    LeaseReady { lease: LeaseId },
+    LeaseReady {
+        lease: LeaseId,
+    },
     /// A command of a lease's, its `command`th, has ended, and what it wrote has been collected:
     /// the ends of its standard output and error, of at most
     /// [`OUTPUT_TAIL_BYTES`](schema::sandbox::op::OUTPUT_TAIL_BYTES) each, as JSON writes them.
@@ -185,9 +198,14 @@ pub enum Event {
         end: TransferEnd,
     },
     /// A lease that [`Action::CloseLease`] closed has ended: its runner has been destroyed.
-    LeaseEnded { lease: LeaseId },
+    LeaseEnded {
+        lease: LeaseId,
+    },
     /// A lease's runner failed to start, or failed as it ran, and has been destroyed.
-    LeaseFailed { lease: LeaseId, reason: String },
+    LeaseFailed {
+        lease: LeaseId,
+        reason: String,
+    },
     /// Time passed.
     Tick,
 }
@@ -195,18 +213,17 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts the agent's sandbox and its command. The runtime reports [`Event::AgentStarted`]
-    /// once both have started, then the command's end as [`Event::AgentExited`] or
-    /// [`Event::AgentFailed`]; or [`Event::AgentFailed`] alone, if either didn't start.
-    StartAgent,
+    /// Starts all agent sandboxes and releases their commands. The runtime reports
+    /// [`Event::WorkStarted`] on release and each agent's exit or failure separately.
+    StartAgents,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
-    /// Runs the final call: a fresh sandbox of its target, and its body on it with `payload`,
-    /// whose every step on the target is to be done within `timeout` of the body's start, as a
-    /// job function's call's is. The runtime reports as it does for [`Action::StartCall`].
+    /// Runs the final body on a fresh sandbox of its target with the agents' selections.
+    /// Its timeout and the runtime's reports are as for [`Action::StartCall`].
     StartFinalCall {
         job: JobId,
-        payload: PayloadRef,
+        /// One entry for each agent in declaration order, including those that selected nothing.
+        selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
     },
     /// Runs a call of job function `function`: a fresh sandbox of the function's target, and the
@@ -226,7 +243,7 @@ pub enum Action {
     /// Stops a call wherever it is, and destroys its target. Its last report follows as usual.
     StopCall { job: JobId },
     /// Opens lease `lease` of grant `grant` for `holder`: starts a fresh sandbox of the grant's
-    /// runner, as instance `instance` of its role (`provider::Create::instance`). The runtime
+    /// runner. The instance number is local to this holder and grant. The runtime
     /// reports [`Event::LeaseReady`] once it has started, then each command's end as
     /// [`Event::CommandEnded`], and last [`Event::LeaseEnded`] once [`Action::CloseLease`] closes
     /// it, or [`Event::LeaseFailed`] at any point, once the lease's sandbox is gone.
@@ -262,9 +279,9 @@ pub enum Action {
     },
     /// Closes lease `lease` wherever it is, and destroys its sandbox with whatever runs in it.
     CloseLease { lease: LeaseId },
-    /// Freezes the agent's sandbox, collects its outputs and destroys it, before the runtime
-    /// performs the next action: the core takes the agent as gone once it asks.
-    TearDownAgent,
+    /// Freezes this agent's sandbox, collects its outputs and destroys it. The runtime
+    /// reports [`Event::AgentTornDown`] once teardown completes, including a failed start.
+    TearDownAgent { agent: AgentId },
     /// Ends the run with its outcome. After it, the core only refuses the ops that still
     /// arrive.
     Finish { outcome: Outcome },
@@ -292,19 +309,19 @@ pub enum Direction {
     },
 }
 
-/// Why the work phase ended.
+/// Why an agent stopped working.
 ///
 /// Of the deadline and the end of the grace after a finalize, the first to pass names the end,
 /// however late the runtime observed it, and the deadline if they pass together; the agent's
 /// exit or failure names it only if observed before then ([`Core::handle`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkEnd {
-    /// The work phase's deadline passed, which counts from the agent's start
-    /// ([`Event::AgentStarted`]).
+    /// The common work deadline passed, counted from the release of the commands
+    /// ([`Event::WorkStarted`]).
     Deadline,
     /// A call ended the agent's work, and the agent was still running when the grace after it ran
     /// out ([`finalize_grace`](schema::workflow::Agent::finalize_grace)). An agent that exits
-    /// within it ends the work phase with [`AgentExited`](Self::AgentExited), and its selection
+    /// within it ends its work with [`AgentExited`](Self::AgentExited), and its selection
     /// is still the locked one.
     Finalized,
     AgentExited(ExitStatus),
@@ -320,61 +337,50 @@ pub struct Submission {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outcome {
+pub struct AgentOutcome {
+    pub agent: AgentId,
     pub work_end: WorkEnd,
-    pub verdict: Verdict,
+    pub submission: Option<Submission>,
+    /// The runtime records a model route failure here after its in-flight requests have ended.
+    pub route_failure: Option<String>,
 }
 
-/// What the final call made of the selected submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// The agent made no submission, so the final call wasn't made.
-    NoSubmission,
-    /// The final call returned `result`.
-    Returned {
-        submission: Submission,
-        result: CallResult,
-    },
-    NoResult {
-        submission: Submission,
-        failure: Failure,
-    },
+pub struct Outcome {
+    /// One entry for every agent, in declaration order.
+    pub agents: Vec<AgentOutcome>,
+    pub result: Result<CallResult, Failure>,
 }
 
 /// How long a run of `placed` may last from its start: its hard end, which [`Core::start`]
 /// sets, after the deadline.
 ///
-/// It is the sum of six shares: the agent's startup, its deadline, its finalize grace, the
-/// agent's startup again, the final call's timeout, and its target's startup. A role's
-/// startup ([`Placed::startup`]) is how long its class may take to start one of its sandboxes,
-/// from when the runtime asks for one to when its session is ready.
+/// It includes the longest agent startup, the work duration, the longest finalize grace and
+/// one more agent startup for collecting, plus the final target's startup and timeout.
 pub fn lasts(placed: &Placed) -> Duration {
     let workflow = placed.workflow();
     let final_call = workflow.final_call();
-    let agent_startup = placed.startup(workflow.agent().id.role());
-    let final_startup = placed.startup(final_call.target.role());
-    // Each start is attempted once (a failed start isn't retried), which is why the hard
-    // end counts one startup per start. The core ends the work phase by the first two shares
-    // (`latest_deadline`), and the agent's teardown begins by then. The target's startup and the
-    // final call's timeout are those of the final call's target, the run's last sandbox: its
-    // start and its body's run. The grace, which the deadline cuts short, and the agent's startup
-    // again are slack for ending the work phase and collecting what it left, which nothing else
-    // bounds: a margin chosen, not derived.
-    latest_deadline(placed)
-        .saturating_add(workflow.agent().finalize_grace)
-        .saturating_add(agent_startup)
+    let startup = agent_startup(placed);
+    let grace = workflow
+        .agents()
+        .map(|agent| agent.finalize_grace)
+        .max()
+        .unwrap_or_default();
+    startup
+        .saturating_add(workflow.work_deadline())
+        .saturating_add(grace)
+        .saturating_add(startup)
         .saturating_add(final_call.timeout)
-        .saturating_add(final_startup)
+        .saturating_add(placed.startup(final_call.target.role()))
 }
 
-/// The latest that the work phase's deadline of a run of `placed` may be, from the run's start:
-/// the agent's startup, then its deadline, which counts from the agent's start, at the latest
-/// from its startup ([`Event::AgentStarted`]).
-fn latest_deadline(placed: &Placed) -> Duration {
-    let agent = placed.workflow().agent();
+fn agent_startup(placed: &Placed) -> Duration {
     placed
-        .startup(agent.id.role())
-        .saturating_add(agent.deadline)
+        .workflow()
+        .agents()
+        .map(|agent| placed.startup(agent.id.role()))
+        .max()
+        .unwrap_or_default()
 }
 
 /// A run's decision core.
@@ -394,47 +400,22 @@ pub struct Core<'w> {
     /// The run's hard end, since it started.
     hard_end: Duration,
     phase: Phase,
+    agents: BTreeMap<AgentId, AgentWork>,
     jobs: jobs::Jobs,
     leases: leases::Leases,
 }
 
 #[derive(Debug)]
 enum Phase {
-    /// The agent works, from when the core asks for it. Its start's report sets the deadline,
-    /// and changes no other decision.
-    Work {
-        latest: Option<PayloadRef>,
-        /// The work phase's deadline, since the run started, as [`Event::AgentStarted`] says.
-        deadline: Duration,
-    },
-    /// A call ended the agent's work with `payload` selected, which is locked as the selection;
-    /// unless the agent ends it first, the work phase ends at `end`, as `work_end` ([`WorkEnd`]).
-    Finalized {
-        payload: PayloadRef,
-        end: Duration,
-        work_end: WorkEnd,
-    },
-    /// The work phase has ended, and the agent has been torn down. The jobs it left, stopped or
-    /// collecting, and the leases it and they held, closed, are ending.
-    Teardown {
-        work_end: WorkEnd,
-        submission: Option<Submission>,
-    },
-    /// The final call judges the selected submission in job `job`, and the run ends once the
-    /// job, and every lease it held, has ended.
-    Final {
-        work_end: WorkEnd,
-        submission: Submission,
-        job: JobId,
-    },
-    Finished(Outcome),
+    Work { deadline: Duration },
+    Final { job: JobId },
+    Finished,
     Abandoned,
 }
 
 impl<'w> Core<'w> {
-    /// Starts a run of `placed`: its work phase begins at time 0, though its deadline counts
-    /// from the agent's start ([`Event::AgentStarted`]), and its hard end is [`lasts`] after.
-    /// Returns the core and its first actions.
+    /// Starts the run at time 0 and returns its first actions. The workflow's deadline counts
+    /// from the release of the commands ([`Event::WorkStarted`]). Its hard end is [`lasts`].
     pub fn start(placed: &'w Placed) -> (Self, Vec<Action>) {
         let workflow = placed.workflow();
         let core = Self {
@@ -442,22 +423,24 @@ impl<'w> Core<'w> {
             now: Duration::ZERO,
             hard_end: lasts(placed),
             phase: Phase::Work {
-                latest: None,
-                deadline: latest_deadline(placed),
+                deadline: agent_startup(placed).saturating_add(workflow.work_deadline()),
             },
+            agents: workflow
+                .agents()
+                .map(|agent| (agent.id, AgentWork::default()))
+                .collect(),
             jobs: jobs::Jobs::default(),
             leases: leases::Leases::default(),
         };
-        (core, vec![Action::StartAgent])
+        (core, vec![Action::StartAgents])
     }
 
     /// Takes in `event`, observed `at` after the run started, and returns the actions it calls
     /// for, in the order to perform them.
     ///
-    /// The time acts before the event: an `at` that reaches the hard end, the work phase's end,
-    /// or a lease's, abandons the run, ends the work phase or closes the lease first, and the
-    /// event then finds it so. A report that a job's command has ended, or that the job has,
-    /// closes the leases it holds.
+    /// The time acts before the event: an `at` that reaches the hard end, an agent's work end,
+    /// or a lease's end abandons the run, ends that agent's work or closes the lease first.
+    /// A report that a job's command has ended, or that the job has, closes the leases it holds.
     #[expect(clippy::too_many_lines, reason = "one arm per event")]
     pub fn handle(&mut self, at: Duration, event: Event) -> Vec<Action> {
         self.now = self.now.max(at);
@@ -468,14 +451,28 @@ impl<'w> Core<'w> {
         self.end_due_work(&mut actions);
         self.expire_leases(&mut actions);
         match event {
-            Event::AgentStarted => self.agent_started(),
+            Event::WorkStarted => {
+                if let Phase::Work { deadline } = &mut self.phase {
+                    *deadline =
+                        (*deadline).min(self.now.saturating_add(self.workflow.work_deadline()));
+                }
+            }
+            Event::AgentTornDown { agent } => {
+                if let Some(end) = self
+                    .agents
+                    .get_mut(&agent)
+                    .and_then(|work| work.ended.as_mut())
+                {
+                    end.torn_down = true;
+                }
+            }
             // A tick only moves the clock, on which the checks above have acted.
             Event::Tick => {}
-            Event::AgentExited { status } => {
-                self.end_work(WorkEnd::AgentExited(status), &mut actions);
+            Event::AgentExited { agent, status } => {
+                self.end_work(agent, WorkEnd::AgentExited(status), &mut actions);
             }
-            Event::AgentFailed { reason } => {
-                self.end_work(WorkEnd::AgentFailed(reason), &mut actions);
+            Event::AgentFailed { agent, reason } => {
+                self.end_work(agent, WorkEnd::AgentFailed(reason), &mut actions);
             }
             Event::OpArrived {
                 op,
@@ -539,42 +536,41 @@ impl<'w> Core<'w> {
     }
 
     /// When the core next acts without another event, as a time since the run started: at the
-    /// end of a lease ([`Core::handle`]) or of the phase ([`Core::phase_due`]), whichever comes
+    /// end of a lease ([`Core::handle`]) or an agent's work ([`Core::agent_due`]), whichever comes
     /// first. The runtime sends [`Event::Tick`] once that time has come.
     pub fn tick_due(&self) -> Duration {
-        // A run that has ended has no lease ready: the work phase's end closes every lease, and
-        // the run ends only once the final job's have ended.
-        let phase = self.phase_due();
+        let phase = self
+            .agents
+            .keys()
+            .map(|id| self.agent_due(*id))
+            .min()
+            .unwrap_or(self.hard_end);
         self.leases_due().map_or(phase, |lease| phase.min(lease))
     }
 
-    /// Whether the selection is locked: the agent's work has been ended, by a call's effect,
-    /// with what was selected.
-    pub fn selection_locked(&self) -> bool {
-        match &self.phase {
-            Phase::Finalized { .. } => true,
-            Phase::Teardown { submission, .. } => submission.as_ref().is_some_and(|s| s.finalized),
-            Phase::Final { submission, .. } => submission.finalized,
-            Phase::Finished(Outcome { verdict, .. }) => match verdict {
-                Verdict::NoSubmission => false,
-                Verdict::Returned { submission, .. } | Verdict::NoResult { submission, .. } => {
-                    submission.finalized
-                }
-            },
-            Phase::Work { .. } | Phase::Abandoned => false,
+    /// Whether this agent locked its selection with `run.end_work()`.
+    pub fn selection_locked(&self, agent: AgentId) -> bool {
+        self.agents
+            .get(&agent)
+            .is_some_and(|work| work.grace_end.is_some())
+    }
+
+    /// The common work deadline, or the hard end after the work phase.
+    pub fn phase_due(&self) -> Duration {
+        match self.phase {
+            Phase::Work { deadline } => deadline,
+            Phase::Final { .. } | Phase::Finished | Phase::Abandoned => self.hard_end,
         }
     }
 
-    /// When the core next ends a phase, or the run, without another event, as a time since the
-    /// run started: while the agent works, when the work phase ends; then at the hard end, also
-    /// once the run has ended.
-    pub fn phase_due(&self) -> Duration {
-        // The work phase ends by the deadline, which comes before the hard end.
-        self.work_end_due().map_or(self.hard_end, |(end, _)| end)
+    /// The earlier of this agent's grace and the common work deadline, or the hard end
+    /// once its work has ended.
+    pub fn agent_due(&self, agent: AgentId) -> Duration {
+        self.work_due(agent).map_or(self.hard_end, |(end, _)| end)
     }
 
     /// Whether `caller`'s model requests are allowed at `at`, a time since the run started: the
-    /// agent's until the work phase ends, the grace after a finalize included
+    /// agent's until that agent's work ends, the grace after a finalize included
     /// ([`finalize_grace_seconds`](schema::ir::AgentRuntime::finalize_grace_seconds)); a call's
     /// from its body's start until it ends, is stopped, or its timeout passes, in whichever phase.
     /// Once they aren't, the runtime refuses each that it takes, and ends those in flight.
@@ -582,158 +578,21 @@ impl<'w> Core<'w> {
         match caller {
             // A harness asks its model after each command, the finalize's too, and fails its turn
             // if refused; the locked selection keeps any answer off the result.
-            Caller::Agent(_) => self.work_end_due().is_some_and(|(end, _)| at < end),
+            Caller::Agent(agent) => self.work_due(agent).is_some_and(|(end, _)| at < end),
             // A call's route is open while it may make ops, which its timeout bounds.
             Caller::Job(_) => self.working(caller).is_ok_and(|working| at < working.end()),
         }
     }
 
-    fn agent_started(&mut self) {
-        let counted = self.now.saturating_add(self.workflow.agent().deadline);
-        match &mut self.phase {
-            // The deadline after the startup is the latest it may be, and a later report gives
-            // no earlier one, so the least is the first report's, and a report past the startup
-            // changes nothing. The time has not passed the deadline, which would have ended the
-            // work phase, so the least is still to come.
-            Phase::Work { deadline, .. } => *deadline = (*deadline).min(counted),
-            // A finalize has settled the work phase's end, or the work phase has ended.
-            Phase::Finalized { .. }
-            | Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished(_)
-            | Phase::Abandoned => {}
-        }
-    }
-
     fn abandon(&mut self, actions: &mut Vec<Action>) {
         match self.phase {
-            Phase::Work { .. }
-            | Phase::Finalized { .. }
-            | Phase::Teardown { .. }
-            | Phase::Final { .. } => {}
-            Phase::Finished(_) | Phase::Abandoned => return,
+            Phase::Work { .. } | Phase::Final { .. } => {}
+            Phase::Finished | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
         // Abandon stops every runner. A later expiry or job report has no lease left to close.
         drop(self.leases.close_where(self.now, |_| true));
         actions.push(Action::Abandon);
-    }
-
-    /// When the work phase ends unless the agent ends it first, and as which [`WorkEnd`], while
-    /// it lasts.
-    fn work_end_due(&self) -> Option<(Duration, WorkEnd)> {
-        match &self.phase {
-            Phase::Work { deadline, .. } => Some((*deadline, WorkEnd::Deadline)),
-            Phase::Finalized { end, work_end, .. } => Some((*end, work_end.clone())),
-            Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished(_)
-            | Phase::Abandoned => None,
-        }
-    }
-
-    fn end_due_work(&mut self, actions: &mut Vec<Action>) {
-        if let Some((end, work_end)) = self.work_end_due()
-            && self.now >= end
-        {
-            self.end_work(work_end, actions);
-        }
-    }
-
-    fn end_work(&mut self, work_end: WorkEnd, actions: &mut Vec<Action>) {
-        let submission = match &mut self.phase {
-            Phase::Work { latest, .. } => latest.take().map(|payload| Submission {
-                payload,
-                finalized: false,
-            }),
-            Phase::Finalized { payload, .. } => Some(Submission {
-                payload: payload.clone(),
-                finalized: true,
-            }),
-            Phase::Teardown { .. }
-            | Phase::Final { .. }
-            | Phase::Finished(_)
-            | Phase::Abandoned => return,
-        };
-        self.phase = Phase::Teardown {
-            work_end,
-            submission,
-        };
-        let stopped = self.jobs.stop_unfinished(self.now);
-        actions.extend(stopped.into_iter().map(|job| Action::StopCall { job }));
-        let closed = self.leases.close_where(self.now, |_| true);
-        actions.extend(closed.into_iter().map(|lease| Action::CloseLease { lease }));
-        actions.push(Action::TearDownAgent);
-    }
-
-    /// Moves the run on once what it waits for is done: the final phase once nothing the agent
-    /// started runs on, and the run's end once the final job, and every lease, has ended.
-    fn advance(&mut self, actions: &mut Vec<Action>) {
-        match &self.phase {
-            Phase::Teardown {
-                work_end,
-                submission,
-            } if self.jobs.all_ended() && self.leases.all_ended() => {
-                let (work_end, submission) = (work_end.clone(), submission.clone());
-                self.enter_final(work_end, submission, actions);
-            }
-            Phase::Final {
-                work_end,
-                submission,
-                job,
-            } => {
-                let Some(jobs::Job {
-                    state: jobs::State::Ended { outcome, .. },
-                    ..
-                }) = self.jobs.get(*job)
-                else {
-                    return;
-                };
-                if !self.leases.all_ended() {
-                    return;
-                }
-                let submission = submission.clone();
-                let verdict = match outcome.clone() {
-                    Ok(result) => Verdict::Returned { submission, result },
-                    Err(failure) => Verdict::NoResult {
-                        submission,
-                        failure,
-                    },
-                };
-                let work_end = work_end.clone();
-                self.finish(Outcome { work_end, verdict }, actions);
-            }
-            Phase::Work { .. }
-            | Phase::Finalized { .. }
-            | Phase::Teardown { .. }
-            | Phase::Finished(_)
-            | Phase::Abandoned => {}
-        }
-    }
-
-    fn enter_final(
-        &mut self,
-        work_end: WorkEnd,
-        submission: Option<Submission>,
-        actions: &mut Vec<Action>,
-    ) {
-        let Some(submission) = submission else {
-            let verdict = Verdict::NoSubmission;
-            return self.finish(Outcome { work_end, verdict }, actions);
-        };
-        // The final phase comes after the deadline, so the time left before it doesn't count.
-        let timeout = self.workflow.final_call().timeout;
-        let job = (self.jobs).add(JobOf::Final, timeout);
-        actions.push(Action::StartFinalCall {
-            job,
-            payload: submission.payload.clone(),
-            timeout,
-        });
-        self.phase = Phase::Final {
-            work_end,
-            submission,
-            job,
-        };
     }
 
     fn on_job(
@@ -754,10 +613,5 @@ impl<'w> Core<'w> {
                 actions.extend(closed.into_iter().map(|lease| Action::CloseLease { lease }));
             }
         }
-    }
-
-    fn finish(&mut self, outcome: Outcome, actions: &mut Vec<Action>) {
-        self.phase = Phase::Finished(outcome.clone());
-        actions.push(Action::Finish { outcome });
     }
 }

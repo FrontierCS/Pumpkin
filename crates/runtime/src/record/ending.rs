@@ -4,7 +4,6 @@ use std::path::Path;
 use std::{fs, io};
 
 use schema::ir::Name;
-use schema::sandbox::ExitStatus;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -41,13 +40,9 @@ impl State {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ending {
     /// It finished with the result that its final call returned. `values` are the values the
-    /// result shows, each by its name, in their order; `after` says how the work phase ended:
-    /// `after the work phase ended <how>`.
-    Returned {
-        values: Vec<(Name, Value)>,
-        after: String,
-    },
-    /// It finished without a result, as the agent submitted nothing or its final call gave none:
+    /// result shows, each by its name, in their order.
+    Returned { values: Vec<(Name, Value)> },
+    /// It finished without a result because the final call gave none:
     /// `finished without a result: <why>`.
     NoResult(String),
     /// It stopped without an outcome, as the `Stopped`'s words say.
@@ -67,63 +62,45 @@ pub(super) fn read_outcome(path: &Path) -> Result<Option<Value>, ReadError> {
 
 /// How the run whose record is `dir` ended, as its `outcome.json` says; `None` while it has none.
 pub(super) fn read(dir: &Path) -> Result<Option<Ending>, ReadError> {
-    let path = dir.join("outcome.json");
-    let Some(outcome) = read_outcome(&path)? else {
+    let Some(ended) = ended(dir)? else {
         return Ok(None);
     };
-    let ended = outcome::Ended::deserialize(&outcome).map_err(unread(&path))?;
     let ending = match ended {
-        outcome::Ended::Finished(read) => finished(read, dir),
+        outcome::Ended::Finished(outcome) => match outcome.verdict {
+            outcome::Verdict::Returned { result } => Ending::Returned {
+                values: result.values(),
+            },
+            outcome::Verdict::NoResult { failure } => failed_final(failure, dir),
+        },
         outcome::Ended::Failed { reason } => Ending::Stopped(Stopped::Failed(reason)),
         outcome::Ended::Interrupted { signal } => Ending::Stopped(Stopped::Interrupted(signal)),
     };
     Ok(Some(ending))
 }
 
+fn ended(dir: &Path) -> Result<Option<outcome::Ended>, ReadError> {
+    let path = dir.join("outcome.json");
+    read_outcome(&path)?
+        .map(|value| outcome::Ended::deserialize(value).map_err(unread(&path)))
+        .transpose()
+}
+
 fn unread(path: &Path) -> impl Fn(serde_json::Error) -> ReadError {
     |error| ReadError::Form(format!("{} doesn't read: {error}", path.display()))
 }
 
-fn finished(read: outcome::Finished, dir: &Path) -> Ending {
-    let outcome::Finished { work_end, verdict } = read;
-    let ended = match work_end {
-        outcome::WorkEnd::Deadline => "at its deadline".to_owned(),
-        outcome::WorkEnd::Finalized => "when the agent finalized".to_owned(),
-        outcome::WorkEnd::AgentExited { status } => match status {
-            ExitStatus::Code(code) => format!("when the agent exited with status {code}"),
-            ExitStatus::Signal(signal) => format!("when signal {signal} killed the agent"),
-        },
-        outcome::WorkEnd::AgentFailed { reason } => format!("when the agent failed: {reason}"),
+fn failed_final(failure: outcome::Failure, dir: &Path) -> Ending {
+    let failure = match failure {
+        outcome::Failure::Timeout => "timeout".to_owned(),
+        outcome::Failure::Error { reason } => format!("error: {reason}"),
     };
-    let without = |why: String| format!("finished without a result: {why}");
-    match verdict {
-        outcome::Verdict::Returned {
-            submission: _,
-            result,
-        } => Ending::Returned {
-            values: result.values(),
-            after: format!("after the work phase ended {ended}"),
-        },
-        outcome::Verdict::NoSubmission => Ending::NoResult(without(format!(
-            "the agent submitted nothing, and the work phase ended {ended}"
-        ))),
-        outcome::Verdict::NoResult {
-            submission: _,
-            failure,
-        } => {
-            let failure = match failure {
-                outcome::Failure::Timeout => "timeout".to_owned(),
-                outcome::Failure::Error { reason } => format!("error: {reason}"),
-            };
-            let logs = match log::final_call(dir) {
-                Ok(job) => logs(&dir.join(format!("jobs/{job}/log"))),
-                Err(error) => format!("its commands' logs can't be found: {error}"),
-            };
-            Ending::NoResult(without(format!(
-                "the final call gave none ({failure}), after the work phase ended {ended}; {logs}"
-            )))
-        }
-    }
+    let logs = match log::final_call(dir) {
+        Ok(job) => logs(&dir.join(format!("jobs/{job}/log"))),
+        Err(error) => format!("its commands' logs can't be found: {error}"),
+    };
+    Ending::NoResult(format!(
+        "finished without a result: the final call gave none ({failure}); {logs}"
+    ))
 }
 
 /// Where the final call's commands' logs are, `logs`, as its record has them: a call that ran no

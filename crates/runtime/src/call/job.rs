@@ -17,7 +17,7 @@ use crate::record::Stored;
 pub(crate) struct Call<'r> {
     pub(crate) job: JobId,
     pub(crate) of: Of<'r>,
-    pub(crate) payload: Stored,
+    pub(crate) inputs: Vec<Stored>,
     /// The longest the body may drive the target.
     pub(crate) timeout: Duration,
 }
@@ -26,7 +26,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
     let Call {
         job,
         of,
-        payload,
+        inputs,
         timeout,
     } = call;
     let target = of.target();
@@ -40,7 +40,7 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         job,
         target: workflow.target(target),
         of: &of,
-        payload,
+        inputs,
         timeout,
     };
     crate::child::run(child, ops, |child, session| {

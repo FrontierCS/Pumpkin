@@ -84,7 +84,7 @@ fn lists() {
 fn lists_other_builds_unread() {
     let scratch = Scratch::new();
     let made = |id: &str, build: Value| {
-        let record = json!({ "record_version": "pumpkin.record/v0", "pumpkin": build, "args": [] });
+        let record = json!({ "record_version": "pumpkin.record/v1", "pumpkin": build, "args": [] });
         scratch.write(&format!("runs/{id}/record.json"), &record);
         scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
     };
@@ -176,7 +176,7 @@ fn lists_the_last_day() {
     // Another build's run that this build can't read, which ended over a day ago too.
     let unread = "20261106-130000-2c9b0004";
     let other = json!({ "version": "9.9.9", "commit": null });
-    let record = json!({ "record_version": "pumpkin.record/v0", "pumpkin": other, "args": [] });
+    let record = json!({ "record_version": "pumpkin.record/v1", "pumpkin": other, "args": [] });
     scratch.write(&format!("runs/{unread}/record.json"), &record);
     scratch.write(&format!("runs/{unread}/driver.pid"), "4242\n");
     scratch.write(
@@ -243,16 +243,18 @@ fn lists_phases() {
         &priced,
     );
     let late = "20261110-110000-0000000b";
-    let unsubmitted = json!({
-        "state": "finished",
-        "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
-    });
+    let unsubmitted = super::unsubmitted();
     let late_log = [
-        logged(5, json!({ "kind": "agent_started" }), json!([])),
+        logged(5, json!({"kind":"work_started"}), json!([])),
+        logged(
+            5,
+            json!({"kind":"agent_started","caller":"agent-0"}),
+            json!([]),
+        ),
         logged(
             1805,
             json!({ "kind": "tick" }),
-            json!([{ "kind": "tear_down_agent" }]),
+            json!([{ "kind": "tear_down_agent", "caller": "agent-0" }]),
         ),
         logged(
             1806,
@@ -297,7 +299,7 @@ fn lists_phases() {
     // rate limit, or a failure with no code; with a 429; or cut short.
     let answer = |status: u64, more: Value| {
         let mut answer = json!({
-            "kind": "model_answered", "caller": "agent",
+            "kind": "model_answered", "caller": "agent-0",
             "answer": { "kind": "forwarded" }, "upstream_status": status,
         });
         for (field, value) in more.as_object().unwrap() {
@@ -326,7 +328,14 @@ fn lists_phases() {
         ),
     ];
     for (id, answers) in answered {
-        let mut log = vec![logged(5, json!({ "kind": "agent_started" }), json!([]))];
+        let mut log = vec![
+            logged(5, json!({"kind":"work_started"}), json!([])),
+            logged(
+                5,
+                json!({"kind":"agent_started","caller":"agent-0"}),
+                json!([]),
+            ),
+        ];
         for (request, (seconds, mut answer)) in (0_u64..).zip((10..).step_by(10).zip(answers)) {
             answer["request"] = json!(request);
             log.push(logged(seconds, answer, json!([])));
@@ -367,18 +376,26 @@ fn lists_phases() {
             exit status: Some(0)
             printed:
               20261110-100000-0000000a finished     18m20s  -          $1.10+  example/lease: score=49.36 metrics={"solved":3}
-              20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: the agent on aws/judge
-              20261111-090000-0000000b agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>
-              20261111-090000-0000000c agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs
+              20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: 1 agent
+                                       starting        <t>  of 2m              solver on aws/judge
+              20261111-090000-0000000b work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>
+                                       solver          <t>  of 30m             2 model requests, the last answered <t> ago; model request 2 in flight for <t>
+              20261111-090000-0000000c work            <t>  of 30m     $0.68+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
               20261111-090000-0000000d final call      <t>  of 15m04s  $1.04+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
-              20261111-090000-0000000e agent           <t>  of 30m      $0.66  example/lease: 2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+              20261111-090000-0000000e work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
+                                       solver          <t>  of 30m             2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
               20261111-090000-0000000f publishing      <t>                  -  example/lease
-              20261111-090000-0000000g agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
-              20261111-090000-0000000h agent           <t>  of 30m      $0.00  example/lease: 3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
-              20261111-090000-0000000i agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
-              20261111-090000-0000000j agent           <t>  of 30m      $0.00  example/lease: 2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
+              20261111-090000-0000000g work            <t>  of 30m      $0.00  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, 2 failed upstream: rate_limit_exceeded; the last good one answered <t> ago
+              20261111-090000-0000000h work            <t>  of 30m      $0.00  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; no good one answered yet
+              20261111-090000-0000000i work            <t>  of 30m      $0.00  example/lease: 1 agent working
+                                       solver          <t>  of 30m             2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
+              20261111-090000-0000000j work            <t>  of 30m      $0.00  example/lease: 1 agent working
+                                       solver          <t>  of 30m             2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
               11 runs: 10 running, 1 finished; $4.15 so far, and more without a price, and for 3 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
@@ -417,30 +434,38 @@ fn lists_leases() {
             $ pumpkin ls --runs runs
             exit status: Some(0)
             printed:
-              20261114-090000-00000001 agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs
+              20261114-090000-00000001 work            <t>  of 30m     $0.68+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 1s busy; put /pumpkin/in/payload to /work/in moved 1 entry, 1 byte
-              20261114-090000-00000002 agent           <t>  of 30m     $0.68+  example/lease: 3 model requests, the last answered <t> ago
-                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs
+              20261114-090000-00000002 work            <t>  of 30m     $0.68+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261114-090000-00000003 agent           <t>  of 30m     $0.71+  example/lease: 3 model requests, the last answered <t> ago
+              20261114-090000-00000003 work            <t>  of 30m     $0.71+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 0         <t>                     box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
-              20261114-090000-00000004 agent           <t>  of 30m     $0.71+  example/lease: 3 model requests, the last answered <t> ago
-                                       lease 1         <t>  of 30m             gpu on modal/a100_80, starting
-                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
-              20261114-090000-00000005 agent           <t>  of 30m     $0.72+  example/lease: 3 model requests, the last answered <t> ago
-                                       lease 1         <t>  of 1m              gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
-                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
-              20261114-090000-00000006 agent           <t>  of 30m     $0.73+  example/lease: 3 model requests, the last answered <t> ago
-                                       lease 1         <t>                     gpu on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
-                                       lease 2         <t>  of 2m              cpu on aws/judge, starting
-              20261114-090000-00000007 agent           <t>  of 30m     $0.74+  example/lease: 3 model requests, the last answered <t> ago
-                                       lease 2         <t>  of 30m             cpu on aws/judge, ready, 2s busy; `sleep 60` running
-              20261114-090000-00000008 agent           <t>  of 30m     $0.94+  example/lease: 3 model requests, the last answered <t> ago
-                                       lease 2         <t>  of 30m             cpu on aws/judge, ready, 30s busy; `sleep 60` timed out
-                                       lease 3         <t>                     gpu on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
+              20261114-090000-00000004 work            <t>  of 30m     $0.71+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       lease 1         <t>  of 30m             gpu of agent 0 on modal/a100_80, starting
+                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
+              20261114-090000-00000005 work            <t>  of 30m     $0.72+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       lease 1         <t>  of 1m              gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
+                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
+              20261114-090000-00000006 work            <t>  of 30m     $0.73+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       lease 1         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
+                                       lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
+              20261114-090000-00000007 work            <t>  of 30m     $0.74+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 2s busy; `sleep 60` running
+              20261114-090000-00000008 work            <t>  of 30m     $0.94+  example/lease: 1 agent working
+                                       solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out
+                                       lease 3         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
               20261114-090000-00000009 ending          <t>  of 1h43m   $1.03+  example/lease: the end of lease 2
-                                       lease 2         <t>                     cpu on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
+                                       lease 2         <t>                     cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
               9 runs: 9 running; $6.95 so far, and more without a price, and for 9 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
@@ -456,25 +481,31 @@ fn says_unread_lines() {
     let scratch = Scratch::new();
     let id = "20261110-110000-0000000b";
     let log = [
-        logged(5, json!({ "kind": "agent_started" }), json!([])),
+        logged(5, json!({"kind":"work_started"}), json!([])),
+        logged(
+            5,
+            json!({"kind":"agent_started","caller":"agent-0"}),
+            json!([]),
+        ),
         logged(10, json!({ "kind": "later" }), json!([])),
-        logged(20, json!({ "kind": "agent_exited" }), json!([])),
+        logged(
+            20,
+            json!({ "kind": "agent_exited", "caller":"agent-0" }),
+            json!([]),
+        ),
         logged(
             30,
-            json!({ "kind": "model_answered", "caller": "agent", "upstream_status": "200",
+            json!({ "kind": "model_answered", "caller": "agent-0", "upstream_status": "200",
                 "answer": { "kind": "forwarded" } }),
             json!([]),
         ),
         logged(
             40,
             json!({ "kind": "tick" }),
-            json!([{ "kind": "tear_down_agent" }, { "kind": "close_lease" }, { "kind": "finish" }]),
+            json!([{ "kind": "tear_down_agent", "caller": "agent-0" }, { "kind": "close_lease" }, { "kind": "finish" }]),
         ),
     ];
-    let unsubmitted = json!({
-        "state": "finished",
-        "verdict": { "kind": "no_submission" }, "work_end": { "kind": "deadline" },
-    });
+    let unsubmitted = super::unsubmitted();
     let dir = write_run(
         &scratch,
         id,
@@ -512,7 +543,7 @@ fn says_unread_lines() {
         &expect![[r#"
             $ pumpkin ls --runs runs
             exit status: Some(0)
-            pumpkin: run 20261110-110000-0000000b: 4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
+            pumpkin: run 20261110-110000-0000000b: 4 parts of its log can't be read by this pumpkin, the first at line 5, its event: missing field `status`
             pumpkin: run 20261110-110000-0000000c: 4 parts of its log can't be read by this pumpkin, the first at line 1, its event: missing field `unix_ns`
             printed:
               20261110-110000-0000000b finished        40s  -               -  example/lease
@@ -521,11 +552,12 @@ fn says_unread_lines() {
             $ pumpkin wait --runs runs 20261110-110000-0000000b
             exit status: Some(3)
             pumpkin: run 20261110-110000-0000000b started <t> after it was asked for, and ran <t>:
-                 <t> agent on aws/judge, started at <t>; the work phase ended at <t>
+                 <t> solver on aws/judge, started at <t>; its work ended at <t>
+                        model: 0 requests
               model: 0 requests
               sandboxes: 1 on aws/judge, <t> in all, 1 created, all deleted
-              4 parts of its log can't be read by this pumpkin, the first at line 4, its event: missing field `status`
-            pumpkin: run 20261110-110000-0000000b finished without a result: the agent submitted nothing, and the work phase ended at its deadline; its record is <scratch>/runs/20261110-110000-0000000b
+              4 parts of its log can't be read by this pumpkin, the first at line 5, its event: missing field `status`
+            pumpkin: run 20261110-110000-0000000b finished without a result: the final call gave none (error: solver submitted nothing); its commands' logs can't be found: <scratch>/runs/20261110-110000-0000000b/log.jsonl names no final call: expected a `start_final_call`, among the parts that this pumpkin can read; 4 of its parts can't be read, the first at line 5, its event: missing field `status`; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-110000-0000000c
             exit status: Some(1)

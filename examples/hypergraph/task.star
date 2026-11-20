@@ -1,7 +1,7 @@
 """Find the core numbers of a hypergraph, with Codex on a named model."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
-load("//hypergraph/score.star", "score")
+load("//hypergraph/score.star", "final_score", "score")
 load("//submit.star", "submit")
 
 MODEL = arg("model", str)
@@ -26,7 +26,6 @@ agent = codex(
     tools = "native",
     workspace = "/workspace",
     prompt = PROMPT,
-    deadline_seconds = 300,
     finalize_grace_seconds = 0,
 )
 runtime = agent["runtime"]["agent"]
@@ -34,6 +33,7 @@ routes = [route | {"budget": {"microusd": USD // 2}} for route in runtime["egres
 judge_image = image("Dockerfile", target = "judge")
 
 workflow(
+    deadline_seconds = 300,
     name = "examples/hypergraph",
     roles = [{
         "name": "agent",
@@ -57,5 +57,5 @@ workflow(
         "needs": {"cpu_millis": 500, "memory_bytes": 256 * MiB},
         "runtime": {"target": {"cwd": "/pumpkin/home"}},
     } for name in ["evaluator", "judge"]],
-    final = {"target": "judge", "body": score, "payload_max_bytes": PAYLOAD_BYTES, "timeout_seconds": 30},
+    final = {"target": "judge", "body": final_score, "payload_max_bytes": PAYLOAD_BYTES, "timeout_seconds": 30},
 )

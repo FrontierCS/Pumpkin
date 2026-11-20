@@ -47,7 +47,6 @@ def claude_code(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
         finalize_grace_seconds,
         max_output_tokens):
     """An agent role's `image` and `runtime`, for Claude Code on `model` at `effort`.
@@ -62,7 +61,6 @@ def claude_code(
       effort: as every harness; Claude Code's `--effort`: one of `_EFFORTS`.
       workspace: as every harness.
       prompt: as every harness; what Claude Code reads on its standard input, not empty.
-      deadline_seconds: as every harness.
       finalize_grace_seconds: as every harness.
       max_output_tokens: as every harness that takes it; Claude Code's
         `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, which it lowers to the model's cap, 128,000 for a model
@@ -138,7 +136,6 @@ def claude_code(
             },
             "dirs": [{"path": path, "mode": "0700"} for path in [home, config, tmp]],
             "stdin": prompt,
-            "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
                 "api": "messages",

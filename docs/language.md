@@ -8,7 +8,7 @@ the language of Bazel's files, with type annotations on a `def`'s parameters and
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the final call, replacing the last.
+    """Selects `payload` for the calling agent, replacing its last selection.
 
     Args:
       run: the run's state.
@@ -117,7 +117,7 @@ Every file can use these, besides Starlark's:
 
 | Name | What it is |
 | --- | --- |
-| `workflow(*, name, roles, final)` | the workflow, which [Workflows](workflows.md) describes; called once |
+| `workflow(*, name, roles, final, deadline_seconds)` | the workflow, which [Workflows](workflows.md) describes; called once |
 | `arg(name, type, *, default)` | the value of `--arg <name>=<value>`, read as `type`, `str`, `int` or `bool`; without a `default`, it must be given |
 | `image(recipe, *, context, mount, target, args, contexts)` | the image that the Dockerfile `recipe` builds; its value names it in a role |
 | `package_name()` | the entry file's directory below the root, such as `tasks/bench` |
@@ -140,8 +140,8 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 | Handle | Methods |
 | --- | --- |
 | `Target`, a job's or the final call's target | `put(path, payload)`, `run(argv)`, `get(path)` |
-| `Run`, the run's state, a now function's | `select(payload)`, `end_work()` |
-| `Payload`, the call's payload | none: it is passed to `put` or `select` |
+| `Run`, the calling agent’s state | `select(payload)`, `end_work()` |
+| `Payload`, an opaque file supplied to the call | none: it is passed to `put` or `select` |
 
 [Workflows](workflows.md#bodies) says what each method does. A handle may be passed to a function
 of the body's file, whose parameter it fits if annotated so.

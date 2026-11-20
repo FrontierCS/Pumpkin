@@ -216,11 +216,7 @@ fn write_served(scratch: &Scratch) -> File {
         ("20261110-070000-00000008", 0),
         ("20261110-080000-00000009", 3),
     ] {
-        let mut outcome = json!({
-            "state": "finished",
-            "verdict": { "kind": "no_submission" },
-            "work_end": { "kind": "deadline" },
-        });
+        let mut outcome = super::unsubmitted();
         outcome["usage"] = json!({
             "ran_ns": "60000000000", "model_requests": requests,
             "tokens": { "responses": 0, "input": 0, "output": 0 }, "sandboxes": [],
@@ -228,11 +224,7 @@ fn write_served(scratch: &Scratch) -> File {
         write_record(scratch, id, true, Some(outcome));
     }
     // A run of which a response left tokens unreported, so that its cost is a floor.
-    let mut outcome = json!({
-        "state": "finished",
-        "verdict": { "kind": "no_submission" },
-        "work_end": { "kind": "deadline" },
-    });
+    let mut outcome = super::unsubmitted();
     outcome["usage"] = json!({
         "ran_ns": "60000000000", "model_requests": 2,
         "tokens": { "responses": 2, "input": 1000, "output": 100 }, "sandboxes": [],
@@ -244,6 +236,98 @@ fn write_served(scratch: &Scratch) -> File {
     // A file among the runs.
     fs::write(scratch.0.join("runs/20261110-131000-00000013"), "").unwrap();
     driver
+}
+
+fn write_team(scratch: &Scratch, id: &str) {
+    let mut ir = super::lease_task();
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("peer");
+    peer["runtime"]["agent"]["grants"][0]["job"]["target"] = json!("tester");
+    let mut target = ir["roles"][1].clone();
+    target["name"] = json!("tester");
+    target["runtime"]["target"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sessions");
+    ir["roles"].as_array_mut().unwrap().extend([peer, target]);
+    let selected = super::payload();
+    let final_call = json!({"kind":"start_final_call","job":2,"timeout_ns":"3000000000",
+        "selections":[{"role":"solver","selection":null},{"role":"peer","selection":selected}]});
+    let call = |caller, job| {
+        json!({"kind":"start_call","grant":"train","caller":caller,"job":job,
+        "payload":selected,"timeout_ns":"3000000000"})
+    };
+    let log = [
+        logged(1, json!({"kind":"work_started"}), json!([])),
+        logged(
+            2,
+            json!({"kind":"tick"}),
+            json!([call("agent-0", 0), call("agent-6", 1)]),
+        ),
+        logged(3, json!({"kind":"tick"}), json!([final_call])),
+        logged(4, json!({"kind":"tick"}), json!([{"kind":"finish"}])),
+    ];
+    let outcome = json!({"state":"finished","agents":[
+        {"role":"solver","work_end":{"kind":"deadline"},"submission":null},
+        {"role":"peer","work_end":{"kind":"finalized"},"submission":super::submission()}
+    ],"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]}}});
+    write_run(
+        scratch,
+        id,
+        asked(id, 1),
+        &log,
+        Some(outcome),
+        &lease_places(Prices::Nothing),
+    );
+    scratch.write(&format!("runs/{id}/ir.json"), &ir);
+}
+
+#[test]
+fn team_roles() {
+    let scratch = Scratch::new();
+    let id = SERVED_ENDED;
+    write_team(&scratch, id);
+    let served = Served::start(&scratch);
+    let path = format!("/api/runs/{id}");
+    let run = served.get(&path);
+    let lanes = run["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| json!([lane["caller"], lane["role"], lane["holder"]]))
+        .collect::<Vec<_>>();
+    let edges = run["talk"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| json!([edge["from"], edge["to"], edge["kind"], edge["bytes"]]))
+        .collect::<Vec<_>>();
+    let traces = ["agent", "agent-0", "agent-6", "agent-1", "agent-06"].map(|caller| {
+        let (status, _) = served.get_with(&format!("{path}/trace/{caller}/ops"), &[]);
+        format!("{caller}: {status}")
+    });
+    let text = format!(
+        "lanes {}\nedges {}\nresult {}\n{}",
+        json!(lanes),
+        json!(edges),
+        run["result"],
+        traces.join("\n")
+    );
+    check(
+        &scratch,
+        [Step::Ran(text)],
+        false,
+        &[],
+        &expect![[r#"
+            lanes [["agent-0","solver",null],["agent-6","peer",null],["job-0","trainer","agent 0"],["job-1","tester","agent 6"],["job-2","scorer",null]]
+            edges [["peer","scorer","final call",3],["peer","tester","job call",3],["solver","trainer","job call",3]]
+            result {"values":[{"name":"score","value":1}]}
+            agent: HTTP/1.1 400 Bad Request
+            agent-0: HTTP/1.1 200 OK
+            agent-6: HTTP/1.1 200 OK
+            agent-1: HTTP/1.1 404 Not Found
+            agent-06: HTTP/1.1 400 Bad Request"#]],
+    );
 }
 
 #[test]
@@ -379,7 +463,7 @@ fn serves_runs() {
               {"bound":"","has_result":false,"id":"20261110-125000-00000010","live":false,"requests":null,"rest":"made by pumpkin 9.9.9","state":"unread","time":"-","tokens":null,"usd":"-"}
               {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)","id":"20261110-124000-00000011"}
               {"bound":"-","has_result":false,"id":"20261110-120000-0000000d","live":false,"requests":null,"rest":"-","state":"lost","time":"-","tokens":null,"usd":"-"}
-              {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # model requests, the last answered #m##s ago","state":"agent","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
+              {"bound":"of 30m","has_result":false,"id":"<live>","live":true,"requests":3,"rest":"example/lease: # agent working","state":"work","time":"<t>","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","has_result":false,"id":"20261110-100000-0000000b","live":false,"requests":3,"rest":"example/lease","state":"lost","time":"2m10s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.72+"}
               {"bound":"-","has_result":true,"id":"<ended>","live":false,"requests":4,"rest":"example/lease: score=49.36 metrics={\"solved\":3}","state":"finished","time":"18m20s","tokens":{"cached":2600,"input":3000,"output":300},"usd":"$0.77+"}
               {"bound":"-","has_result":false,"id":"20261110-083000-0000000c","live":false,"requests":2,"rest":"-","state":"finished","time":"1m00s","tokens":{"cached":null,"input":1000,"output":100},"usd":"$0.45+"}
@@ -394,42 +478,42 @@ fn serves_runs() {
             GET /api/runs/<ended>
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
-            end: 9222
+            end: 9485
             has_result: true
             id: "<ended>"
             lanes:
-              {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent","failed":[],"kind":"agent","lane":"agent","said":"agent on aws/judge, started at 0:05, exited 0 at 16:40; the work phase ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"kind":"target","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
+              {"answered":[10.0,20.0,31.0],"answers":{"count":3,"failed":0},"caller":"agent-0","failed":[],"kind":"agent","lane":"agent 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":3,"tokens":{"cached":2600,"input":3000,"output":300},"took":{"count":3,"median":5.0}},"role":"solver","said":"solver on aws/judge, started at 0:05, exited 0 at 16:40; its work ended at 16:40","sandbox":{"asked":0.0,"deleted":true,"gone":1002.0,"place":"aws/judge","started":5.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-0","failed":[],"holder":"agent 0","kind":"target","lane":"job 0","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53","sandbox":{"asked":40.0,"deleted":true,"gone":100.0,"place":"modal/a100_80 with unknown GPUs","started":46.0}}
               {"grant":"box","holder":"job 0","kind":"runner","lane":"lease 0","role":"box","said":"box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\\nprint 7` exited 0; closed as its call ended","sandbox":{"asked":50.0,"deleted":true,"gone":102.0,"place":"aws/box","started":55.0},"work":[{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]}
-              {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
-              {"grant":"cpu","holder":"agent","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 1 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"kind":"target","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 2 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"kind":"target","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 3 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
-              {"grant":"gpu","holder":"agent","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
+              {"grant":"gpu","holder":"agent 0","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
+              {"grant":"cpu","holder":"agent 0","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 of agent 0 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"holder":"agent 0","kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 1 of agent 0 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"holder":"agent 0","kind":"target","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 2 of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"holder":"agent 0","kind":"target","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 3 of agent 0 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
+              {"grant":"gpu","holder":"agent 0","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
               {"answered":[1020.0],"answers":{"count":1,"failed":1},"caller":"job-4","failed":[1020.0],"kind":"target","lane":"job 4","model":{"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":1,"tokens":{"cached":null,"input":500,"output":50},"took":{"count":0,"median":null}},"of":"final","role":"scorer","said":"final call job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={\"solved\":3}","sandbox":{"asked":1006.0,"deleted":true,"gone":1100.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":1010.0}}
             live: false
             log_epoch: 0
             model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3500,"output":350},"took":{"count":3,"median":5.0}}
             other_build: null
-            result: {"after":"after the work phase ended when the agent exited with status 0","values":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}]}
+            result: {"values":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}]}
             state: "finished"
             summary: "<as `wait` says it>"
             talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":3,"count":1,"from":"solver","kind":"final call","to":"scorer"},{"back_bytes":null,"bytes":12,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"grants":[{"from":"solver","kind":"job","to":"trainer"},{"from":"solver","kind":"lease","to":"gpu"},{"from":"solver","kind":"lease","to":"cpu"},{"from":"trainer","kind":"lease","to":"box"},{"from":"solver","kind":"final","to":"scorer"}],"roles":[{"final_target":false,"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}]},{"final_target":false,"kind":"target","name":"trainer","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":true,"kind":"target","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}]},{"final_target":false,"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[]}]}
             task: "example/lease"
             times: {"end":1100.0,"hard_end":7200.0,"last":1100.0,"now":null,"started_unix":1794301230.0}
             unread: null
-            verdict: "Run <ended> finished with a result (score=49.36 metrics={\"solved\":3}), after the work phase ended when the agent exited with status 0"
+            verdict: "Run <ended> finished with a result (score=49.36 metrics={\"solved\":3})"
 
             GET /api/runs/20261110-060000-00000005: its cost: {"said":"$0.66 for tokens, and more for sandboxes, which lack a price, and for 1 response's unreported tokens","shown":"$0.66+"}
             GET /api/runs/20261110-050000-00000006: its cost: {"said":"$0.44 for sandboxes, and more for tokens, which lack a price","shown":"$0.44+"}
             GET /api/runs/20261110-040000-00000007: its cost: null
             GET /api/runs/<ended>/since?log=<end>
-            {"end":9222,"live":false}
+            {"end":9485,"live":false}
             GET /api/runs/<ended>/since?log=0
-            end 9222, live false, next 9222, run "<ended>", 59 records, the first {"actions":[{"kind":"start_agent"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
-            GET /api/runs/<ended>/log?at=7715
-            next 9222, end 9222, bytes [Number(7715), Number(7874), Number(7977), Number(8066), Number(8305), Number(8436), Number(8524), Number(8642), Number(9032)], the last's event "call_returned"
+            end 9485, live false, next 9485, run "<ended>", 60 records, the first {"actions":[{"kind":"start_agents"}],"at_ns":"0","byte":0,"event":{"hard_end_ns":"7200000000000","kind":"run_started","unix_ns":"1794301230000000000"},"seq":0,"when":0.0}
+            GET /api/runs/<ended>/log?at=7818
+            next 9485, end 9485, bytes [Number(7818), Number(7906), Number(8103), Number(8205), Number(8294), Number(8568), Number(8699), Number(8787), Number(8905), Number(9295)], the last's event "call_returned"
             GET /api/runs [("X-Pumpkin-Token", "")]
             HTTP/1.1 401 Unauthorized
             {"error":"the request carries no token in `X-Pumpkin-Token`: give the one in the address that `pumpkin view` printed as it started"}
@@ -453,13 +537,13 @@ fn serves_runs() {
             {"error":"no run that this view serves matches `20261110-131000-00000013`: name the id of one that its list shows"}
             GET /api/runs/20261110-125000-00000010 []
             HTTP/1.1 404 Not Found
-            {"error":"runs/20261110-125000-00000010/record.json holds record_version \"pumpkin.record/v9\": expected \"pumpkin.record/v0\", which this `pumpkin` reads"}
+            {"error":"runs/20261110-125000-00000010/record.json holds record_version \"pumpkin.record/v9\": expected \"pumpkin.record/v1\", which this `pumpkin` reads"}
             GET /api/runs/20261110-124000-00000011 []
             HTTP/1.1 500 Internal Server Error
             {"error":"runs/20261110-124000-00000011/record.json: Permission denied (os error 13)"}
             GET /api/runs/<ended>/since?log=7 []
             HTTP/1.1 400 Bad Request
-            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9222: expected 0, or a byte that an answer gave"}"#]],
+            {"error":"byte 7 starts no line of run <ended>'s log, which is read to byte 9485: expected 0, or a byte that an answer gave"}"#]],
     );
 }
 
@@ -525,7 +609,7 @@ fn answers_over_a_pipe() {
     let targets = [
         format!("/api/runs?before={live}"),
         format!("/api/runs/{ended}/log?at=0"),
-        format!("/api/runs/{ended}/trace/agent/steps"),
+        format!("/api/runs/{ended}/trace/agent-0/steps"),
         "/api/runs/run-1".to_owned(),
         format!("/api/runs/{ended}/since?log=7"),
         "/api/nothing".to_owned(),
@@ -596,7 +680,7 @@ fn answers_over_a_pipe() {
         &expect![[r#"
             /api/runs?before=<live>: 200 OK
             /api/runs/<ended>/log?at=0: 200 OK
-            /api/runs/<ended>/trace/agent/steps: 200 OK
+            /api/runs/<ended>/trace/agent-0/steps: 200 OK
             /api/runs/run-1: 404 Not Found
             /api/runs/<ended>/since?log=7: 400 Bad Request
             /api/nothing: 404 Not Found
@@ -629,7 +713,7 @@ fn follows_a_live_run() {
     driver.lock().unwrap();
     let mut grown = Vec::new();
     for request in 0..1500 {
-        let caller = json!({ "caller": "agent", "request": request });
+        let caller = json!({ "caller": "agent-0", "request": request });
         let mut started = caller.clone();
         started["kind"] = json!("model_request_started");
         let mut answered = caller;
@@ -745,7 +829,7 @@ fn follows_a_live_run() {
             tokens: {"cached":null,"input":0,"output":0}
             took: {"count":0,"median":null}
 
-            after 250 lines: 250 records, next 35231, end 35231
+            after 250 lines: 250 records, next 35732, end 35732
             after the last poll: dropped_headers: []
             failed: []
             first_token: {"count":0,"median":null}
@@ -757,8 +841,8 @@ fn follows_a_live_run() {
             took: {"count":1500,"median":0.0}
 
             the agent's lane: answers {"count":1500,"failed":0}, 500 times of them, the first 1.0 and the last 1497.0
-            then: HTTP/1.1 200 OK, end 431109, live true, the run's end 431109 and its clock on: true
-            once ended: {"end":431109,"live":false}"#]],
+            then: HTTP/1.1 200 OK, end 437110, live true, the run's end 437110 and its clock on: true
+            once ended: {"end":437110,"live":false}"#]],
     );
 }
 
@@ -894,7 +978,7 @@ fn cancels_a_run() {
 fn counts_a_jobs_answers_under_its_caller_name() {
     let scratch = Scratch::new();
     let id = "20261110-170000-00000012";
-    let call = json!({ "kind": "start_call", "job": 4, "grant": "train",
+    let call = json!({ "kind": "start_call", "caller": "agent-0", "job": 4, "grant": "train",
         "payload": { "size": 0 }, "timeout_ns": "10000000000" });
     let mut answer = answered(3, "job-04", 0, 429, json!({}), None);
     answer["event"]["failed"] = json!({ "code": "rate_limit_exceeded" });
@@ -992,16 +1076,16 @@ fn starts_over_a_shortened_log() {
         false,
         &[(id, "<id>")],
         &expect![[r#"
-            GET /api/runs/<id>: end 9222, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
-            GET /api/runs/<id>/since?log=3330&log_epoch=0
+            GET /api/runs/<id>: end 9485, log_epoch 0, a build that kept no routes: ["\"solver\" \"unknown\"", "\"trainer\" \"unknown\"", "\"scorer\" \"unknown\"", "\"gpu\" \"unknown\"", "\"cpu\" \"unknown\"", "\"box\" \"unknown\""]
+            GET /api/runs/<id>/since?log=3294&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3330: read the run again, and its log from byte 0","log_epoch":1}
-            GET /api/runs/<id>/log?at=3330&log_epoch=0
+            {"error":"run <id>'s log started over since the reply that gave byte 3294: read the run again, and its log from byte 0","log_epoch":1}
+            GET /api/runs/<id>/log?at=3294&log_epoch=0
             HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 3330: read the run again, and its log from byte 0","log_epoch":1}
-            then GET /api/runs/<id>: end 4652, log_epoch 1
-            GET /api/runs/<id>/since?log=3330&log_epoch=1
-            end 4652, log_epoch 1, 10 records"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 3294: read the run again, and its log from byte 0","log_epoch":1}
+            then GET /api/runs/<id>: end 4696, log_epoch 1
+            GET /api/runs/<id>/since?log=3294&log_epoch=1
+            end 4696, log_epoch 1, 10 records"#]],
     );
 }
 
@@ -1047,9 +1131,9 @@ fn windows_a_log_by_its_bytes() {
         false,
         &[],
         &expect![[r#"
-            from byte 0: 10001 records, next 709044
-            from byte 709044: 1 records, next 1757701
-            from byte 1757701: 10058 records, next 2486956"#]],
+            from byte 0: 10001 records, next 709045
+            from byte 709045: 1 records, next 1757702
+            from byte 1757702: 10059 records, next 2487222"#]],
     );
 }
 
@@ -1275,10 +1359,10 @@ fn deflates_what_the_request_accepts() {
             /api/runs/<id>/log?at=0 "gzip": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
             /api/runs/<id>/log?at=0 "deflate;q=0.5": Content-Encoding deflate, Vary Accept-Encoding
-            /api/runs/<id>/since?log=9222 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=9222 "gzip": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=9222 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
-            /api/runs/<id>/since?log=9222 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
+            /api/runs/<id>/since?log=9485 "gzip, deflate, br, zstd": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9485 "gzip": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9485 "gzip, deflate;q=0": Content-Encoding none, Vary Accept-Encoding
+            /api/runs/<id>/since?log=9485 "deflate;q=0.5": Content-Encoding none, Vary Accept-Encoding"#]],
     );
 }
 
@@ -1523,7 +1607,7 @@ fn traces_a_caller() {
     let mut third = second.to_vec();
     third.extend([said("a.txt is there"), user("and now?")]);
     let other = [user("another thread")];
-    let mut log = vec![started(1, "agent", 0)];
+    let mut log = vec![started(1, "agent-0", 0)];
     let kept = model.keep(
         0,
         "input",
@@ -1532,8 +1616,8 @@ fn traces_a_caller() {
         rest(),
         Some(&answer(json!([call]))),
     );
-    log.push(answered(2, "agent", 0, 200, kept, Some("responses")));
-    log.push(started(3, "agent", 1));
+    log.push(answered(2, "agent-0", 0, 200, kept, Some("responses")));
+    log.push(started(3, "agent-0", 1));
     let kept = model.keep(
         1,
         "input",
@@ -1542,9 +1626,9 @@ fn traces_a_caller() {
         rest(),
         Some(&answer(json!([said("a.txt is there")]))),
     );
-    log.push(answered(4, "agent", 1, 200, kept, Some("responses")));
+    log.push(answered(4, "agent-0", 1, 200, kept, Some("responses")));
     // A thread of its own, failed, retried, then sent again.
-    log.push(started(5, "agent", 2));
+    log.push(started(5, "agent-0", 2));
     let kept = model.keep(
         2,
         "input",
@@ -1553,9 +1637,9 @@ fn traces_a_caller() {
         rest(),
         Some("{\"error\":{\"message\":\"slow down\"}}"),
     );
-    log.push(answered(6, "agent", 2, 429, kept, Some("responses")));
+    log.push(answered(6, "agent-0", 2, 429, kept, Some("responses")));
     for n in [3, 4] {
-        log.push(started(n * 2 + 1, "agent", n));
+        log.push(started(n * 2 + 1, "agent-0", n));
         let kept = model.keep(
             n,
             "input",
@@ -1564,7 +1648,7 @@ fn traces_a_caller() {
             rest(),
             Some(&answer(json!([said("hello")]))),
         );
-        let mut answered = answered(n * 2 + 2, "agent", n, 200, kept, Some("responses"));
+        let mut answered = answered(n * 2 + 2, "agent-0", n, 200, kept, Some("responses"));
         // Cut short, which makes its cost unknown.
         if n == 4 {
             answered["event"]["answer"]["kind"] = json!("cut");
@@ -1572,12 +1656,12 @@ fn traces_a_caller() {
         log.push(answered);
     }
     // A new turn, whose response is a link out of the record, as damage would leave it.
-    log.push(started(11, "agent", 5));
+    log.push(started(11, "agent-0", 5));
     let kept = model.keep(5, "input", &third, &whole, rest(), None);
     let outside = scratch.0.join("outside");
     fs::write(&outside, "not the record's").unwrap();
     std::os::unix::fs::symlink(&outside, dir.join("model/5.response")).unwrap();
-    log.push(answered(12, "agent", 5, 200, kept, Some("responses")));
+    log.push(answered(12, "agent-0", 5, 200, kept, Some("responses")));
     // A call's Chat Completions request, which names no API and keeps its tools in each request.
     let system = json!({ "role": "system", "content": "judge it" });
     let asked = json!({ "role": "user", "content": "is it right?" });
@@ -1663,24 +1747,24 @@ fn traces_a_caller() {
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
     let mut said = Vec::new();
-    let steps = served.get(&format!("{run}/trace/agent/steps"));
-    entries_counted(&served, &format!("{run}/trace/agent"), &steps);
+    let steps = served.get(&format!("{run}/trace/agent-0/steps"));
+    entries_counted(&served, &format!("{run}/trace/agent-0"), &steps);
     said.push(format!(
         "the agent's steps:\n{}",
         columns_text(&steps, "steps")
     ));
-    let entries = served.get(&format!("{run}/trace/agent/entries?from=0&to=5"));
+    let entries = served.get(&format!("{run}/trace/agent-0/entries?from=0&to=5"));
     said.push(format!("its entries:\n{}", entries_text(&entries)));
     let window = served.get(&format!(
-        "{run}/trace/agent/entries?from=0&to=5&kind=user&thread=2"
+        "{run}/trace/agent-0/entries?from=0&to=5&kind=user&thread=2"
     ));
     said.push(format!("thread 2's users':\n{}", entries_text(&window)));
-    let found = served.get(&format!("{run}/trace/agent/search?q=A.TXT"));
+    let found = served.get(&format!("{run}/trace/agent-0/search?q=A.TXT"));
     said.push(format!("found: {found}"));
-    let found = served.get(&format!("{run}/trace/agent/search?q=a.txt&kind=output"));
+    let found = served.get(&format!("{run}/trace/agent-0/search?q=a.txt&kind=output"));
     said.push(format!("found in outputs: {found}"));
     for by in ["step", "turn", "thread"] {
-        let folded = served.get(&format!("{run}/trace/agent/stats?by={by}"));
+        let folded = served.get(&format!("{run}/trace/agent-0/stats?by={by}"));
         said.push(format!("by {by}:\n{}", columns_text(&folded, "rows")));
     }
     let steps = served.get(&format!("{run}/trace/job-0/steps"));
@@ -1705,7 +1789,7 @@ fn traces_a_caller() {
         let caller = if at.starts_with('8') {
             "job-0"
         } else {
-            "agent"
+            "agent-0"
         };
         let entry = served.get(&format!("{run}/trace/{caller}/entry?at={at}"));
         said.push(format!("entry {at}: {entry}"));
@@ -1713,23 +1797,23 @@ fn traces_a_caller() {
     let item = format!("{:064x}", 0);
     let (status, body) = served.get_with(&format!("{run}/item/{item}"), &[]);
     said.push(format!("item 0: {status}\n{body}"));
-    let search = format!("trace/agent/search?q={}", "a".repeat(1025));
+    let search = format!("trace/agent-0/search?q={}", "a".repeat(1025));
     for path in [
         "trace/someone/steps",
         "trace/job-01/steps",
         "trace/job-99/steps",
         "trace/job-99/ops",
-        "trace/agent/entries?from=0&to=5&kind=tool",
+        "trace/agent-0/entries?from=0&to=5&kind=tool",
         "item/abc",
         "exchange/99",
-        "trace/agent/entries?from=0",
-        "trace/agent/entries?from=5&to=3",
-        "trace/agent/stats?by=day",
-        "trace/agent/entry",
-        "trace/agent/entry?at=1/in/x/0",
-        "trace/agent/entry?at=1/out",
-        "trace/agent/entry?at=1/in/9/0",
-        "trace/agent/entry?at=6/out/0",
+        "trace/agent-0/entries?from=0",
+        "trace/agent-0/entries?from=5&to=3",
+        "trace/agent-0/stats?by=day",
+        "trace/agent-0/entry",
+        "trace/agent-0/entry?at=1/in/x/0",
+        "trace/agent-0/entry?at=1/out",
+        "trace/agent-0/entry?at=1/in/9/0",
+        "trace/agent-0/entry?at=6/out/0",
         &search,
     ] {
         let (status, body) = served.get_with(&format!("{run}/{path}"), &[]);
@@ -1740,7 +1824,7 @@ fn traces_a_caller() {
         };
         said.push(format!("{path}: {status}\n{body}"));
     }
-    served.get(&format!("{run}/trace/agent/steps"));
+    served.get(&format!("{run}/trace/agent-0/steps"));
     // The view drops the run's held trace as other ended runs are read, and the log is cut back
     // while none holds it: the trace is read again from the log as it stands.
     for other in 0..9 {
@@ -1763,7 +1847,7 @@ fn traces_a_caller() {
         log.split_inclusive('\n').take(3).collect::<String>(),
     )
     .unwrap();
-    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    let steps = served.get(&format!("{run}/trace/agent-0/steps"));
     said.push(format!("once cut: {}", steps["steps"]["request"]));
     check(
         &scratch,
@@ -1778,8 +1862,8 @@ fn traces_a_caller() {
             added=1 added_entries=2 answer="forwarded" answers=1 api="responses" back_bytes=121 cache_hit=0.16666666666666666 cached=50 calls=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=1 kept_bytes=289 model_ns=1000000001 output=10 request=3 retry_count=1 retry_of=2 sent_bytes=100 start_ns="6999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=1 added_entries=2 answer="cut" answers=1 api="responses" back_bytes=121 cache_hit=0.125 cached=50 calls=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=1 kept_bytes=289 model_ns=1000000001 output=10 repeat_of=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 stop="completed" thread=2 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=0 api="responses" back_bytes=0 cache_hit=0.1 cached=50 calls=[] differs=[] end_ns="12000000000" first_byte_ns="11999999500" first_token_ns="11600000000" input=500 items=5 kept_bytes=585 model_ns=1000000001 notes=["its response can't be read: `<scratch>/runs/<id>/model/5.response` is a symbolic link: expected a file of the record's own"] output=10 parent=1 request=5 sent_bytes=100 start_ns="10999999999" status=200 thread=0 tools=0 turn=5 upstream="zai" whole=false
-            caller: "agent"
-            end: 6248
+            caller: "agent-0"
+            end: 6273
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[11000000001,5000000001],"thread":[0,2]}
@@ -1817,7 +1901,7 @@ fn traces_a_caller() {
             cache_hit=0.125 cached=50 calls={} decode_ns=400000000 input=400 model_ns=1000000001 outcome="failed" output=10 repeat_of=3 request=4 status=200 thread=2 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2
             cache_hit=0.1 cached=50 calls={} decode_ns=400000000 input=500 model_ns=1000000001 outcome="ok" output=10 queue_ns=6999999999 request=5 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=5 usd=0.1515
             by: "step"
-            caller: "agent"
+            caller: "agent-0"
             totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":2,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.33599999999999997,"usd_unknown":2}
 
             by turn:
@@ -1825,14 +1909,14 @@ fn traces_a_caller() {
             cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=2 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 turn=2 usd=0.153 usd_unknown=1
             cache_hit=0.1 cache_write_unknown=1 cached=50 cached_unknown=0 calls={} decode_ns=400000000 decode_ns_unknown=0 failures=0 first_request=5 in_flight=0 input=500 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=1000000001 model_ns_unknown=0 output=10 output_unknown=0 queue_ns=6999999999 queue_ns_unknown=0 reasoning_unknown=1 refusals=0 repeats=0 retries=0 span_ns=1000000001 steps=1 thread=0 tok_s=25.0 turn=5 usd=0.1515 usd_unknown=0
             by: "turn"
-            caller: "agent"
+            caller: "agent-0"
             totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":2,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.33599999999999997,"usd_unknown":2}
 
             by thread:
             cache_hit=0.25 cache_write_unknown=3 cached=150 cached_unknown=0 calls={"exec":1} decode_ns=1200000000 decode_ns_unknown=0 failures=0 first_request=0 in_flight=0 input=600 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns=7999999998 queue_ns_unknown=1 reasoning_unknown=3 refusals=0 repeats=0 retries=0 span_ns=11000000001 steps=3 thread=0 tok_s=25.0 usd=0.183 usd_unknown=1
             cache_hit=0.16666666666666666 cache_write_unknown=3 cached=150 cached_unknown=0 calls={} decode_ns=1200000000 decode_ns_unknown=0 failures=2 first_request=2 in_flight=0 input=900 input_unknown=0 median_to_first_byte_ns=999999501 median_to_first_byte_ns_unknown=0 median_to_first_token_ns=600000001 median_to_first_token_ns_unknown=0 model_ns=3000000003 model_ns_unknown=0 output=30 output_unknown=0 queue_ns_unknown=3 reasoning_unknown=3 refusals=0 repeats=1 retries=1 span_ns=5000000001 steps=3 thread=2 tok_s=25.0 usd=0.153 usd_unknown=1
             by: "thread"
-            caller: "agent"
+            caller: "agent-0"
             totals: {"cache_hit":0.2,"cache_write":null,"cache_write_unknown":6,"cached":300,"cached_unknown":0,"calls":{"exec":1},"decode_ns":2400000000,"decode_ns_unknown":0,"failures":2,"first_request":0,"in_flight":0,"input":1500,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":6000000006,"model_ns_unknown":0,"output":60,"output_unknown":0,"queue_ns":7999999998,"queue_ns_unknown":4,"reasoning":null,"reasoning_unknown":6,"refusals":0,"repeats":1,"retries":1,"span_ns":11000000001,"steps":6,"threads":2,"tok_s":25.0,"turns":3,"usd":0.33599999999999997,"usd_unknown":2}
 
             the call's steps:
@@ -1842,7 +1926,7 @@ fn traces_a_caller() {
             added=2 added_entries=1 answer="abandoned" answers=0 back_bytes=49 calls=[] differs=[] end_ns="17000000000" items=4 kept_bytes=391 model_ns=1000000001 parent=6 repeat_of=8 request=9 sent_bytes=100 start_ns="15999999999" thread=6 tools=0 turn=6 whole=true
             added_entries=1 answer="barred" answers=0 api="chat" back_bytes=53 calls=[] end_ns="18000000000" kept_bytes=71 notes=["the record kept its body whole, so its conversation is compared with no other"] request=10 sent_bytes=71 thread=10 turn=10 upstream="zai" whole=true
             caller: "job-0"
-            end: 6248
+            end: 6273
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[1000000001,null],"thread":[6,10]}
@@ -1884,7 +1968,7 @@ fn traces_a_caller() {
             exchange 1:
             answer: {"kind":"forwarded"}
             api: "responses"
-            caller: "agent"
+            caller: "agent-0"
             config: {"max_tokens":null,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":false,"temperature":null,"tools":["exec"]}
             failed: null
             kept: {"request":{"body_bytes":100,"bytes":437,"items":{"count":3,"field":"input"},"path":"model/1.request","whole":["instructions","tools"]},"response":{"bytes":130,"path":"model/1.response"}}
@@ -1906,35 +1990,35 @@ fn traces_a_caller() {
             item 0: HTTP/1.1 200 OK
             {"content":[{"text":"list the files","type":"input_text"}],"role":"user","type":"message"}
             trace/someone/steps: HTTP/1.1 400 Bad Request
-            {"error":"`someone` is no caller: expected `agent` or `job-<n>`"}
+            {"error":"`someone` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
             trace/job-01/steps: HTTP/1.1 400 Bad Request
-            {"error":"`job-01` is no caller: expected `agent` or `job-<n>`"}
+            {"error":"`job-01` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
             trace/job-99/steps: HTTP/1.1 404 Not Found
-            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
+            {"error":"run <id>'s log names no job 99: name an agent or a job of the run"}
             trace/job-99/ops: HTTP/1.1 404 Not Found
-            {"error":"run <id>'s log names no job 99: name `agent`, or a job of the run"}
-            trace/agent/entries?from=0&to=5&kind=tool: HTTP/1.1 400 Bad Request
+            {"error":"run <id>'s log names no job 99: name an agent or a job of the run"}
+            trace/agent-0/entries?from=0&to=5&kind=tool: HTTP/1.1 400 Bad Request
             {"error":"`kind` is no entry's kind: unknown variant `tool`, expected one of `system`, `user`, `assistant`, `reasoning`, `call`, `output`, `other`, `unread`"}
             item/abc: HTTP/1.1 400 Bad Request
             {"error":"`abc` is no item: expected 64 lowercase hexadecimal digits"}
             exchange/99: HTTP/1.1 404 Not Found
             {"error":"run <id>'s log names no model request 99"}
-            trace/agent/entries?from=0: HTTP/1.1 400 Bad Request
+            trace/agent-0/entries?from=0: HTTP/1.1 400 Bad Request
             {"error":"give a request's number: `?to=<request>`"}
-            trace/agent/entries?from=5&to=3: HTTP/1.1 400 Bad Request
+            trace/agent-0/entries?from=5&to=3: HTTP/1.1 400 Bad Request
             {"error":"`to` is 3, before `from`, 5: expected `from` <= `to`"}
-            trace/agent/stats?by=day: HTTP/1.1 400 Bad Request
+            trace/agent-0/stats?by=day: HTTP/1.1 400 Bad Request
             {"error":"`by` is `day`: expected `step`, `turn` or `thread`"}
-            trace/agent/entry: HTTP/1.1 400 Bad Request
+            trace/agent-0/entry: HTTP/1.1 400 Bad Request
             {"error":"give an entry's address: `?at=<address>`"}
-            trace/agent/entry?at=1/in/x/0: HTTP/1.1 400 Bad Request
+            trace/agent-0/entry?at=1/in/x/0: HTTP/1.1 400 Bad Request
             {"error":"`1/in/x/0` is no entry's address: expected `<request>/in/<item>/<part>`, `<request>/head/<field>/<part>` or `<request>/out/<part>`"}
-            trace/agent/entry?at=1/out: HTTP/1.1 400 Bad Request
+            trace/agent-0/entry?at=1/out: HTTP/1.1 400 Bad Request
             {"error":"`1/out` is no entry's address: expected `<request>/in/<item>/<part>`, `<request>/head/<field>/<part>` or `<request>/out/<part>`"}
-            trace/agent/entry?at=1/in/9/0: HTTP/1.1 404 Not Found
-            {"error":"agent's trace has no entry at `1/in/9/0`"}
-            trace/agent/entry?at=6/out/0: HTTP/1.1 404 Not Found
-            {"error":"agent's trace has no entry at `6/out/0`"}
+            trace/agent-0/entry?at=1/in/9/0: HTTP/1.1 404 Not Found
+            {"error":"agent-0's trace has no entry at `1/in/9/0`"}
+            trace/agent-0/entry?at=6/out/0: HTTP/1.1 404 Not Found
+            {"error":"agent-0's trace has no entry at `6/out/0`"}
             a search of 1025 bytes: HTTP/1.1 400 Bad Request
             {"error":"`q` is 1025 bytes: expected at most 1024"}
             once cut: [0]"#]],
@@ -2018,7 +2102,7 @@ fn traces_a_messages_exchange() {
             "event: content_block_start\ndata: {start}\n\nevent: content_block_delta\ndata: {delta}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
         )
     };
-    let mut log = vec![started(1, "agent", 0)];
+    let mut log = vec![started(1, "agent-0", 0)];
     let kept = model.keep(
         0,
         "messages",
@@ -2027,13 +2111,13 @@ fn traces_a_messages_exchange() {
         rest(),
         Some(MESSAGES_STREAM),
     );
-    let mut record = answered(2, "agent", 0, 200, kept, Some("messages"));
+    let mut record = answered(2, "agent-0", 0, 200, kept, Some("messages"));
     // As the route logs the stream's counts, with 120 tokens written to the cache: its input
     // counts the cache's reads and writes.
     record["event"]["usage"] = json!({ "input_tokens": 36838, "output_tokens": 83,
         "cached_tokens": 36544, "cache_write_tokens": 120 });
     log.push(record);
-    log.push(started(3, "agent", 1));
+    log.push(started(3, "agent-0", 1));
     let kept = model.keep(
         1,
         "messages",
@@ -2042,14 +2126,14 @@ fn traces_a_messages_exchange() {
         rest(),
         Some(&answer("a.txt is there")),
     );
-    log.push(answered(4, "agent", 1, 200, kept, Some("messages")));
+    log.push(answered(4, "agent-0", 1, 200, kept, Some("messages")));
     // This request sends the update again, its mark left out, as the item its parent sent.
     let update = json!({ "role": "system",
         "content": "# Environment update\n - Primary working directory: /workspace" });
     let reply = json!({ "role": "assistant", "content": "a.txt is there" });
     let next = json!({ "role": "user", "content": [{ "type": "text", "text": "and b?",
         "cache_control": { "type": "ephemeral" } }] });
-    log.push(started(5, "agent", 2));
+    log.push(started(5, "agent-0", 2));
     let sent = [first, call, result, update, reply, next];
     let kept = model.keep(
         2,
@@ -2059,7 +2143,7 @@ fn traces_a_messages_exchange() {
         rest(),
         Some(&answer("b.txt is not")),
     );
-    log.push(answered(6, "agent", 2, 200, kept, Some("messages")));
+    log.push(answered(6, "agent-0", 2, 200, kept, Some("messages")));
     let changed = json!([{ "type": "text", "text": "You are a Claude agent.\nAssist with the task, briefly." }]);
     let sent = [
         &sent[..],
@@ -2069,7 +2153,7 @@ fn traces_a_messages_exchange() {
         ],
     ]
     .concat();
-    log.push(started(7, "agent", 3));
+    log.push(started(7, "agent-0", 3));
     let kept = model.keep(
         3,
         "messages",
@@ -2078,7 +2162,7 @@ fn traces_a_messages_exchange() {
         rest(),
         Some(&answer("c.txt is not")),
     );
-    log.push(answered(8, "agent", 3, 200, kept, Some("messages")));
+    log.push(answered(8, "agent-0", 3, 200, kept, Some("messages")));
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
         &scratch,
@@ -2091,17 +2175,17 @@ fn traces_a_messages_exchange() {
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
     let mut said = Vec::new();
-    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    let steps = served.get(&format!("{run}/trace/agent-0/steps"));
     said.push(format!(
         "the agent's steps:\n{}",
         columns_text(&steps, "steps")
     ));
-    entries_counted(&served, &format!("{run}/trace/agent"), &steps);
-    let entries = served.get(&format!("{run}/trace/agent/entries?from=0&to=1"));
+    entries_counted(&served, &format!("{run}/trace/agent-0"), &steps);
+    let entries = served.get(&format!("{run}/trace/agent-0/entries?from=0&to=1"));
     said.push(format!("its entries:\n{}", entries_text(&entries)));
-    let found = served.get(&format!("{run}/trace/agent/search?q=CANNOT"));
+    let found = served.get(&format!("{run}/trace/agent-0/search?q=CANNOT"));
     said.push(format!("found: {found}"));
-    let folded = served.get(&format!("{run}/trace/agent/stats?by=step"));
+    let folded = served.get(&format!("{run}/trace/agent-0/stats?by=step"));
     said.push(format!("by step:\n{}", columns_text(&folded, "rows")));
     let exchange = served.get(&format!("{run}/exchange/0"));
     said.push(format!("exchange 0:\n{}", fields(&exchange, &[])));
@@ -2118,8 +2202,8 @@ fn traces_a_messages_exchange() {
             added=3 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=297 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="4000000000" first_byte_ns="3999999500" first_token_ns="3600000000" input=100 items=4 kept_bytes=557 model_ns=1000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=200 thread=0 tools=0 turn=0 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=200 items=6 kept_bytes=705 model_ns=1000000001 output=10 parent=1 request=2 sent_bytes=100 start_ns="4999999999" status=200 thread=0 tools=0 turn=2 upstream="zai" whole=true
             added=2 added_entries=2 answer="forwarded" answers=1 api="messages" back_bytes=295 cache_hit=0.16666666666666666 cached=50 calls=[] differs=["system"] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=8 kept_bytes=853 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 tools=0 turn=3 upstream="zai" whole=true
-            caller: "agent"
-            end: 2860
+            caller: "agent-0"
+            end: 2877
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[7000000001],"thread":[0]}
@@ -2142,13 +2226,13 @@ fn traces_a_messages_exchange() {
             cache_hit=0.25 cached=50 calls={} decode_ns=400000000 input=200 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=2 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=2 usd=0.0615
             cache_hit=0.16666666666666666 cached=50 calls={} decode_ns=400000000 input=300 model_ns=1000000001 outcome="ok" output=10 queue_ns=999999999 request=3 status=200 thread=0 to_first_byte_ns=999999501 to_first_token_ns=600000001 tok_s=25.0 turn=3 usd=0.0915
             by: "step"
-            caller: "agent"
+            caller: "agent-0"
             totals: {"cache_hit":0.9801271435439928,"cache_write":120,"cache_write_unknown":3,"cached":36694,"cached_unknown":0,"calls":{"Bash":1},"decode_ns":1600000000,"decode_ns_unknown":0,"failures":0,"first_request":0,"in_flight":0,"input":37438,"input_unknown":0,"median_to_first_byte_ns":999999501,"median_to_first_byte_ns_unknown":0,"median_to_first_token_ns":600000001,"median_to_first_token_ns_unknown":0,"model_ns":4000000004,"model_ns_unknown":0,"output":113,"output_unknown":0,"queue_ns":2999999997,"queue_ns_unknown":1,"reasoning":null,"reasoning_unknown":4,"refusals":0,"repeats":0,"retries":0,"span_ns":7000000001,"steps":4,"threads":1,"tok_s":70.625,"turns":3,"usd":1.50252,"usd_unknown":0}
 
             exchange 0:
             answer: {"kind":"forwarded"}
             api: "messages"
-            caller: "agent"
+            caller: "agent-0"
             config: {"max_tokens":32000,"model":"glm-5.3","reasoning_effort":null,"stop":[],"stream":true,"temperature":null,"tools":["Bash"]}
             failed: null
             kept: {"request":{"body_bytes":100,"bytes":335,"items":{"count":1,"field":"messages"},"path":"model/0.request","whole":["system","tools"]},"response":{"bytes":1376,"path":"model/0.response"}}
@@ -2201,11 +2285,11 @@ fn follows_a_trace() {
         Some(&done(said("again"))),
     );
     let log = [
-        started(1, "agent", 0),
-        answered(2, "agent", 0, 200, kept, Some("responses")),
-        started(3, "agent", 1),
-        started(4, "agent", 2),
-        answered(5, "agent", 2, 200, again, Some("responses")),
+        started(1, "agent-0", 0),
+        answered(2, "agent-0", 0, 200, kept, Some("responses")),
+        started(3, "agent-0", 1),
+        started(4, "agent-0", 2),
+        answered(5, "agent-0", 2, 200, again, Some("responses")),
     ];
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(
@@ -2223,7 +2307,7 @@ fn follows_a_trace() {
     let begun = done(said("part one"));
     fs::write(&response, format!("{begun}data: {{\"type\":\"resp")).unwrap();
     let served = Served::start(&scratch);
-    let run = format!("/api/runs/{id}/trace/agent");
+    let run = format!("/api/runs/{id}/trace/agent-0");
     let mut said_ = Vec::new();
     let first = served.get(&format!("{run}/steps"));
     entries_counted(&served, &run, &first);
@@ -2245,7 +2329,7 @@ fn follows_a_trace() {
         None,
     );
     // Request 1 fails, so request 2, answered before it, becomes its retry.
-    let line = answered(6, "agent", 1, 429, kept, Some("responses"));
+    let line = answered(6, "agent-0", 1, 429, kept, Some("responses"));
     let mut file = OpenOptions::new()
         .append(true)
         .open(dir.join("log.jsonl"))
@@ -2262,8 +2346,8 @@ fn follows_a_trace() {
         user("run it"),
     ];
     let kept = model.keep(3, "input", &asked, &[], rest(), Some(&done(call.clone())));
-    let mut lines = vec![line, started(7, "agent", 3)];
-    lines.push(answered(8, "agent", 3, 200, kept, Some("responses")));
+    let mut lines = vec![line, started(7, "agent-0", 3)];
+    lines.push(answered(8, "agent-0", 3, 200, kept, Some("responses")));
     let mut append = |lines: &mut [Value], seq: usize| {
         for (at, line) in lines.iter_mut().enumerate() {
             line["seq"] = json!(seq + at);
@@ -2284,8 +2368,8 @@ fn follows_a_trace() {
     asked.extend([call, output]);
     let kept = model.keep(4, "input", &asked, &[], rest(), Some(&done(said("done"))));
     let mut lines = [
-        started(9, "agent", 4),
-        answered(10, "agent", 4, 200, kept, Some("responses")),
+        started(9, "agent-0", 4),
+        answered(10, "agent-0", 4, 200, kept, Some("responses")),
     ];
     append(&mut lines, log.len() + 4);
     drop(driver);
@@ -2310,8 +2394,8 @@ fn follows_a_trace() {
             added=1 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cached=50 calls=[] end_ns="2000000000" first_byte_ns="1999999500" first_token_ns="1600000000" input=0 items=1 kept_bytes=117 model_ns=1000000001 output=10 request=0 sent_bytes=100 start_ns="999999999" status=200 thread=0 turn=0 upstream="zai" whole=false
             answers=1 calls=[] request=1 start_ns="2999999999" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=2 upstream="zai" whole=false
-            caller: "agent"
-            end: 1570
+            caller: "agent-0"
+            end: 1581
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[4000000001],"thread":[0]}
@@ -2322,8 +2406,8 @@ fn follows_a_trace() {
             {"at":"1/out/0","digest":null,"index":0,"kind":"assistant","request":1,"side":"answer","text":"part one"}
             next: null
             nothing new:
-            caller: "agent"
-            end: 1570
+            caller: "agent-0"
+            end: 1581
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[],"thread":[]}
@@ -2334,8 +2418,8 @@ fn follows_a_trace() {
             added=2 added_entries=1 answer="forwarded" answers=2 api="responses" back_bytes=0 cache_hit=0.5 cached=50 calls=[] differs=[] end_ns="6000000000" first_byte_ns="5999999500" first_token_ns="5600000000" input=100 items=3 kept_bytes=265 model_ns=3000000001 output=10 parent=0 request=1 sent_bytes=100 start_ns="2999999999" status=429 stop="completed" thread=0 turn=1 upstream="zai" whole=true
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=189 cache_hit=0.25 cached=50 calls=[] differs=[] end_ns="5000000000" first_byte_ns="4999999500" first_token_ns="4600000000" input=200 items=3 kept_bytes=265 model_ns=1000000001 output=10 parent=0 request=2 retry_count=1 retry_of=1 sent_bytes=100 start_ns="3999999999" status=200 thread=0 turn=1 upstream="zai" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
-            caller: "agent"
-            end: 2709
+            caller: "agent-0"
+            end: 2726
             live: true
             log_epoch: 0
             thread_spans: {"span_ns":[7000000001],"thread":[0]}
@@ -2354,8 +2438,8 @@ fn follows_a_trace() {
             its output sent:
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=172 cache_hit=0.16666666666666666 cached=50 calls=["exec"] differs=[] end_ns="8000000000" first_byte_ns="7999999500" first_token_ns="7600000000" input=300 items=5 kept_bytes=413 model_ns=1000000001 output=10 parent=2 request=3 sent_bytes=100 start_ns="6999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
             added=2 added_entries=1 answer="forwarded" answers=1 api="responses" back_bytes=188 cache_hit=0.125 cached=50 calls=[] differs=[] end_ns="10000000000" first_byte_ns="9999999500" first_token_ns="9600000000" input=400 items=7 kept_bytes=561 model_ns=1000000001 output=10 parent=3 request=4 sent_bytes=100 start_ns="8999999999" status=200 thread=0 turn=3 upstream="zai" whole=false
-            caller: "agent"
-            end: 3352
+            caller: "agent-0"
+            end: 3373
             live: false
             log_epoch: 0
             thread_spans: {"span_ns":[9000000001],"thread":[0]}
@@ -2367,7 +2451,7 @@ fn follows_a_trace() {
             {"at":"3/out/0","call_id":"c1","digest":null,"index":1,"kind":"call","name":"exec","output":"4/in/6/0","request":3,"side":"answer","text":"{}"}
             next: null
             of another epoch: HTTP/1.1 409 Conflict
-            {"error":"run <id>'s log started over since the reply that gave byte 1570: read the run again, and its log from byte 0","log_epoch":0}"#]],
+            {"error":"run <id>'s log started over since the reply that gave byte 1581: read the run again, and its log from byte 0","log_epoch":0}"#]],
     );
 }
 
@@ -2412,10 +2496,10 @@ fn diffs_two_requests() {
         whole.extend(instructions.map(|text| ("instructions", text)));
         let response = json!({ "status": "completed", "output": [said("ok")] }).to_string();
         let kept = model.keep(n, "input", &items, &whole, json!({}), Some(&response));
-        log.push(started(n * 2 + 1, "agent", n));
+        log.push(started(n * 2 + 1, "agent-0", n));
         log.push(answered(
             n * 2 + 2,
-            "agent",
+            "agent-0",
             n,
             200,
             kept,
@@ -2433,7 +2517,7 @@ fn diffs_two_requests() {
     );
     let served = Served::start(&scratch);
     let run = format!("/api/runs/{id}");
-    let steps = served.get(&format!("{run}/trace/agent/steps"));
+    let steps = served.get(&format!("{run}/trace/agent-0/steps"));
     let mut said = vec![format!("differs: {}", steps["steps"]["differs"])];
     for asked in [
         "a=0&b=1&part=system",
@@ -2700,7 +2784,7 @@ fn places_steps_whatever_their_answers_order() {
 fn holds_each_live_trace_and_the_last_three_ended() {
     let scratch = Scratch::new();
     let (ended, live) = ("20261110-210000-00000017", "20261110-210000-00000018");
-    let callers = ["agent", "job-0", "job-1", "job-2"];
+    let callers = ["agent-0", "job-0", "job-1", "job-2"];
     let response = json!({ "status": "completed", "output": [said("done")] }).to_string();
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let failed = json!({ "state": "failed", "reason": "stopped" });
@@ -2734,11 +2818,11 @@ fn holds_each_live_trace_and_the_last_three_ended() {
     let mut said = Vec::new();
     let asked = [
         (ended, "job-1"),
-        (live, "agent"),
+        (live, "agent-0"),
         (ended, "job-0"),
         (ended, "job-2"),
         (live, "job-0"),
-        (ended, "agent"),
+        (ended, "agent-0"),
         (live, "job-1"),
         (ended, "job-1"),
         (live, "job-2"),
@@ -2761,11 +2845,11 @@ fn holds_each_live_trace_and_the_last_three_ended() {
         &[],
         &expect![[r#"
             ended run's job-1 asked: its record read again: false
-            live run's agent asked: its record read again: false
+            live run's agent-0 asked: its record read again: false
             ended run's job-0 asked: its record read again: false
             ended run's job-2 asked: its record read again: false
             live run's job-0 asked: its record read again: false
-            ended run's agent asked: its record read again: true
+            ended run's agent-0 asked: its record read again: true
             live run's job-1 asked: its record read again: false
             ended run's job-1 asked: its record read again: true
             live run's job-2 asked: its record read again: false"#]],
@@ -2787,7 +2871,7 @@ fn times_a_callers_ops() {
     let log = [
         arrived(
             1,
-            "agent",
+            "agent-0",
             0,
             json!({ "kind": "status", "job": "0" }),
             json!([]),
@@ -2795,7 +2879,7 @@ fn times_a_callers_ops() {
         // The first call waits for a slot: its job starts on a later line.
         arrived(
             2,
-            "agent",
+            "agent-0",
             1,
             call.clone(),
             json!([reply(1, json!({ "kind": "call", "job": 0 }))]),
@@ -2803,7 +2887,7 @@ fn times_a_callers_ops() {
         ended(3, json!({ "kind": "call_started", "job": 0 })),
         arrived(
             4,
-            "agent",
+            "agent-0",
             2,
             call.clone(),
             json!([reply(
@@ -2813,7 +2897,7 @@ fn times_a_callers_ops() {
         ),
         arrived(
             5,
-            "agent",
+            "agent-0",
             3,
             json!({ "kind": "now", "grant": "final", "evaluated": {
                 "effects": ["select"], "returned": [{ "name": "state", "value": "stored" }],
@@ -2833,7 +2917,7 @@ fn times_a_callers_ops() {
         ),
         arrived(
             7,
-            "agent",
+            "agent-0",
             5,
             json!({ "kind": "lease_put", "lease": 2 }),
             json!([reply(5, json!({ "kind": "lease", "lease": 2 })),
@@ -2845,7 +2929,7 @@ fn times_a_callers_ops() {
         ),
         arrived(
             9,
-            "agent",
+            "agent-0",
             6,
             json!({ "kind": "lease_run", "lease": 2 }),
             json!([reply(6, json!({ "kind": "lease", "lease": 2 })),
@@ -2869,14 +2953,14 @@ fn times_a_callers_ops() {
         ),
         arrived(
             13,
-            "agent",
+            "agent-0",
             7,
             call.clone(),
             json!([reply(7, json!({ "kind": "call", "job": 1 }))]),
         ),
         arrived(
             14,
-            "agent",
+            "agent-0",
             8,
             call,
             json!([reply(8, json!({ "kind": "call", "job": 2 }))]),
@@ -2887,7 +2971,7 @@ fn times_a_callers_ops() {
         ),
         arrived(
             16,
-            "agent",
+            "agent-0",
             9,
             json!({ "kind": "lease_get", "lease": 2 }),
             json!([reply(9, json!({ "kind": "lease", "lease": 2 })),
@@ -2900,7 +2984,7 @@ fn times_a_callers_ops() {
         // A now function's body that returned nothing.
         arrived(
             18,
-            "agent",
+            "agent-0",
             10,
             json!({ "kind": "now", "grant": "final", "evaluated": { "effects": [], "returned": [] } }),
             json!([reply(10, json!({ "kind": "call", "returned": {} }))]),
@@ -2909,7 +2993,7 @@ fn times_a_callers_ops() {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     write_run(&scratch, id, since, &log, None, &lease_places(Prices::Both));
     let served = Served::start(&scratch);
-    let said = ["agent", "job-1"].map(|caller| {
+    let said = ["agent-0", "job-1"].map(|caller| {
         let reply = served.get(&format!("/api/runs/{id}/trace/{caller}/ops"));
         format!("{caller}:\n{}", columns_text(&reply, "ops"))
     });
@@ -2919,7 +3003,7 @@ fn times_a_callers_ops() {
         false,
         &[],
         &expect![[r#"
-            agent:
+            agent-0:
             end_ns="11000000000" failed=false kind="call" name="train" op=1 result="returned score=14" start_ns="2000000000"
             end_ns="4000000000" failed=true kind="call" name="train" op=2 result="refused: one call at a time" start_ns="4000000000"
             end_ns="5000000000" failed=false kind="now" name="final" op=3 result="returned state=\"stored\"" start_ns="5000000000"
@@ -2929,7 +3013,7 @@ fn times_a_callers_ops() {
             end_ns="15000000000" failed=true kind="call" name="train" op=8 result="failed: the sandbox was lost" start_ns="14000000000"
             end_ns="17000000000" failed=false kind="lease_get" name="lease 2" op=9 result="moved 96 bytes, 2 entries" start_ns="16000000000"
             end_ns="18000000000" failed=false kind="now" name="final" op=10 result="returned" start_ns="18000000000"
-            caller: "agent"
+            caller: "agent-0"
 
             job-1:
             end_ns="10000000000" failed=false kind="lease_run" name="lease 0" op=4 result="exit 0" start_ns="6000000000"

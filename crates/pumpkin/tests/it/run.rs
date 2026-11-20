@@ -283,10 +283,10 @@ fn usage() {
                    an outcome.json, which `pumpkin cancel` then records; or another error.
                 2  A usage error.
               While the run goes on, `wait` says on the standard error each of its milestones
-              as its record logs it: the agent's start, each call's start and end, each
+              as its record logs it: the start of work, each call's start and end, each
               lease's start, its runner's readiness and its end, and the end of the work
               phase. Once the run has ended, it says its summary: when it started, how long it
-              ran, the agent's start and end, each call with how long it took and how it
+              ran, each agent's start and end, each call with how long it took and how it
               ended, each lease with how long its runner lived and was charged for, and how
               much of that a command or transfer ran, its commands and how it ended, the model
               requests of an agent with a model route and the tokens reported, what each role
@@ -339,9 +339,9 @@ fn usage() {
                    others all the same.
                 2  A usage error.
 
-              A live run's phase is `publishing` what its sandboxes run, `starting` its agent,
-              `agent` at work, `ending` the work phase, or `final call`; under it, a line for
-              each call the agent made, by its function, and each lease, by its grant and
+              A live run's phase is `publishing` what its sandboxes run, `starting` its agents,
+              `work`, `ending` the work phase, or `final call`; under it, a line for
+              each call, by function, and each lease, by its grant and
               state, that hasn't ended; a phase past its bound is a bug, which `ls` says. An
               ended run's state is `finished`, `failed`, `interrupted` (by a signal), or
               `lost`, if its driver ended without an outcome.json. Its task is its workflow's
@@ -459,7 +459,7 @@ fn usage() {
               do, and of the providers asks only EC2, for a controller's state and its start,
               as below.
 
-              A run's page links to the trace of each caller that used a model, the agent or
+              A run's page links to the trace of each caller that used a model, an agent or
               a call: its model requests as threads of steps, each with the entries it
               added and the model's answer, as the record's log and the bodies it keeps say.
 
@@ -1052,31 +1052,32 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
             $ pumpkin wait <id> --runs runs
             exit status: Some(0)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                        model: 1 request, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 1 good answer, by the median, <t> to the end
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
               model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished with a result (score=1), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished with a result (score=1); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
             $ pumpkin wait <id> --runs runs
             exit status: Some(0)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=3
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished with a result (score=3), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished with a result (score=3); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/submits/task.star
             $ pumpkin wait <id> --runs runs
             exit status: Some(3)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
-                 <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                 <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
-                15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
+            pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
+                18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
                    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `final_call()`, called at fails/final.star:3:5), after the work phase ended when the agent exited with status 0; its commands' logs are in <scratch>/runs/<id>/jobs/0/log; its record is <scratch>/runs/<id>
+                in `final_call()`, called at fails/final.star:3:5); its commands' logs are in <scratch>/runs/<id>/jobs/0/log; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star"#]],
     );
 }
@@ -1368,34 +1369,34 @@ fn refusals() {
         &expect![[r#"
             $ pumpkin run it's broken/tasks/task.star --sandboxd sandboxd --runs runs --config conf/served.toml
             exit status: Some(1)
-            tasks/task.star:9:922: `agent` also names /roles/0: give each a unique name
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^^^^^^^
+            tasks/task.star:9:895: `agent` also names /roles/0: give each a unique name
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ^^^^^^^
                 the IR's /roles/1/name
-            tasks/task.star:9:701: no role is named `trainer`: name one listed in `roles`
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             ^^^^^^^^^
+            tasks/task.star:9:674: no role is named `trainer`: name one listed in `roles`
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  ^^^^^^^^^
                 the IR's /roles/0/runtime/agent/grants/0/job/target
-            tasks/task.star:9:897: `agent` is a target that no job function or final call names: name it from one
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            tasks/task.star:9:870: `agent` is a target that no job function or final call names: name it from one
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/1
             pumpkin: it's broken/tasks/task.star: the task has 3 problems
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/served.toml --sandboxd <scratch>/sandboxd '<scratch>/it'\''s broken/tasks/task.star'
             $ pumpkin run a~b/tasks/task.star --sandboxd sandboxd --runs two
             lines --config my served.toml
             exit status: Some(1)
-            tasks/task.star:9:922: `agent` also names /roles/0: give each a unique name
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          ^^^^^^^
+            tasks/task.star:9:895: `agent` also names /roles/0: give each a unique name
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ^^^^^^^
                 the IR's /roles/1/name
-            tasks/task.star:9:701: no role is named `trainer`: name one listed in `roles`
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             ^^^^^^^^^
+            tasks/task.star:9:674: no role is named `trainer`: name one listed in `roles`
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  ^^^^^^^^^
                 the IR's /roles/0/runtime/agent/grants/0/job/target
-            tasks/task.star:9:897: `agent` is a target that no job function or final call names: name it from one
-                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "deadline_seconds": 18000, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
-                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            tasks/task.star:9:870: `agent` is a target that no job function or final call names: name it from one
+                9 |     roles = [{"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 34359738368}, "runtime": {"agent": {"command": {"argv": ["/usr/local/bin/pumpkin-fake-agent"], "cwd": "/workspace"}, "dirs": [{"mode": "0700", "path": "/workspace/.codex"}, {"mode": "0700", "path": "/workspace/.tmp"}], "egress": {"model": [{"api": "responses", "models": ["gpt-6-astra"]}]}, "files": [{"content": "model = \"gpt-6-astra\"\n", "mode": "0600", "path": "/workspace/.codex/config.toml"}], "finalize_grace_seconds": 60, "grants": [{"job": {"body": train, "call_timeout_seconds": 12000, "calls": 100, "cumulative_seconds": 12000, "payload_max_bytes": 4194304, "target": "trainer"}, "name": "train"}, {"name": "submit", "now": {"body": submit, "payload_max_bytes": 4194304}}], "stdin": "Solve the task in /task/README.md.\n"}}, "user": {"gid": 10001, "uid": 10001}}, {"image": IMAGE, "name": "agent", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/workspace", "env": ["MODE=train", "DATASET=/data/train.json"]}}, "user": {"gid": 65532, "uid": 65532}}, {"image": IMAGE, "name": "final_judge", "needs": {"cpu_millis": 8000, "memory_bytes": 2147483648}, "runtime": {"target": {"cwd": "/pumpkin/home", "env": ["MODE=eval", "DATASET=/data/eval.json"]}}, "user": {"gid": 65532, "uid": 65532}}],
+                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/1
             pumpkin: a~b/tasks/task.star: the task has 3 problems
             pumpkin: to run it again: pumpkin run --runs '<scratch>/two
@@ -2024,86 +2025,92 @@ fn runs_on_docker() {
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
             pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the agent started on local/container
+            pumpkin:    <t> agent started on local/container
             pumpkin:    <t> the work phase ended
             pumpkin:    <t> final call job 0 asked on local/container
             pumpkin:    <t> final call job 0 started
             pumpkin:    <t> final call job 0 ended: score=1
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                        model: 1 request, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 1 good answer, by the median, <t> to the end
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
               model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished with a result (score=1), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished with a result (score=1); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/answer, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/answer, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/06651be039f9e5a47490f8ea118fd0931e7824702c693557a77a7df2d5114aa4, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/asks/final.star, sources/task/asks/submit.star, sources/task/asks/task.star, sources/task/lib/train.star
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/answer, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/answer, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/06651be039f9e5a47490f8ea118fd0931e7824702c693557a77a7df2d5114aa4, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/asks/final.star, sources/task/asks/submit.star, sources/task/asks/task.star, sources/task/lib/train.star
+            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             provider.json routes: {"agent":[{"api":"responses","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra","usd_per_mtok":{"input":1.25,"output":10.0}}},"upstream":"provider"}],"final_judge":[{"api":"chat","models":{"gpt-6-astra":{"upstream_name":"vendor/gpt-6-astra","usd_per_mtok":{"input":1.25,"output":10.0}}},"upstream":"provider"}]}
-            the run log records: {"answer":{"kind":"forwarded"},"api":"responses","caller":"agent","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":57,"body_sha256":"8e1b803c11e5437c46a8ea56e92d591b284778ce8209d56a347f8c8fdc0ca260","bytes":57,"dropped_headers":["user-agent"]},"response":{"bytes":116}},"kind":"model_answered","model":"gpt-6-astra","request":0,"upstream":"provider","upstream_status":200}
+            the run log records: {"answer":{"kind":"forwarded"},"api":"responses","caller":"agent-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":57,"body_sha256":"8e1b803c11e5437c46a8ea56e92d591b284778ce8209d56a347f8c8fdc0ca260","bytes":57,"dropped_headers":["user-agent"]},"response":{"bytes":116}},"kind":"model_answered","model":"gpt-6-astra","request":0,"upstream":"provider","upstream_status":200}
             the run log records: {"answer":{"kind":"forwarded"},"api":"chat","caller":"job-0","first_byte_ns":"<ns>","kept":{"request":{"body_bytes":77,"body_sha256":"018fa791e56a2db8c8c065da57294d744c30e14181cf2fdbfd272d3e8f009efd","bytes":117,"items":{"count":1,"field":"messages"}},"response":{"bytes":143}},"kind":"model_answered","model":"gpt-6-astra","request":1,"upstream":"provider","upstream_status":200}
             the agent's answer: data: POST /v1/responses HTTP/1.1 Some("Bearer sk-test") {"input":"hi","model":"vendor/gpt-6-astra","store":false}\n\n
             the final call's answer: data: POST /v1/chat/completions HTTP/1.1 Some("Bearer sk-test") {"messages":[{"content":"grade","role":"user"}],"model":"vendor/gpt-6-astra"}\n\n
-            outcome.json: {"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"calls":[{"grant":null,"job":0,"model_requests":1,"tokens":{"input":0,"output":0,"responses":0}}],"model_requests":2,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1}]}}}
             $ DOCKER_CONFIG=<docker config> pumpkin run exits/task.star --sandboxd <sandboxd> --wait
-            exit status: Some(3)
+            exit status: Some(0)
             pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
             pumpkin: run <id> started
             pumpkin: following run <id>, recorded in <scratch>/.pumpkin/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the agent started on local/container
+            pumpkin:    <t> agent started on local/container
             pumpkin:    <t> the work phase ended
+            pumpkin:    <t> final call job 0 asked on local/container
+            pumpkin:    <t> final call job 0 started
+            pumpkin:    <t> final call job 0 ended: score=0
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
-              sandboxes: 1 on local/container, <t> in all, 1 created, all deleted
-            pumpkin: run <id> finished without a result: the agent submitted nothing, and the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                 <t> final call job 0 on local/container, started after <t>, ran <t>: score=0
+              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+            pumpkin: run <id> finished with a result (score=0); its record is <scratch>/.pumpkin/runs/<id>
             pumpkin: to run it again: pumpkin run --sandboxd <sandboxd> <scratch>/exits/task.star
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/exits/final.star, sources/task/exits/submit.star, sources/task/exits/task.star, sources/task/lib/train.star
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"no_submission"},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/out/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/exits/final.star, sources/task/exits/submit.star, sources/task/exits/task.star, sources/task/lib/train.star
+            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":0}]}}}
             $ pumpkin run submits/task.star --sandboxd <sandboxd> --wait --runs runs --config conf/pumpkin.toml
             exit status: Some(0)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
             pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the agent started on local/container
+            pumpkin:    <t> agent started on local/container
             pumpkin:    <t> the work phase ended
             pumpkin:    <t> final call job 0 asked on local/container
             pumpkin:    <t> final call job 0 started
             pumpkin:    <t> final call job 0 ended: score=3
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=3
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished with a result (score=3), after the work phase ended when the agent exited with status 0; its record is <scratch>/runs/<id>
+            pumpkin: run <id> finished with a result (score=3); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/submits/task.star
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/lib/train.star, sources/task/submits/final.star, sources/task/submits/submit.star, sources/task/submits/task.star
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/lib/train.star, sources/task/submits/final.star, sources/task/submits/submit.star, sources/task/submits/task.star
+            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3}]},"submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":3}]}}}
             $ pumpkin run fails/task.star --sandboxd <sandboxd> --wait --runs runs --config conf/pumpkin.toml
             exit status: Some(3)
             pumpkin: run <id> records into <scratch>/runs/<id>
             pumpkin: run <id> started
             pumpkin: following run <id>, recorded in <scratch>/runs/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the agent started on local/container
+            pumpkin:    <t> agent started on local/container
             pumpkin:    <t> the work phase ended
             pumpkin:    <t> final call job 0 asked on local/container
             pumpkin:    <t> final call job 0 started
-            pumpkin:    <t> final call job 0 ended: failed: fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
+            pumpkin:    <t> final call job 0 ended: failed: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
-                 <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                 <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
               sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
-            pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
-                15 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
+            pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
+                18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
                    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                in `final_call()`, called at fails/final.star:3:5), after the work phase ended when the agent exited with status 0; its commands' logs are in <scratch>/runs/<id>/jobs/0/log; its record is <scratch>/runs/<id>
+                in `final_call()`, called at fails/final.star:3:5); its commands' logs are in <scratch>/runs/<id>/jobs/0/log; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/fails/task.star
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/fails/final.star, sources/task/fails/submit.star, sources/task/fails/task.star, sources/task/lib/train.star
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/fails/final.star, sources/task/fails/submit.star, sources/task/fails/task.star, sources/task/lib/train.star
+            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"fails/final.star:15:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    15 |     return {\"score\": json.decode(target.get(\"/pumpkin/out/result.json\"))[\"raw_score\"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5"},"kind":"no_result","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}"#]],
+            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {\"score\": json.decode(target.get(\"/pumpkin/out/result.json\"))[\"raw_score\"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5"},"kind":"no_result"}}"#]],
     );
     upstream.stop();
     wait_for_each_run(&scratch, &sandboxd);
@@ -2174,31 +2181,31 @@ fn writes_only_in_its_workspace() {
         pumpkin: run <id> records into <scratch>/.pumpkin/runs/<id>
         pumpkin: run <id> started
         pumpkin: following run <id>, recorded in <scratch>/.pumpkin/runs/<id>: ending `pumpkin run` does not stop it
-        pumpkin:    <t> the agent started on local/container
-        pumpkin:    <t> count job 0 asked on local/container
-        pumpkin:    <t> count job 0 started
-        pumpkin:    <t> count job 0 ended: lines=1 bytes=6
+        pumpkin:    <t> agent started on local/container
+        pumpkin:    <t> count job 0 of agent 0 asked on local/container
+        pumpkin:    <t> count job 0 of agent 0 started
+        pumpkin:    <t> count job 0 of agent 0 ended: lines=1 bytes=6
         pumpkin:    <t> the work phase ended
         pumpkin:    <t> final call job 1 asked on local/container
         pumpkin:    <t> final call job 1 started
         pumpkin:    <t> final call job 1 ended: score=6 lines=1
         pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-             <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
-             <t> count job 0 on local/container, started after <t>, ran <t>: lines=1 bytes=6
+             <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+             <t> count job 0 of agent 0 on local/container, started after <t>, ran <t>: lines=1 bytes=6
              <t> final call job 1 on local/container, started after <t>, ran <t>: score=6 lines=1
           sandboxes: 3 on local/container, <t> in all, 3 created, all deleted
-        pumpkin: run <id> finished with a result (score=6 lines=1), after the work phase ended when the agent exited with status 0; its record is <scratch>/.pumpkin/runs/<id>
+        pumpkin: run <id> finished with a result (score=6 lines=1); its record is <scratch>/.pumpkin/runs/<id>
         pumpkin: to run it again: pumpkin run --config <scratch>/pumpkin.toml <scratch>/examples/hello/task.star
-        record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/counts.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/got/1/result.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03, provider.json, record.json, sources/task/hello/count.star, sources/task/hello/final.star, sources/task/hello/task.star, sources/task/submit.star
-        the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+        record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/counts.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/got/1/result.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03, provider.json, record.json, sources/task/hello/count.star, sources/task/hello/final.star, sources/task/hello/task.star, sources/task/submit.star
+        agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
         job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-        outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":3,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6},{"name":"lines","value":1}]},"submission":{"finalized":true,"payload":{"digest":"sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+        outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":3,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6},{"name":"lines","value":1}]}}}
         HOME's new files: []
         TMPDIR holds: []
         .pumpkin holds: bin, docker, runs
         .pumpkin/docker holds: buildx, publish-slots
-        the agent's standard output:
+        agent `agent`'s standard output:
         {"kind":"call","job":0,"remaining":{"calls":null,"seconds":null}}
         {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":null,"seconds":null}}
         {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
@@ -2442,7 +2449,7 @@ fn leases_on_docker() {
             command 1's stderr: "to stderr\n"
             command 4's stdout: ""
             command 4's stderr: ""
-            the agent's standard output:
+            agent `agent`'s standard output:
             sandboxctl call gpu.open: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":5}}
             sandboxctl call gpu.status 0: exit 0: {"kind":"lease_status","lease":0,"state":"ready","elapsed_seconds":"<s>","busy_seconds":"<s>","idle_seconds":"<s>","failure":null,"last":null,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":5}}
             sandboxctl call gpu.put 0 /workspace/src /work/src: exit 0: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":"<s>","cumulative_seconds":null,"commands":4}}
@@ -2546,7 +2553,7 @@ fn final_call_leases_on_docker() {
             values: [{"name":"score","value":7}]
             the program's stdout: "7\n"
             the program's stderr: "cat: can't open '/answers': No such file or directory\n"
-            the agent's standard output:
+            agent `agent`'s standard output:
             {"kind":"call","returned":{},"remaining_seconds":60}
             job 0's command 0's standard output:
             the judge reads /answers: 42
@@ -2578,7 +2585,7 @@ fn ops_on_docker() {
     let listed = containers(&context).list(&RunTag::try_from(id.to_owned()).unwrap());
     lines.push(format!("listed once it ended: {:?}", listed.unwrap()));
     let sockets = scratch.0.join(dir).join("sockets");
-    let over = sockets.join("agent/s").into_os_string().len() > 107;
+    let over = sockets.join("agent-0/s").into_os_string().len() > 107;
     lines.push(format!(
         "the agent's socket's path is over 107 bytes: {over}"
     ));
@@ -2598,36 +2605,36 @@ fn ops_on_docker() {
             pumpkin: run <id> records into <scratch>/<runs>/<id>
             pumpkin: run <id> started
             pumpkin: following run <id>, recorded in <scratch>/<runs>/<id>: ending `pumpkin run` does not stop it
-            pumpkin:    <t> the agent started on local/container
-            pumpkin:    <t> train job 0 asked on local/container
-            pumpkin:    <t> train job 0 started
-            pumpkin:    <t> train job 0 ended: bytes=6
-            pumpkin:    <t> train job 1 asked on local/container
-            pumpkin:    <t> train job 1 started
-            pumpkin:    <t> train job 1 ended: failed: the call's timeout passed
+            pumpkin:    <t> agent started on local/container
+            pumpkin:    <t> train job 0 of agent 0 asked on local/container
+            pumpkin:    <t> train job 0 of agent 0 started
+            pumpkin:    <t> train job 0 of agent 0 ended: bytes=6
+            pumpkin:    <t> train job 1 of agent 0 asked on local/container
+            pumpkin:    <t> train job 1 of agent 0 started
+            pumpkin:    <t> train job 1 of agent 0 ended: failed: the call's timeout passed
             pumpkin:    <t> the work phase ended
             pumpkin:    <t> final call job 2 asked on local/container
             pumpkin:    <t> final call job 2 started
             pumpkin:    <t> final call job 2 ended: score=6
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
-                 <t> agent on local/container, started at <t>, exited 0 at <t>; the work phase ended at <t>
-                 <t> train job 0 on local/container, started after <t>, ran <t>: bytes=6
-                 <t> train job 1 on local/container, started after <t>, ran <t>: failed: the call's timeout passed (timed out)
+                 <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
+                 <t> train job 0 of agent 0 on local/container, started after <t>, ran <t>: bytes=6
+                 <t> train job 1 of agent 0 on local/container, started after <t>, ran <t>: failed: the call's timeout passed (timed out)
                  <t> final call job 2 on local/container, started after <t>, ran <t>: score=6
               sandboxes: 4 on local/container, <t> in all, 4 created, all deleted
-            pumpkin: run <id> finished with a result (score=6), after the work phase ended when the agent exited with status 0; its record is <scratch>/<runs>/<id>
+            pumpkin: run <id> finished with a result (score=6); its record is <scratch>/<runs>/<id>
             pumpkin: to run it again: pumpkin run --runs '<scratch>/<runs>' --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/ops/task.star
-            record: agent/log/command.stderr, agent/log/command.stdout, agent/out/, agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/, jobs/1/sandbox.json, jobs/2/got/1/result.json, jobs/2/log/0/command.stderr, jobs/2/log/0/command.stdout, jobs/2/out/evidence.txt, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json, sources/task/lib/train.star, sources/task/ops/final.star, sources/task/ops/submit.star, sources/task/ops/task.star
-            the agent's sandbox, agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
+            record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/, jobs/1/sandbox.json, jobs/2/got/1/result.json, jobs/2/log/0/command.stderr, jobs/2/log/0/command.stdout, jobs/2/out/evidence.txt, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json, sources/task/lib/train.star, sources/task/ops/final.star, sources/task/ops/submit.star, sources/task/ops/task.star
+            agent `agent`'s sandbox, agents/agent/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 1's sandbox, jobs/1/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
             job 2's sandbox, jobs/2/sandbox.json: {"delete":{"state":"deleted"},"id":"<container>","provider":"local"}
-            outcome.json: {"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]},"submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"work_end":{"kind":"agent_exited","status":{"code":0}}}
+            outcome.json: {"agents":[{"role":"agent","submission":{"finalized":true,"payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":4,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"kind":"returned","result":{"values":[{"name":"score","value":6}]}}}
             listed once it ended: []
             the agent's socket's path is over 107 bytes: true
             socket directory left: false
             modes in the record: directories 755; files 644
-            the agent's standard output:
+            agent `agent`'s standard output:
             700 .codex
             750 .codex/skills
             600 .codex/config.toml

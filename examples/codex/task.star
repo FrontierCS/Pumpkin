@@ -18,11 +18,11 @@ agent = codex(
     tools = "native",
     workspace = "/workspace",
     prompt = "Write a greeting to the file `greeting`, then submit it with `" + SANDBOXCTL + " call final greeting --arg finalize=true`.\n",
-    deadline_seconds = 1800,
     finalize_grace_seconds = 60,
 )
 
 workflow(
+    deadline_seconds = 1800,
     name = "examples/codex",
     roles = [
         {

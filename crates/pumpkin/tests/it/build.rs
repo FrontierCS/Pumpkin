@@ -271,8 +271,9 @@ fn builds_on_docker() {
             printed as a record keeps it: true
             printed:
               {
-                "ir_version": "pumpkin.ir/v0",
+                "ir_version": "pumpkin.ir/v1",
                 "name": "neutral/bench",
+                "deadline_seconds": 18000,
                 "roles": [
                   {
                     "name": "agent",
@@ -320,7 +321,6 @@ fn builds_on_docker() {
                           }
                         ],
                         "stdin": "Solve the task in /task/README.md, working in /workspace.\n\nSubmit a tar for a train call with `sandboxctl`, read its score and the calls left, and go on\nwhile it helps. Submit the final tar with `sandboxctl call final <tar> --arg finalize=true` once, as\nyour last step, then exit.\n",
-                        "deadline_seconds": 18000,
                         "finalize_grace_seconds": 60,
                         "egress": {
                           "model": [

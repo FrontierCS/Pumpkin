@@ -19,6 +19,7 @@ SANDBOXCTL call final greeting --arg finalize=true
 """.replace("SANDBOXCTL", SANDBOXCTL)
 
 workflow(
+    deadline_seconds = 300,
     name = "examples/hello",
     roles = [
         {
@@ -31,7 +32,6 @@ workflow(
                     "argv": ["sh", "-c", "set -e" + AGENT],
                     "cwd": "/workspace",
                 },
-                "deadline_seconds": 300,
                 "finalize_grace_seconds": 30,
                 "grants": [
                     {"name": "count", "job": {

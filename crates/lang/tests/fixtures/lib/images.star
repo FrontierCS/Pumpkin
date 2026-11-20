@@ -42,9 +42,9 @@ def train(target: Target, payload: Payload):
     target.run(["/opt/judge/run"])
     return json.decode(target.get("/pumpkin/out/result.json"))
 
-def final_call(target: Target, payload: Payload):
+def final_call(target: Target, selections):
     """Runs the judge on the selection, and shows the result it wrote."""
-    target.put("/pumpkin/in/payload", payload)
+    target.put("/pumpkin/in/payload", selections["agent"])
     target.run(["/opt/judge/run"])
     return {"result": target.get("/pumpkin/out/result.json")}
 
@@ -65,6 +65,7 @@ def images_task(*, agent):
     ]
     harness = image("Dockerfile", context = "//harness", contexts = {"base": agent_image})
     workflow(
+        deadline_seconds = DEADLINE,
         name = "neutral/" + task.replace("_", "-"),
         roles = [
             {
@@ -75,7 +76,6 @@ def images_task(*, agent):
                 "runtime": {"agent": {
                     "command": {"argv": ["/harness/bin/agent"], "cwd": "/workspace"},
                     "stdin": "Solve the task in /task/README.md, then submit with \"sandboxctl\".\n",
-                    "deadline_seconds": DEADLINE,
                     "finalize_grace_seconds": 0 if STRICT else 60,
                     "egress": {"model": [{"api": "responses", "models": [MODEL]}]},
                     "grants": [

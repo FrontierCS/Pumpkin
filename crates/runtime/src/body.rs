@@ -53,8 +53,8 @@ pub trait Bodies: Sync {
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
 
-    /// Calls the final call's body `body`, given `keywords`, with a handle on `target` and the
-    /// payload, on the calling thread, whose stack is [`stack_bytes`](Self::stack_bytes).
+    /// Calls the final body with one entry per agent, in role order. Each selected input names
+    /// a slot for [`Target::put`] on this call.
     ///
     /// # Errors
     ///
@@ -63,6 +63,7 @@ pub trait Bodies: Sync {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
+        selections: &[(Name, Option<usize>)],
         target: &mut dyn Target,
     ) -> Result<Vec<(Name, Value)>, String>;
 
@@ -93,8 +94,8 @@ pub trait RunState {
 /// The target of a job's call, as its body drives it. A method's `Err` is why it failed, which
 /// ends the call.
 pub trait Target {
-    /// Puts the call's payload at `path`, one file, its parents made.
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String>;
+    /// Puts the input at `path`, one file, its parents made. A job's payload has slot zero.
+    fn put(&mut self, path: &AbsolutePath, input_slot: usize) -> Result<(), String>;
 
     /// Runs `argv`, and waits for it to end, whatever its exit status.
     fn run(&mut self, argv: &Argv) -> Result<(), String>;
@@ -115,7 +116,7 @@ pub(crate) struct Call<'c> {
     /// The target, whose `cwd` and `env` its commands run with.
     pub(crate) target: &'c workflow::Target,
     pub(crate) of: &'c Of<'c>,
-    pub(crate) payload: Stored,
+    pub(crate) inputs: Vec<Stored>,
     /// The longest the body may drive the target, from its start.
     pub(crate) timeout: Duration,
 }
@@ -127,14 +128,17 @@ pub(crate) enum Of<'r> {
         function: &'r JobFunction,
         arguments: BTreeMap<Name, ir::ArgumentValue>,
     },
-    Final(&'r Final),
+    Final {
+        final_call: &'r Final,
+        selections: Vec<(Name, Option<usize>)>,
+    },
 }
 
 impl Of<'_> {
     pub(crate) fn target(&self) -> TargetId {
         match self {
             Self::Function { function, .. } => function.target,
-            Self::Final(final_call) => final_call.target,
+            Self::Final { final_call, .. } => final_call.target,
         }
     }
 }
@@ -183,9 +187,15 @@ pub(crate) fn evaluate<H: Host>(
             function,
             arguments,
         } => bodies.job(&function.body, &function.keywords, arguments, &mut target),
-        Of::Final(final_call) => {
-            bodies.final_call(&final_call.body, &final_call.keywords, &mut target)
-        }
+        Of::Final {
+            final_call,
+            selections,
+        } => bodies.final_call(
+            &final_call.body,
+            &final_call.keywords,
+            selections,
+            &mut target,
+        ),
     };
     target.end();
     match (target.cut, returned) {
@@ -318,12 +328,17 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 }
 
 impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
+    fn put(&mut self, path: &AbsolutePath, input_slot: usize) -> Result<(), String> {
         let by = self.going()?;
         let Some((dir, name)) = path.split_last() else {
             return Err("`/` is the sandbox's root: name a file's path".to_owned());
         };
-        let payload = self.call.payload.read()?;
+        let input = self
+            .call
+            .inputs
+            .get(input_slot)
+            .ok_or_else(|| format!("this call has no input in slot {input_slot}"))?;
+        let payload = input.read()?;
         let put = self
             .session
             .put(&dir, [Put::File(name, file_mode(), &payload)], by);

@@ -57,8 +57,8 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        // The work phase's end stops every call (`end_work`), so a call is given at most the time
-        // the work phase has left when it is accepted; after a wait in the queue, its timeout can
+        // Ending an agent's work stops its calls (`end_work`), so a call is given at most the time
+        // its caller has left when it is accepted; after a wait in the queue, its timeout can
         // reach past the deadline, where that stop ends it all the same. Each term is positive: the
         // work phase ends at the deadline, and every limit is left above zero.
         let work_left = deadline.saturating_sub(self.now);

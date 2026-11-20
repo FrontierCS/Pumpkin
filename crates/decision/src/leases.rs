@@ -218,9 +218,7 @@ impl Lease {
 }
 
 impl Leases {
-    /// Opens a lease, under the lowest instance that no lease of the grant, not yet ended, holds.
-    /// The grant's limits are the caller's to check, and so is that no other holder has a lease of
-    /// the grant that has not ended: the instance is then below the grant's `instances`.
+    /// Opens a lease in the first free instance of this holder and grant.
     pub(super) fn open(
         &mut self,
         (holder, grant): (Caller, SessionId),
@@ -230,6 +228,7 @@ impl Leases {
         let taken = |instance: u32| {
             (self.0.iter()).any(|lease| {
                 lease.grant == grant
+                    && lease.holder == holder
                     && lease.instance == instance
                     && !matches!(lease.state, State::Ended { .. })
             })

@@ -38,9 +38,9 @@ def _final_target(*, needs, env, max_bytes):
         "runtime": {"target": {"cwd": "/pumpkin/home", "env": _env(env, "eval", max_bytes)}},
     }
 
-def final_call(target: Target, payload: Payload):
+def final_call(target: Target, selections):
     """Runs the judge in eval mode on the selection, and shows the result it wrote."""
-    target.put("/pumpkin/in/payload", payload)
+    target.put("/pumpkin/in/payload", selections["agent"])
     target.run(["/opt/judge/run", "--mode", "eval"])
     return {"result": target.get("/pumpkin/out/result.json")}
 
@@ -77,6 +77,7 @@ def neutral_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mo
     id = task.split("/")[-1]
     egress = {"egress": {"model": [{"api": "responses", "models": sorted(models)}]}} if models else {}
     workflow(
+        deadline_seconds = 5 * 3600,
         name = "neutral/" + id.replace("_", "-"),
         roles = [
             {
@@ -91,7 +92,6 @@ def neutral_task(*, task, agent, metrics, calls = None, judge = {}, env = {}, mo
                         len(metrics),
                         ", ".join(metrics),
                     ),
-                    "deadline_seconds": 5 * 3600,
                     "finalize_grace_seconds": int(env.get("GRACE", "60")),
                     "grants": [
                         {"name": "train", "job": {

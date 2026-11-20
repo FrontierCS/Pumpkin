@@ -127,7 +127,7 @@ pub(crate) fn end(
 ) -> Result<ExitCode, String> {
     let id = record.id();
     let (exit, how) = match ending {
-        Ending::Returned { values, after } => (ExitCode::SUCCESS, returned(values, after)),
+        Ending::Returned { values } => (ExitCode::SUCCESS, returned(values)),
         Ending::NoResult(why) => (ExitCode::from(3), why.clone()),
         Ending::Stopped(stopped) => (ExitCode::FAILURE, stopped.to_string()),
         // It has no `outcome.json` to print.
@@ -174,12 +174,12 @@ fn again(record: &Record, args: &[String]) {
     advise("run it again", &next::run_again(args));
 }
 
-pub(crate) fn returned(values: &[(Name, Value)], after: &str) -> String {
+pub(crate) fn returned(values: &[(Name, Value)]) -> String {
     if values.is_empty() {
-        format!("finished with a result, {after}")
+        "finished with a result".to_owned()
     } else {
         let shown = progress::shown_values(values);
-        format!("finished with a result ({shown}), {after}")
+        format!("finished with a result ({shown})")
     }
 }
 
