@@ -911,13 +911,14 @@ fn library_lints() {
     );
 }
 
-/// The `--arg`s that [`examples`] checks an example with, by the name of its directory below
-/// `examples/`; it checks one not named here with none.
+/// The `--arg`s that [`examples`] checks an example with, by its entry file below `examples/`.
+/// An entry file not listed here needs no argument.
 const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
-    ("codex", &["--arg", "model=model-a"]),
-    ("hypergraph", &["--arg", "model=model-a"]),
+    ("codex/task.star", &["--arg", "model=model-a"]),
+    ("hypergraph/task.star", &["--arg", "model=model-a"]),
+    ("team/codex.star", &["--arg", "model=model-a"]),
     // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
-    ("smoke", &["--arg", "gpu_model=gpu-a"]),
+    ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
 
 #[test]
@@ -927,12 +928,13 @@ fn examples() {
     let mut names: Vec<String> = (fs::read_dir(&examples).unwrap())
         .map(Result::unwrap)
         .filter(|entry| entry.file_type().unwrap().is_dir())
-        .map(|entry| entry.file_name().into_string().unwrap())
+        .map(|entry| format!("{}/task.star", entry.file_name().into_string().unwrap()))
         .collect();
+    names.push("team/codex.star".into());
     names.sort();
     let steps = names.iter().map(|name| {
         let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
-        let mut command = scratch.pumpkin(&["check", &format!("{name}/task.star")]);
+        let mut command = scratch.pumpkin(&["check", name]);
         command.args(args.map_or(&[][..], |(_, args)| args));
         command.current_dir(&examples);
         Step::from(command)
@@ -950,6 +952,10 @@ fn examples() {
             $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
+            exit status: Some(0)
+            $ pumpkin check team/codex.star --arg model=model-a
+            exit status: Some(0)
+            $ pumpkin check team/task.star
             exit status: Some(0)"#]],
     );
 }
