@@ -661,7 +661,9 @@ fn usage() {
                                 flag, and without `cpu_model`, no model, and a class that
                                 states a model is offered only to roles that need it; and
                                 `usd_per_hour`, what an instance costs an hour, if given,
-                                by which `ls` and a run's summary price its sandboxes.
+                                by which `ls` and a run's summary price its sandboxes; and
+                                `startup_seconds`, the most seconds an instance's start may
+                                take, its images' pulls among them: absent, 1740.
                   repositories  The envelope's ECR repositories: `roles`, of the roles'
                                 images, and `sandboxd`, of the images that hold sandboxd.
                   timer         The sandboxes' timer, which terminates each instance at its
