@@ -134,32 +134,32 @@ fn refusals() {
         ],
         &["prompt"],
         &expect![[r#"
-            @pumpkin//harness/zcode/zcode.star:59:9: fail: `medium` is not a reasoning level of ZCode's: use one of low, high, max
-                59 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/zcode/zcode.star:57:9: fail: `medium` is not a reasoning level of ZCode's: use one of low, high, max
+                57 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:59:9: fail: `High` is not a reasoning level of ZCode's: use one of low, high, max
-                59 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/zcode/zcode.star:57:9: fail: `High` is not a reasoning level of ZCode's: use one of low, high, max
+                57 |         fail("`{}` is not a reasoning level of ZCode's: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:69:13: `/pumpkin/home/.zcode-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                69 |     home = ("" if workspace == "/" else workspace) + "/.zcode-home"
+            @pumpkin//harness/zcode/zcode.star:67:13: `/pumpkin/home/.zcode-home` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                67 |     home = ("" if workspace == "/" else workspace) + "/.zcode-home"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
-            @pumpkin//harness/zcode/zcode.star:61:9: fail: ZCode runs only on a prompt: give a string that is not empty
-                61 |         fail("ZCode runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/zcode/zcode.star:59:9: fail: ZCode runs only on a prompt: give a string that is not empty
+                59 |         fail("ZCode runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:63:9: fail: `0` is not a number of tokens: give a positive int
-                63 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
+            @pumpkin//harness/zcode/zcode.star:61:9: fail: `0` is not a number of tokens: give a positive int
+                61 |         fail("`{}` is not a number of tokens: give a positive int".format(context_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:65:9: fail: `0` is not a number of tokens: give a positive int
-                65 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
+            @pumpkin//harness/zcode/zcode.star:63:9: fail: `0` is not a number of tokens: give a positive int
+                63 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9
-            @pumpkin//harness/zcode/zcode.star:61:9: fail: ZCode runs only on a prompt: give a string that is not empty
-                61 |         fail("ZCode runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/zcode/zcode.star:59:9: fail: ZCode runs only on a prompt: give a string that is not empty
+                59 |         fail("ZCode runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `zcode()`, called at task.star:16:9"#]],
     );
