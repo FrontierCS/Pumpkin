@@ -15,7 +15,7 @@ use std::{fs, io};
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
 use schema::ir::{self, AbsolutePath, Argv, Name};
-use schema::sandbox::op::{CommandEnd, OpReply};
+use schema::sandbox::op::{CommandEnd, LeaseStatusReply, SessionOp};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, Root, command_env, dir_mode, file_mode,
@@ -96,6 +96,9 @@ pub trait RunState {
 /// The target of a job's call, as its body drives it. A method's `Err` is why it failed, which
 /// ends the call.
 pub trait Target {
+    /// Waits for the granted operation to complete. Closing waits until the runner is deleted.
+    fn runner(&mut self, grant: &Name, op: SessionOp) -> Result<LeaseStatusReply, String>;
+
     /// The issuing agent's declared role name, or none in the final body.
     fn caller(&self) -> Option<&str>;
 
@@ -172,7 +175,7 @@ pub(crate) enum Ended {
 pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     call: &Call<'_>,
-    child: &mut Child<'_, H, OpReply>,
+    child: &mut Child<'_, H, crate::relay::Order>,
     session: &mut Session,
     stdin: &mut Stdin,
 ) -> Ended {
@@ -311,7 +314,7 @@ impl Stdin {
 /// The target of a body's call, on its child's session.
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
-    child: &'a mut Child<'r, H, OpReply>,
+    child: &'a mut Child<'r, H, crate::relay::Order>,
     session: &'a mut Session,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
@@ -429,7 +432,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
                 .relay
                 .wait(self.child, self.call.job, until, process, self.session)?
             {
-                Waited::Exited(status) => return Ok(status),
+                Waited::Finished(status) => return Ok(status),
                 Waited::Stopped => {}
                 Waited::TimedOut => {
                     return Err("the shared call's command did not confirm its exit".to_owned());
@@ -517,7 +520,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let job = self.call.job;
         let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
         match waited {
-            Ok(Waited::Exited(status)) => {
+            Ok(Waited::Finished(status)) => {
                 self.running = None;
                 let end = CommandEnd::Exited(status);
                 self.log(Targeted::Ended { command, end });
@@ -542,6 +545,22 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 }
 
 impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
+    fn runner(&mut self, grant: &Name, op: SessionOp) -> Result<LeaseStatusReply, String> {
+        self.going()?;
+        match self.relay.runner(
+            self.child,
+            self.call.job,
+            self.timeout,
+            self.session,
+            grant,
+            op,
+        )? {
+            Waited::Finished(status) => Ok(status),
+            Waited::Stopped => Err(self.cut_short(Cut::Stopped)),
+            Waited::TimedOut => Err(self.cut_short(Cut::TimedOut)),
+        }
+    }
+
     fn put(&mut self, path: &AbsolutePath, input_slot: usize) -> Result<(), String> {
         let by = self.going()?;
         let Some((dir, name)) = path.split_last() else {

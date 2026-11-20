@@ -388,6 +388,10 @@ the reap of what it left (`Record::reap`).
 provider's crate, not even in its tests, which run on a simulated provider, so a new provider
 changes no runtime code.
 
+A job body can use a target's session grant through a scoped runner callback. The core authorizes
+and meters its operations as the job's. The runtime sends the body the receipt of its admitted
+command or transfer through the job's inbox. Closing waits for the runner's recorded deletion.
+
 **Architecture Invariant:** every sandbox starts on the one start path (`Sandboxes::start`), and a
 run's end deletes whatever each of its providers still lists of it, so a run ends with none of its
 sandboxes left, or fails.

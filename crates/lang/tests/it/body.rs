@@ -22,6 +22,59 @@ const RESULT: (&str, &str) = (
 struct Logged(Vec<String>);
 
 impl lang::Target for Logged {
+    fn runner(
+        &mut self,
+        grant: &Name,
+        op: schema::sandbox::op::SessionOp,
+    ) -> Result<schema::sandbox::op::LeaseStatusReply, String> {
+        use schema::sandbox::ExitStatus;
+        use schema::sandbox::op::{
+            CommandEnd, CommandStatus, Last, LeaseRemaining, LeaseState, LeaseStatusReply,
+            SessionOp, TransferEnd, TransferStatus,
+        };
+        let lease = self.0.len() as u64;
+        self.0.push(format!("{grant} {op:?}"));
+        let (state, last) = match op {
+            SessionOp::Open { .. } => (LeaseState::Ready, None),
+            SessionOp::Close { .. } => (LeaseState::Closed, None),
+            SessionOp::Put { .. } => (
+                LeaseState::Ready,
+                Some(Last::Transfer(TransferStatus {
+                    transfer: 0,
+                    end: Some(TransferEnd::Moved {
+                        entries: 1,
+                        bytes: 2,
+                    }),
+                })),
+            ),
+            SessionOp::Run { .. } => (
+                LeaseState::Ready,
+                Some(Last::Command(CommandStatus {
+                    command: 1,
+                    end: Some(CommandEnd::Exited(ExitStatus::Code(7))),
+                    stdout: "answer".into(),
+                    stderr: "diagnostic".into(),
+                })),
+            ),
+            _ => return Err("the test host refused the operation".to_owned()),
+        };
+        Ok(LeaseStatusReply {
+            lease,
+            state,
+            elapsed_seconds: 0,
+            busy_seconds: 0,
+            idle_seconds: 0,
+            failure: None,
+            last,
+            remaining: LeaseRemaining {
+                instances: 0,
+                instance_seconds: 10,
+                cumulative_seconds: None,
+                commands: None,
+            },
+        })
+    }
+
     fn caller(&self) -> Option<&str> {
         Some("agent")
     }
@@ -172,6 +225,58 @@ fn check_within(
         }
     });
     expect.assert_eq(&shown);
+}
+
+#[test]
+fn runner_returns_its_callback_value() {
+    check(
+        "judge",
+        BodyKind::Job,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner: Runner, source):
+    runner.put(source, "/work/src")
+    return runner.run(["compile"], timeout_seconds = 2)
+def judge(target: Target, payload: Payload):
+    return target.with_runner("cpp", check, "/source")
+"#,
+        &expect![[r#"
+            cpp Open { instance_seconds: None }
+            cpp Put { lease: 0, tree: AbsolutePath("/source"), to: AbsolutePath("/work/src"), replace: false }
+            cpp Run { lease: 0, argv: Argv { program: "compile", args: [] }, timeout_seconds: Some(2) }
+            cpp Close { lease: 0 }
+            returns end={"exited":{"code":7}} stderr_tail="diagnostic" stdout_tail="answer""#]],
+    );
+}
+
+#[test]
+fn runner_lifetime() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def identity(runner: Runner):
+    return runner
+def run_with(runner: Runner, earlier: Runner):
+    return earlier.run(["outside"])
+def judge(target: Target, submissions):
+    earlier = target.with_runner("cpp", identity)
+    return target.with_runner("cpp", run_with, earlier)
+"#,
+        &expect![[r#"
+    cpp Open { instance_seconds: None }
+    cpp Close { lease: 0 }
+    cpp Open { instance_seconds: None }
+    cpp Close { lease: 2 }
+    score.star:4:12: the runner's callback has ended: use a runner within its callback
+        4 |     return earlier.run(["outside"])
+          |            ^^^^^^^^^^^^^^^^^^^^^^^^
+        in `run_with()`, called at score.star:7:12
+        in `judge()`, called at score.star:5:5"#]],
+    );
 }
 
 #[test]
@@ -576,7 +681,7 @@ def train_call(target, payload):
     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
-            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
+            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`, `with_runner`
                 2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5

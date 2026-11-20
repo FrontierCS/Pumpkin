@@ -5,17 +5,23 @@ use std::time::Duration;
 
 use decision::JobId;
 use gateway::{Arrival, IncomingOp, Process, Session};
+use schema::ir::Name;
 use schema::sandbox::ExitStatus;
-use schema::sandbox::op::OpReply;
+use schema::sandbox::op::{LeaseStatusReply, OpReply, SessionOp};
 use stdx::Deadline;
 
 use crate::child::{Child, Message, Report};
 use crate::host::deadline;
 use crate::{Clock, Host, Inbox, request};
 
-/// How waiting on a child's command ended.
-pub(super) enum Waited {
-    Exited(ExitStatus),
+/// Separate destinations for the sandbox's outstanding op and the body's session operation.
+pub(super) enum Order {
+    Sandbox(OpReply),
+    Body(Result<LeaseStatusReply, String>),
+}
+
+pub(super) enum Waited<T = ExitStatus> {
+    Finished(T),
     /// Its timeout passed first.
     TimedOut,
     /// The core stopped the child first.
@@ -34,6 +40,7 @@ pub(super) struct Relay {
 
 /// What came of a message into a job's inbox, if it ends a wait.
 enum Arrived {
+    Body(Result<LeaseStatusReply, String>),
     Exited(Process, ExitStatus),
     Stopped,
 }
@@ -44,12 +51,52 @@ impl Relay {
     /// ended first.
     pub(super) fn wait<H: Host>(
         &mut self,
-        child: &mut Child<'_, H, OpReply>,
+        child: &mut Child<'_, H, Order>,
         job: JobId,
         timeout: Duration,
         process: Process,
         session: &mut Session,
     ) -> Result<Waited, String> {
+        self.until(child, job, timeout, session, |arrival| match arrival {
+            Arrived::Exited(exited, status) if exited == process => Some(Ok(status)),
+            _ => None,
+        })
+    }
+
+    pub(super) fn runner<H: Host>(
+        &mut self,
+        child: &mut Child<'_, H, Order>,
+        job: JobId,
+        timeout: Duration,
+        session: &mut Session,
+        grant: &Name,
+        op: SessionOp,
+    ) -> Result<Waited<LeaseStatusReply>, String> {
+        let body = Some(crate::scoped::Waiting::for_op(&op));
+        child.report(Report::Op {
+            at: child.clock.now(),
+            job,
+            request: decision::Request::Session {
+                grant: grant.clone(),
+                op,
+            },
+            body,
+            trees: session.trees(),
+        });
+        self.until(child, job, timeout, session, |arrival| match arrival {
+            Arrived::Body(result) => Some(result),
+            _ => None,
+        })
+    }
+
+    fn until<H: Host, T>(
+        &mut self,
+        child: &mut Child<'_, H, Order>,
+        job: JobId,
+        timeout: Duration,
+        session: &mut Session,
+        finished: impl Fn(Arrived) -> Option<Result<T, String>>,
+    ) -> Result<Waited<T>, String> {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
         }
@@ -59,11 +106,13 @@ impl Relay {
                 return Ok(Waited::TimedOut);
             };
             match self.relay(child, job, (session, by), message)? {
-                Some(Arrived::Exited(exited, status)) if exited == process => {
-                    return Ok(Waited::Exited(status));
-                }
-                None | Some(Arrived::Exited(_, _)) => {}
                 Some(Arrived::Stopped) => return Ok(Waited::Stopped),
+                Some(arrival) => {
+                    if let Some(result) = finished(arrival) {
+                        return result.map(Waited::Finished);
+                    }
+                }
+                None => {}
             }
         }
     }
@@ -73,7 +122,7 @@ impl Relay {
     /// ended, if it has.
     pub(super) fn idle<H: Host>(
         &mut self,
-        child: &mut Child<'_, H, OpReply>,
+        child: &mut Child<'_, H, Order>,
         job: JobId,
         (session, by): (&mut Session, Deadline),
     ) -> Result<bool, String> {
@@ -82,7 +131,7 @@ impl Relay {
         }
         while let Some(message) = child.inbox.take() {
             match self.relay(child, job, (&mut *session, by), message)? {
-                None => {}
+                None | Some(Arrived::Body(_)) => {}
                 Some(Arrived::Stopped) => return Ok(true),
                 Some(Arrived::Exited(_, _)) => unreachable!(
                     "job {} received a client exit while idle, though it waits for each client's \
@@ -96,14 +145,15 @@ impl Relay {
 
     fn relay<H: Host>(
         &mut self,
-        child: &mut Child<'_, H, OpReply>,
+        child: &mut Child<'_, H, Order>,
         job: JobId,
         (session, by): (&mut Session, Deadline),
-        message: Message<OpReply>,
+        message: Message<Order>,
     ) -> Result<Option<Arrived>, String> {
         match message {
             Message::Stop => return Ok(Some(Arrived::Stopped)),
-            Message::Order(reply) => {
+            Message::Order(Order::Body(result)) => return Ok(Some(Arrived::Body(result))),
+            Message::Order(Order::Sandbox(reply)) => {
                 let Some(op) = self.asked.take() else {
                     unreachable!(
                         "job {}'s call was sent a reply to no op, though the loop replies only \
@@ -124,6 +174,7 @@ impl Relay {
                     at,
                     job,
                     request,
+                    body: None,
                     trees,
                 });
             }

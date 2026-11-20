@@ -100,7 +100,7 @@ module do.
 
 A `def` may annotate each parameter after `:` and its return after `->`. A type is `None`,
 `bool`, `int`, `float`, `str`, `list[T]`, `dict[K, V]`, whose `K` is `int`, `float` or `str`, or
-one of the handles `Target`, `Run` and `Payload`. A `list` or a `dict` names its elements' types,
+one of the handles `Target`, `Runner`, `Run` and `Payload`. A `list` or a `dict` names its elements' types,
 and a type is one type, with no `|`.
 
 An annotation is checked as the function is called, against each argument, and as it returns,
@@ -139,7 +139,8 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 
 | Handle | Methods |
 | --- | --- |
-| `Target`, a job's or the final call's target | `caller()`, `put(path, payload)`, `run(argv)`, `capture(argv, stdin = payload)`, `get(path)` |
+| `Target`, a job's or the final call's target | `caller()`, `put(path, payload)`, `run(argv)`, `capture(argv, stdin = payload)`, `get(path)`, `with_runner(session, callback, ...)` |
+| `Runner`, the lease passed to a callback | `put(tree, to)`, `run(argv, timeout_seconds = seconds)` |
 | `Run`, the calling agent’s state | `set_submission(payload)`, `end_work()` |
 | `Payload`, an opaque file supplied to the call | passed to `put`, to `capture` as stdin, or to `set_submission` |
 

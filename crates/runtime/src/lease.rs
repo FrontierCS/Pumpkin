@@ -57,6 +57,7 @@ pub(super) struct Run {
     pub(super) argv: Argv,
     /// The longest it may run, if it has a bound of its own.
     pub(super) timeout: Option<Duration>,
+    pub(super) required_output: bool,
 }
 
 struct Running {
@@ -65,6 +66,7 @@ struct Running {
     /// When it is to be killed, since the run started, until it has been.
     kill_at: Option<Duration>,
     timed_out: bool,
+    required_output: bool,
 }
 
 /// A lease, as its thread drives it.
@@ -101,13 +103,14 @@ fn drive<H: Host>(
         ));
     }
     child.event(Event::LeaseReady { lease });
-    let running = match serve(leased, child, session) {
-        Ok(running) => running,
-        Err(reason) => return failed(reason),
-    };
+    let mut running = None;
+    let served = serve(leased, child, session, &mut running);
     let by = deadline(&child.clock, child.deadlines.collect);
     if let Err(error) = session.freeze(by) {
-        return failed(format!("freezing the runner's sandbox failed: {error}"));
+        let reason = served
+            .err()
+            .unwrap_or_else(|| format!("freezing the runner's sandbox failed: {error}"));
+        return failed(reason);
     }
     if let Some(running) = running {
         let dir = command_dir(running.command);
@@ -118,7 +121,7 @@ fn drive<H: Host>(
     if let Err(error) = collect(session, &out_dir(), &child.dir, by) {
         child.note(format!("lease {}'s out is incomplete: {error}", lease.0));
     }
-    Event::LeaseEnded { lease }
+    served.map_or_else(failed, |()| Event::LeaseEnded { lease })
 }
 
 /// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
@@ -128,13 +131,13 @@ fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,
     session: &mut Session,
-) -> Result<Option<Running>, String> {
+    running: &mut Option<Running>,
+) -> Result<(), String> {
     let Leased {
         lease,
         runner,
         start: by_start,
     } = *leased;
-    let mut running: Option<Running> = None;
     // What a transfer took from the inbox as it cut it short, to act on next.
     let mut held = None;
     loop {
@@ -144,11 +147,11 @@ fn serve<H: Host>(
             .or_else(|| child.inbox.wait(kill_at.unwrap_or(Duration::MAX)));
         match message {
             None => {
-                if let Some(running) = &mut running {
-                    kill(child, by_start, running, session);
+                if let Some(running) = running {
+                    kill(child, by_start, running, session)?;
                 }
             }
-            Some(Message::Stop) => return Ok(running),
+            Some(Message::Stop) => return Ok(()),
             Some(Message::Order(Order::Transfer(order))) => {
                 let end = transfer(child, &session.trees(), &order, &mut held);
                 let transfer = order.number;
@@ -162,11 +165,12 @@ fn serve<H: Host>(
                 match start(runner, child, (&run, by_start), session) {
                     Ok(process) => {
                         let kill_at = run.timeout.map(|timeout| child.clock.now() + timeout);
-                        running = Some(Running {
+                        *running = Some(Running {
                             command: run.command,
                             process,
                             kill_at,
                             timed_out: false,
+                            required_output: run.required_output,
                         });
                     }
                     Err(error) => {
@@ -184,7 +188,7 @@ fn serve<H: Host>(
                 } else {
                     CommandEnd::Exited(status)
                 };
-                let (stdout, stderr) = outputs(child, ran.command, session);
+                let (stdout, stderr) = outputs(child, ran.command, session, ran.required_output)?;
                 child.event(command_ended(lease, ran.command, (end, stdout, stderr)));
             }
             Some(Message::Session(Arrival::Ended { reason })) => {
@@ -211,16 +215,20 @@ fn kill<H: Host>(
     by_start: Duration,
     running: &mut Running,
     session: &mut Session,
-) {
+) -> Result<(), String> {
     let by = deadline(&child.clock, by_start);
     running.kill_at = None;
     match session.kill(running.process, by) {
         Ok(()) => running.timed_out = true,
-        Err(error) => child.note(format!(
-            "command {} wasn't killed: {error}",
-            running.command
-        )),
+        Err(error) => {
+            let reason = format!("command {} wasn't killed: {error}", running.command);
+            if running.required_output {
+                return Err(reason);
+            }
+            child.note(reason);
+        }
     }
+    Ok(())
 }
 
 /// Starts `run` in the runner's `cwd` with its `env`, its output in [`command_dir`].
@@ -252,23 +260,36 @@ fn outputs<H: Host>(
     child: &Child<'_, H, Order>,
     command: u64,
     session: &mut Session,
-) -> (String, String) {
+    required: bool,
+) -> Result<(String, String), String> {
     let (dir, by) = (
         command_dir(command),
         deadline(&child.clock, child.deadlines.collect),
     );
     if let Err(error) = collect(session, &dir, &child.dir, by) {
-        child.note(format!("command {command}'s output is incomplete: {error}"));
+        let reason = format!("command {command}'s output is incomplete: {error}");
+        if required {
+            return Err(reason);
+        }
+        child.note(reason);
     }
     let collected = child.dir.join(dir.as_str());
     let tail = |name: &str| {
         let path = collected.join(name);
-        tail(&path).unwrap_or_else(|error| {
-            child.note(format!("{} can't be read: {error}", path.display()));
-            String::new()
-        })
+        match tail(&path) {
+            Ok(text) => Ok(text),
+            Err(error) if !required && error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => {
+                let reason = format!("{} can't be read: {error}", path.display());
+                if required {
+                    return Err(reason);
+                }
+                child.note(reason);
+                Ok(String::new())
+            }
+        }
     };
-    (tail("command.stdout"), tail("command.stderr"))
+    Ok((tail("command.stdout")?, tail("command.stderr")?))
 }
 
 /// Copies the tree that `order` names between its holder's sandbox and the runner's, whose trees
@@ -400,14 +421,9 @@ pub(crate) fn command_dir(command: u64) -> RelativePath {
     log_dir().join(&RelativePath::from(command))
 }
 
-/// The end of the output in the file at `path`, as [`op::output_tail`] gives it; empty if there
-/// is no file.
+/// The end of the output in the file at `path`, as [`op::output_tail`] gives it.
 fn tail(path: &Path) -> io::Result<String> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(error) => return Err(error),
-    };
+    let mut file = File::open(path)?;
     let size = file.metadata()?.len();
     let most = OUTPUT_TAIL_BYTES as u64;
     file.seek(SeekFrom::Start(size.saturating_sub(most)))?;

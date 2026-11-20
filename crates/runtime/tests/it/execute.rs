@@ -4717,6 +4717,110 @@ fn op_arriving_before_launch_confirmation_can_set_submission() {
     );
 }
 
+fn scoped_runner(argv: &[&str]) -> Value {
+    let mut ir = held_lease_workflow(&["ops", "call submit 6 finalize=true"], &["exit", "0"]);
+    let grants = ir["roles"][1]["runtime"]["target"]
+        .as_object_mut()
+        .unwrap()
+        .remove("sessions")
+        .unwrap();
+    ir["roles"][2]["runtime"]["target"]["sessions"] = grants;
+    ir["roles"][2]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(2);
+    ir["final"]["body"]["def"] = json!("scoped");
+    ir["final"]["keywords"] = json!({ "argv": argv });
+    ir
+}
+
+#[test]
+fn body_waits_for_its_numbered_work_and_deletion() {
+    let dir = TestDir::new();
+    let (record, _, result) = judged(scoped_runner(&["worker", "7"]), &dir);
+    let command = &result.values()[0].1;
+    assert_eq!(command["end"], json!({"exited":{"code":7}}));
+    assert_eq!(command["stdout"], "absent");
+    assert_eq!(command["stderr"], "worker diagnostic");
+    assert_eq!(
+        fs::read(record.join("leases/0/log/1/command.stderr")).unwrap(),
+        b"worker diagnostic"
+    );
+    let log = read_log(&record);
+    assert!(
+        log.iter()
+            .all(|line| line["event"]["request"]["kind"] != "lease_status")
+    );
+    let event_at = |kind| {
+        log.iter()
+            .position(|line| line["event"]["kind"] == kind)
+            .unwrap()
+    };
+    assert!(event_at("lease_ended") < event_at("call_returned"));
+    let deleted = log
+        .iter()
+        .position(|line| {
+            line["event"]["kind"] == "sandbox_deleted" && line["event"]["sandbox"] == "lease-0"
+        })
+        .unwrap();
+    assert!(deleted < event_at("lease_ended"));
+}
+
+#[test]
+fn runner_command_timeout_returns_its_collected_output() {
+    let dir = TestDir::new();
+    let (_, _, result) = judged(scoped_runner(&["worker", "wait"]), &dir);
+    let command = &result.values()[0].1;
+    assert_eq!(command["end"], "timed_out");
+    assert_eq!(command["stdout"], "absent");
+    assert_eq!(command["stderr"], "worker diagnostic");
+}
+
+#[test]
+fn interrupting_a_body_wait_deletes_its_runner() {
+    let dir = TestDir::new();
+    let (record, outcome) = execute_agents(
+        &System,
+        2,
+        scoped_runner(&["worker", "wait"]),
+        &dir,
+        Some(At::Logged(r#""kind":"run_command""#)),
+    );
+    assert!(matches!(outcome, Err(runtime::Stopped::Interrupted(_))));
+    let deleted: Value =
+        serde_json::from_slice(&fs::read(record.join("leases/0/sandbox.json")).unwrap()).unwrap();
+    assert_eq!(deleted["delete"]["state"], "deleted");
+    assert!(record.join("leases/0/log/1/command.stderr").is_file());
+}
+
+#[test]
+fn failure_to_delete_a_scoped_runner_fails_the_run() {
+    let mut ir = scoped_runner(&["worker", "0"]);
+    ir["roles"][3]["image"] = json!(sim::image(REFUSED_ONCE).as_str());
+    let dir = TestDir::new();
+    let (_, outcome) = execute_agents(&System, 2, ir, &dir, None);
+    let Err(runtime::Stopped::Failed(reason)) = outcome else {
+        panic!("expected deletion failure: {outcome:?}")
+    };
+    assert!(reason.contains("can't be deleted"));
+}
+
+#[test]
+fn missing_runner_evidence_fails_the_call() {
+    let dir = TestDir::new();
+    let (record, outcome) =
+        execute_agents(&System, 2, scoped_runner(&["print", "answer"]), &dir, None);
+    assert!(outcome.unwrap().result.is_err());
+    let log = read_log(&record);
+    let failure = log
+        .iter()
+        .find(|line| line["event"]["kind"] == "call_failed")
+        .unwrap();
+    assert!(
+        failure["event"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("command.stderr")
+    );
+}
+
 #[test]
 fn releases_agents_and_a_shared_target_ready_before_the_driver_takes_their_notices() {
     let mut ir = shared_workflow(&["ops", "call submit 6 finalize=true"], &["slow"], "board");

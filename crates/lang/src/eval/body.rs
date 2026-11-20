@@ -74,6 +74,14 @@ impl Host<'_> {
 /// What a job's body drives through its `Target`: the call's target. A method's `Err` is why it
 /// failed, which ends the call with that message.
 pub trait Target {
+    /// Runs an operation on the named grant and waits for its receipt. Each open returns
+    /// a fresh lease number for the lifetime of this evaluation.
+    fn runner(
+        &mut self,
+        grant: &ir::Name,
+        op: schema::sandbox::op::SessionOp,
+    ) -> Result<schema::sandbox::op::LeaseStatusReply, String>;
+
     /// The issuing agent role for a job, or none for the final call.
     fn caller(&self) -> Option<&str>;
 
@@ -166,7 +174,7 @@ impl BodyKind {
 
     // The handle that a body of this kind takes first, how an annotation writes its type, and the
     // name that a message gives its parameter.
-    fn handle(self) -> (Hosted<usize>, &'static str, &'static str) {
+    fn handle(self) -> (Hosted<usize, u64>, &'static str, &'static str) {
         match self {
             Self::Job | Self::Final => (Hosted::Target, "Target", "target"),
             Self::Now => (Hosted::Run, "Run", "run"),
@@ -518,11 +526,13 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Method {
+    WithRunner,
+    Runner(super::runner::RunnerMethod),
     Target(fn(&mut dyn Target, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
     Run(fn(&mut dyn Run, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
 }
 
-impl Hosted<usize> {
+impl Hosted<usize, u64> {
     pub(crate) fn methods(self) -> Result<&'static [(&'static str, Method)], &'static str> {
         match self {
             Self::Target => Ok(&[
@@ -531,6 +541,11 @@ impl Hosted<usize> {
                 ("get", Method::Target(get)),
                 ("put", Method::Target(put)),
                 ("run", Method::Target(run)),
+                ("with_runner", Method::WithRunner),
+            ]),
+            Self::Runner(_) => Ok(&[
+                ("put", Method::Runner(super::runner::RunnerMethod::Put)),
+                ("run", Method::Runner(super::runner::RunnerMethod::Run)),
             ]),
             Self::Run => Ok(&[
                 ("end_work", Method::Run(end_work)),
@@ -544,15 +559,26 @@ impl Hosted<usize> {
 }
 
 impl Method {
-    pub(crate) fn call(
+    pub(crate) fn call<L: Loader>(
         self,
-        purpose: &mut Purpose<'_>,
+        evaluation: &mut Evaluation<'_, '_, L>,
+        handle: Hosted<usize, u64>,
         name: &Name,
         call: &Call<'_>,
+        depth: usize,
     ) -> Result<Value, Fault> {
         let kind = match self {
+            Self::WithRunner => return evaluation.with_runner(call, depth),
+            Self::Runner(method) => {
+                let Hosted::Runner(lease) = handle else {
+                    unreachable!("only a Runner lists the runner's run and put methods")
+                };
+                return evaluation.runner_method(lease, method, name, call);
+            }
             Self::Target(method) => {
-                let Purpose::Call(Host::Job(target) | Host::Final(target, _)) = purpose else {
+                let Purpose::Call(Host::Job(target) | Host::Final(target, _)) =
+                    &mut evaluation.purpose
+                else {
                     unreachable!(
                         "a `Target`'s method is called outside a call of a job's or the final \
                          call's body, though only such a call makes a `Target`, and the value it \
@@ -562,7 +588,7 @@ impl Method {
                 method(&mut **target, name, call)
             }
             Self::Run(method) => {
-                let Purpose::Call(Host::Now(run)) = purpose else {
+                let Purpose::Call(Host::Now(run)) = &mut evaluation.purpose else {
                     unreachable!(
                         "a `Run`'s method is called outside a call of a now function's body, \
                          though only that call makes a `Run`, and the value it is in lives no \
@@ -633,7 +659,7 @@ fn capture(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<valu
     Ok(value::Kind::Str(Text::new(&text, call.at, call.budget)?))
 }
 
-fn command_argv(name: &Name, at: Span, argv: &Value) -> Result<Argv, Fault> {
+pub(super) fn command_argv(name: &Name, at: Span, argv: &Value) -> Result<Argv, Fault> {
     let refused = |what: &Value| {
         let message = format!(
             "`{}` can't run {}: give it a list of strings",
@@ -696,7 +722,7 @@ fn end_work(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Ki
 }
 
 // The absolute path that `argument`, `what`, gives.
-fn absolute(what: &str, argument: &(Span, Value)) -> Result<AbsolutePath, Fault> {
+pub(super) fn absolute(what: &str, argument: &(Span, Value)) -> Result<AbsolutePath, Fault> {
     let path = string(what, argument.0, &argument.1)?;
     AbsolutePath::try_from(String::from(path))
         .map_err(|problem| origin(Fault::new(argument.0, problem), "the argument", &argument.1))

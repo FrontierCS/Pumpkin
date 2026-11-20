@@ -189,6 +189,14 @@ impl lang::Run for Proposing<'_> {
 struct Driven<'t>(&'t mut dyn runtime::Target);
 
 impl lang::Target for Driven<'_> {
+    fn runner(
+        &mut self,
+        grant: &Name,
+        op: schema::sandbox::op::SessionOp,
+    ) -> Result<schema::sandbox::op::LeaseStatusReply, String> {
+        self.0.runner(grant, op)
+    }
+
     fn caller(&self) -> Option<&str> {
         self.0.caller()
     }

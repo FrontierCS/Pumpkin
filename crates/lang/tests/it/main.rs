@@ -3355,7 +3355,7 @@ load("//lib.star", "X")
 def f(x: Strng):
     pass"#,
         &expect![[r#"
-            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, `dict[…, …]`, `Target`, `Run` or `Payload`
+            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, `dict[…, …]`, `Target`, `Runner`, `Run` or `Payload`
                 1 | def f(x: Strng):
                   |          ^^^^^"#]],
     );

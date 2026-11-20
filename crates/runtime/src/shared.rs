@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use decision::{CallResult, Event, JobId};
 use gateway::{Arrival, Process};
-use schema::sandbox::op::OpReply;
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::TargetId;
 use stdx::Context;
@@ -19,13 +18,13 @@ use crate::child::{Child, End, Message, Report};
 use crate::sandbox::{Sandboxes, Started, Which, collect, launch};
 use crate::{Clock, Entry, Host, Inbox, Input, Runtime, deadline};
 
-type Call<'r, H> = (job::Call<'r>, Child<'r, H, OpReply>);
+type Call<'r, H> = (job::Call<'r>, Child<'r, H, crate::relay::Order>);
 
 pub(super) struct Service<'r, H: Host> {
     orders: Option<Sender<Call<'r, H>>>,
     pub(super) process: Option<Process>,
     failed: Option<String>,
-    active: Option<(JobId, Sender<Message<OpReply>>)>,
+    active: Option<(JobId, Sender<Message<crate::relay::Order>>)>,
 }
 
 impl<'r, H: Host> Service<'r, H> {
@@ -43,7 +42,7 @@ impl<'r, H: Host> Service<'r, H> {
     pub(super) fn call(
         &mut self,
         call: job::Call<'r>,
-        child: Child<'r, H, OpReply>,
+        child: Child<'r, H, crate::relay::Order>,
     ) -> Result<(), String> {
         let active = (call.job, child.inbox.sender());
         let sender = self.orders.as_ref().ok_or("the shared worker is closed")?;

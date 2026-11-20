@@ -140,6 +140,7 @@ impl runtime::Bodies for Bodies<'_> {
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
             }
+            "scoped" => scoped(target, keywords, submissions[0].1),
             "submissions" => {
                 assert_eq!(target.caller(), None);
                 let mut files = Map::new();
@@ -250,4 +251,50 @@ fn capture(
     let stdin = keywords["stdin"].as_bool().unwrap().then_some(0);
     let reply = target.capture(&argv, stdin)?;
     Ok(vec![(Name::from_static("reply"), json!(reply))])
+}
+
+fn scoped(
+    target: &mut dyn runtime::Target,
+    keywords: &Map<String, Value>,
+    submission: Option<usize>,
+) -> Result<Vec<(Name, Value)>, String> {
+    use schema::sandbox::op::{Last, SessionOp};
+    let grant = Name::from_static("box");
+    let tree = AbsolutePath::from_static("/work/src");
+    target.put(
+        &AbsolutePath::from_static("/work/src/source"),
+        submission.unwrap(),
+    )?;
+    let opened = target.runner(
+        &grant,
+        SessionOp::Open {
+            instance_seconds: None,
+        },
+    )?;
+    let lease = opened.lease;
+    let copied = target.runner(
+        &grant,
+        SessionOp::Put {
+            lease,
+            tree,
+            to: AbsolutePath::from_static("/work/src"),
+            replace: false,
+        },
+    )?;
+    assert_eq!(copied.remaining.commands, Some(1));
+    let run = SessionOp::Run {
+        lease,
+        argv: serde_json::from_value(keywords["argv"].clone()).unwrap(),
+        timeout_seconds: std::num::NonZeroU64::new(1),
+    };
+    let ran = target.runner(&grant, run.clone())?;
+    let Some(Last::Command(command)) = ran.last else {
+        panic!("no command receipt")
+    };
+    assert_eq!(command.command, 1);
+    assert_eq!(ran.remaining.commands, Some(0));
+    let refused = target.runner(&grant, run).unwrap_err();
+    assert!(refused.contains("no commands left"));
+    target.runner(&grant, SessionOp::Close { lease })?;
+    Ok(vec![(Name::from_static("command"), json!(command))])
 }

@@ -195,7 +195,7 @@ the text the record keeps. Its parameters, in order:
 4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
    give, each a JSON value that must fit its annotation. One that they don't give needs a default.
 
-The two handles' methods:
+Methods available to a body and its runner callbacks follow.
 
 | Method | What it does |
 | --- | --- |
@@ -203,9 +203,19 @@ The two handles' methods:
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
+| `target.with_runner(session, callback, ...)` | opens a fresh runner under the target's named session grant, calls `callback(runner, ...)` with the remaining positional arguments, then closes the runner and waits for deletion before returning the callback's value |
+| `runner.put(tree, to)` | copies the directory `tree` on the target into the runner at `to`, which must be new. Both paths are absolute. The copy counts as one grant operation |
+| `runner.run(argv, timeout_seconds = seconds)` | runs a command in that runner and waits for its recorded output. Its optional timeout is a positive number of seconds. The result holds `end`, `stdout_tail` and `stderr_tail` |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
 | `run.set_submission(payload)` | sets or replaces the caller’s submission |
 | `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
+
+A runner handle works only during its callback. A callback error also closes the runner.
+A runner command reports its own timeout as `"timed_out"` and an exit as
+`{"exited": {"code": n}}` or `{"exited": {"signal": n}}`. Its output fields hold at most
+21 KiB each, with invalid UTF-8 replaced. The record keeps the raw streams.
+A refused operation, failed copy, unstarted command, incomplete output collection or expired
+lease fails the body. A runner that cannot be deleted fails the run.
 
 A now function's body proposes these operations. When the body returns, the run applies them
 in order if they all pass validation. A refused operation leaves the state unchanged.
