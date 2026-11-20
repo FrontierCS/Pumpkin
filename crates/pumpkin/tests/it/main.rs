@@ -889,7 +889,7 @@ fn whole_log() -> Vec<Value> {
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
     let final_call = json!([{
-        "kind": "start_final_call", "job": 4, "submissions": [{"role":"solver","selection":payload()}], "timeout_ns": "900000000000",
+        "kind": "start_final_call", "job": 4, "selections": [{"role":"solver","selection":payload()}], "timeout_ns": "900000000000",
     }]);
     let values = json!([
         { "name": "score", "value": 49.36 },
