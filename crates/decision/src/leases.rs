@@ -274,12 +274,17 @@ impl Leases {
     }
 
     pub(super) fn all_ended(&self) -> bool {
-        (self.0.iter()).all(|lease| matches!(lease.state, State::Ended { .. }))
+        self.active().next().is_none()
+    }
+
+    pub(super) fn active(&self) -> impl Iterator<Item = &Lease> {
+        self.0
+            .iter()
+            .filter(|lease| !matches!(lease.state, State::Ended { .. }))
     }
 
     pub(super) fn holds(&self, holder: Caller) -> bool {
-        (self.0.iter())
-            .any(|lease| lease.holder == holder && !matches!(lease.state, State::Ended { .. }))
+        self.active().any(|lease| lease.holder == holder)
     }
 
     pub(super) fn usage(&self, grant: SessionId, holder: Caller, now: Duration) -> Usage {

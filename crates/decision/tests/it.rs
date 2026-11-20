@@ -2942,6 +2942,63 @@ fn final_call_leases() {
 }
 
 #[test]
+fn work_target_drains_the_previous_jobs_lease_before_reusing_its_slot() {
+    check(
+        |ir| {
+            two_agents(ir);
+            ir["roles"][0]["runtime"]["agent"]["grants"][0]["job"]["call_timeout_seconds"] =
+                json!(1);
+            ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
+        },
+        r#"
+        0 work_started
+        100 @zoe call train 1
+        110 call_started 0
+        120 @0 box.open
+        130 lease_ready 0
+        1110 call_timed_out 0
+        1120 call_failed 0 the call's timeout passed
+        1130 @bob call train 1
+        1140 lease_ended 0
+        1150 @bob call train 1
+        1160 call_started 1
+        1170 @1 box.status 0
+        1180 @1 box.open
+        "#,
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 30000)
+            0 work_started
+              (tick due at 20000)
+            100 @zoe call train 1
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 1 bytes, with a timeout of 1s
+            110 call_started 0
+            120 @0 box.open
+              reply to op 2: {"kind":"lease","lease":0,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 0 of box for job 0, as instance 0, started by 1110
+            130 lease_ready 0
+            1110 call_timed_out 0
+              close lease 0
+            1120 call_failed 0 the call's timeout passed
+            1130 @bob call train 1
+              refuse op 3 (busy): `train`'s shared sandbox is busy: retry after its current call ends; this call is not charged
+            1140 lease_ended 0
+            1150 @bob call train 1
+              reply to op 4: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+              start call 1 of train on op 4's payload of 1 bytes, with a timeout of 18.85s
+            1160 call_started 1
+            1170 @1 box.status 0
+              refuse op 5: you have no lease 0: name one that `box.open` returned
+            1180 @1 box.open
+              reply to op 6: {"kind":"lease","lease":1,"remaining":{"instances":0,"instance_seconds":100,"cumulative_seconds":null,"commands":2}}
+              open lease 1 of box for job 1, as instance 0, started by 20000
+        "#]],
+    );
+}
+
+#[test]
 fn abandoned_final_call_leases() {
     check(
         |ir| {

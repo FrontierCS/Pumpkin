@@ -224,19 +224,11 @@ impl<'ir> Parser<'ir> {
             sessions,
         } = target;
         let lifetime = lifetime.unwrap_or(ir::TargetLifetime::Call);
-        if lifetime == ir::TargetLifetime::Work {
-            if !sessions.is_empty() {
-                self.errors.report(
-                    at.token("sessions"),
-                    "sandbox-issued sessions require a call-lifetime target",
-                );
-            }
-            if !egress.is_empty() {
-                self.errors.report(
-                    at.token("egress"),
-                    "model egress requires a call-lifetime target",
-                );
-            }
+        if lifetime == ir::TargetLifetime::Work && !egress.is_empty() {
+            self.errors.report(
+                at.token("egress"),
+                "model egress requires a call-lifetime target",
+            );
         }
         self.hold(at, TargetId(role), sessions);
         let target = Target {

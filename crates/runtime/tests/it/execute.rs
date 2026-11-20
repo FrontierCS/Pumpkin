@@ -157,6 +157,9 @@ where
     Sim: Creator<D, C>,
 {
     fn create(&self, create: &Create, dial: D) -> Result<C, String> {
+        if create.name.as_str().starts_with("shared-") {
+            assert!(!create.ops && !create.model);
+        }
         let created = Creator::<D, C>::create(self.sim, create, dial);
         if let Some(At::Created(name)) = self.at
             && create.name.as_str() == name
@@ -4729,6 +4732,57 @@ fn scoped_runner(argv: &[&str]) -> Value {
     ir["final"]["body"]["def"] = json!("scoped");
     ir["final"]["keywords"] = json!({ "argv": argv });
     ir
+}
+
+#[test]
+fn work_target_bodies_run_separate_leases_for_each_callers_job() {
+    let mut ir = held_lease_workflow(
+        &[
+            "ops",
+            "call train first",
+            "await 0 completed",
+            "call submit a finalize=true",
+        ],
+        &["worker", "0"],
+    );
+    ir["roles"][1]["runtime"]["target"]["lifetime"] = json!("work");
+    ir["roles"][1]["runtime"]["target"]["sessions"][0]["session"]["commands"] = json!(2);
+    let agent = &mut ir["roles"][0];
+    agent["name"] = json!("alpha");
+    agent["runtime"]["agent"]["grants"][0]["job"]["body"]["def"] = json!("scoped");
+    let mut peer = agent.clone();
+    peer["name"] = json!("beta");
+    peer["runtime"]["agent"]["command"]["argv"] = json!([
+        "ops",
+        "await_log agent_collected",
+        "call train second",
+        "await 1 completed",
+        "call submit b finalize=true"
+    ]);
+    ir["roles"].as_array_mut().unwrap().push(peer);
+    ir["final"]["body"]["def"] = json!("submissions");
+
+    let dir = TestDir::new();
+    let (record, agents, _) = judged(ir, &dir);
+    assert!(agents.iter().all(|agent| agent.submission.is_some()));
+    let log = read_log(&record);
+    let leases: Vec<_> = log
+        .iter()
+        .flat_map(|line| line["actions"].as_array().into_iter().flatten())
+        .filter(|action| action["kind"] == "start_lease")
+        .map(|action| {
+            (
+                action["holder"].as_str().unwrap(),
+                action["lease"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(leases, [("job-0", 0), ("job-1", 1)]);
+    for job in 0..leases.len() {
+        assert!(record.join(format!("leases/{job}/sandbox.json")).is_file());
+        assert!(!record.join(format!("jobs/{job}/sandbox.json")).exists());
+    }
+    assert!(record.join("shared/trainer/sandbox.json").is_file());
 }
 
 #[test]

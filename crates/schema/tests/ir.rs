@@ -1325,7 +1325,6 @@ fn job_functions() {
             parsed
             /final/target: `verifier` is a shared work sandbox: give the final call a fresh target
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles/4/runtime/target/sessions: sandbox-issued sessions require a call-lifetime target
             /roles/4/runtime/target/egress: model egress requires a call-lifetime target"#]],
     );
 }

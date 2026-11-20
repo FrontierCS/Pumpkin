@@ -48,6 +48,7 @@ impl runtime::Bodies for Bodies<'_> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "capture" => capture(target, keywords),
+            "scoped" => scoped(target, keywords, 0),
             "check" => {
                 target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 let dir = keywords["dir"].as_str().unwrap();
@@ -140,7 +141,7 @@ impl runtime::Bodies for Bodies<'_> {
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
             }
-            "scoped" => scoped(target, keywords, submissions[0].1),
+            "scoped" => scoped(target, keywords, submissions[0].1.unwrap()),
             "submissions" => {
                 assert_eq!(target.caller(), None);
                 let mut files = Map::new();
@@ -256,14 +257,15 @@ fn capture(
 fn scoped(
     target: &mut dyn runtime::Target,
     keywords: &Map<String, Value>,
-    submission: Option<usize>,
+    input: usize,
 ) -> Result<Vec<(Name, Value)>, String> {
     let grant = Name::from_static("box");
     let lease = target.runner_open(&grant)?;
-    let tree = AbsolutePath::from_static("/work/src");
+    let tree =
+        AbsolutePath::try_from(format!("/work/{}", target.caller().unwrap_or("src"))).unwrap();
     target.put(
-        &AbsolutePath::from_static("/work/src/source"),
-        submission.unwrap(),
+        &tree.join(&schema::sandbox::RelativePath::from_static("source")),
+        input,
     )?;
     target.runner_put(&grant, lease, tree, AbsolutePath::from_static("/work/src"))?;
     let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();

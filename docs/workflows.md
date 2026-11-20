@@ -90,7 +90,7 @@ a sandbox. Every target must be reached. The final call has an exclusive call-li
 | `cwd` | the directory each command of the body's starts in |
 | `env` | `NAME=value` entries added to each command's environment |
 | `egress` | a call-lifetime sandbox's model route, open while its body runs |
-| `sessions` | the sessions a call-lifetime sandbox may open while its body runs, written as a grant of one is |
+| `sessions` | the body's runner grants, each with fresh limits per call. Commands in a call-lifetime sandbox can also use these grants through `sandboxctl`. |
 
 Each agent may name a given call-lifetime target from one job function. Different agents may
 run independent calls of the same target concurrently.
@@ -104,7 +104,8 @@ end, the driver collects the sandbox's output and deletes it before starting the
 The driver authenticates the calling agent and carries the body's inputs, commands and results.
 A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
 requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
-require a call-lifetime target.
+require a call-lifetime target. The trusted body can use `target.with_runner` on either
+lifetime. Its job holds the runner until deletion, and a work target stays busy until then.
 
 ### Runners
 
@@ -253,7 +254,7 @@ body unrun, as `examples/hello`'s `final` answers:
 
 ## From inside a sandbox
 
-An agent, or a target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
+An agent, or a call-lifetime target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
 directory first on each command's `PATH`, ahead of the path the role or image sets.
 `sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
 1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait
