@@ -13,12 +13,14 @@ from pathlib import Path
 from hypergraph.judge import core_numbers
 
 FIXTURE = Path("/opt/hypergraph/graph.json")
-CTL = "/.pumpkin/bin/sandboxctl"
 
 
 def ctl(op, *args):
     done = subprocess.run(
-        [CTL, "call", "cpp." + op, *args], capture_output=True, text=True, check=True
+        ["sandboxctl", "call", "cpp." + op, *args],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return json.loads(done.stdout)
 
