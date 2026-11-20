@@ -1990,9 +1990,9 @@ fn traces_a_caller() {
             item 0: HTTP/1.1 200 OK
             {"content":[{"text":"list the files","type":"input_text"}],"role":"user","type":"message"}
             trace/someone/steps: HTTP/1.1 400 Bad Request
-            {"error":"`someone` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
+            {"error":"`someone` is no caller: expected `agent-<n>` or `job-<n>`"}
             trace/job-01/steps: HTTP/1.1 400 Bad Request
-            {"error":"`job-01` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"}
+            {"error":"`job-01` is no caller: expected `agent-<n>` or `job-<n>`"}
             trace/job-99/steps: HTTP/1.1 404 Not Found
             {"error":"run <id>'s log names no job 99: name an agent or a job of the run"}
             trace/job-99/ops: HTTP/1.1 404 Not Found

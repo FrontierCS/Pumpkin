@@ -41,8 +41,7 @@ pub struct Progress {
     pub started: UnixTime,
     /// When the core abandons the run if it is still going.
     pub hard_end: Duration,
-    /// The work phase's deadline, counted from the agent's start, as the IR gives it; `None` if the
-    /// IR has no agent.
+    /// The time all agents may work from their common start, if the IR gives it.
     pub deadline: Option<Duration>,
     /// When the latest line read was written.
     pub last: Duration,
@@ -55,7 +54,7 @@ pub struct Progress {
     pub leases: Vec<LeaseSpan>,
     /// The model requests of every role.
     pub model: ModelUse,
-    /// When the work phase ended: when the agent's teardown began.
+    /// When the last agent's work ended.
     pub work_end: Option<Duration>,
     /// When the core finished or abandoned the run.
     pub end: Option<Duration>,
@@ -127,9 +126,8 @@ pub struct Sandbox {
     pub asked: Duration,
     /// When its command started, or its runner was ready.
     pub started: Option<Duration>,
-    /// When the run was done with it: once it had collected what the agent's work phase left, or
-    /// the agent failed; once a call or a lease ended; else once it was deleted, as one is
-    /// when the run stops short of the core's end.
+    /// When the agent's sandbox was deleted or its teardown finished without a sandbox, or a
+    /// call or lease ended. The deletion also ends a sandbox when its run stops early.
     pub gone: Option<Duration>,
     /// Whether its `sandbox.json` records the provider's delete as done; `None` if it has no
     /// `sandbox.json`, so was never created.
@@ -517,10 +515,14 @@ impl Reading {
             logged::Event::AgentFailed { caller, reason } => {
                 let agent = self.agents.entry(*caller).or_default();
                 agent.end = Some((at, AgentEnd::Failed(reason.clone())));
-                agent.sandbox.gone.get_or_insert(at);
             }
-            logged::Event::AgentCollected { caller } => {
-                self.agents.entry(*caller).or_default().sandbox.gone = Some(at);
+            logged::Event::AgentTornDown { caller } => {
+                self.agents
+                    .entry(*caller)
+                    .or_default()
+                    .sandbox
+                    .gone
+                    .get_or_insert(at);
             }
             logged::Event::CallStarted { job } => {
                 if let Some(call) = self.call(*job) {

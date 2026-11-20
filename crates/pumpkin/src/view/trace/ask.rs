@@ -95,7 +95,7 @@ pub(in crate::view) fn asked(parts: &[&str], request: &Request) -> Result<Asked,
             .filter(|parsed| parsed.to_string() == caller);
         parsed.ok_or_else(|| {
             bad(format!(
-                "`{caller}` is no caller: expected `agent`, `agent-<n>` or `job-<n>`"
+                "`{caller}` is no caller: expected `agent-<n>` or `job-<n>`"
             ))
         })
     };

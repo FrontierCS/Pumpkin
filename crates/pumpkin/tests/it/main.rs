@@ -983,7 +983,7 @@ fn whole_log() -> Vec<Value> {
         ),
         logged(
             1002,
-            json!({"kind":"agent_collected","caller":"agent-0"}),
+            json!({"kind":"agent_torn_down","caller":"agent-0"}),
             none(),
         ),
         logged(1005, of_lease("lease_ended", 2), none()),

@@ -87,7 +87,7 @@ pub(super) fn work(progress: &runtime::Progress, at: Duration) -> Phase {
     let flying = in_flight(&progress.model, at);
     let working = agents
         .values()
-        .filter(|agent| agent.sandbox.gone.is_none())
+        .filter(|agent| agent.work_end.is_none())
         .count();
     match progress.work_started {
         Some(started) => Phase {
@@ -118,7 +118,7 @@ pub(super) fn children(
     progress
         .agents
         .values()
-        .filter(|agent| agent.sandbox.gone.is_none())
+        .filter(|agent| agent.work_end.is_none())
         .map(move |agent| {
             let child = phase(
                 &agent.role,

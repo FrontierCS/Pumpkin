@@ -114,7 +114,7 @@ pub(super) enum Event {
         caller: CallerName,
         reason: String,
     },
-    AgentCollected {
+    AgentTornDown {
         #[serde(deserialize_with = "agent")]
         caller: CallerName,
     },
@@ -196,7 +196,7 @@ impl Event {
             | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
-            | Self::AgentCollected { .. }
+            | Self::AgentTornDown { .. }
             | Self::OpRefused
             | Self::CallStarted { .. }
             | Self::CallTimedOut { .. }
@@ -227,7 +227,7 @@ impl Event {
             | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
-            | Self::AgentCollected { .. }
+            | Self::AgentTornDown { .. }
             | Self::OpArrived { .. }
             | Self::OpRefused
             | Self::LeaseReady { .. }

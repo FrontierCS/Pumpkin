@@ -667,9 +667,19 @@ fn reads_agent_end() {
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let collected = r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected","caller":"agent-0"},"actions":[]}"#;
     let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent-0"},"actions":[]}"#;
+    let failed = r#"{"seq":1,"at_ns":"10000000000","event":{"kind":"agent_failed","caller":"agent-0","reason":"session ended"},"actions":[]}"#;
+    let torn_down = r#"{"seq":4,"at_ns":"42000000000","event":{"kind":"agent_torn_down","caller":"agent-0"},"actions":[]}"#;
     let logs = [
-        ("collected", &[started, collected, deleted][..]),
-        ("never collected", &[started, deleted]),
+        ("failed before deletion", &[started, failed][..]),
+        (
+            "collected then deleted",
+            &[started, failed, collected, deleted, torn_down],
+        ),
+        (
+            "deleted without collection",
+            &[started, failed, deleted, torn_down],
+        ),
+        ("never created", &[started, failed, torn_down]),
     ];
     let mut read = Vec::new();
     for (name, lines) in logs {
@@ -683,8 +693,10 @@ fn reads_agent_end() {
         read.push(format!("{name}: gone {gone:?}"));
     }
     expect![[r#"
-        collected: gone Some(31s)
-        never collected: gone Some(40s)"#]]
+        failed before deletion: gone None
+        collected then deleted: gone Some(40s)
+        deleted without collection: gone Some(40s)
+        never created: gone Some(42s)"#]]
     .assert_eq(&read.join("\n"));
 }
 
