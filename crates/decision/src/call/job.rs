@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use schema::ir::{Name, argument};
 use schema::sandbox::op::{CallReply, JobReply, OpReply, Remaining};
-use schema::workflow::{Holder, JobFunctionId, JobOf};
+use schema::workflow::{Holder, JobFunctionId, JobOf, TargetId};
 
 use crate::ops::fits;
 use crate::{Action, Caller, Core, PayloadRef};
@@ -57,16 +57,7 @@ impl Core<'_> {
                     "`{name}` cannot run because its shared sandbox is unavailable"
                 ));
             }
-            // A job can report its end while its runner still occupies this target's slot.
-            let draining = self.leases.active().any(|lease| {
-                self.workflow.session(lease.grant).holder == Holder::Target(function.target)
-            });
-            if draining
-                || self
-                    .jobs
-                    .active_on(self.workflow, function.target)
-                    .is_some()
-            {
+            if self.work_target_busy(function.target) {
                 return Ok(OpReply::Refused {
                     busy: true,
                     message: format!(
@@ -104,6 +95,15 @@ impl Core<'_> {
             job: job.0,
             remaining,
         })))
+    }
+
+    fn work_target_busy(&self, target: TargetId) -> bool {
+        // A job can report its end while its runner still occupies this target's slot.
+        self.jobs.active_on(self.workflow, target).is_some()
+            || self
+                .leases
+                .active()
+                .any(|lease| self.workflow.session(lease.grant).holder == Holder::Target(target))
     }
 
     /// What job function `id` has left of its quotas.
