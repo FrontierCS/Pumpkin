@@ -65,7 +65,7 @@ def team(name, agent_image, runtimes, *, toolchain, needs, deadline_seconds, eva
                 "runtime": {"target": {
                     "lifetime": "work",
                     "cwd": "/pumpkin/out",
-                    "env": {"TEAM_ROLES": " ".join(PARTICIPANTS)},
+                    "env": ["TEAM_ROLES=" + " ".join(PARTICIPANTS)],
                 }},
             },
         ] + [
