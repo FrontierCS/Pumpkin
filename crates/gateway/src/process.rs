@@ -49,8 +49,7 @@ impl Drop for ReservedStart {
 }
 
 impl Session {
-    /// Starts a command, whose exit arrives as an [`Arrival::Exited`] naming the [`Process`] this
-    /// returns.
+    /// Starts a command. Its [`crate::Arrival::Exited`] names the returned process.
     pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
         let (process, send) = self.prepare_start(by)?;
         send(launch, by)?;
