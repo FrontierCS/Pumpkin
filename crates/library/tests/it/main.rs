@@ -361,6 +361,7 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
         command,
         dirs,
         files,
+        grant_help,
         stdin: _,
         finalize_grace_seconds: _,
         egress: _,
@@ -385,6 +386,9 @@ fn show(runtime: &AgentRuntime, excerpt: impl Fn(&ir::File) -> String) -> String
     );
     for dir in dirs {
         let _ = writeln!(shown, "dir {} {}", dir.mode, dir.path);
+    }
+    if let Some(path) = grant_help {
+        let _ = writeln!(shown, "grant help {path}");
     }
     for file in files {
         let mut digest = String::new();

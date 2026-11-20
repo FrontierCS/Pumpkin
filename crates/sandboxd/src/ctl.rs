@@ -56,11 +56,14 @@ mod flags {
         cmd sandboxctl {
             /// Prints this sandbox's limits: the time left to work, its CPU and memory, and
             /// the grants it holds.
-            cmd ops {}
+            cmd ops {
+                /// Prints shell usage for this role's grants, including their arguments and limits.
+                optional --text
+            }
 
-            /// Calls a function that this sandbox's role holds: `<function> <file>`, with the
-            /// payload in <file>, or `<session>.<op>`, one of a session's ops, each answered at
-            /// once, which lease its runners and drive them, one command or copy at a time: `open`
+            /// Calls a function that this sandbox's role holds: `<function> [<file>]`, with the
+            /// payload in <file> (empty when omitted), or `<session>.<op>`. A session’s ops answer
+            /// at once and drive its runners one command or copy at a time: `open`
             /// opens a lease, whose runner lasts as the session lets it; `run <lease> [--timeout
             /// <seconds>] -- <program> [<arg>...]` runs a command in its runner, until the timeout
             /// or the lease's end; `put <lease> <tree> <to>` copies the directory <tree> here to
@@ -117,7 +120,9 @@ mod flags {
     }
 
     #[derive(Debug)]
-    pub struct Ops;
+    pub struct Ops {
+        pub text: bool,
+    }
 
     #[derive(Debug)]
     pub struct Call {
@@ -159,7 +164,19 @@ mod flags {
 /// outcome, which its output doesn't change ([`print_line`]).
 pub(crate) fn main(args: Vec<OsString>) -> ExitCode {
     let reply = match flags::Sandboxctl::from_vec(args) {
-        Ok(flags) => run(flags),
+        Ok(flags) => {
+            let text = matches!(
+                flags.subcommand,
+                flags::SandboxctlCmd::Ops(flags::Ops { text: true })
+            );
+            match run(flags) {
+                Ok(OpReply::Ops(ops)) if text => {
+                    print_line(io::stdout(), ops.guide().trim_end());
+                    return ExitCode::SUCCESS;
+                }
+                result => result,
+            }
+        }
         Err(error) if error.is_help() => {
             print_line(io::stdout(), error);
             return ExitCode::SUCCESS;
@@ -242,7 +259,7 @@ fn exchange(
 /// payload file's absolute path ([`payload_path`]).
 fn parse(flags: flags::Sandboxctl) -> Result<(OpCall, Vec<u8>), String> {
     match flags.subcommand {
-        flags::SandboxctlCmd::Ops(flags::Ops) => Ok((OpCall::Ops, Vec::new())),
+        flags::SandboxctlCmd::Ops(_) => Ok((OpCall::Ops, Vec::new())),
         flags::SandboxctlCmd::Call(call) => call::call(call),
         flags::SandboxctlCmd::Status(flags::Status { job }) => {
             let job = job

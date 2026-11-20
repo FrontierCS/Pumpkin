@@ -178,6 +178,10 @@ pub struct AgentRuntime {
     /// Absent, none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<File>,
+    /// Where to append this role's grant instructions before startup, creating the file as 0600
+    /// if it is absent from `files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_help: Option<RolePath>,
     /// The text the command reads on its standard input, which the runtime puts at
     /// [`command_stdin()`](crate::sandbox::command_stdin); absent, its standard input is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]

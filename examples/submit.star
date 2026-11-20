@@ -16,3 +16,19 @@ def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]
         run.end_work()
         return {"state": "accepted"}
     return {"state": "stored"}
+
+def submission(name, payload_max_bytes):
+    """The named grant to save and finalize this agent's file.
+
+    Args:
+      name: the role's public command name.
+      payload_max_bytes: the largest file it may submit.
+
+    Returns:
+      The agent's now grant.
+    """
+    return {
+        "name": name,
+        "help": "Save the file as your current submission. Set finalize=true to lock it and end your work. Returns state stored, or accepted when finalized.",
+        "now": {"body": submit, "payload_max_bytes": payload_max_bytes},
+    }

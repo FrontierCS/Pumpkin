@@ -39,7 +39,7 @@ struct Parser<'ir> {
 /// A role that holds sessions, with each of them, its name and its place.
 struct Holding<'ir> {
     holder: Holder,
-    sessions: Vec<(JsonPointer, &'ir Name, &'ir ir::Session)>,
+    sessions: Vec<(JsonPointer, &'ir Name, &'ir str, &'ir ir::Session)>,
 }
 
 struct DeclaredAgent<'ir> {
@@ -73,20 +73,38 @@ impl<'ir> Parser<'ir> {
         let (final_call, sessions) = self
             .errors
             .finish(final_call.and_then(|call| Ok((call, sessions?))))?;
-        Ok(Workflow {
+        let mut workflow = Workflow {
             ir: ir.clone(),
             roles: self.roles,
-            agents: agents
-                .into_iter()
-                .map(|decl| (decl.agent.id, decl.agent))
-                .collect(),
+            agents: BTreeMap::new(),
             targets: self.targets,
             runners: self.runners,
             job_functions: self.job_functions,
             sessions,
             now_functions: self.now_functions,
             final_call,
-        })
+        };
+        workflow.check_ops()?;
+        for DeclaredAgent {
+            mut agent, runtime, ..
+        } in agents
+        {
+            if let Some(path) = &runtime.grant_help {
+                let content = workflow.initial_ops(agent.id.role()).guide();
+                if let Some(file) = agent.files.iter_mut().find(|f| f.path == *path) {
+                    file.content.push_str("\n\n");
+                    file.content.push_str(&content);
+                } else {
+                    agent.files.push(ir::File {
+                        path: path.clone(),
+                        mode: ir::Mode::new(0o600),
+                        content,
+                    });
+                }
+            }
+            workflow.agents.insert(agent.id, agent);
+        }
+        Ok(workflow)
     }
 
     fn roles(&mut self, roles: &'ir [ir::Role]) {
@@ -131,12 +149,13 @@ impl<'ir> Parser<'ir> {
             command,
             dirs,
             files,
+            grant_help,
             stdin,
             finalize_grace_seconds,
             egress,
             grants: _,
         } = runtime;
-        self.agent_paths(&at, dirs, files);
+        self.agent_paths(&at, dirs, files, grant_help.as_ref());
         let model = egress.model.clone();
         let mut dirs = dirs.clone();
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -152,11 +171,19 @@ impl<'ir> Parser<'ir> {
         self.agents.push(DeclaredAgent { at, agent, runtime });
     }
 
-    fn agent_paths(&mut self, runtime: &JsonPointer, dirs: &[ir::Dir], files: &[ir::File]) {
-        let file_paths = files.iter().map(|file| &file.path);
+    fn agent_paths(
+        &mut self,
+        runtime: &JsonPointer,
+        dirs: &[ir::Dir],
+        files: &[ir::File],
+        grant_help: Option<&RolePath>,
+    ) {
+        let extra = grant_help.filter(|path| !files.iter().any(|file| file.path == **path));
+        let file_paths = files.iter().map(|file| &file.path).chain(extra);
         let all: Vec<&RolePath> = dirs.iter().map(|dir| &dir.path).chain(file_paths).collect();
         let at = |index: usize| match index.checked_sub(dirs.len()) {
             None => runtime.token("dirs").token(index),
+            Some(file) if file == files.len() => runtime.token("grant_help"),
             Some(file) => runtime.token("files").token(file),
         };
         for (index, path) in all.iter().enumerate() {
@@ -174,7 +201,12 @@ impl<'ir> Parser<'ir> {
                 ),
                 (None, None) => continue,
             };
-            self.errors.report(at(index).token("path"), message);
+            let location = if index == dirs.len() + files.len() {
+                at(index)
+            } else {
+                at(index).token("path")
+            };
+            self.errors.report(location, message);
         }
     }
 
@@ -185,7 +217,7 @@ impl<'ir> Parser<'ir> {
         self.errors.unique(names, |index| list.token(index));
         let sessions = sessions.iter().enumerate();
         let sessions = sessions.map(|(index, ir::NamedSession { name, session })| {
-            (list.token(index).token("session"), name, session)
+            (list.token(index).token("session"), name, "", session)
         });
         self.holders.push(Holding {
             holder: Holder::Target(target),
@@ -237,13 +269,15 @@ impl<'ir> Parser<'ir> {
             let at = place(&list, index, grant);
             match &grant.function {
                 ir::Function::Job(job) => {
-                    if let Ok(job) = self.job_function(&at, holder, &grant.name, job) {
+                    if let Ok(job) = self.job_function(&at, holder, &grant.name, &grant.help, job) {
                         self.job_functions.push(job);
                     }
                 }
-                ir::Function::Session(session) => sessions.push((at, &grant.name, session)),
+                ir::Function::Session(session) => {
+                    sessions.push((at, &grant.name, grant.help.as_str(), session));
+                }
                 ir::Function::Now(now) => {
-                    if let Ok(now) = self.now_function(&at, holder, &grant.name, now) {
+                    if let Ok(now) = self.now_function(&at, holder, &grant.name, &grant.help, now) {
                         self.now_functions.push(now);
                     }
                 }
@@ -260,6 +294,7 @@ impl<'ir> Parser<'ir> {
         at: &JsonPointer,
         holder: AgentId,
         name: &'ir Name,
+        help: &str,
         job: &'ir ir::JobFunction,
     ) -> Result<JobFunction, Reported> {
         let ir::JobFunction {
@@ -293,6 +328,7 @@ impl<'ir> Parser<'ir> {
         shared.and(bounded).map(|payload_max_bytes| JobFunction {
             holder,
             name: name.clone(),
+            help: help.to_owned(),
             target: target_id,
             body: body.clone(),
             keywords: keywords.clone(),
@@ -308,9 +344,9 @@ impl<'ir> Parser<'ir> {
         let mut parsed = Vec::new();
         let mut earlier: Vec<(Holder, &Name, &ir::Session)> = Vec::new();
         for Holding { holder, sessions } in &holders {
-            for (at, name, session) in sessions {
+            for (at, name, help, session) in sessions {
                 let held = (*holder, *name, *session);
-                let leased = self.session(at, held, &earlier);
+                let leased = self.session(at, held, help, &earlier);
                 parsed.push(leased);
                 earlier.push(held);
             }
@@ -323,6 +359,7 @@ impl<'ir> Parser<'ir> {
         &mut self,
         at: &JsonPointer,
         (holder, name, grant): (Holder, &Name, &ir::Session),
+        help: &str,
         earlier: &[(Holder, &Name, &ir::Session)],
     ) -> Result<Session, Reported> {
         let ir::Session {
@@ -380,6 +417,7 @@ impl<'ir> Parser<'ir> {
             name: name.clone(),
             holder,
             runner: RunnerId(id),
+            help: help.to_owned(),
             instances: *instances,
             instance_seconds: *instance_seconds,
             cumulative_seconds: *cumulative_seconds,
@@ -460,6 +498,7 @@ impl<'ir> Parser<'ir> {
         at: &JsonPointer,
         holder: AgentId,
         name: &Name,
+        help: &str,
         now: &ir::NowFunction,
     ) -> Result<NowFunction, Reported> {
         let ir::NowFunction {
@@ -470,6 +509,7 @@ impl<'ir> Parser<'ir> {
             self.payload_bound(at, &format!("`{name}`'s"), *payload_max_bytes)?;
         Ok(NowFunction {
             holder,
+            help: help.to_owned(),
             name: name.clone(),
             body: body.clone(),
             payload_max_bytes,

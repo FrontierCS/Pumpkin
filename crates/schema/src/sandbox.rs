@@ -220,7 +220,7 @@ pub fn model_url() -> String {
 }
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox)); its
 /// body holds none.
