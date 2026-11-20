@@ -27,7 +27,7 @@ use core::time::Duration;
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name, Sha256Digest};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp, TransferEnd};
-use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, Workflow};
+use schema::workflow::{AgentId, JobFunctionId, Placed, SessionId, TargetId, Workflow};
 
 mod call;
 mod jobs;
@@ -147,6 +147,15 @@ pub enum Event {
     AgentTornDown {
         agent: AgentId,
     },
+    /// The work target lost its sandbox or could not stop a command. Refuse further calls.
+    SharedFailed {
+        target: TargetId,
+        reason: String,
+    },
+    /// The worker finished and deleted any shared sandbox its provider identified.
+    SharedTornDown {
+        target: TargetId,
+    },
     /// `caller`'s sandbox made an op. The core answers it with an [`Action::Reply`] naming `op`.
     OpArrived {
         op: OpId,
@@ -213,8 +222,8 @@ pub enum Event {
 /// What the core asks the runtime to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Starts all agent sandboxes and releases their commands. The runtime reports
-    /// [`Event::WorkStarted`] on release and each agent's exit or failure separately.
+    /// Starts the work-lifetime targets and agents. Releasing the agents' commands produces
+    /// [`Event::WorkStarted`]. Each agent reports its own exit or failure.
     StartAgents,
     /// Answers op `op`.
     Reply { op: OpId, reply: OpReply },
@@ -282,6 +291,8 @@ pub enum Action {
     /// Freezes this agent's sandbox, collects its outputs and destroys it. The runtime
     /// reports [`Event::AgentTornDown`] once teardown completes, including a failed start.
     TearDownAgent { agent: AgentId },
+    /// Stop and delete the shared sandbox after all work calls have drained.
+    TearDownShared { target: TargetId },
     /// Ends the run with its outcome. After it, the core only refuses the ops that still
     /// arrive.
     Finish { outcome: Outcome },
@@ -379,6 +390,12 @@ fn agent_startup(placed: &Placed) -> Duration {
         .workflow()
         .agents()
         .map(|agent| placed.startup(agent.id.role()))
+        .chain(
+            placed
+                .workflow()
+                .work_targets()
+                .map(|id| placed.startup(id.role())),
+        )
         .max()
         .unwrap_or_default()
 }
@@ -401,8 +418,16 @@ pub struct Core<'w> {
     hard_end: Duration,
     phase: Phase,
     agents: BTreeMap<AgentId, AgentWork>,
+    shared: BTreeMap<TargetId, Availability>,
     jobs: jobs::Jobs,
     leases: leases::Leases,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Availability {
+    Available,
+    Failed,
+    Stopping,
 }
 
 #[derive(Debug)]
@@ -428,6 +453,10 @@ impl<'w> Core<'w> {
             agents: workflow
                 .agents()
                 .map(|agent| (agent.id, AgentWork::default()))
+                .collect(),
+            shared: workflow
+                .work_targets()
+                .map(|id| (id, Availability::Available))
                 .collect(),
             jobs: jobs::Jobs::default(),
             leases: leases::Leases::default(),
@@ -455,6 +484,19 @@ impl<'w> Core<'w> {
                 if let Phase::Work { deadline } = &mut self.phase {
                     *deadline =
                         (*deadline).min(self.now.saturating_add(self.workflow.work_deadline()));
+                }
+            }
+            Event::SharedFailed { target, .. } => {
+                if let Some(state @ Availability::Available) = self.shared.get_mut(&target) {
+                    *state = Availability::Failed;
+                    if let Some(job) = self.jobs.active_on(self.workflow, target) {
+                        actions.push(Action::StopCall { job });
+                    }
+                }
+            }
+            Event::SharedTornDown { target } => {
+                if self.shared.get(&target) == Some(&Availability::Stopping) {
+                    self.shared.remove(&target);
                 }
             }
             Event::AgentTornDown { agent } => {
@@ -590,6 +632,8 @@ impl<'w> Core<'w> {
             Phase::Finished | Phase::Abandoned => return,
         }
         self.phase = Phase::Abandoned;
+        // Abandon stops the workers. A late service failure has no call left to stop.
+        self.shared.clear();
         // Abandon stops every runner. A later expiry or job report has no lease left to close.
         drop(self.leases.close_where(self.now, |_| true));
         actions.push(Action::Abandon);

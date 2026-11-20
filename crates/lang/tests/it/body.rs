@@ -22,6 +22,10 @@ const RESULT: (&str, &str) = (
 struct Logged(Vec<String>);
 
 impl lang::Target for Logged {
+    fn caller(&self) -> Option<&str> {
+        Some("agent")
+    }
+
     fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String> {
         self.0.push(format!("put payload {input} at {path}"));
         Ok(())
@@ -176,7 +180,7 @@ PAYLOAD = "/pumpkin/in/payload"
 
 def _verified(target: Target, payload: Payload):
     target.put(PAYLOAD, payload)
-    target.run(["/opt/frontier/verifier", "--fast"])
+    target.run(["/opt/frontier/verifier", "--fast", target.caller()])
     return json.decode(target.get("/pumpkin/out/result.json"))
 
 def train_call(target: Target, payload: Payload, *, metrics: list[str]):
@@ -187,7 +191,7 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
 "#,
         &expect![[r#"
             put payload 0 at /pumpkin/in/payload
-            run /opt/frontier/verifier ["--fast"]
+            run /opt/frontier/verifier ["--fast", "agent"]
             get /pumpkin/out/result.json
             returns raw_score=43.12 failure="slow" passed=7"#]],
     );
@@ -547,7 +551,7 @@ def train_call(target, payload):
     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
-            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
+            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `get`, `put`, `run`
                 2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5

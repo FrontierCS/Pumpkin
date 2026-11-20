@@ -16,6 +16,7 @@ it ran. This page says where to look in a record, and what the page shows.
 | what the driver said after the start, such as why a sandbox failed to start | `driver.log` |
 | each agent's output, and what it left in its `out/` | `agents/<role>/log/`, `agents/<role>/out/` |
 | each call's target, a job function's or the final call's: each command's output, each file its body got, and what the target held in `/pumpkin/out` as the call ended | `jobs/<n>/log/<c>/`, `jobs/<n>/got/<k>/`, `jobs/<n>/out/` |
+| a work-lifetime target's log, output directory and physical sandbox | `shared/<role>/log/`, `shared/<role>/out/`, `shared/<role>/sandbox.json` |
 | each lease's runner sandbox: its output and what it wrote | `leases/<n>/log/`, `leases/<n>/out/` |
 | each call's payload, including each agent's submission | `payloads/<digest>`, by the SHA-256 that the log and `outcome.json` name |
 | each model request and response, as they went through the route | `model/` |
@@ -63,8 +64,13 @@ $ ./pumpkin wait --outcome 234cd166 2> /dev/null | jq '{agents: [.agents[] | {ro
 both in nanoseconds written as strings, and the model requests and tokens.
 
 The log identifies agent callers by their role index (`agent-<n>`). Jobs and leases have
-run-wide numbers. The `start_final_call` action lists the selection for each agent by role.
+run-wide numbers. Calls on a shared sandbox keep their command output and the files their
+bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all its calls. If a sweep deletes an
+allocation whose role is unknown, `usage.unplaced_sandbox` marks the cost as partial. The
+allocation contributes no estimate to a class’s count, time or price.
+The `start_final_call` action lists the selection for each agent by role.
 [Workflows](workflows.md) describes what the log keeps of each call.
+
 
 ## Model exchanges
 

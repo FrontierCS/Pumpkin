@@ -20,6 +20,8 @@ pub struct CallSpan {
     pub of: CallOf,
     /// The role that runs it: the function's target, or the final call's.
     pub role: Option<String>,
+    /// The shared sandbox's declared role index when this job reuses a resident service.
+    pub shared: Option<usize>,
     pub sandbox: Sandbox,
     /// How long the core gave it.
     pub timeout: Duration,
@@ -49,6 +51,7 @@ impl CallSpan {
             caller,
             of,
             role,
+            shared: None,
             sandbox,
             timeout,
             stopped: false,

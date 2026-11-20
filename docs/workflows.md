@@ -80,17 +80,30 @@ when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A 
 
 ### Targets
 
-A role that a function's body drives: each call of the job function that names it, and the final
-call if it names it, starts a fresh sandbox of it, which runs no command of its own and ends with
-the call. Each agent may name a given target from one job function. A target used by the final
-call is exclusive to it. Every target must be reached.
+A target runs the commands sent by a call's body. Its `lifetime` determines which calls share
+a sandbox. Every target must be reached. The final call has an exclusive call-lifetime target.
 
 | Key | What it is |
 | --- | --- |
+| `lifetime` | `"call"` (also when omitted) starts a sandbox for each call. `"work"` keeps one sandbox for the work phase. |
 | `cwd` | the directory each command of the body's starts in |
 | `env` | `NAME=value` entries added to each command's environment |
-| `egress` | its model route, open while a call's body runs |
-| `sessions` | the sessions it may call while a call's body runs, written as a grant of one is; each call uses them afresh |
+| `egress` | a call-lifetime sandbox's model route, open while its body runs |
+| `sessions` | the sessions a call-lifetime sandbox may open while its body runs, written as a grant of one is |
+
+Each agent may name a given call-lifetime target from one job function. Different agents may
+run independent calls of the same target concurrently.
+
+A work-lifetime target starts alongside the agents. Its sandbox keeps files between calls.
+Multiple grants can name it. The driver admits one complete body at a time. A competing call
+receives a busy refusal and keeps its quota. A failed body can leave files behind. If the
+sandbox's session ends, further calls fail and agents can still submit. After active calls
+end, the driver collects the sandbox's output and deletes it before starting the final call.
+
+The driver authenticates the calling agent and carries the body's inputs, commands and results.
+A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
+requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
+require a call-lifetime target.
 
 ### Runners
 
@@ -110,13 +123,13 @@ is refused, and so is a grant with none.
 
 | Key | What it is |
 | --- | --- |
-| `target` | the target that each call starts afresh |
+| `target` | the role whose fresh or shared sandbox runs the body |
 | `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
 | `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
 | `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
 | `calls` | the most calls the agent may make; left out, no bound |
 | `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
-| `call_timeout_seconds` | each call's timeout, counted from its target's start |
+| `call_timeout_seconds` | each call's timeout, counted from its body's start |
 
 An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
 cumulative time, or with the work phase, whichever comes first.
@@ -188,6 +201,7 @@ The two handles' methods:
 
 | Method | What it does |
 | --- | --- |
+| `target.caller()` | returns the issuing agent's role name, authenticated by its session; available in a job body |
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |

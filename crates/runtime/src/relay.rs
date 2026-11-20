@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use decision::JobId;
-use gateway::{Arrival, IncomingOp, Session};
+use gateway::{Arrival, IncomingOp, Process, Session};
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::OpReply;
 use stdx::Deadline;
@@ -29,11 +29,12 @@ pub(super) enum Waited {
 #[derive(Default)]
 pub(super) struct Relay {
     asked: Option<IncomingOp>,
+    closed: Option<String>,
 }
 
 /// What came of a message into a job's inbox, if it ends a wait.
 enum Arrived {
-    Exited(ExitStatus),
+    Exited(Process, ExitStatus),
     Stopped,
 }
 
@@ -46,16 +47,22 @@ impl Relay {
         child: &mut Child<'_, H, OpReply>,
         job: JobId,
         timeout: Duration,
+        process: Process,
         session: &mut Session,
     ) -> Result<Waited, String> {
+        if let Some(reason) = &self.closed {
+            return Err(reason.clone());
+        }
         let by = deadline(&child.clock, timeout);
         loop {
             let Some(message) = child.inbox.wait(timeout) else {
                 return Ok(Waited::TimedOut);
             };
             match self.relay(child, job, (session, by), message)? {
-                None => {}
-                Some(Arrived::Exited(status)) => return Ok(Waited::Exited(status)),
+                Some(Arrived::Exited(exited, status)) if exited == process => {
+                    return Ok(Waited::Exited(status));
+                }
+                None | Some(Arrived::Exited(_, _)) => {}
                 Some(Arrived::Stopped) => return Ok(Waited::Stopped),
             }
         }
@@ -70,16 +77,14 @@ impl Relay {
         job: JobId,
         (session, by): (&mut Session, Deadline),
     ) -> Result<bool, String> {
+        if let Some(reason) = &self.closed {
+            return Err(reason.clone());
+        }
         while let Some(message) = child.inbox.take() {
             match self.relay(child, job, (&mut *session, by), message)? {
-                None => {}
                 Some(Arrived::Stopped) => return Ok(true),
-                Some(Arrived::Exited(_)) => unreachable!(
-                    "job {}'s sandbox reported a command's exit while none ran, though the job \
-                     starts one command at a time and waits for each to exit before it starts \
-                     the next",
-                    job.0
-                ),
+                // Only a waiter for a particular process consumes its exit status.
+                None | Some(Arrived::Exited(_, _)) => {}
             }
         }
         Ok(false)
@@ -125,11 +130,13 @@ impl Relay {
                 }
                 child.note(format!("job {}'s op was refused: {message}", job.0));
             }
-            // The sandbox runs one command at a time, so the exit is its.
-            Message::Session(Arrival::Exited { process: _, status }) => {
-                return Ok(Some(Arrived::Exited(status)));
+            Message::Session(Arrival::Exited { process, status }) => {
+                return Ok(Some(Arrived::Exited(process, status)));
             }
-            Message::Session(Arrival::Ended { reason }) => return Err(reason),
+            Message::Session(Arrival::Ended { reason }) => {
+                self.closed = Some(reason.clone());
+                return Err(reason);
+            }
             Message::Session(Arrival::ModelRequest(incoming)) => {
                 let at = child.clock.now();
                 child.report(Report::Model { at, job, incoming });

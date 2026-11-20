@@ -1,23 +1,23 @@
 //! Bodies, as the runtime calls them: a body is a function of the workflow's, which the runtime
 //! reaches through the driver's [`Bodies`], and so depends on no language. A job's body drives a
-//! sandbox that the runtime has started for its call, its target, through a [`Target`]. Each
+//! sandbox, its target, through a [`Target`]. Each
 //! command that a body runs has its output in a directory of its own, `log/<c>` for its `c`th, as
 //! a lease's command ([`command_dir`]), collected into the job's directory of the record once it
-//! exits, or at the call's end if the call is cut short while it runs. At the end of a call whose
-//! body started, the target is frozen, and its `out` is collected there too.
+//! exits, or at the call's end if the call is cut short while it runs. Fresh targets are frozen
+//! and collected as the body ends. A work-lifetime sandbox stays available until work ends.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 use std::{fs, io};
 
 use decision::{Event, JobId};
-use gateway::{Put, Session};
-use schema::ir::{self, AbsolutePath, Argv, Name};
+use gateway::{Process, Put, Session};
+use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
 use schema::sandbox::op::{CommandEnd, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Launch, RESULT_MAX_BYTES, RelativePath, command_env, dir_mode, file_mode, log_dir, out_dir,
-    pumpkin_dir,
+    ExitStatus, Launch, RESULT_MAX_BYTES, RelativePath, command_env, dir_mode, file_mode, log_dir,
+    out_dir, pumpkin_dir,
 };
 use schema::workflow::{self, Final, JobFunction, TargetId};
 use serde_json::{Map, Value};
@@ -28,7 +28,7 @@ use crate::host::deadline;
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
 use crate::relay::{Relay, Waited};
-use crate::sandbox::collect;
+use crate::sandbox::{collect, collect_as};
 use crate::{Clock, Entry, Host, Targeted};
 
 /// The evaluator of the workflow's bodies, which the driver gives the run. The run calls it on
@@ -94,6 +94,9 @@ pub trait RunState {
 /// The target of a job's call, as its body drives it. A method's `Err` is why it failed, which
 /// ends the call.
 pub trait Target {
+    /// The issuing agent's declared role name, or none in the final body.
+    fn caller(&self) -> Option<&str>;
+
     /// Puts the input at `path`, one file, its parents made. A job's payload has slot zero.
     fn put(&mut self, path: &AbsolutePath, input_slot: usize) -> Result<(), String>;
 
@@ -166,7 +169,8 @@ pub(crate) fn evaluate<H: Host>(
     child: &mut Child<'_, H, OpReply>,
     session: &mut Session,
 ) -> Ended {
-    if child.stopped() {
+    let resident = call.target.lifetime == TargetLifetime::Work;
+    if !resident && child.stopped() {
         return Ended::Stopped;
     }
     // The timeout runs from the start's reported time.
@@ -179,10 +183,16 @@ pub(crate) fn evaluate<H: Host>(
         timeout: at.saturating_add(call.timeout),
         relay: Relay::default(),
         cut: None,
+        running: None,
         runs_count: 0,
         gets_count: 0,
     };
-    let returned = match call.of {
+    let ready = if resident {
+        target.going().map(drop)
+    } else {
+        Ok(())
+    };
+    let returned = ready.and_then(|()| match call.of {
         Of::Function {
             function,
             arguments,
@@ -196,11 +206,26 @@ pub(crate) fn evaluate<H: Host>(
             submissions,
             &mut target,
         ),
+    });
+    let returned = if resident && target.cut.is_none() {
+        target.going().and(returned)
+    } else {
+        returned
     };
-    target.end();
+    if resident {
+        if let Err(reason) = target.release() {
+            child.event(Event::SharedFailed {
+                target: call.of.target(),
+                reason: reason.clone(),
+            });
+            return Ended::Failed(reason);
+        }
+    } else {
+        target.collect_fresh();
+    }
     match (target.cut, returned) {
-        (Some((Cut::TimedOut, _)), _) => Ended::TimedOut,
-        (Some((Cut::Stopped, _)), _) => Ended::Stopped,
+        (Some(Cut::TimedOut), _) => Ended::TimedOut,
+        (Some(Cut::Stopped), _) => Ended::Stopped,
         (None, Ok(values)) => Ended::Returned(values),
         (None, Err(reason)) => Ended::Failed(reason),
     }
@@ -231,9 +256,9 @@ struct OnTarget<'a, 'c, 'r, H: Host> {
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
     relay: Relay,
-    /// What cut the call short, after which every method fails, and the command that ran then, if
-    /// one did.
-    cut: Option<(Cut, Option<u64>)>,
+    /// What cut the call short, after which every method fails.
+    cut: Option<Cut>,
+    running: Option<(u64, Process)>,
     /// The commands run so far.
     runs_count: u64,
     /// The files got so far, which number their directories in the record.
@@ -245,29 +270,28 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// target's session handed over since the last, and fails once the core has stopped the call,
     /// or its timeout has passed.
     fn going(&mut self) -> Result<Deadline, String> {
-        if let Some((cut, _)) = self.cut {
+        if let Some(cut) = self.cut {
             return Err(cut.reason());
         }
         let by = deadline(&self.child.clock, self.timeout);
         let idle = (self.relay).idle(self.child, self.call.job, (self.session, by));
         match idle {
-            Ok(true) => return Err(self.cut_short(Cut::Stopped, None)),
+            Ok(true) => return Err(self.cut_short(Cut::Stopped)),
             Ok(false) => {}
             Err(reason) => return Err(format!("the target's session ended: {reason}")),
         }
         if self.child.clock.now() >= self.timeout {
-            return Err(self.cut_short(Cut::TimedOut, None));
+            return Err(self.cut_short(Cut::TimedOut));
         }
         Ok(by)
     }
 
-    /// Cuts the call short while `running`, the command that runs then, if one does, reports a
-    /// timeout, and returns why the method fails.
-    fn cut_short(&mut self, cut: Cut, running: Option<u64>) -> String {
+    /// Reports the timeout, if any, and returns why the method fails.
+    fn cut_short(&mut self, cut: Cut) -> String {
         if let Cut::TimedOut = cut {
             self.child.event(Event::CallTimedOut { job: self.call.job });
         }
-        self.cut = Some((cut, running));
+        self.cut = Some(cut);
         cut.reason()
     }
 
@@ -275,9 +299,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// deadline, has passed is the timeout's.
     fn timely<T>(&mut self, done: Result<T, String>) -> Result<T, String> {
         match done {
-            Err(_) if self.child.clock.now() >= self.timeout => {
-                Err(self.cut_short(Cut::TimedOut, None))
-            }
+            Err(_) if self.child.clock.now() >= self.timeout => Err(self.cut_short(Cut::TimedOut)),
             done => done,
         }
     }
@@ -288,12 +310,20 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         self.child.log(Entry::Target(self.call.job, targeted, at));
     }
 
-    /// Collects `dir`, a command's output, into the job's directory of the record, by `by`, or
+    /// Collects the command's output into the job's directory of the record, by `by`, or
     /// notes why it couldn't: a call doesn't fail for want of its log.
-    fn collect_output(&mut self, dir: &RelativePath, by: Deadline) {
+    fn collect_output(&mut self, command: u64, by: Deadline) {
+        let dir = self.output_dir(command);
         let into = self.child.dir.join(log_dir().as_str());
         let collected = fs::create_dir_all(&into).map_err(|error| error.to_string());
-        let collected = collected.and_then(|()| collect(self.session, dir, &self.child.dir, by));
+        let collected = collected.and_then(|()| {
+            collect_as(
+                self.session,
+                &dir,
+                &self.child.dir.join(command_dir(command).as_str()),
+                by,
+            )
+        });
         if let Err(error) = collected {
             let job = self.call.job.0;
             self.child
@@ -301,12 +331,57 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         }
     }
 
-    /// At the call's end, freezes the target, so that nothing it runs changes what is collected,
-    /// then collects the output of the command that ran as the call was cut short, if one did,
-    /// and the target's `out`, into the job's directory of the record, by the child's collect
-    /// deadline. Notes what failed, which never fails the call, and collects all the same after
-    /// a failed freeze; but collects nothing from a session that has ended.
-    fn end(&mut self) {
+    /// Stops and accounts for the active client before releasing this shared sandbox to another
+    /// job. An unconfirmed stop or closed session makes the target unavailable.
+    fn release(&mut self) -> Result<(), String> {
+        if let Some((command, process)) = self.running {
+            let until = self
+                .child
+                .clock
+                .now()
+                .saturating_add(self.call.timeout)
+                .min(self.child.deadlines.collect);
+            let by = deadline(&self.child.clock, until);
+            let stopped = self.stop_client(process, until, by);
+            self.collect_output(command, by);
+            let status = stopped?;
+            let end = if matches!(self.cut, Some(Cut::TimedOut)) {
+                CommandEnd::TimedOut
+            } else {
+                CommandEnd::Exited(status)
+            };
+            self.log(Targeted::Ended { command, end });
+        }
+        match self.session.ended() {
+            Some(reason) => Err(format!("the shared role's session ended: {reason}")),
+            None => Ok(()),
+        }
+    }
+
+    fn stop_client(
+        &mut self,
+        process: Process,
+        until: Duration,
+        by: Deadline,
+    ) -> Result<ExitStatus, String> {
+        self.session
+            .kill(process, by)
+            .context("stopping the shared call's command failed")?;
+        loop {
+            match self
+                .relay
+                .wait(self.child, self.call.job, until, process, self.session)?
+            {
+                Waited::Exited(status) => return Ok(status),
+                Waited::Stopped => {}
+                Waited::TimedOut => {
+                    return Err("the shared call's command did not confirm its exit".to_owned());
+                }
+            }
+        }
+    }
+
+    fn collect_fresh(&mut self) {
         let job = self.call.job.0;
         let by = deadline(&self.child.clock, self.child.deadlines.collect);
         match self.session.freeze(by) {
@@ -318,11 +393,24 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
                 (self.child).note(format!("freezing job {job}'s target failed: {error}"));
             }
         }
-        if let Some((_, Some(command))) = self.cut {
-            self.collect_output(&command_dir(command), by);
+        if self.cut.is_some()
+            && let Some((command, _)) = self.running
+        {
+            self.collect_output(command, by);
         }
         if let Err(error) = collect(self.session, &out_dir(), &self.child.dir, by) {
             (self.child).note(format!("job {job}'s out is incomplete: {error}"));
+        }
+    }
+
+    fn output_dir(&self, command: u64) -> RelativePath {
+        let dir = command_dir(command);
+        if self.call.target.lifetime == TargetLifetime::Work {
+            const { RelativePath::from_static("jobs") }
+                .join(&RelativePath::from(self.call.job.0))
+                .join(&dir)
+        } else {
+            dir
         }
     }
 }
@@ -352,13 +440,32 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         Ok(())
     }
 
+    fn caller(&self) -> Option<&str> {
+        match self.call.of {
+            Of::Function { function, .. } => Some(
+                self.child
+                    .sandboxes
+                    .workflow()
+                    .sandbox(function.holder.role())
+                    .name
+                    .as_str(),
+            ),
+            Of::Final { .. } => None,
+        }
+    }
+
     fn run(&mut self, argv: &Argv) -> Result<(), String> {
         let by = self.going()?;
         let target = self.call.target;
         let command = self.runs_count;
-        let dir = command_dir(command);
+        let dir = self.output_dir(command);
         self.runs_count += 1;
-        let put = (self.session).put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by);
+        let put = if target.lifetime == TargetLifetime::Work {
+            self.session.put(&pumpkin_dir().join(&dir), [], by)
+        } else {
+            self.session
+                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by)
+        };
         self.timely(put.context(format_args!("making {dir} failed")))?;
         let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
         let launch = Launch {
@@ -370,20 +477,22 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
             stderr: output(const { RelativePath::from_static("command.stderr") }),
         };
         let started = self.session.start(launch, by);
-        self.timely(started.context("the command didn't start"))?;
+        let process = self.timely(started.context("the command didn't start"))?;
+        self.running = Some((command, process));
         let argv = argv.clone();
         self.log(Targeted::Run { command, argv });
         let job = self.call.job;
-        let waited = (self.relay).wait(self.child, job, self.timeout, self.session);
+        let waited = (self.relay).wait(self.child, job, self.timeout, process, self.session);
         match waited {
             Ok(Waited::Exited(status)) => {
+                self.running = None;
                 let end = CommandEnd::Exited(status);
                 self.log(Targeted::Ended { command, end });
-                self.collect_output(&dir, deadline(&self.child.clock, self.timeout));
+                self.collect_output(command, deadline(&self.child.clock, self.timeout));
                 Ok(())
             }
-            Ok(Waited::TimedOut) => Err(self.cut_short(Cut::TimedOut, Some(command))),
-            Ok(Waited::Stopped) => Err(self.cut_short(Cut::Stopped, Some(command))),
+            Ok(Waited::TimedOut) => Err(self.cut_short(Cut::TimedOut)),
+            Ok(Waited::Stopped) => Err(self.cut_short(Cut::Stopped)),
             Err(reason) => Err(format!("the target's session ended: {reason}")),
         }
     }

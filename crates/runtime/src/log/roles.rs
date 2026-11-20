@@ -17,6 +17,7 @@ use crate::read_error::{ReadError, read_optional};
 #[derive(Default)]
 pub(super) struct Roles {
     pub(super) agents: BTreeMap<CallerName, Agent>,
+    pub(super) shared: BTreeMap<String, usize>,
     pub(super) grants: BTreeMap<(String, String), Grant>,
     pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
@@ -70,16 +71,14 @@ impl Roles {
                 }
             }
         }
-        // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
-        let entries = provided["routes"].as_object().into_iter().flatten();
-        let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
-        let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
-        let token_prices = models.filter_map(|(model, served)| {
-            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
-            Some((model.clone(), prices))
-        });
         Self {
             agents,
+            shared: roles
+                .iter()
+                .enumerate()
+                .filter(|(_, role)| matches!(&role.runtime, ir::Runtime::Target(target) if target.lifetime == Some(ir::TargetLifetime::Work)))
+                .map(|(index, role)| (role.name.to_string(), index))
+                .collect(),
             grants: grants.collect(),
             final_target,
             places: places(provided),
@@ -87,7 +86,7 @@ impl Roles {
             deadline: ir.map(|ir| Duration::from_secs(ir.deadline_seconds.get())),
             startups,
             prices,
-            token_prices: token_prices.collect(),
+            token_prices: token_prices(provided),
         }
     }
 
@@ -105,6 +104,19 @@ impl Roles {
             ..Sandbox::default()
         }
     }
+}
+
+fn token_prices(provided: &Value) -> BTreeMap<String, TokenPrices> {
+    // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
+    let entries = provided["routes"].as_object().into_iter().flatten();
+    let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
+    let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
+    models
+        .filter_map(|(model, served)| {
+            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
+            Some((model.clone(), prices))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -157,11 +169,34 @@ pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     let Some(bytes) = read_optional(&path)? else {
         return Ok(None);
     };
-    let ir = serde_json::from_slice(&bytes).map_err(|error| {
-        ReadError::Form(format!(
-            "{} holds an IR that this build doesn't read: {error}",
-            path.display()
-        ))
-    })?;
+    let ir = serde_json::from_slice(&bytes)
+        .or_else(|error| legacy_ir(&bytes).ok_or(error))
+        .map_err(|error| {
+            ReadError::Form(format!(
+                "{} holds an IR that this build doesn't read: {error}",
+                path.display()
+            ))
+        })?;
     Ok(Some(ir))
+}
+
+/// Recorded service roles used the same physical sandbox and job records as work-lifetime
+/// targets. Only record readers accept their old declaration.
+fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
+    let mut ir: Value = serde_json::from_slice(bytes).ok()?;
+    let mut converted = false;
+    for role in ir.get_mut("roles")?.as_array_mut()? {
+        let runtime = role.get_mut("runtime")?.as_object_mut()?;
+        if runtime.len() == 1
+            && let Some(mut shared) = runtime.remove("shared")
+        {
+            let target = shared.as_object_mut()?;
+            ir::Command::deserialize(target.remove("command")?).ok()?;
+            target.insert("lifetime".to_owned(), Value::from("work"));
+            runtime.insert("target".to_owned(), shared);
+            converted = true;
+        }
+    }
+    converted.then_some(())?;
+    serde_json::from_value(ir).ok()
 }

@@ -100,6 +100,16 @@ pub(super) enum Event {
         hard_end_ns: Option<Duration>,
     },
     WorkStarted,
+    SharedStarted {
+        shared: usize,
+    },
+    SharedFailed {
+        shared: usize,
+        reason: String,
+    },
+    SharedTornDown {
+        shared: usize,
+    },
     AgentStarted {
         #[serde(deserialize_with = "agent")]
         caller: CallerName,
@@ -193,6 +203,9 @@ impl Event {
             Self::OpArrived { request } => Some(request),
             Self::RunStarted { .. }
             | Self::WorkStarted
+            | Self::SharedStarted { .. }
+            | Self::SharedFailed { .. }
+            | Self::SharedTornDown { .. }
             | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
@@ -224,6 +237,9 @@ impl Event {
             | Self::CallFailed { job, .. } => Some(*job),
             Self::RunStarted { .. }
             | Self::WorkStarted
+            | Self::SharedStarted { .. }
+            | Self::SharedFailed { .. }
+            | Self::SharedTornDown { .. }
             | Self::AgentStarted { .. }
             | Self::AgentExited { .. }
             | Self::AgentFailed { .. }
@@ -475,6 +491,9 @@ impl<'de> Deserialize<'de> for CallerName {
         match SandboxName::deserialize(deserializer)? {
             SandboxName::Agent(role) => Ok(Self::Agent(role)),
             SandboxName::Job(job) => Ok(Self::Job(job)),
+            SandboxName::Shared(index) => {
+                Err(D::Error::custom(format!("shared-{index} is no caller")))
+            }
             SandboxName::Lease(lease) => Err(D::Error::custom(format_args!(
                 "lease-{lease} is no caller: expected `agent-<n>` or `job-<n>`"
             ))),

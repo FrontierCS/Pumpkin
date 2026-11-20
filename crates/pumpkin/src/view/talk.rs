@@ -361,10 +361,14 @@ fn role_json(
     routes: Option<&[RouteEntry]>,
 ) -> Value {
     let name = role.name.as_str();
-    let (kind, has_route) = match &role.runtime {
-        ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
-        ir::Runtime::Target(target) => ("target", target.egress.model.is_some()),
-        ir::Runtime::Runner(_) => ("runner", false),
+    let (kind, has_route, lifetime) = match &role.runtime {
+        ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some(), None),
+        ir::Runtime::Target(target) => (
+            "target",
+            target.egress.model.is_some(),
+            Some(target.lifetime.unwrap_or(ir::TargetLifetime::Call)),
+        ),
+        ir::Runtime::Runner(_) => ("runner", false, None),
     };
     let place = (places.get(name)).map(|Place { provider, class }| format!("{provider}/{class}"));
     let routes = routes.map_or(json!("unknown"), |entries| {
@@ -378,12 +382,16 @@ fn role_json(
         });
         Value::Array(entries.collect())
     });
-    json!({
+    let mut role = json!({
         "name": name,
         "kind": kind,
         "final_target": name == target,
         "routed": has_route,
         "place": place,
         "routes": routes,
-    })
+    });
+    if let Some(lifetime) = lifetime {
+        role["lifetime"] = json!(lifetime);
+    }
+    role
 }

@@ -151,8 +151,7 @@ pub const MILLIS_PER_CPU: u64 = 1000;
 pub enum Runtime {
     /// An agent harness.
     Agent(AgentRuntime),
-    /// A target, which each call that names it, a [`JobFunction`]'s or the [`Final`] call, starts
-    /// afresh, and which runs the commands the call's body sends.
+    /// A target runs the commands a call's body sends.
     Target(TargetRuntime),
     /// A runner, which runs the commands its lease's holder sends, in a fresh instance for each
     /// lease ([`Session`]).
@@ -225,11 +224,24 @@ pub struct RunnerRuntime {
     pub env: Env,
 }
 
+/// The lifetime of a target sandbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetLifetime {
+    /// Each call owns its sandbox until its body ends.
+    Call,
+    /// All work-phase calls use one sandbox, one complete body at a time.
+    Work,
+}
+
 /// How a target runs each command a call's body sends, as the role's user: as a [`Command`] would
 /// with the body's argument vector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetRuntime {
+    /// Which calls share a sandbox. Absent, each call has its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<TargetLifetime>,
     /// The directory each command starts in.
     pub cwd: AbsolutePath,
     /// Variables added to each command's environment, as [`Command::env`]'s are.

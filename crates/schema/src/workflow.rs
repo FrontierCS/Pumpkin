@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{
     AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, User, WorkflowName,
+    Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
@@ -64,6 +64,13 @@ impl Workflow {
 
     pub fn target(&self, id: TargetId) -> &Target {
         &self.targets[&id.0]
+    }
+
+    /// Targets whose sandbox spans the work phase, in declaration order.
+    pub fn work_targets(&self) -> impl Iterator<Item = TargetId> {
+        self.targets.iter().filter_map(|(role, target)| {
+            (target.lifetime == TargetLifetime::Work).then_some(TargetId(*role))
+        })
     }
 
     pub fn runner(&self, id: RunnerId) -> &Runner {
@@ -380,6 +387,7 @@ pub struct Agent {
 /// A target role; see [`ir::TargetRuntime`](crate::ir::TargetRuntime).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    pub lifetime: TargetLifetime,
     pub cwd: AbsolutePath,
     pub env: Env,
     /// The target's model route, with the budgets of its entries, if it has one.

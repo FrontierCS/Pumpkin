@@ -9,11 +9,13 @@
 //! while it waits.
 
 use std::iter;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::thread::Scope;
 use std::time::Duration;
 
-use decision::{CallResult, Event, JobId, Request};
+use decision::{CallResult, Caller, Core, Event, JobId, Request};
 use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
@@ -21,7 +23,7 @@ use schema::sandbox::OpPayloadLimit;
 use super::host::deadline;
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Which};
-use super::{Clock, Host, Inbox, Input};
+use super::{Asked, Clock, Host, Inbox, Input, Runtime};
 
 /// A child of the run, as its thread sees it, timed and synced by the host `H`, whose driver
 /// takes orders of type `O`.
@@ -104,6 +106,7 @@ impl End {
     pub(super) fn failed(which: Which, reason: String) -> Self {
         match which {
             Which::Agent(agent) => Self::Event(Event::AgentFailed { agent, reason }),
+            Which::Shared(target) => Self::Event(Event::SharedFailed { target, reason }),
             Which::Call(job, ..) => Self::Call(job, Err(reason)),
             Which::Lease(lease, ..) => Self::Event(Event::LeaseFailed { lease, reason }),
         }
@@ -188,5 +191,63 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
 
     pub(super) fn report(&self, report: Report) {
         let _ = self.reports.send(Input::Child(report));
+    }
+}
+
+impl<'r, H: Host + 'r> Runtime<'r, H> {
+    pub(super) fn report<'s>(
+        &mut self,
+        scope: Option<&'s Scope<'s, 'r>>,
+        core: &Core<'_>,
+        report: Report,
+    ) -> Result<Option<(Duration, Event)>, String> {
+        match report {
+            Report::Event(at, Event::SharedFailed { target, reason }) => {
+                let event = self
+                    .residents
+                    .get_mut(&target)
+                    .and_then(|resident| resident.fail(target, reason));
+                Ok(event.map(|event| (at, event)))
+            }
+            Report::Event(at, event) => Ok(Some((at, event))),
+            Report::CallEnded { at, job, mut end } => {
+                let target = self.call(job).target;
+                if let Some(resident) = self.residents.get_mut(&target) {
+                    resident.finish(job, &mut end);
+                }
+                // Whole for every bar the target heard: the route reports a bar before its client
+                // hears it, so before the call can end on it, into this inbox, which keeps order.
+                let count = self.call(job).model_requests_over_budget;
+                let model_requests_over_budget = NonZeroU64::new(count);
+                let event = match end {
+                    Ok(result) => Event::CallReturned {
+                        job,
+                        result,
+                        model_requests_over_budget,
+                    },
+                    Err(reason) => Event::CallFailed {
+                        job,
+                        reason,
+                        model_requests_over_budget,
+                    },
+                };
+                Ok(Some((at, event)))
+            }
+            Report::Op {
+                at,
+                job,
+                request,
+                trees,
+            } => {
+                self.call(job).trees = Some(trees);
+                Ok(Some((at, self.op(Asked::Job(job), request))))
+            }
+            Report::Model { at, job, incoming } => {
+                let caller = Caller::Job(job);
+                self.model_request(scope, core, (caller, at), incoming)
+                    .map(|()| None)
+            }
+            Report::Undeleted(reason) => Err(reason),
+        }
     }
 }

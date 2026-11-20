@@ -130,7 +130,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     fn role(&mut self, caller: Caller) -> RoleId {
         match caller {
             Caller::Agent(agent) => agent.role(),
-            Caller::Job(job) => self.call(job).role,
+            Caller::Job(job) => self.call(job).target.role(),
         }
     }
 

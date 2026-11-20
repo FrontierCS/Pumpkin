@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use decision::{CallResult, JobId};
+use gateway::Session;
 use schema::sandbox::OpPayloadLimit;
 use schema::sandbox::op::OpReply;
 use schema::workflow::Holder;
@@ -23,6 +24,25 @@ pub(crate) struct Call<'r> {
 }
 
 pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Child<'_, H, OpReply>) {
+    let holder = Holder::Target(call.of.target());
+    // A target's ops carry no payload: it holds sessions alone.
+    let ops = child
+        .sandboxes
+        .workflow()
+        .sessions()
+        .any(|(_, grant)| grant.holder == holder)
+        .then_some(OpPayloadLimit::NONE);
+    crate::child::run(child, ops, |child, session| {
+        evaluate(call, bodies, child, session)
+    });
+}
+
+pub(crate) fn evaluate<H: Host>(
+    call: Call<'_>,
+    bodies: &dyn Bodies,
+    child: &mut Child<'_, H, OpReply>,
+    session: &mut Session,
+) -> End {
     let Call {
         job,
         of,
@@ -31,11 +51,6 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
     } = call;
     let target = of.target();
     let workflow = child.sandboxes.workflow();
-    let holder = Holder::Target(target);
-    // A target's ops carry no payload: it holds sessions alone.
-    let ops = (workflow.sessions())
-        .any(|(_, grant)| grant.holder == holder)
-        .then_some(OpPayloadLimit::NONE);
     let call = body::Call {
         job,
         target: workflow.target(target),
@@ -43,13 +58,11 @@ pub(crate) fn run<H: Host>(call: Call<'_>, bodies: &dyn Bodies, child: &mut Chil
         inputs,
         timeout,
     };
-    crate::child::run(child, ops, |child, session| {
-        let end = match body::evaluate(bodies, &call, child, session) {
-            Ended::Returned(returned) => CallResult::returned_by(returned),
-            Ended::Failed(reason) => Err(reason),
-            Ended::TimedOut => Err("the call's timeout passed".to_owned()),
-            Ended::Stopped => Err("the call was stopped".to_owned()),
-        };
-        End::Call(job, end)
-    });
+    let end = match body::evaluate(bodies, &call, child, session) {
+        Ended::Returned(returned) => CallResult::returned_by(returned),
+        Ended::Failed(reason) => Err(reason),
+        Ended::TimedOut => Err("the call's timeout passed".to_owned()),
+        Ended::Stopped => Err("the call was stopped".to_owned()),
+    };
+    End::Call(job, end)
 }

@@ -100,7 +100,7 @@ export function drawTalk(node, data, lit, picked, pick) {
   const running = new Map();
   for (const lane of data.lanes || []) {
     const role = laneRole(lane, data);
-    if (!role) continue;
+    if (!role || lane.service) continue;
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
   }

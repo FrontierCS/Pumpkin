@@ -42,6 +42,22 @@ impl Core<'_> {
         let holding = (self.jobs)
             .of(JobOf::Function(id))
             .any(|job| self.leases.holds(Caller::Job(job)));
+        if let Some(service) = self.shared.get(&function.target) {
+            if *service != crate::Availability::Available {
+                return Err(format!(
+                    "`{name}` cannot run because its shared sandbox is unavailable"
+                ));
+            }
+            if self
+                .jobs
+                .active_on(self.workflow, function.target)
+                .is_some()
+            {
+                return Err(format!(
+                    "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
+                ));
+            }
+        }
         if usage.busy || holding {
             return Err(format!(
                 "`{name}` runs one call at a time, and already has one queued or running: call \

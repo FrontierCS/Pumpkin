@@ -195,13 +195,30 @@ impl<'ir> Parser<'ir> {
 
     fn target(&mut self, at: &JsonPointer, role: RoleId, target: &'ir ir::TargetRuntime) {
         let ir::TargetRuntime {
+            lifetime,
             cwd,
             env,
             egress,
             sessions,
         } = target;
+        let lifetime = lifetime.unwrap_or(ir::TargetLifetime::Call);
+        if lifetime == ir::TargetLifetime::Work {
+            if !sessions.is_empty() {
+                self.errors.report(
+                    at.token("sessions"),
+                    "sandbox-issued sessions require a call-lifetime target",
+                );
+            }
+            if !egress.is_empty() {
+                self.errors.report(
+                    at.token("egress"),
+                    "model egress requires a call-lifetime target",
+                );
+            }
+        }
         self.hold(at, TargetId(role), sessions);
         let target = Target {
+            lifetime,
             cwd: cwd.clone(),
             env: env.clone(),
             model: egress.model.clone(),
@@ -260,7 +277,8 @@ impl<'ir> Parser<'ir> {
         let first = self
             .called
             .iter()
-            .find(|(target, agent, _)| *target == target_id && *agent == holder);
+            .find(|(target, agent, _)| *target == target_id && *agent == holder)
+            .filter(|_| self.targets[&target_id.0].lifetime == ir::TargetLifetime::Call);
         let shared = match first {
             Some((_, _, first)) => Err(self.errors.report(
                 target_at,
@@ -498,6 +516,12 @@ impl<'ir> Parser<'ir> {
     fn final_target(&mut self, target: &Name) -> Result<TargetId, Reported> {
         let at = JsonPointer::root().token("final").token("target");
         let id = self.call_target(&at, target, "the final call's target")?;
+        if self.targets[&id.0].lifetime == ir::TargetLifetime::Work {
+            return Err(self.errors.report(
+                at,
+                format!("`{target}` is a shared work sandbox: give the final call a fresh target"),
+            ));
+        }
         // So that the final call, like a job, has its target to itself.
         if let Some((_, _, function)) = self.called.iter().find(|(target, _, _)| *target == id) {
             let message = format!(

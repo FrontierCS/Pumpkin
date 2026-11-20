@@ -134,10 +134,18 @@ identifies the caller by the agent role or job registered for that session and s
 how many of its target's model requests a budget barred, and what its body returns, so the
 workflow decides the agent's feedback. The status reply's types hold nothing else.
 
-**Architecture Invariant:** the final call starts once the work sandboxes and their leases have been torn
-down. Work ends at the common deadline or once every agent has ended its work. The final body
+**Architecture Invariant:** before the final call starts, the driver confirms deletion of every
+work sandbox it claimed, including shared targets and lease runners. Work ends at the common
+deadline or once every agent has ended its work. The final body
 receives every agent role's last submission, an opaque payload or `None`. Its calls to `put`
 determine which payloads enter the target and where they go.
+
+A target with work lifetime has one sandbox across its work-phase grants. The core admits one complete
+body at a time across all those grants. The runtime supplies the caller’s role from its session.
+
+A failed provider create can allocate a sandbox without returning its identity. The driver gives
+that sandbox no session or command. It sweeps the affected providers before the final call and
+all providers at run end. An allocation can become visible only on a later sweep.
 
 ### `crates/recipe`
 

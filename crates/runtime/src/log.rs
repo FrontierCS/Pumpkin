@@ -36,7 +36,7 @@ use provider::UnixTime;
 use route::{Answer, Bar, Usage};
 use schema::ir::{AbsolutePath, Api, Argv, GpuModel, Name};
 use schema::sandbox::op::{CommandEnd, OpReply, SessionOp};
-use schema::workflow::{AgentId, Workflow};
+use schema::workflow::{AgentId, TargetId, Workflow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::Context;
@@ -59,7 +59,7 @@ pub use logged::{CallerName, Direction};
 pub(super) use progress::places;
 pub use progress::{
     AgentEnd, AgentSpan, Closed, LeaseSpan, ModelUse, Part, Place, Progress, Readout, Sandbox,
-    Tokens, Unread, Work,
+    SharedSpan, Tokens, Unread, Work,
 };
 pub(super) use roles::ir_in;
 pub use usage::{Cost, PlaceUse, Priced, TokensCost, Used};
@@ -263,6 +263,13 @@ impl<'h, H: Host> Log<'h, H> {
             Entry::AgentLaunched(id, at) => {
                 self.observed(at, agent_event("agent_started", id), &[])
             }
+            Entry::SharedStarted { target, at } => self.observed(
+                at,
+                json!({
+                    "kind": "shared_started", "shared": target.role().index(),
+                }),
+                &[],
+            ),
             Entry::ModelRequestStarted((caller, request), started) => {
                 let event = json!({
                     "kind": "model_request_started",
@@ -374,6 +381,10 @@ pub(super) enum Entry {
     /// done with it.
     AgentCollected(AgentId),
     AgentLaunched(AgentId, Duration),
+    SharedStarted {
+        target: TargetId,
+        at: Duration,
+    },
     /// A model request going upstream, at a time, as `model_request_started`; a request that the
     /// route refuses itself never goes upstream, and has none.
     ModelRequestStarted((Caller, u64), Duration),
@@ -474,6 +485,12 @@ fn event_json(event: &Event) -> Value {
             let mut event = agent_event("agent_failed", *agent);
             event["reason"] = json!(reason);
             event
+        }
+        Event::SharedFailed { target, reason } => json!({
+            "kind": "shared_failed", "shared": target.role().index(), "reason": reason,
+        }),
+        Event::SharedTornDown { target } => {
+            json!({ "kind": "shared_torn_down", "shared": target.role().index() })
         }
         Event::OpArrived {
             op,
@@ -735,6 +752,9 @@ fn action_json(workflow: &Workflow, action: &Action) -> Value {
         Action::CloseLease { lease } => json!({ "kind": "close_lease", "lease": lease.0 }),
         Action::TearDownAgent { agent } => agent_event("tear_down_agent", *agent),
         // `outcome.json` holds the outcome.
+        Action::TearDownShared { target } => {
+            json!({ "kind": "tear_down_shared", "shared": target.role().index() })
+        }
         Action::Finish { outcome: _ } => json!({ "kind": "finish" }),
         Action::Abandon => json!({ "kind": "abandon" }),
     }

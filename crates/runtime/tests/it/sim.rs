@@ -70,6 +70,10 @@ pub(crate) const UNLISTABLE: &str = "/sim/unlistable";
 
 /// A create that fails without naming the sandbox it made, which never dials.
 pub(crate) const LOST: &str = "/sim/lost";
+pub(crate) const LOST_REFUSED: &str = "/sim/lost-refused";
+
+// A platform that declines to allocate the requested instance.
+pub(crate) const UNCREATED: &str = "/sim/uncreated";
 
 /// A create that takes two seconds of real time, or until its deadline if that comes first, in
 /// which case it fails, leaving the sandbox for the run's list to find, which, where it listens,
@@ -654,6 +658,9 @@ impl Sim {
         self.holds(create)?;
         let path = self.own("the `sandboxd`", create.sandboxd.as_str())?;
         let digest = self.own("the image", create.image.as_str())?;
+        if digest == image(UNCREATED).as_str() {
+            return Err("the platform declined to create this sandbox".to_owned());
+        }
         let (gateway, presented, awaited) = met;
         let Faults {
             made,
@@ -939,7 +946,11 @@ impl Dialing {
 
 impl Faults {
     fn of(names: impl Fn(&str) -> bool) -> Self {
-        let (lost, unlistable, vanishing) = (names(LOST), names(UNLISTABLE), names(VANISHING));
+        let (lost, unlistable, vanishing) = (
+            names(LOST) || names(LOST_REFUSED),
+            names(UNLISTABLE),
+            names(VANISHING),
+        );
         let listing = if unlistable {
             Listing::Failing
         } else if vanishing {
@@ -964,7 +975,7 @@ impl Faults {
         let refusals = if names(UNDELETABLE) {
             u32::MAX
         } else {
-            u32::from(names(REFUSED_ONCE) || names(HUNG_REFUSED))
+            u32::from(names(REFUSED_ONCE) || names(HUNG_REFUSED) || names(LOST_REFUSED))
         };
         Self {
             made,
@@ -1840,10 +1851,11 @@ impl Served {
         shared: &Mutex<Status>,
     ) -> bool {
         match launch.argv.program() {
-            "exit" => {
+            "exit" | "exit-close" => {
                 let code = launch.argv.args()[0].parse().unwrap();
                 let status = ExitStatus::Code(code);
                 replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+                return launch.argv.program() == "exit-close";
             }
             "stall" => status(shared).stalled = true,
             "crash" => return true,

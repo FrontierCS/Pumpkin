@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -24,7 +23,7 @@ use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::{Label, ModelName};
 use schema::sandbox::op::OpReply;
-use schema::workflow::{AgentId, ByProvider, ByRole, Placed, RoleId, Workflow};
+use schema::workflow::{AgentId, ByProvider, ByRole, Placed, RoleId, TargetId, Workflow};
 use stdx::{Context, Deadline};
 
 mod agent;
@@ -44,6 +43,7 @@ mod record;
 mod relay;
 mod routes;
 mod sandbox;
+mod shared;
 mod sources;
 mod start;
 
@@ -58,7 +58,7 @@ pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
     LeaseSpan, LogFold, ModelUse, Part, Place, PlaceUse, Priced, Progress, Readout, Sandbox,
-    StartedOver, TakenLine, Tokens, TokensCost, Unread, Used, Work, returned_values,
+    SharedSpan, StartedOver, TakenLine, Tokens, TokensCost, Unread, Used, Work, returned_values,
 };
 use log::{Entry, Log, Targeted};
 use model::Served;
@@ -251,6 +251,7 @@ impl<'r, H: Host> Run<'r, H> {
             payloads: Payloads::create(host, &self.dir)?,
             agents: BTreeMap::new(),
             starting: BTreeMap::new(),
+            residents: BTreeMap::new(),
             unanswered: BTreeMap::new(),
             next_op: 0,
             next_model_request: 0,
@@ -314,7 +315,7 @@ struct Called {
     trees: Option<Trees>,
     // The role that runs the call, whose model route serves once the call's command or body
     // starts.
-    role: RoleId,
+    target: TargetId,
     instance: u32,
     owner: Option<AgentId>,
     // How many of the call's model requests its route has barred for a spent model budget.
@@ -342,6 +343,7 @@ struct Runtime<'r, H: Host> {
     agents: BTreeMap<AgentId, Agent>,
     // Whether teardown was requested before setup handed over the session or disposed of it.
     starting: BTreeMap<AgentId, bool>,
+    residents: BTreeMap<TargetId, shared::Resident<'r, H>>,
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
@@ -363,6 +365,7 @@ enum Input {
     Prepared(AgentId, Result<Box<Agent>, String>),
     Launched(AgentId, Duration, Result<(), String>),
     Agent(AgentId, Duration, Arrival),
+    Shared(TargetId, Duration, Arrival),
     Child(Report),
     Logged(Entry),
 }
@@ -373,6 +376,7 @@ impl Input {
         match self {
             Self::Launched(_, at, Err(_))
             | Self::Agent(_, at, _)
+            | Self::Shared(_, at, _)
             | Self::Child(
                 Report::Event(at, _)
                 | Report::CallEnded { at, .. }
@@ -553,22 +557,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<Option<(Duration, Event)>, String> {
         let (id, at, arrival) = match input {
             Input::Prepared(id, agent) => {
-                match agent {
-                    Ok(agent) => {
-                        self.agents.insert(id, *agent);
-                    }
-                    Err(detail) => {
-                        let role = &self.workflow().sandbox(id.role()).name;
-                        self.log.note(&format!(
-                            "agent `{role}`: the agent's sandbox didn't start: {detail}"
-                        ))?;
-                    }
-                }
-                if self.starting.remove(&id) == Some(true)
-                    && let Some(scope) = scope
-                {
-                    self.tear_down_agent(scope, id)?;
-                }
+                self.prepared(scope, id, agent)?;
                 return Ok(None);
             }
             Input::Launched(id, at, result) => {
@@ -584,6 +573,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     self.launched(id, at)?;
                 }
                 (id, at, arrival)
+            }
+            Input::Shared(target, at, arrival) => {
+                let event = self
+                    .residents
+                    .get_mut(&target)
+                    .and_then(|resident| resident.arrival(target, arrival));
+                return Ok(event.map(|event| (at, event)));
             }
             Input::Child(report) => return self.report(scope, core, report),
             Input::Logged(entry) => {
@@ -627,51 +623,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
         };
         Ok(event.map(|event| (at, event)))
-    }
-
-    fn report<'s>(
-        &mut self,
-        scope: Option<&'s Scope<'s, 'r>>,
-        core: &Core<'_>,
-        report: Report,
-    ) -> Result<Option<(Duration, Event)>, String> {
-        match report {
-            Report::Event(at, event) => Ok(Some((at, event))),
-            Report::CallEnded { at, job, end } => {
-                // Whole for every bar the target heard: the route reports a bar before its client
-                // hears it, so before the call can end on it, into this inbox, which keeps order.
-                let count = self.call(job).model_requests_over_budget;
-                let model_requests_over_budget = NonZeroU64::new(count);
-                let event = match end {
-                    Ok(result) => Event::CallReturned {
-                        job,
-                        result,
-                        model_requests_over_budget,
-                    },
-                    Err(reason) => Event::CallFailed {
-                        job,
-                        reason,
-                        model_requests_over_budget,
-                    },
-                };
-                Ok(Some((at, event)))
-            }
-            Report::Op {
-                at,
-                job,
-                request,
-                trees,
-            } => {
-                self.call(job).trees = Some(trees);
-                Ok(Some((at, self.op(Asked::Job(job), request))))
-            }
-            Report::Model { at, job, incoming } => {
-                let caller = Caller::Job(job);
-                self.model_request(scope, core, (caller, at), incoming)
-                    .map(|()| None)
-            }
-            Report::Undeleted(reason) => Err(reason),
-        }
     }
 
     fn op(&mut self, asked: Asked, request: Request) -> Event {
@@ -721,6 +672,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     | Action::RunCommand { .. }
                     | Action::Transfer { .. }
                     | Action::CloseLease { .. }
+                    | Action::TearDownShared { .. }
                     | Action::TearDownAgent { .. }
                     | Action::Finish { .. }
                     | Action::Abandon) => {
@@ -742,7 +694,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         scope: &'s Scope<'s, 'r>,
         core: &Core<'_>,
         actions: Vec<Action>,
-    ) -> Result<Option<Result<Outcome, String>>, String> {
+    ) -> Result<Option<Result<Outcome, String>>, Stopped> {
         let mut end = None;
         for action in actions {
             match action {
@@ -806,6 +758,11 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 }
                 Action::CloseLease { lease } => self.send_lease(lease, Message::Stop),
                 Action::TearDownAgent { agent } => self.tear_down_agent(scope, agent)?,
+                Action::TearDownShared { target } => {
+                    if let Some(resident) = self.residents.get_mut(&target) {
+                        resident.close();
+                    }
+                }
                 // Only a reply can follow `Finish` or `Abandon` in its batch: the refusal of an op
                 // taken at the hard end, by which its answer was due, so `answer` notes it unsent,
                 // and the op ends with the agent's sandbox, which the run's end deletes.
@@ -945,7 +902,10 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let _ = orders.send(message);
     }
 
-    fn stop_children(&self) {
+    fn stop_children(&mut self) {
+        for resident in self.residents.values_mut() {
+            resident.close();
+        }
         for call in self.jobs.values() {
             let _ = call.orders.send(Message::Stop);
         }
@@ -967,6 +927,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Input::Agent(..)
                 | Input::Prepared(..)
                 | Input::Launched(..)
+                | Input::Shared(..)
                 | Input::Child(
                     Report::Event(..)
                     | Report::CallEnded { .. }
