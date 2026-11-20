@@ -74,9 +74,6 @@ def qwen_code(
     state = home + "/qwen"
     body = extra_body | {"reasoning_effort": effort, "max_tokens": max_output_tokens}
 
-    # The settings, which, with the command and the environment, are those FrontierCS 2 runs Qwen
-    # Code with, but for the usage statistics, the update check and the catalog
-    # (https://github.com/FrontierCS/FrontierCS-2/blob/d247b3f15b73805e455ff93c6d043d84603ec341/candidates/qwen-code/launcher.py#L63-L154).
     settings = {
         "$version": 4,
         "security": {"auth": {"selectedType": "openai"}},

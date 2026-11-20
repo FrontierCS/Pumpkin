@@ -18,9 +18,7 @@ _ROOT = "/harness/pi-1.2.0"
 # The thinking levels the model file offers, each sent as the request's `reasoning_effort`.
 _EFFORTS = ["low", "medium", "high"]
 
-# The one provider the model file names. That file, the settings and the command are those
-# FrontierCS 2 runs Pi with
-# (https://github.com/FrontierCS/FrontierCS-2/blob/d247b3f15b73805e455ff93c6d043d84603ec341/candidates/pi-gemini/launcher.py#L69-L175).
+# The one provider the model file names.
 _PROVIDER = "pumpkin"
 
 def pi(

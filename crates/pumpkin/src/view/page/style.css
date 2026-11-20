@@ -423,9 +423,8 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .payload-file + .payload-file { margin-top: var(--s5); }
 .payload-file > h3 { font-size: var(--fs); font-weight: 600; margin: 0 0 var(--s2); }
 .payload-file > h3 .num { color: var(--dim); font-weight: 400; }
-/* A patch as the FrontierCS site's patch viewer draws one (its `fcs2-patch.css`), in Claude Code's
-   diff colours: rows on the dim tone, changed words on the full one, signs and numbers in the word
-   tone; the dark theme's tones are the light ones' darkened. */
+/* Claude Code's diff colours: rows on the dim tone, changed words on the full one, signs and
+   numbers in the word tone. The dark theme uses darker versions of the same colours. */
 .cc { --add: light-dark(rgb(199, 225, 203), rgb(31, 60, 38)); --add-w: light-dark(rgb(105, 219, 124), rgb(46, 110, 62));
   --add-t: light-dark(rgb(47, 157, 68), rgb(105, 219, 124)); --del: light-dark(rgb(253, 210, 216), rgb(74, 33, 38));
   --del-w: light-dark(rgb(255, 168, 180), rgb(128, 48, 58)); --del-t: light-dark(rgb(209, 69, 75), rgb(255, 140, 150));
