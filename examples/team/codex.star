@@ -17,8 +17,10 @@ edge {0,1,2}, all three members are in a 1-core together and vertex 3 is isolate
 must be 1 1 1 0. Check this case with your executable.
 
 Save your first working source as soon as it compiles. Exchange your test before having a draft
-scored. Two correct vectors earn full credit. Finalize your best evaluated source as soon as it
-earns full credit or you use your last evaluation. A partial score counts.
+scored. A pending evaluation has no score. Wait for it to complete and read the returned score.
+Two correct vectors earn full credit. Finalize your best evaluated source as soon as it earns
+full credit or your last evaluation completes. If you finish with partial credit, finalize that
+source before you exit.
 """
 
 ASSIGNMENTS = {
