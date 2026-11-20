@@ -40,7 +40,7 @@ Every role has these keys:
 | `image` | what `image()` returns, which `pumpkin run` builds |
 | `user` | `{"uid": …, "gid": …}`, the user its commands run as, neither of them 0 |
 | `needs` | what each of its sandboxes needs, from which the run picks its class of sandbox |
-| `runtime` | its kind and what the kind holds: `{"agent": {…}}`, `{"target": {…}}`, `{"shared": {…}}` or `{"runner": {…}}` |
+| `runtime` | its kind and what the kind holds: `{"agent": {…}}`, `{"target": {…}}` or `{"runner": {…}}` |
 
 `needs` holds `cpu_millis`, thousandths of a CPU, and `memory_bytes`, both required; `gpu`,
 `{"count": …, "model": …}` with the model as `nvidia-smi` names it; `cpu_features`, flags as
@@ -80,28 +80,30 @@ when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A 
 
 ### Targets
 
-A role that a function's body drives: each call of the job function that names it, and the final
-call if it names it, starts a fresh sandbox of it, which runs no command of its own and ends with
-the call. Each agent may name a given target from one job function. A target used by the final
-call is exclusive to it. Every target must be reached.
+A target runs the commands sent by a call's body. Its `lifetime` determines which calls share
+a sandbox. Every target must be reached. The final call has an exclusive call-lifetime target.
 
 | Key | What it is |
 | --- | --- |
+| `lifetime` | `"call"` (also when omitted) starts a sandbox for each call. `"work"` keeps one sandbox for the work phase. |
 | `cwd` | the directory each command of the body's starts in |
 | `env` | `NAME=value` entries added to each command's environment |
-| `egress` | its model route, open while a call's body runs |
-| `sessions` | the sessions it may call while a call's body runs, written as a grant of one is; each call uses them afresh |
+| `egress` | a call-lifetime sandbox's model route, open while its body runs |
+| `sessions` | the sessions a call-lifetime sandbox may open while its body runs, written as a grant of one is |
 
-### Shared targets
+Each agent may name a given call-lifetime target from one job function. Different agents may
+run independent calls of the same target concurrently.
 
-A shared role starts one sandbox alongside the agents. Its `command` runs for the work phase.
-Job grants that name this role send their bodies to that sandbox. All grants use the same
-files and resident process. The role's `cwd` and optional `env` apply to commands run by bodies.
+A work-lifetime target starts alongside the agents. Its sandbox keeps files between calls.
+Multiple grants can name it. The driver admits one complete body at a time. A competing call
+receives a busy refusal and keeps its quota. A failed body can leave files behind. If the
+sandbox's session ends, further calls fail and agents can still submit. After active calls
+end, the driver collects the sandbox's output and deletes it before starting the final call.
 
-Only one body can use the sandbox at a time. A competing call receives a busy refusal and
-keeps its quota. A failed body can leave changes in the sandbox. If the resident process or
-session ends, further calls fail and agents can still select their results. The driver deletes
-the shared sandbox before starting the final call.
+The driver authenticates the calling agent and carries the body's inputs, commands and results.
+A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
+requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
+require a call-lifetime target.
 
 ### Runners
 

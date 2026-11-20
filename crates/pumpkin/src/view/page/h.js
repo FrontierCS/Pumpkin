@@ -139,7 +139,18 @@ export async function get(path, signal) {
     const body = await response.json().catch((error) => {
       throw unarrived(key, error);
     });
-    if (key === "runs.json" || /^runs\/[^/]+\/run\.json$/.test(key)) noteHead(response, key === "runs.json" ? body.runs.some((/** @type {any} */ run) => run.error === undefined && run.live) : body.live);
+    if (key === "runs.json") {
+      noteHead(response, body.runs.some((/** @type {any} */ run) => run.error === undefined && run.live));
+    } else if (/^runs\/[^/]+\/run\.json$/.test(key)) {
+      // Exports keep an ended run's JSON when publishing a newer page.
+      for (const item of [...(body.lanes || []), ...(body.talk?.roles || [])]) {
+        if (item.kind === "shared") {
+          item.kind = "target";
+          item.lifetime = "work";
+        }
+      }
+      noteHead(response, body.live);
+    }
     return body;
   }
   const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN }, signal }).catch((error) => {

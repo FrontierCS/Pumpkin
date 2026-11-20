@@ -63,7 +63,7 @@ impl Capacity {
         for agent in workflow.agents() {
             work.insert(agent.id.role(), NonZeroU32::MIN);
         }
-        for (target, _) in workflow.shared_targets() {
+        for target in workflow.work_targets() {
             work.insert(target.role(), NonZeroU32::MIN);
         }
         let overflow = |role| {
@@ -84,7 +84,7 @@ impl Capacity {
         };
         let mut functions = BTreeMap::new();
         for (id, function) in workflow.job_functions() {
-            if workflow.target(function.target).shared.is_none() {
+            if workflow.target(function.target).lifetime == schema::ir::TargetLifetime::Call {
                 functions.insert(id, reserve(&mut work, function.target.role(), 1)?);
             }
         }
