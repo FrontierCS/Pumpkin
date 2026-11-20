@@ -204,9 +204,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         let hard_end = self.unix_hard_end;
         let mut ready = self.clock.inbox();
         let mut gates = BTreeMap::new();
-        self.start_services(scope, &ready.sender())?;
+        self.start_residents(scope, &ready.sender())?;
         let mut startup = self
-            .services
+            .residents
             .keys()
             .map(|target| self.placed.startup(target.role()))
             .max()
@@ -246,7 +246,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) {
         let mut releases = Vec::new();
         let mut failures = Vec::new();
-        let mut waiting: BTreeSet<_> = self.services.keys().copied().collect();
+        let mut waiting: BTreeSet<_> = self.residents.keys().copied().collect();
         while !gates.is_empty() || !waiting.is_empty() {
             if super::interruption::signal().is_some() {
                 return;
@@ -276,15 +276,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 }
                 Ready::Shared(target, status) => {
                     waiting.remove(&target);
-                    if let Some(service) = self.services.get_mut(&target) {
+                    if let Some(resident) = self.residents.get_mut(&target) {
                         match status {
-                            Ok(process) if at <= self.placed.startup(target.role()) => {
-                                service.process = Some(process);
+                            Ok(()) if at <= self.placed.startup(target.role()) => {}
+                            Ok(()) => {
+                                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
                             }
-                            Ok(_) => {
-                                failures.extend(service.fail(target, SHARED_EXPIRED.to_owned()));
-                            }
-                            Err(reason) => failures.extend(service.fail(target, reason)),
+                            Err(reason) => failures.extend(resident.fail(target, reason)),
                         }
                     }
                 }
@@ -300,8 +298,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             reason: SETUP_EXPIRED.to_owned(),
         }));
         for target in waiting {
-            if let Some(service) = self.services.get_mut(&target) {
-                failures.extend(service.fail(target, SHARED_EXPIRED.to_owned()));
+            if let Some(resident) = self.residents.get_mut(&target) {
+                failures.extend(resident.fail(target, SHARED_EXPIRED.to_owned()));
             }
         }
         self.pending
@@ -321,7 +319,7 @@ const SHARED_EXPIRED: &str = "the shared role's setup missed the startup deadlin
 
 pub(super) enum Ready {
     Agent(AgentId, Result<(), String>),
-    Shared(TargetId, Result<Process, String>),
+    Shared(TargetId, Result<(), String>),
 }
 
 struct Worker<C> {

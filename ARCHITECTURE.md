@@ -140,7 +140,7 @@ deadline or once every agent has ended its work. The final body
 receives every agent role's last submission, an opaque payload or `None`. The body sends a selected payload
 to a file with `put` or to a command’s standard input with `capture`.
 
-A shared target has one sandbox across its work-phase grants. The core admits one complete
+A target with work lifetime has one sandbox across its work-phase grants. The core admits one complete
 body at a time across all those grants. The runtime supplies the caller’s role from its session.
 
 A failed provider create can allocate a sandbox without returning its identity. The driver gives

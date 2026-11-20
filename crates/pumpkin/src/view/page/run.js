@@ -82,7 +82,8 @@ import { drawTalk, laneRole } from "./talk.js";
  * @typedef {object} Lane a sandbox or a call on a resident sandbox
  * @property {string} lane
  * @property {string} [caller] the caller that the lane's trace is of, `agent-<n>` or `job-<n>`; none for a lease
- * @property {"agent" | "target" | "runner" | "shared"} kind
+ * @property {"agent" | "target" | "runner"} kind
+ * @property {"work"} [lifetime]
  * @property {string} [service] the resident sandbox that ran this job
  * @property {string | null} [role]
  * @property {{ function: string } | "final"} [of] whose body a call's lane calls: a job function's, by its name, or the final call's
@@ -97,7 +98,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
  * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches
- * @typedef {{ name: string, kind: string | null, place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown" }} Role
+ * @typedef {{ name: string, kind: string | null, lifetime?: "work" | "call", place: string | null, routed: boolean, final_target: boolean, routes: Route[] | "unknown" }} Role
  * @typedef {{ api: string, upstream: string, models: Record<string, string> }} Route an entry of a role's model route: each model by the name the upstream takes it as
  * @typedef {{ from: string, to: string, kind: string, count: number, bytes: number | null, back_bytes: number | null }} Edge
  * @typedef {import("./records.js").LogRecord} LogRecord
@@ -843,6 +844,7 @@ function inspectRole(name, inspector, data) {
       {},
       h("dt", {}, "Place"),
       h("dd", {}, role.place || "-"),
+      role.lifetime ? [h("dt", {}, "Sandbox lifetime"), h("dd", {}, role.lifetime)] : null,
       role.final_target ? [h("dt", {}, "Final call"), h("dd", {}, "The final call's target, in which the body whose return is the run's result runs")] : null,
       h("dt", {}, "Model route"),
       routes(role),
@@ -888,7 +890,7 @@ function inspectLane(lane, inspector, nearest, data, callList) {
       h("dd", {}, count(answers.count, "ans") + (answers.failed ? ", " + answers.failed.toLocaleString("en-US") + " failed" : "")),
     ),
     work.length ? h("ul", {}, work) : null,
-    lane.kind === "shared" ? callList : null,
+    lane.lifetime === "work" ? callList : null,
   );
 }
 

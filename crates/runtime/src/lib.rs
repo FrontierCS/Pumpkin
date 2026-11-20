@@ -251,7 +251,7 @@ impl<'r, H: Host> Run<'r, H> {
             payloads: Payloads::create(host, &self.dir)?,
             agents: BTreeMap::new(),
             starting: BTreeMap::new(),
-            services: BTreeMap::new(),
+            residents: BTreeMap::new(),
             unanswered: BTreeMap::new(),
             next_op: 0,
             next_model_request: 0,
@@ -343,7 +343,7 @@ struct Runtime<'r, H: Host> {
     agents: BTreeMap<AgentId, Agent>,
     // Whether teardown was requested before setup handed over the session or disposed of it.
     starting: BTreeMap<AgentId, bool>,
-    services: BTreeMap<TargetId, shared::Service<'r, H>>,
+    residents: BTreeMap<TargetId, shared::Resident<'r, H>>,
     // The ops given to the core that it hasn't replied to: at most one of each sandbox's, whose
     // session hands out an op only once the one before it has been answered.
     unanswered: BTreeMap<OpId, Asked>,
@@ -576,9 +576,9 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             }
             Input::Shared(target, at, arrival) => {
                 let event = self
-                    .services
+                    .residents
                     .get_mut(&target)
-                    .and_then(|service| service.arrival(target, arrival));
+                    .and_then(|resident| resident.arrival(target, arrival));
                 return Ok(event.map(|event| (at, event)));
             }
             Input::Child(report) => return self.report(scope, core, report),
@@ -759,8 +759,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 Action::CloseLease { lease } => self.send_lease(lease, Message::Stop),
                 Action::TearDownAgent { agent } => self.tear_down_agent(scope, agent)?,
                 Action::TearDownShared { target } => {
-                    if let Some(service) = self.services.get_mut(&target) {
-                        service.close();
+                    if let Some(resident) = self.residents.get_mut(&target) {
+                        resident.close();
                     }
                 }
                 // Only a reply can follow `Finish` or `Abandon` in its batch: the refusal of an op
@@ -903,8 +903,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     }
 
     fn stop_children(&mut self) {
-        for service in self.services.values_mut() {
-            service.close();
+        for resident in self.residents.values_mut() {
+            resident.close();
         }
         for call in self.jobs.values() {
             let _ = call.orders.send(Message::Stop);

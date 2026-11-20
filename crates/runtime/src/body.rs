@@ -4,7 +4,7 @@
 //! command that a body runs has its output in a directory of its own, `log/<c>` for its `c`th, as
 //! a lease's command ([`command_dir`]), collected into the job's directory of the record once it
 //! exits, or at the call's end if the call is cut short while it runs. Fresh targets are frozen
-//! and collected as the body ends. A shared role keeps running until the work phase ends.
+//! and collected as the body ends. A work-lifetime sandbox stays available until work ends.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -14,7 +14,7 @@ use std::{fs, io};
 
 use decision::{Event, JobId, PayloadRef};
 use gateway::{Process, Put, Session};
-use schema::ir::{self, AbsolutePath, Argv, Name};
+use schema::ir::{self, AbsolutePath, Argv, Name, TargetLifetime};
 use schema::sandbox::op::{CommandEnd, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
@@ -176,7 +176,8 @@ pub(crate) fn evaluate<H: Host>(
     session: &mut Session,
     stdin: &mut Stdin,
 ) -> Ended {
-    if call.target.shared.is_none() && child.stopped() {
+    let resident = call.target.lifetime == TargetLifetime::Work;
+    if !resident && child.stopped() {
         return Ended::Stopped;
     }
     // The timeout runs from the start's reported time.
@@ -194,7 +195,7 @@ pub(crate) fn evaluate<H: Host>(
         runs_count: 0,
         gets_count: 0,
     };
-    let ready = if call.target.shared.is_some() {
+    let ready = if resident {
         target.going().map(drop)
     } else {
         Ok(())
@@ -214,12 +215,12 @@ pub(crate) fn evaluate<H: Host>(
             &mut target,
         ),
     });
-    let returned = if call.target.shared.is_some() && target.cut.is_none() {
+    let returned = if resident && target.cut.is_none() {
         target.going().and(returned)
     } else {
         returned
     };
-    if call.target.shared.is_some() {
+    if resident {
         if let Err(reason) = target.release() {
             child.event(Event::SharedFailed {
                 target: call.of.target(),
@@ -388,7 +389,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     }
 
     /// Stops and accounts for the active client before releasing this shared sandbox to another
-    /// job. An unconfirmed stop or closed session makes the service unavailable.
+    /// job. An unconfirmed stop or closed session makes the target unavailable.
     fn release(&mut self) -> Result<(), String> {
         let until = self
             .child
@@ -485,7 +486,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let command = self.runs_count;
         let dir = self.output_dir(command);
         self.runs_count += 1;
-        let put = if target.shared.is_some() {
+        let put = if target.lifetime == TargetLifetime::Work {
             self.session.put(&pumpkin_dir().join(&dir), [], by)
         } else {
             self.session
@@ -531,7 +532,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 
     fn output_dir(&self, command: u64) -> RelativePath {
         let dir = command_dir(command);
-        if self.call.target.shared.is_some() {
+        if self.call.target.lifetime == TargetLifetime::Work {
             const { RelativePath::from_static("jobs") }
                 .join(&RelativePath::from(self.call.job.0))
                 .join(&dir)

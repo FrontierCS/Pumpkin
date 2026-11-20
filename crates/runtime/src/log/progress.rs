@@ -151,7 +151,7 @@ pub struct AgentSpan {
     pub model: Option<ModelUse>,
 }
 
-/// A resident service: one sandbox for every granted call that names this role.
+/// One work-lifetime sandbox for all calls that name this target.
 #[derive(Clone, Debug, Default)]
 pub struct SharedSpan {
     pub role: String,
