@@ -2,8 +2,8 @@
 
 import itertools
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 
 def core_numbers(graph):
@@ -27,7 +27,11 @@ def score(payload, expected):
         answer = json.loads(payload)
     except (ValueError, RecursionError):
         return 0
-    return int(isinstance(answer, list) and all(type(v) is int for v in answer) and answer == expected)
+    return int(
+        isinstance(answer, list)
+        and all(type(v) is int for v in answer)
+        and answer == expected
+    )
 
 
 if __name__ == "__main__":

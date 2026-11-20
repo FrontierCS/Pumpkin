@@ -3,9 +3,8 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 CORES = [3, 3, 3, 3, 2, 2, 1, 1, 1, 1, 1, 0]
 DEGREES = [5, 5, 4, 4, 2, 3, 2, 1, 1, 2, 1, 0]
@@ -22,8 +21,11 @@ def vector(record, payload):
         answer = json.loads(data)
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("malformed submission: expected a JSON vector") from error
-    if not (isinstance(answer, list) and len(answer) == len(CORES)
-            and all(type(value) is int for value in answer)):
+    if not (
+        isinstance(answer, list)
+        and len(answer) == len(CORES)
+        and all(type(value) is int for value in answer)
+    ):
         raise ValueError(f"malformed submission: expected {len(CORES)} JSON integers")
     return answer
 
@@ -59,11 +61,17 @@ def verify(mode, record):
     events = [line["event"] for line in lines if "event" in line]
     actions = [action for line in lines for action in line.get("actions", [])]
     if mode == "reference":
-        evals = [a for a in actions if a["kind"] == "start_call" and a["grant"] == "eval"]
+        evals = [
+            a for a in actions if a["kind"] == "start_call" and a["grant"] == "eval"
+        ]
         if len(evals) != 1 or vector(record, evals[0]["payload"]) != DEGREES:
             raise ValueError("expected one evaluation of the raw degrees")
-        if not any(e["kind"] == "call_returned" and e["job"] == evals[0]["job"]
-                   and e["returned"] == [{"name": "score", "value": 0}] for e in events):
+        if not any(
+            e["kind"] == "call_returned"
+            and e["job"] == evals[0]["job"]
+            and e["returned"] == [{"name": "score", "value": 0}]
+            for e in events
+        ):
             raise ValueError("the evaluator did not score the raw degrees zero")
         if usage["model_requests"]:
             raise ValueError("the reference agent made a model request")
@@ -71,7 +79,10 @@ def verify(mode, record):
         raise ValueError("no successful agent model response with output tokens")
 
     end = outcome["work_end"]
-    if end not in ({"kind": "finalized"}, {"kind": "agent_exited", "status": {"code": 0}}):
+    if end not in (
+        {"kind": "finalized"},
+        {"kind": "agent_exited", "status": {"code": 0}},
+    ):
         raise ValueError(f"agent work ended with {end}")
     verdict = outcome["verdict"]
     if verdict["kind"] != "returned":
@@ -81,13 +92,21 @@ def verify(mode, record):
     answer = vector(record, verdict["submission"]["payload"])
     score = int(answer == CORES)
     if verdict["result"]["values"] != [{"name": "score", "value": score}]:
-        raise ValueError(f"judge score disagrees with the selected vector (expected {score})")
+        raise ValueError(
+            f"judge score disagrees with the selected vector (expected {score})"
+        )
     if mode == "reference" and score != 1:
         raise ValueError("the reference agent selected a wrong vector")
-    build = json.loads((record / "record.json").read_bytes())["pumpkin"]["commit"]["hash"]
-    places = ", ".join(f"{p['count']} on {p['provider']}/{p['class']}" for p in usage["sandboxes"])
-    print(f"{record.name} {mode}: score={score}, {usage['model_requests']} model requests, "
-          f"sandboxes deleted ({places}), Pumpkin {build}")
+    build = json.loads((record / "record.json").read_bytes())["pumpkin"]["commit"][
+        "hash"
+    ]
+    places = ", ".join(
+        f"{p['count']} on {p['provider']}/{p['class']}" for p in usage["sandboxes"]
+    )
+    print(
+        f"{record.name} {mode}: score={score}, {usage['model_requests']} model requests, "
+        f"sandboxes deleted ({places}), Pumpkin {build}"
+    )
 
 
 if __name__ == "__main__":

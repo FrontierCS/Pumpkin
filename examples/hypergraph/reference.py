@@ -1,9 +1,9 @@
 """Try the original degrees with the evaluator, then peel the graph for the final submission."""
 
 import json
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 
 
 def degrees(vertices, edges):
@@ -45,7 +45,9 @@ def main():
         time.sleep(1)
         status = ctl("status", str(job))
     if status["state"] != "completed" or status["returned"] != {"score": 0}:
-        raise RuntimeError(f"expected the evaluator to reject raw degrees, got {status}")
+        raise RuntimeError(
+            f"expected the evaluator to reject raw degrees, got {status}"
+        )
     answer.write_text(json.dumps(peel(vertices, edges)) + "\n")
     ctl("call", "final", str(answer), "--arg", "finalize=true")
 
