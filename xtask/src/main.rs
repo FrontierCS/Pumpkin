@@ -100,7 +100,7 @@ mod flags {
             cmd op-stats {
                 /// The run's record directory.
                 required run_dir: PathBuf
-                /// Only count requests from this caller, written as `agent` or `job-<n>`.
+                /// Only count requests with this caller name in the record, such as `job-17`.
                 optional --caller name: String
             }
 
