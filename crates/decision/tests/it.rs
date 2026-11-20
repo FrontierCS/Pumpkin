@@ -364,8 +364,11 @@ impl Run<'_> {
             ),
             Action::Reply {
                 op: OpId(op),
-                reply: OpReply::Refused { message },
-            } => format!("refuse op {op}: {message}"),
+                reply: OpReply::Refused { message, busy },
+            } => {
+                let busy = if *busy { " (busy)" } else { "" };
+                format!("refuse op {op}{busy}: {message}")
+            }
             Action::StartFinalCall {
                 job,
                 selections,
@@ -840,12 +843,12 @@ fn one_call_at_a_time() {
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":1,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1100 call train 10
-              refuse op 2: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 2 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             1200 status 0
               reply to op 3: {"kind":"status","job":0,"state":"queued","remaining":{"calls":1,"seconds":12000}}
             2000 call_started 0
             3100 call train 10
-              refuse op 4: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 4 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             3200 call_returned 0
             3300 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11998}}
@@ -2832,7 +2835,7 @@ fn call_leases() {
             4300 status 0
               reply to op 9: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":11998}}
             4400 call train 10
-              refuse op 10: `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 10 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
             5000 lease_ended 0
             5100 status 0
               reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
@@ -3257,7 +3260,7 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
           reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
           start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
         210 @bob call board 7
-          refuse op 2: `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
+          refuse op 2 (busy): `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
         220 call_started 0
         230 call_returned 0 count=1
         240 @bob call board 7

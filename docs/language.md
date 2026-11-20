@@ -139,9 +139,9 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 
 | Handle | Methods |
 | --- | --- |
-| `Target`, a job's or the final call's target | `put(path, payload)`, `run(argv)`, `get(path)` |
+| `Target`, a job's or the final call's target | `caller()`, `put(path, payload)`, `run(argv)`, `capture(argv, stdin = payload)`, `get(path)` |
 | `Run`, the calling agent’s state | `set_submission(payload)`, `end_work()` |
-| `Payload`, an opaque file supplied to the call | none: it is passed to `put` or `set_submission` |
+| `Payload`, an opaque file supplied to the call | passed to `put`, to `capture` as stdin, or to `set_submission` |
 
 [Workflows](workflows.md#bodies) says what each method does. A handle may be passed to a function
 of the body's file, whose parameter it fits if annotated so.

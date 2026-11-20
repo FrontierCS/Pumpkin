@@ -201,6 +201,10 @@ impl lang::Target for Driven<'_> {
         self.0.run(argv)
     }
 
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
+        self.0.capture(argv, stdin)
+    }
+
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String> {
         self.0.get(path)
     }

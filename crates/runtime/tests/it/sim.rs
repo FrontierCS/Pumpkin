@@ -7,6 +7,8 @@
 //! - `exit <code>`; `stall` (the sandbox stops answering); `crash` (its connection ends);
 //! - `print <words>` and `fill <n> <words>` (`n` `x`es first) leave their text as the command's
 //!   stdout, and `list <dir>` leaves a listing of what was put under `dir`;
+//! - `worker <code>` decodes its stdin's JSON byte array to stdout, or prints `absent` for no
+//!   stdin and nothing for an empty file. It writes a diagnostic to stderr and exits with `code`;
 //! - `judge <path> [<file>]` scores the payload put at `path` by its length, except `slow` (it
 //!   never ends) and `large` (a result over its limit), and puts its result at `file` too, if
 //!   named; with no payload it exits 1;
@@ -1712,19 +1714,20 @@ impl Files {
     }
 }
 
+fn exited(stream: u32, code: i32) -> (FromSandbox, Vec<u8>) {
+    let status = ExitStatus::Code(code);
+    (FromSandbox::Exited { stream, status }, Vec::new())
+}
+
 fn judge(
     payload: Option<&Vec<u8>>,
     stream: u32,
     replies: &mut Vec<(FromSandbox, Vec<u8>)>,
 ) -> Option<Vec<u8>> {
-    let exit = |code| {
-        let status = ExitStatus::Code(code);
-        (FromSandbox::Exited { stream, status }, Vec::new())
-    };
     match payload.map(Vec::as_slice) {
         Some(b"slow") => None,
         Some(payload) => {
-            replies.push(exit(0));
+            replies.push(exited(stream, 0));
             let result = json!({ "raw_score": payload.len() });
             let mut result = result.to_string().into_bytes();
             if payload == b"large" {
@@ -1733,7 +1736,7 @@ fn judge(
             Some(result)
         }
         None => {
-            replies.push(exit(1));
+            replies.push(exited(stream, 1));
             None
         }
     }
@@ -1853,8 +1856,7 @@ impl Served {
         match launch.argv.program() {
             "exit" | "exit-close" => {
                 let code = launch.argv.args()[0].parse().unwrap();
-                let status = ExitStatus::Code(code);
-                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+                replies.push(exited(stream, code));
                 return launch.argv.program() == "exit-close";
             }
             "stall" => status(shared).stalled = true,
@@ -1868,6 +1870,7 @@ impl Served {
                 let made = (self.caller).insert(Caller::new(stream, steps, model, record));
                 return made.next(replies);
             }
+            "worker" => self.worker(launch, stream, replies),
             "judge" => {
                 let args = launch.argv.args();
                 let payload = self.files.by_path.get(&args[0]);
@@ -1894,15 +1897,13 @@ impl Served {
                 }
                 let text = (lines.into_values()).collect::<Vec<_>>().join("\n");
                 self.printed.insert(launch.stdout.to_string(), text);
-                let status = ExitStatus::Code(0);
-                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+                replies.push(exited(stream, 0));
             }
             "bytes" => {
                 let bytes = self.files.by_path.get(&launch.argv.args()[0]);
                 self.printed
                     .insert(launch.stdout.to_string(), json!(bytes).to_string());
-                let status = ExitStatus::Code(0);
-                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+                replies.push(exited(stream, 0));
             }
             "print" | "fill" => {
                 let mut args = launch.argv.args();
@@ -1913,14 +1914,28 @@ impl Served {
                 }
                 text.push_str(&args.join(" "));
                 self.printed.insert(launch.stdout.to_string(), text);
-                let status = ExitStatus::Code(0);
-                replies.push((FromSandbox::Exited { stream, status }, Vec::new()));
+                replies.push(exited(stream, 0));
             }
             _ => {
                 self.running.insert(stream);
             }
         }
         false
+    }
+
+    fn worker(&mut self, launch: &Launch, stream: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
+        let stdout = match &launch.stdin {
+            None => b"absent".to_vec(),
+            Some(path) => match self.files.by_path[path.as_str()].as_slice() {
+                [] => Vec::new(),
+                bytes => serde_json::from_slice(bytes).unwrap(),
+            },
+        };
+        self.files.by_path.insert(launch.stdout.to_string(), stdout);
+        self.printed
+            .insert(launch.stderr.to_string(), "worker diagnostic".to_owned());
+        let code = launch.argv.args()[0].parse().unwrap();
+        replies.push(exited(stream, code));
     }
 
     fn answered(

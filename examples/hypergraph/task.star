@@ -14,9 +14,9 @@ A vertex's core number is the largest k for which it belongs to a set of vertice
 degree at least k using only edges wholly in the set. An isolated vertex has core number zero.
 
 Write cores.json as a JSON array of integers in vertex order. To score a draft, run
-/.pumpkin/bin/sandboxctl call eval cores.json and poll /.pumpkin/bin/sandboxctl status JOB
+sandboxctl call eval cores.json and poll sandboxctl status JOB
 with the returned job number. A score of 1 means every entry matches. Submit the final file with
-/.pumpkin/bin/sandboxctl call final cores.json --arg finalize=true.
+sandboxctl call final cores.json --arg finalize=true.
 """
 
 agent = codex(

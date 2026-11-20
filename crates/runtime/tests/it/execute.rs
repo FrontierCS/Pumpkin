@@ -5024,6 +5024,94 @@ fn shared_calls_keep_the_service_and_collect_each_call_once() {
     assert_eq!(sandbox["delete"]["state"], "deleted");
 }
 
+fn capture_workflow() -> Value {
+    let mut ir = shared_workflow(
+        &[
+            "ops",
+            "call train [65,10]",
+            "await 0 completed",
+            "call train 0",
+            "await 1 completed",
+            "call absent 0",
+            "await 2 completed",
+            "call fail [66]",
+            "await 3 errored",
+            "call train [255]",
+            "await 4 errored",
+            "call large 0",
+            "await 5 errored",
+            "call cleared 0",
+            "await 6 completed",
+            "call submit a finalize=true",
+        ],
+        &["slow"],
+        "capture",
+    );
+    let grants = ir["roles"][0]["runtime"]["agent"]["grants"]
+        .as_array_mut()
+        .unwrap();
+    grants[0]["job"]["keywords"] = json!({"argv": ["worker", "0"], "stdin": true});
+    for (name, argv, stdin) in [
+        ("absent", json!(["worker", "0"]), false),
+        ("fail", json!(["worker", "17"]), true),
+        ("large", json!(["fill", "1048577"]), false),
+        ("cleared", json!(["list", "/pumpkin/.stdin"]), false),
+    ] {
+        let mut grant = grants[0].clone();
+        grant["name"] = json!(name);
+        grant["job"]["keywords"] = json!({"argv": argv, "stdin": stdin});
+        grants.push(grant);
+    }
+    ir
+}
+
+#[test]
+fn captures_complete_worker_replies_on_a_shared_target() {
+    let ir = capture_workflow();
+    let dir = TestDir::new();
+    let (record, _, _) = judged(ir, &dir);
+    let log = read_log(&record);
+    let replies: Vec<_> = log
+        .iter()
+        .filter_map(|line| {
+            let event = &line["event"];
+            match event["kind"].as_str()? {
+                "call_returned" => event.pointer("/returned/0/value")?.as_str(),
+                "call_failed" => event["reason"].as_str(),
+                _ => None,
+            }
+        })
+        .collect();
+    expect![[r#"
+        [
+            "A\n",
+            "",
+            "absent",
+            "command 0 exited with code 17",
+            "command 0's stdout is not UTF-8 text",
+            "command 0's stdout exceeds the capture limit of 1048576 bytes",
+            "",
+        ]
+    "#]]
+    .assert_debug_eq(&replies);
+    let job = record.join("jobs/3/log/0");
+    assert_eq!(fs::read(job.join("command.stdout")).unwrap(), b"B");
+    assert_eq!(
+        fs::read(job.join("command.stderr")).unwrap(),
+        b"worker diagnostic"
+    );
+    assert_eq!(
+        fs::read(record.join("jobs/4/log/0/command.stdout")).unwrap(),
+        [255]
+    );
+    assert_eq!(
+        fs::metadata(record.join("jobs/5/log/0/command.stdout"))
+            .unwrap()
+            .len(),
+        1_048_577
+    );
+}
+
 #[test]
 fn shared_timeout_stops_its_client_before_the_next_call() {
     let mut ir = shared_workflow(

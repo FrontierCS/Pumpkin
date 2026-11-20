@@ -190,9 +190,12 @@ fn serve<H: Host>(
     bodies: &dyn crate::Bodies,
     mut sandbox: Option<&mut Started>,
 ) {
+    let mut stdin = crate::body::Stdin::default();
     for (call, mut child) in orders {
         let end = match sandbox.as_deref_mut() {
-            Some(started) => job::evaluate(call, bodies, &mut child, &mut started.session),
+            Some(started) => {
+                job::evaluate(call, bodies, &mut child, &mut started.session, &mut stdin)
+            }
             None => End::Call(call.job, Err("the shared sandbox never started".to_owned())),
         };
         child.report(end.report(child.clock.now()));

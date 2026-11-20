@@ -47,6 +47,7 @@ impl runtime::Bodies for Bodies<'_> {
     ) -> Result<Vec<(Name, Value)>, String> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
+            "capture" => capture(target, keywords),
             "check" => {
                 target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 let dir = keywords["dir"].as_str().unwrap();
@@ -239,4 +240,14 @@ fn board(target: &mut dyn runtime::Target) -> Result<Vec<(Name, Value)>, String>
     target.run(&serde_json::from_value(json!(["print", caller])).unwrap())?;
     let message = target.get(&path)?;
     Ok(vec![(Name::from_static("message"), json!(message))])
+}
+
+fn capture(
+    target: &mut dyn runtime::Target,
+    keywords: &Map<String, Value>,
+) -> Result<Vec<(Name, Value)>, String> {
+    let argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
+    let stdin = keywords["stdin"].as_bool().unwrap().then_some(0);
+    let reply = target.capture(&argv, stdin)?;
+    Ok(vec![(Name::from_static("reply"), json!(reply))])
 }

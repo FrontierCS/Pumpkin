@@ -289,9 +289,19 @@ impl<'h, H: Host> Log<'h, H> {
                         "kind": "target_put", "job": job, "path": path,
                         "digest": put.digest, "bytes": put.size,
                     }),
-                    Targeted::Run { command, argv } => json!({
-                        "kind": "target_run", "job": job, "command": command, "argv": argv,
-                    }),
+                    Targeted::Run {
+                        command,
+                        argv,
+                        stdin,
+                    } => {
+                        let mut event = json!({
+                            "kind": "target_run", "job": job, "command": command, "argv": argv,
+                        });
+                        if let Some(stdin) = stdin {
+                            event["stdin"] = payload_json(&stdin);
+                        }
+                        event
+                    }
                     Targeted::Ended { command, end } => json!({
                         "kind": "command_ended", "job": job, "command": command, "end": end,
                     }),
@@ -410,7 +420,11 @@ pub(super) enum Targeted {
     Put { path: AbsolutePath, put: PayloadRef },
     /// A command has started, the body's `command`th, whose output the job's `log/<command>`
     /// holds once it exits.
-    Run { command: u64, argv: Argv },
+    Run {
+        command: u64,
+        argv: Argv,
+        stdin: Option<PayloadRef>,
+    },
     /// The body's `command`th command exited, as `end` says; one that its call's end cut short
     /// has none.
     Ended { command: u64, end: CommandEnd },

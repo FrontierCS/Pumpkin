@@ -30,7 +30,7 @@ use provider::{
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
-use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Name, Resources, User};
+use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Image, Mode, Name, Resources, User};
 use schema::sandbox::op::{
     CallReply, CommandEnd, CommandStatus, Failure, FailureCode, JobReply, JobState, Last,
     LeaseRemaining, LeaseReply, LeaseState, LeaseStatusReply, NowReply, OpReply, OpsReply,
@@ -968,7 +968,58 @@ fn mute_sandboxd(dir: &Path) -> PathBuf {
 }
 
 const CTL: &str = r#"
-    ctl() { out=$(/.pumpkin/bin/sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
+    ctl() { out=$(sandboxctl "$@" 2>&1); echo "\$ sandboxctl $*: exit $?"; [ -z "$out" ] || echo "  $out"; }"#;
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn sandboxctl_on_path() {
+    check(
+        "ops-path",
+        |fixture| {
+            let sandbox = fixture.try_start(
+                &fixture.run,
+                "ops",
+                &fixture.sandboxd,
+                &image(),
+                Some(OpPayloadLimit::NONE),
+                false,
+            );
+            let mut sandbox = sandbox.unwrap();
+            let executable = Mode::new(0o755);
+            let put = [
+                Put::File(relative("sandboxctl"), executable, b"#!/bin/sh\nexit 99\n"),
+                Put::File(
+                    relative("caller"),
+                    executable,
+                    b"#!/bin/sh\nexec sandboxctl ops\n",
+                ),
+            ];
+            let home = "/pumpkin/home";
+            sandbox.session().put(&absolute(home), put, hung()).unwrap();
+            let mut lines = Vec::new();
+            for (program, cwd, path) in [
+                ("sandboxctl", "/workspace", "PATH=/pumpkin/home"),
+                ("caller", "/workspace", "PATH=/pumpkin/home"),
+                ("caller", home, "PATH="),
+            ] {
+                let launch = Launch {
+                    argv: Argv::try_from([program, "ops"].map(str::to_owned).to_vec()).unwrap(),
+                    cwd: absolute(cwd),
+                    env: Env::try_from(vec![EnvVar::try_from(path.to_owned()).unwrap()]).unwrap(),
+                    ..launch(1, "")
+                };
+                let process = sandbox.session().start(launch, hung()).unwrap();
+                let (status, asked) = serve(&mut sandbox, process, &[]);
+                lines.push(format!("{path} {program} in {cwd}: {status:?}, {asked:?}"));
+            }
+            lines
+        },
+        &expect![[r#"
+            PATH=/pumpkin/home sandboxctl in /workspace: Code(0), ["ops"]
+            PATH=/pumpkin/home caller in /workspace: Code(0), ["ops"]
+            PATH= caller in /pumpkin/home: Code(0), ["ops"]"#]],
+    );
+}
 
 // `sandboxd` closes the control socket's directory to all but the role's user, and `sandboxctl` is
 // read-only, so writing it fails the last command.
@@ -1136,6 +1187,7 @@ fn refused_calls() {
                 ctl call train --seconds 5 huge
                 ctl call submit huge --arg finalize
                 ctl call submit huge --arg a=1 --arg a=2
+                ctl call gpu.open --wait 1
                 ctl call gpu.open --arg a=1
                 ctl status 1
                 second=$(/.pumpkin/sandboxd /.pumpkin/gateway/second --ops 2>&1)
@@ -1178,13 +1230,15 @@ fn refused_calls() {
             $ sandboxctl status soon: exit 1
               sandboxctl: `soon` is not a job: name one by the number a call returned
             $ sandboxctl call train: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
+              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call train --seconds 5 huge: exit 1
-              sandboxctl: `train` takes the file that holds the payload, and no flag but `--arg`: call it as `sandboxctl call train <file> [--arg <name>=<value>]…`
+              sandboxctl: `train` takes the file that holds the payload: call it as `sandboxctl call train <file> [--arg <name>=<value>]… [--wait <seconds>]`
             $ sandboxctl call submit huge --arg finalize: exit 1
               sandboxctl: `--arg finalize` has no `=`: give it as `--arg <name>=<value>`
             $ sandboxctl call submit huge --arg a=1 --arg a=2: exit 1
               sandboxctl: `--arg a=2` names an arg given already: give each arg once
+            $ sandboxctl call gpu.open --wait 1: exit 1
+              sandboxctl: a session's `open` takes no `--wait`: give its own words and flags
             $ sandboxctl call gpu.open --arg a=1: exit 1
               sandboxctl: a session's `open` takes no `--arg`: give its own words and flags
             $ sandboxctl status 1: exit 0
@@ -1217,6 +1271,8 @@ fn turns() {
                 $ctl status 4 & sent $!; kill $!; wait $! 2>/dev/null
                 echo "the caller of status 4, which left as it waited its turn: exit $?"
                 printf ledger > payload && cp payload swapped
+                stalled=$($ctl call train payload --wait 1 2>&1)
+                echo "waiting on the held connection: exit $?: $stalled"
                 $ctl status 2 > 2.out 2>&1 & second=$!
                 $ctl status 3 > 3.out 2>&1 & third=$!
                 $ctl call train swapped > swapped.out 2>&1 & fourth=$!
@@ -1259,6 +1315,7 @@ fn turns() {
             Code(0)
             the caller of status 1, which left with its op in flight: exit 143
             the caller of status 4, which left as it waited its turn: exit 143
+            waiting on the held connection: exit 124: sandboxctl: wait expired before the admission reply: the call may have started
             status 2: exit 2: {"kind":"status","job":2,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"remaining":{"calls":1,"seconds":null}}
             status 3: exit 1: {"kind":"refused","message":"there is no job 3: name one a call returned"}
             call train swapped: exit 1: sandboxctl: /pumpkin/home/swapped: Symbolic link loop (os error 40)
@@ -1618,7 +1675,7 @@ fn status(job: u64, remaining: Remaining) -> OpReply {
         }
         _ => {
             let message = format!("there is no job {job}: name one a call returned");
-            return OpReply::Refused { message };
+            return OpReply::refused(message);
         }
     };
     OpReply::Status(StatusReply {
