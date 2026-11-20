@@ -228,6 +228,18 @@ A runner command reports its own timeout as `"timed_out"` and an exit as
 A refused operation, failed copy, unstarted command, incomplete output collection or expired
 lease fails the body. A runner that cannot be deleted fails the run.
 
+A body can call `target.with_runner("judge", _grade, target, argv)` when its judge command
+writes `/work/result.json`. The destination directory `/work/feedback` must be new on the target.
+
+```python
+def _grade(runner, target, argv):
+    result = runner.run(argv)
+    if result["end"] != {"exited": {"code": 0}}:
+        fail("judge failed")
+    runner.get("/work/result.json", "/work/feedback")
+    return json.decode(target.get("/work/feedback/result.json"))
+```
+
 A now function's body proposes these operations. When the body returns, the run applies them
 in order if they all pass validation. A refused operation leaves the state unchanged.
 `end_work()` can end a caller that submitted nothing and must come last.
