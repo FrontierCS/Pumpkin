@@ -13,37 +13,59 @@ def board_call(target: Target, payload: Payload):
     reply = target.capture(["python3", "/opt/team/board.py", "call", target.caller()], stdin = payload)
     return json.decode(reply)
 
+JUDGE = "/opt/team/judge.py"
+COMPILE = "sha256sum src/solution.cpp && exec g++ --std=c++17 src/solution.cpp --output solution"
+
+# The extra byte lets the judge reject an oversized answer, within the runner's stdout tail.
+SOLVE = 'ulimit -f 1; printf "%s" "$1" | ./solution > answer && head --bytes=1025 answer'
+
+def _answer(runner, graph):
+    result = runner.run(["sh", "-c", SOLVE, "solve", graph], timeout_seconds = 3)
+    return result["stdout_tail"] if result["end"] == {"exited": {"code": 0}} else None
+
+def _run_source(runner, directory, inputs):
+    runner.put(directory, "/pumpkin/home/src")
+    built = runner.run(["sh", "-c", COMPILE], timeout_seconds = 20)
+    if built["end"] != {"exited": {"code": 0}}:
+        return None
+    return [_answer(runner, graph) for graph in inputs]
+
+def _score_source(target, role, source):
+    if source == None:
+        return {"role": role, "digest": None, "status": "missing", "score": None}
+    directory = "/pumpkin/in/" + role
+    path = directory + "/solution.cpp"
+    target.put(path, source)
+    prepared = json.decode(target.capture(["python3", JUDGE, "prepare", path]))
+    inputs = prepared["inputs"]
+    outputs = target.with_runner("cpp", _run_source, directory, inputs) if inputs != None else None
+    grade = json.decode(target.capture(["python3", JUDGE, "grade", json.encode(outputs)]))
+    return {"role": role, "digest": prepared["digest"]} | grade
+
 def evaluate(target: Target, payload: Payload):
-    """Compiles a draft source in a fresh runner and scores the resulting program.
+    """Compiles and grades the caller's draft in a fresh runner.
 
     Args:
-      target: the trusted evaluator with a compiler session.
+      target: the trusted evaluator with a compiler grant.
       payload: the draft C++ source.
 
     Returns:
       The draft's status and score.
     """
-    reply = target.capture(["python3", "/opt/team/judge.py", "draft"], stdin = payload)
-    return json.decode(reply)
-
-def _stage(target, role, chosen):
-    if chosen == None:
-        return [role, ""]
-    path = "/pumpkin/in/" + role + ".cpp"
-    target.put(path, chosen)
-    return [role, path]
+    row = _score_source(target, target.caller(), payload)
+    return {"status": row["status"], "score": row["score"]}
 
 def judge(target: Target, submissions):
-    """Scores each selected program and returns the best individual score.
+    """Scores the selected programs, keeping a result row for every agent.
 
     Args:
-      target: the trusted judge with a compiler session.
+      target: the trusted judge with a compiler grant.
       submissions: maps each agent role to its C++ payload or None.
 
     Returns:
-      The team score and each role's source digest, status and score.
+      The highest score and the per-role scores, digests and statuses.
     """
+    rows = [_score_source(target, role, source) for role, source in submissions.items()]
     result = "/pumpkin/out/result.json"
-    args = [arg for role, chosen in submissions.items() for arg in _stage(target, role, chosen)]
-    target.run(["python3", "/opt/team/judge.py", "final", result] + args)
+    target.run(["python3", JUDGE, "final", result, json.encode(rows)])
     return json.decode(target.get(result))

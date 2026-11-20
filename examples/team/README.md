@@ -19,11 +19,12 @@ The output is `2 2 2 0`. Alice and Bob work in separate sandboxes, share one boa
 each finalize only their own C++ source. Alice publishes a test graph and its core vector.
 Bob runs his program on her graph and sends Alice the message ID and his observed output.
 
-The final body receives each role’s selected source or a missing value. It writes the selected
-files into the judge sandbox. The judge records each source’s SHA-256 digest and opens a
-fresh compiler sandbox for each program. It compiles the source and runs it on the graph above and the
-[single-agent example's fixture](../hypergraph/graph.json). The judge checks each output
-against an exhaustive enumeration of vertex subsets. One complete correct vector earns one
+The final body receives each role’s source or a missing value. It stages each selected file in the
+judge sandbox, where a trusted Python worker checks its encoding and computes its SHA-256 digest.
+The body uses `target.with_runner("cpp", ...)` to copy that source into a fresh compiler sandbox,
+compile it once and run it on both the graph above and the [single-agent fixture](../hypergraph/graph.json).
+Pumpkin closes the runner when the callback finishes. The Python worker compares the outputs with
+its own exhaustive enumeration of vertex subsets. One complete correct vector earns one
 point. The team score is the greater individual score.
 
 These small graphs check correctness. Compiler startup and sandbox overhead dominate the
