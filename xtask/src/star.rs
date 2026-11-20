@@ -26,11 +26,11 @@ pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
 /// Makes [`LINK`] a symbolic link to the pinned buildifier, fetched if need be, replacing what is
 /// there, and returns the pinned one's path.
 pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
-    let buildifier = buildifier(cargo)?;
     let link = Path::new(LINK);
     let Some(dir) = link.parent() else {
-        unreachable!("{LINK} has no parent, though cargo makes a relative `[env]` value absolute")
+        return Err(format!("PUMPKIN_BUILDIFIER names `{LINK}`: give the path of a file").into());
     };
+    let buildifier = buildifier(cargo)?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
     // Made beside it, then renamed over it, so that a test never finds the link missing. The
     // target is absolute, so that the link in a copy of the tree, as cargo-mutants makes,
