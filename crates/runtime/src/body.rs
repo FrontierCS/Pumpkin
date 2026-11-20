@@ -113,6 +113,15 @@ pub trait Target {
         to: AbsolutePath,
     ) -> Result<(), String>;
 
+    /// Copies the runner's file or tree into a new directory on the target.
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
     /// Waits for a started command's exit or timeout and both recorded output streams.
     fn runner_run(
         &mut self,
@@ -532,6 +541,17 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         Ok((self.timely(put)?, supplied))
     }
 
+    fn runner_copy(&mut self, grant: &Name, op: SessionOp) -> Result<(), String> {
+        let status = self.scoped(grant, Waiting::Work, op)?;
+        let Some(Last::Transfer(TransferStatus { end: Some(end), .. })) = status.last else {
+            return Err("the runner's copy has no receipt".to_owned());
+        };
+        match end {
+            TransferEnd::Moved { .. } => Ok(()),
+            TransferEnd::Failed(reason) => Err(reason),
+        }
+    }
+
     fn command(&mut self, argv: &Argv, input: Option<usize>) -> Result<(u64, ExitStatus), String> {
         let by = self.going()?;
         let target = self.call.target;
@@ -616,14 +636,17 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
             to,
             replace: false,
         };
-        let status = self.scoped(grant, Waiting::Work, op)?;
-        let Some(Last::Transfer(TransferStatus { end: Some(end), .. })) = status.last else {
-            return Err("the runner's copy has no receipt".to_owned());
-        };
-        match end {
-            TransferEnd::Moved { .. } => Ok(()),
-            TransferEnd::Failed(reason) => Err(reason),
-        }
+        self.runner_copy(grant, op)
+    }
+
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.runner_copy(grant, SessionOp::Get { lease, from, to })
     }
 
     fn runner_run(

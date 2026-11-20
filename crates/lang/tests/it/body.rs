@@ -42,6 +42,17 @@ impl lang::Target for Logged {
         Ok(())
     }
 
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.push(format!("{grant} {lease} get {from} at {to}"));
+        Ok(())
+    }
+
     fn runner_run(
         &mut self,
         grant: &Name,
@@ -230,7 +241,9 @@ fn runner_returns_its_callback_value() {
 #- //score.star
 def check(runner: Runner, source):
     runner.put(source, "/work/src")
-    return runner.run(["compile"], timeout_seconds = 2)
+    result = runner.run(["compile"], timeout_seconds = 2)
+    runner.get("/work/result", "/out")
+    return result
 def judge(target: Target, payload: Payload):
     return target.with_runner("cpp", check, "/source")
 "#,
@@ -238,6 +251,7 @@ def judge(target: Target, payload: Payload):
             cpp open
             cpp 0 put /source at /work/src
             cpp 0 run compile with timeout Some(2)
+            cpp 0 get /work/result at /out
             cpp close 0
             returns end={"exited":{"code":7}} stderr_tail="diagnostic" stdout_tail="answer""#]],
     );

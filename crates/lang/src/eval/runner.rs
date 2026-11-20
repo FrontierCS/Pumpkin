@@ -18,6 +18,7 @@ use crate::{Loader, json};
 
 #[derive(Clone, Copy)]
 pub(crate) enum RunnerMethod {
+    Get,
     Put,
     Run,
 }
@@ -91,6 +92,14 @@ impl<L: Loader> Evaluation<'_, '_, L> {
             )
         })?;
         match method {
+            RunnerMethod::Get => {
+                let [from, to] = positional::<2>(&name.text, Takes::exactly(2), call)?;
+                let from = absolute("the runner's source path", from)?;
+                let to = absolute("the target's destination directory", to)?;
+                self.runner_target()
+                    .runner_get(&grant, lease, from, to)
+                    .map_err(|why| Fault::new(at, why))?;
+            }
             RunnerMethod::Put => {
                 let [tree, to] = positional::<2>(&name.text, Takes::exactly(2), call)?;
                 let tree = absolute("the target's source directory", tree)?;
@@ -98,10 +107,6 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                 self.runner_target()
                     .runner_put(&grant, lease, tree, to)
                     .map_err(|why| Fault::new(at, why))?;
-                Ok(Value {
-                    kind: Kind::None,
-                    span: at,
-                })
             }
             RunnerMethod::Run => {
                 let given = place(&name.text, &["argv", "timeout_seconds"], 1, call)?;
@@ -114,9 +119,13 @@ impl<L: Loader> Evaluation<'_, '_, L> {
                     .runner_target()
                     .runner_run(&grant, lease, argv, timeout_seconds)
                     .map_err(|why| Fault::new(at, why))?;
-                json::value_of(&serde_json::json!(output), at, call.budget)
+                return json::value_of(&serde_json::json!(output), at, call.budget);
             }
         }
+        Ok(Value {
+            kind: Kind::None,
+            span: at,
+        })
     }
 }
 
