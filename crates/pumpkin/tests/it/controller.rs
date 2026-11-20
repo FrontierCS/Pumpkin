@@ -2101,7 +2101,7 @@ fn send_refused_partial() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 6 of the task's 7 files: sending 2.3 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
@@ -2483,7 +2483,7 @@ fn send_changed_file() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
             exit status: Some(0)
             pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 6 of the task's 7 files: sending 2.3 KiB
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 2.9 KiB
             pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
             pumpkin: to follow it: pumpkin wait <id>
             pumpkin: to stop it: pumpkin cancel <id>
