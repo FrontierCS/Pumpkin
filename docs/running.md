@@ -89,7 +89,7 @@ the random digits of its id are fresh each time.
 
 `pumpkin wait <run>` says each milestone of the run as its record logs it, and once it has ended,
 its summary: how long each sandbox and call took, the model requests and their tokens, what each
-budget spent, the cost, and the values its result shows. It exits 0 if the run finished with a
+budget spent, the estimated cost, and the values its result shows. It exits 0 if the run finished with a
 result, 3 if it finished without one, and 1 if it failed, was interrupted or was lost. Ending
 `wait` does not stop the run. `run --wait` starts a run and then follows it as `wait` does. Both
 print the milestones and the summary on their standard error, and nothing on their standard output
@@ -113,14 +113,16 @@ pumpkin: run 20261116-195228-234cd166 started 1s after it was asked for, and ran
      0:00 agent on local/container, started at 0:00, exited 0 at 0:01; its work ended at 0:01
      0:00 count job 0 of agent 0 on local/container, started after 0s, ran 0s: lines=1 bytes=6
      0:01 final call job 1 on local/container, started after 0s, ran 0s: score=6 lines=1
-  sandboxes: 3 on local/container, 3s in all, 3 created, all deleted
+  sandboxes: 3 on local/container, 3s in all, no hourly rate, 3 created, all deleted
+  estimated cost: unavailable (no priced usage)
 pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1); its record is /home/alice/tasks/.pumpkin/runs/20261116-195228-234cd166
 pumpkin: to run it again: pumpkin run /home/alice/tasks/examples/hello/task.star
 ```
 
 `pumpkin ls` lists the runs that are live or ended within the last day, a line each, then their
 totals: a live run's phase and the bound at which Pumpkin ends it, an ended run's state, how long
-it ran, its cost and its result's values. `pumpkin ls 20261116` lists a day's runs.
+it ran, its [estimated cost](record.md#estimated-cost) and its result's values. `pumpkin ls 20261116` lists a
+day's runs.
 
 ```console
 $ ./pumpkin ls

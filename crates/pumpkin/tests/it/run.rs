@@ -714,10 +714,10 @@ fn usage() {
                               if given, `usd_per_mtok`, what its tokens cost in US dollars a
                               million: `input` and `output`, and `cached` and `cache_write`,
                               the input that the upstream read from its cache and wrote to
-                              it. Reasoning is output. A model without `usd_per_mtok` has no
-                              cost, and nor has one whose responses report a kind of token
-                              that its prices lack. No model is listed twice, under one
-                              upstream or two.
+                              it. Reasoning is output. The estimate includes the reported kinds
+                              that have rates. If cache reads and writes together exceed
+                              input, the estimate omits that model's tokens. No model is
+                              listed twice, under one upstream or two.
 
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
@@ -1057,7 +1057,8 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
               model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=1); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
             $ pumpkin wait <id> --runs runs
@@ -1065,7 +1066,8 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=3
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=3); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/submits/task.star
             $ pumpkin wait <id> --runs runs
@@ -1073,7 +1075,8 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
                 18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
                    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -2036,7 +2039,8 @@ fn runs_on_docker() {
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=1
                         model: 1 request, all answered 200; no response reported its tokens; of 1 good answer, by the median, <t> to the end
               model: 2 requests, all answered 200; dropped request headers: user-agent; no response reported its tokens; of 2 good answers, by the median, <t> to the end
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=1); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/asks/task.star
             record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/answer, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/answer, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, model/0.request, model/0.response, model/1.request, model/1.response, model/items/06651be039f9e5a47490f8ea118fd0931e7824702c693557a77a7df2d5114aa4, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/asks/final.star, sources/task/asks/submit.star, sources/task/asks/task.star, sources/task/lib/train.star
@@ -2061,7 +2065,8 @@ fn runs_on_docker() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=0
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=0); its record is <scratch>/.pumpkin/runs/<id>
             pumpkin: to run it again: pumpkin run --sandboxd <sandboxd> <scratch>/exits/task.star
             record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/out/, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/, provider.json, record.json, sources/task/exits/final.star, sources/task/exits/submit.star, sources/task/exits/task.star, sources/task/lib/train.star
@@ -2081,7 +2086,8 @@ fn runs_on_docker() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: score=3
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=3); its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/pumpkin.toml --sandboxd <sandboxd> <scratch>/submits/task.star
             record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/result.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/result.json, jobs/0/sandbox.json, log.jsonl, outcome.json, payloads/44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674, provider.json, record.json, sources/task/lib/train.star, sources/task/submits/final.star, sources/task/submits/submit.star, sources/task/submits/task.star
@@ -2101,7 +2107,8 @@ fn runs_on_docker() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
                  <t> final call job 0 on local/container, started after <t>, ran <t>: failed: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)\n    18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}\n       |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    in `final_call()`, called at fails/final.star:3:5
-              sandboxes: 2 on local/container, <t> in all, 2 created, all deleted
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished without a result: the final call gave none (error: fails/final.star:18:34: getting /pumpkin/out/result.json failed: /pumpkin/out/result.json: No such file or directory (os error 2)
                 18 |     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
                    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -2193,7 +2200,8 @@ fn writes_only_in_its_workspace() {
              <t> agent on local/container, started at <t>, exited 0 at <t>; its work ended at <t>
              <t> count job 0 of agent 0 on local/container, started after <t>, ran <t>: lines=1 bytes=6
              <t> final call job 1 on local/container, started after <t>, ran <t>: score=6 lines=1
-          sandboxes: 3 on local/container, <t> in all, 3 created, all deleted
+          sandboxes: 3 on local/container, <t> in all, no hourly rate, 3 created, all deleted
+          estimated cost: unavailable (no priced usage)
         pumpkin: run <id> finished with a result (score=6 lines=1); its record is <scratch>/.pumpkin/runs/<id>
         pumpkin: to run it again: pumpkin run --config <scratch>/pumpkin.toml <scratch>/examples/hello/task.star
         record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/got/1/counts.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/got/1/result.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/result.json, jobs/1/sandbox.json, log.jsonl, outcome.json, payloads/5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03, provider.json, record.json, sources/task/hello/count.star, sources/task/hello/final.star, sources/task/hello/task.star, sources/task/submit.star
@@ -2601,7 +2609,8 @@ fn ops_on_docker() {
                  <t> train job 0 of agent 0 on local/container, started after <t>, ran <t>: failed: the call's timeout passed (timed out)
                  <t> train job 1 of agent 0 on local/container, started after <t>, ran <t>: bytes=6
                  <t> final call job 2 on local/container, started after <t>, ran <t>: score=6
-              sandboxes: 4 on local/container, <t> in all, 4 created, all deleted
+              sandboxes: 4 on local/container, <t> in all, no hourly rate, 4 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished with a result (score=6); its record is <scratch>/<runs>/<id>
             pumpkin: to run it again: pumpkin run --runs '<scratch>/<runs>' --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/ops/task.star
             record: agents/agent/log/command.stderr, agents/agent/log/command.stdout, agents/agent/out/, agents/agent/sandbox.json, driver.log, driver.pid, ir.json, jobs/0/log/0/command.stderr, jobs/0/log/0/command.stdout, jobs/0/out/, jobs/0/sandbox.json, jobs/1/got/1/result.json, jobs/1/log/0/command.stderr, jobs/1/log/0/command.stdout, jobs/1/out/, jobs/1/sandbox.json, jobs/2/got/1/result.json, jobs/2/log/0/command.stderr, jobs/2/log/0/command.stdout, jobs/2/out/evidence.txt, jobs/2/out/result.json, jobs/2/sandbox.json, log.jsonl, outcome.json, payloads/5e0cf7bd1dfa3831788b0cf6dedcdd228fba6f34dc238d371e746567e80bc7b6, payloads/b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd, provider.json, record.json, sources/task/lib/train.star, sources/task/ops/final.star, sources/task/ops/submit.star, sources/task/ops/task.star

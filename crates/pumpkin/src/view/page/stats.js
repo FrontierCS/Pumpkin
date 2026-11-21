@@ -45,11 +45,11 @@ const TIMES = [
 
 /** @type {Record<"step" | "thread", Column>} */
 const COST = {
-  step: { name: "usd", head: "Cost", title: "What its tokens cost at its model's prices", text: usd, class: "usd" },
+  step: { name: "usd", head: "Est. cost", title: "Estimated token cost at the recorded model rates", text: usd, class: "usd" },
   thread: {
     name: "usd",
-    head: "Cost",
-    title: "The sum of its steps' costs",
+    head: "Est. cost",
+    title: "Estimated token cost for steps with complete pricing",
     text: (v, rows, r) => usd(v) + (v !== null && rows.usd_unknown[r] ? "+" : ""),
     note: (rows, r) => (rows.usd_unknown[r] ? unknownCost(rows.usd_unknown[r]) : null),
     class: "usd",
@@ -97,7 +97,7 @@ function totalsLine(t) {
     part("Steps", number(t.steps), "Its steps, in " + plural(t.threads, "thread") + " and " + plural(t.turns, "turn")),
     part("Threads", number(t.threads), "Its threads"),
     part("Tokens", count(t.input, "tok") + " in · " + percent(t.cache_hit) + " cached · " + (t.cache_write === null ? "" : count(t.cache_write, "tok") + " written to the cache · ") + count(t.output, "tok") + " out", "The sums of the tokens its steps report"),
-    part("Cost", usd(t.usd), "The sum of its steps' costs" + (t.usd_unknown ? "; " + unknownCost(t.usd_unknown) : "")),
+    part("Token estimate", usd(t.usd) + (t.usd !== null && t.usd_unknown ? "+" : ""), "Estimated token cost for steps with complete pricing" + (t.usd_unknown ? "; " + unknownCost(t.usd_unknown) : "")),
     part("Model", time(t.model_ns), "The sum of its steps' model times"),
     part("Between", time(t.queue_ns), "The sum of the times between steps: tool calls and the harness"),
     part("TTFT", time(t.median_to_first_token_ns), "The median time to the first token"),

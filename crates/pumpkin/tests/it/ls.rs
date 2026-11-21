@@ -570,7 +570,8 @@ fn says_unread_lines() {
                  <t> solver on aws/judge, started at <t>; its work ended at <t>
                         model: 0 requests
               model: 0 requests
-              sandboxes: 1 on aws/judge, <t> in all, 1 created, all deleted
+              sandboxes: 1 on aws/judge, <t> in all, no hourly rate, 1 created, all deleted
+              estimated cost: unavailable (no priced usage)
               4 parts of its log can't be read by this pumpkin, the first at line 5, its event: missing field `status`
             pumpkin: run 20261110-110000-0000000b finished without a result: the final call gave none (error: solver submitted nothing); its commands' logs can't be found: <scratch>/runs/20261110-110000-0000000b/log.jsonl names no final call: expected a `start_final_call`, among the parts that this pumpkin can read; 4 of its parts can't be read, the first at line 5, its event: missing field `status`; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star

@@ -16,6 +16,7 @@ use super::call::CallOf;
 use super::progress::{ModelUse, Place, Progress, Sandbox, Tokens};
 use super::{logged, nanos};
 use crate::TokenPrices;
+use crate::price::TokenCost;
 
 impl Progress {
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
@@ -139,13 +140,16 @@ impl ModelUse {
             let unreported = self.unreported.get(key).copied().unwrap_or(0);
             match (prices.get(model), self.by_model.get(key)) {
                 (None, _) => cost.unpriced.push(model.clone()),
-                (Some(prices), Some(tokens)) => match prices.usd(tokens) {
-                    Some(usd) => {
-                        *cost.usd.get_or_insert(0.0) += usd;
-                        cost.unreported += unreported;
+                (Some(prices), Some(tokens)) => {
+                    let subtotal = prices.cost(tokens);
+                    if !matches!(subtotal, TokenCost::Complete(_)) {
+                        cost.unpriced.push(model.clone());
                     }
-                    None => cost.unpriced.push(model.clone()),
-                },
+                    if let TokenCost::Complete(usd) | TokenCost::Partial(usd) = subtotal {
+                        *cost.usd.get_or_insert(0.0) += usd;
+                    }
+                    cost.unreported += unreported;
+                }
                 // Its responses reported no tokens, whose cost is unknown, never zero.
                 (Some(_), None) => cost.unreported += unreported,
             }
@@ -160,11 +164,9 @@ impl ModelUse {
 /// What the tokens that responses reported cost, and what that leaves out.
 #[derive(Debug)]
 pub struct TokensCost {
-    /// What the tokens that responses reported cost, in US dollars; `None` if no model that
-    /// reported tokens has a price.
+    /// The reported tokens with a known price, in US dollars.
     pub usd: Option<f64>,
-    /// The models that have no price, or whose tokens their prices can't cost
-    /// ([`TokenPrices::usd`]).
+    /// The models whose reported tokens could only be priced in part, or not at all.
     pub unpriced: Vec<String>,
     /// How many responses of the models that have a price went with tokens unreported
     /// ([`ModelUse::unreported`]), whose cost `usd` leaves out in whole or in part.

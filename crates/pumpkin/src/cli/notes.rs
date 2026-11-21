@@ -522,10 +522,10 @@ settings:
                 if given, `usd_per_mtok`, what its tokens cost in US dollars a
                 million: `input` and `output`, and `cached` and `cache_write`,
                 the input that the upstream read from its cache and wrote to
-                it. Reasoning is output. A model without `usd_per_mtok` has no
-                cost, and nor has one whose responses report a kind of token
-                that its prices lack. No model is listed twice, under one
-                upstream or two.
+                it. Reasoning is output. The estimate includes the reported kinds
+                that have rates. If cache reads and writes together exceed
+                input, the estimate omits that model's tokens. No model is
+                listed twice, under one upstream or two.
 
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.

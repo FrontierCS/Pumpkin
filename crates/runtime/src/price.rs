@@ -100,6 +100,13 @@ impl AllPrices {
     }
 }
 
+/// The cost in US dollars of the reported tokens whose prices are known.
+pub(crate) enum TokenCost {
+    Complete(f64),
+    Partial(f64),
+    Unknown,
+}
+
 impl TokenPrices {
     /// These prices, if they price every kind of token; else the kinds they give no price, by
     /// their names in the configuration, as a list for a message (`` `cached` or `cache_write` ``).
@@ -127,6 +134,13 @@ impl TokenPrices {
     /// count tokens of has no price, or they count more input read from and written to the
     /// cache than input. A count that no response gave is 0.
     pub fn usd(&self, tokens: &Tokens) -> Option<f64> {
+        match self.cost(tokens) {
+            TokenCost::Complete(usd) => Some(usd),
+            TokenCost::Partial(_) | TokenCost::Unknown => None,
+        }
+    }
+
+    pub(crate) fn cost(&self, tokens: &Tokens) -> TokenCost {
         let Tokens {
             reported: _,
             input,
@@ -136,21 +150,39 @@ impl TokenPrices {
             reasoning: _,
         } = *tokens;
         let (cached, cache_write) = (cached.unwrap_or(0), cache_write.unwrap_or(0));
-        let uncached = input.checked_sub(cached)?.checked_sub(cache_write)?;
-        // A kind without a price costs nothing only if none of its tokens were used.
-        let cost = |count: u64, price: Option<f64>| match (count, price) {
-            (0, _) => Some(0.0),
-            (_, None) => None,
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "exact below 2^53 tokens, past what any run uses"
-            )]
-            (count, Some(price)) => Some(count as f64 * price),
+        let Some(uncached) = input
+            .checked_sub(cached)
+            .and_then(|remaining| remaining.checked_sub(cache_write))
+        else {
+            return TokenCost::Unknown;
         };
-        let usd = cost(uncached, Some(self.input))?
-            + cost(cached, self.cached)?
-            + cost(cache_write, self.cache_write)?
-            + cost(output, Some(self.output))?;
-        Some(usd / 1e6)
+        let kinds = [
+            (uncached, Some(self.input)),
+            (cached, self.cached),
+            (cache_write, self.cache_write),
+            (output, Some(self.output)),
+        ];
+        let mut subtotal = None;
+        let mut complete = true;
+        for (count, price) in kinds {
+            if count == 0 {
+                continue;
+            }
+            if let Some(price) = price {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "exact below 2^53 tokens, past what any run uses"
+                )]
+                let amount = count as f64 * price;
+                *subtotal.get_or_insert(0.0) += amount;
+            } else {
+                complete = false;
+            }
+        }
+        match (complete, subtotal) {
+            (true, sum) => TokenCost::Complete(sum.unwrap_or(0.0) / 1e6),
+            (false, Some(sum)) => TokenCost::Partial(sum / 1e6),
+            (false, None) => TokenCost::Unknown,
+        }
     }
 }
