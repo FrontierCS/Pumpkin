@@ -47,9 +47,7 @@ pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
         "HEAD".to_owned()
     };
     let commit = cmd!(sh, "git rev-parse --verify {revision}").read()?;
-    let launcher = cmd!(sh, "git show {commit}:deploy/pumpkin")
-        .output()?
-        .stdout;
+    let launcher = cmd!(sh, "git show {commit}:dist/pumpkin").output()?.stdout;
     let release = Release {
         tag,
         commit,
@@ -80,7 +78,7 @@ fn package(cargo: &Cargo, sh: &Shell, output: &Path, release: &Release<'_>) -> R
     build(cargo, Some(sh.current_dir().join("dist")), MUSL)?;
     sh.write_file("dist/commit", format!("{commit}\n"))?;
     sh.copy_file(
-        root().join("deploy/buildifier-LICENSE"),
+        root().join("dist/buildifier-LICENSE"),
         "dist/buildifier-LICENSE",
     )?;
     // The upstream formatter includes compressed Go debug sections in its release binary.
@@ -160,7 +158,7 @@ fn publish_assets(sh: &Shell, release: &Release<'_>) -> Result<()> {
         launcher,
     } = release;
     if sh.read_binary_file("pumpkin")? != *launcher {
-        return Err(format!("pumpkin differs from deploy/pumpkin at tag {tag}").into());
+        return Err(format!("pumpkin differs from dist/pumpkin at tag {tag}").into());
     }
     if sh.read_file("pumpkinversion")? != release.pin(sh)? {
         return Err(
