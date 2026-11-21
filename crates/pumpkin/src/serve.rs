@@ -307,9 +307,7 @@ fn mark_install_used(install: &Path) {
     }
 }
 
-/// Marks `install` as used at `now`: sets its modification time, by which each prune of installs
-/// tells how long ago it was used.
-pub(crate) fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
+fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
     let touched = File::open(install).and_then(|dir| dir.set_modified(now));
     touched.context(install.display())
 }

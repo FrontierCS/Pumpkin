@@ -268,6 +268,7 @@ fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
         symlink("pumpkin", &boot).context(boot.display())?;
         fs::rename(made.path(), &bin).context(bin.display())?;
     }
-    crate::serve::mark_used(&root, SystemTime::now())?;
+    let marked = File::open(&root).and_then(|root| root.set_modified(SystemTime::now()));
+    marked.context(root.display())?;
     Ok(pumpkin)
 }
