@@ -13,6 +13,7 @@ use stdx::{Context as _, Deadline};
 
 use super::{BUILDS, JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
 use crate::link::{JobKind, JobStart, StartAnswer};
+use crate::member::Member;
 use crate::{manifest, workspace};
 
 // The bound on asking systemd to start a job.
@@ -21,7 +22,13 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 // In the job's persistent directory once systemd has confirmed the start.
 const STARTED: &str = "started";
 
-pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAnswer, String> {
+/// Starts the job of `start`, with the credentials in `body`, as `member`'s if it is a run's.
+pub(crate) fn start(
+    home: &Path,
+    start: JobStart,
+    body: &[u8],
+    member: Option<&Member>,
+) -> Result<StartAnswer, String> {
     let id = RunTag::try_from(start.id.clone())?;
     let name = super::unit_name(&id);
     let id = id.as_str();
@@ -65,6 +72,10 @@ pub(crate) fn start(home: &Path, start: JobStart, body: &[u8]) -> Result<StartAn
     let workspace = home.join(workspace::DIR);
     symlink(&workspace, tree.path().join(workspace::DIR)).context(tree.path().display())?;
     write_sent(&start, sent.path(), body)?;
+    // Only a run's job is listed with its member.
+    if let (JobKind::Run, Some(member)) = (start.kind, member) {
+        super::write_member(job.path(), member)?;
+    }
     let answer = launch(
         &pumpkin,
         &name,

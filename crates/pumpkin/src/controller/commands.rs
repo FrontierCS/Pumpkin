@@ -16,7 +16,8 @@ use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
 use crate::link::{
-    Ask, CancelAnswer, CancelRequest, JobKind, JobsRequest, ReapRequest, Unanswered,
+    Ask, CancelAnswer, CancelRequest, Job, JobKind, Jobs, JobsRequest, Owner, ReapRequest,
+    Unanswered,
 };
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
@@ -95,19 +96,63 @@ pub(crate) fn wait(
     printed: Printed,
 ) -> Result<ExitCode, String> {
     let mut reached = Reached::reach(&client.controller)?;
-    let (build, id) = job_id(&mut reached, run)?;
+    let (build, id) = job_id(&mut reached, run, Among::Every)?;
     follow(&mut reached, &build, &id, None, printed)
 }
 
-/// The id of the job on the controller that `run` names, which may be a prefix of it.
-fn job_id(reached: &mut Reached, run: &str) -> Result<(Build, String), String> {
+/// Whose jobs on the controller a run is named among.
+#[derive(Clone, Copy)]
+enum Among {
+    /// Every member's.
+    Every,
+    /// Those of the member that the link acts for, and those that name no member.
+    Own,
+}
+
+/// The id of the job on the controller that `run` names, which may be a prefix of it, among the
+/// jobs that `among` says. Fails, naming its owner and how to name it among every member's, if
+/// only another member's job matches.
+fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, String), String> {
     let build = Build::of_this("expected to send it to the controller, to find the run there")?;
-    let ids = reached.asked(&build, "finding the run", |reached, linked| {
+    let jobs = reached.asked(&build, "finding the run", |reached, linked| {
         linked.ask(reached, JobsRequest {})
     })?;
     let name = &reached.name;
-    let ids = ids.map_err(|message| format!("controller `{name}` refused: {message}"))?;
-    let id = runtime::named(&ids, run, &format!("on controller `{name}`"))?;
+    let Jobs { member, jobs } =
+        jobs.map_err(|message| format!("controller `{name}` refused: {message}"))?;
+    let on = format!("on controller `{name}`");
+    // Why a job is another member's: it names another, or one that can't be read, which may be.
+    // A job that names none is everyone's, as is every job of a link that names no member.
+    let whose = |job: &Job| match (&member, &job.owner) {
+        (None, _) | (Some(_), Owner::Nobody) => None,
+        (Some(member), Owner::Member { member: owner }) => {
+            (owner != member).then(|| format!("is {owner}'s"))
+        }
+        (Some(_), Owner::Unread { error }) => {
+            Some(format!("names a member that can't be read: {error}"))
+        }
+    };
+    let ids = |own: bool| -> Vec<String> {
+        let jobs = jobs.iter().filter(|job| !own || whose(job).is_none());
+        jobs.map(|job| job.id.clone()).collect()
+    };
+    let every = ids(false);
+    let id = match (runtime::named(&every, run, &on), among) {
+        (Ok(id), _) => id,
+        (Err(error), Among::Every) => return Err(error),
+        // A prefix that matches several runs, of which one is the member's own, names that one.
+        (Err(error), Among::Own) => {
+            let own = ids(true);
+            let id = runtime::named(&own, run, &on).map_err(|_| error)?;
+            return Ok((build, id.to_owned()));
+        }
+    };
+    if let Among::Own = among
+        && let Some(whose) = jobs.iter().find(|job| job.id == id).and_then(whose)
+    {
+        let any = next::again("cancel", &["--any-member".to_owned()], &[id.to_owned()]);
+        return Err(format!("run {id} {on} {whose}: to stop it: {any}"));
+    }
     Ok((build, id.to_owned()))
 }
 
@@ -228,13 +273,21 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
 }
 
 /// Stops the run that `run` names on the controller and copies its record once it has ended.
-pub(crate) fn cancel(client: &config::Client, run: &str, force: bool) -> Result<ExitCode, String> {
+/// Unless `any_member`, `run` is named among the member's own runs, as [`Among::Own`] says.
+pub(crate) fn cancel(
+    client: &config::Client,
+    run: &str,
+    force: bool,
+    any_member: bool,
+) -> Result<ExitCode, String> {
     let mut reached = Reached::reach(&client.controller)?;
-    let (build, id) = job_id(&mut reached, run)?;
+    let among = if any_member { Among::Every } else { Among::Own };
+    let (build, id) = job_id(&mut reached, run, among)?;
     let modal = client.modal_file()?;
     let request = CancelRequest {
         id: id.clone(),
         force,
+        any_member,
         modal_bytes: modal.as_ref().map(Vec::len),
     };
     let name = &client.controller.name;

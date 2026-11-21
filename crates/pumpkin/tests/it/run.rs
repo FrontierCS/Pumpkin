@@ -376,6 +376,11 @@ fn usage() {
                         driver had given up on may still make a sandbox after `cancel` has
                         ended, which `pumpkin reap` removes.
 
+                    --any-member
+                        Name the run among every member's runs on the controller. Without it, a
+                        prefix or an id is matched among this member's runs, and those that no member
+                        started, and a run of another member's is refused.
+
                 -h, --help
                         Print this help.
 

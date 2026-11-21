@@ -30,6 +30,7 @@ mod ending;
 mod job;
 mod link;
 mod manifest;
+mod member;
 mod next;
 mod progress;
 mod publish;
@@ -83,7 +84,7 @@ fn main() -> ExitCode {
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
-        Ok(cli::Command::Serve) => serve::serve(),
+        Ok(cli::Command::Serve(member)) => serve::serve(member.as_ref()),
         Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")

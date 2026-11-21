@@ -1183,7 +1183,9 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 const KEY: &str = "sk-client-stand-in";
 
 // Runs the controller command in the test's home, with cuts before the requested byte on either
-// stream. Each before-N action runs just before the Nth connection.
+// stream. Each before-N action runs just before the Nth connection. A client home with a
+// `.member` is a key that the admin lists under that member, so the command runs as the
+// controller's forced command runs it.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
@@ -1194,25 +1196,27 @@ while :; do
     esac
 done
 shift
-first=$(printf '%s\n' "$*" | head --lines=1)
+command=$*
+if [ -f "$HOME/.member" ]; then set -- pumpkin --member "$(cat "$HOME/.member")"; else set --; fi
+first=$(printf '%s\n' "$command" | head --lines=1)
 printf '%s\n' "$first" >> "$dir/scripts"
 calls=$(wc --lines < "$dir/scripts")
 if [ -f "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
 cd "$dir/../home" || exit 1
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
-    stdbuf --output=0 head --bytes="$(cat "$dir/cut-in-$$")" | sh -c "$*"
+    stdbuf --output=0 head --bytes="$(cat "$dir/cut-in-$$")" | /bin/sh -c "$command" "$@"
     exit 1
 fi
 if mv "$dir/answer" "$dir/answered" 2>/dev/null; then exec cat "$dir/answered"; fi
 if mv "$dir/cut-out" "$dir/cut-out-$$" 2>/dev/null; then
     exec 3<&0; mkfifo "$dir/fifo-$$"
-    sh -c "$*" <&3 > "$dir/fifo-$$" &
+    /bin/sh -c "$command" "$@" <&3 > "$dir/fifo-$$" &
     dd bs=1 count="$(cat "$dir/cut-out-$$")" status=none < "$dir/fifo-$$"
     exit 1
 fi
 if [ -f "$dir/link-pid" ]; then echo $$ > "$dir/link-pid"; fi
-exec sh -c "$*"
+exec /bin/sh -c "$command" "$@"
 "#;
 
 const SYSTEMCTL: &str = "#!/bin/sh\n";
@@ -1243,6 +1247,7 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
     );
     scratch.write("client/.config/pumpkin/pumpkin.toml", &config);
     scratch.write("client/.config/pumpkin/gateway-key", KEY);
+    scratch.write("client/.member", "alice\n");
     // Not git's own variables, such as the `GIT_DIR` that `git rebase --exec` exports, which
     // would point `git init` at another repository.
     let git = stdx::process::command("git", Environment::Only(&["HOME", "PATH"]))
@@ -1264,14 +1269,69 @@ fn set_up_client(scratch: &Scratch) -> [(String, String); 2] {
 }
 
 fn on_client(scratch: &Scratch, environment: &[(String, String); 2], args: &[&str]) -> Command {
+    on_repo(scratch, "repo", environment, args)
+}
+
+// The client's command in its repository `repo`, below the scratch directory.
+fn on_repo(
+    scratch: &Scratch,
+    repo: &str,
+    environment: &[(String, String); 2],
+    args: &[&str],
+) -> Command {
     let pumpkin = scratch
         .0
-        .join(format!("repo/.pumpkin/{PINNED}/bin/pumpkin"));
+        .join(format!("{repo}/.pumpkin/{PINNED}/bin/pumpkin"));
     let mut command = scratch.program(pumpkin, args);
     command
-        .current_dir(scratch.0.join("repo"))
+        .current_dir(scratch.0.join(repo))
         .envs(environment.iter().map(|(name, value)| (name, value)));
     command
+}
+
+// A teammate of the client's, `name`, whose key the admin lists under that name: a home of
+// their own, `client-<name>`, with the client's configuration, and a copy of the client's
+// repository, `repo-<name>`, that has found the same controller.
+fn set_up_member(scratch: &Scratch, name: &str) -> [(String, String); 2] {
+    let home = format!("client-{name}");
+    let config = fs::read_to_string(scratch.0.join("client/.config/pumpkin/pumpkin.toml"));
+    scratch.write(
+        &format!("{home}/.config/pumpkin/pumpkin.toml"),
+        &config.unwrap(),
+    );
+    scratch.write(&format!("{home}/.config/pumpkin/gateway-key"), KEY);
+    scratch.write(&format!("{home}/.member"), &format!("{name}\n"));
+    let repo = format!("repo-{name}");
+    fs::create_dir_all(scratch.0.join(&repo)).unwrap();
+    for entry in fs::read_dir(scratch.0.join("repo")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == ".pumpkin" {
+            continue;
+        }
+        let copied = stdx::process::command("cp", Environment::Only(&["PATH"]))
+            .args(["--recursive", "--"])
+            .arg(entry.path())
+            .arg(scratch.0.join(&repo))
+            .status();
+        assert!(copied.unwrap().success());
+    }
+    install(scratch, &format!("{repo}/.pumpkin/{PINNED}/bin"));
+    scratch.write(&format!("{repo}/.pumpkin/.gitignore"), "*\n");
+    found_at(
+        &scratch
+            .0
+            .join(format!("{repo}/.pumpkin/controller/alice.us-west-1")),
+    );
+    [
+        (
+            "HOME".to_owned(),
+            scratch.0.join(home).display().to_string(),
+        ),
+        (
+            "PATH".to_owned(),
+            format!("{}:/usr/bin:/bin", scratch.0.join("bin").display()),
+        ),
+    ]
 }
 
 fn modes(dir: &Path) -> String {
@@ -1310,6 +1370,12 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     let first = on_client(scratch, client, &["ls"]).output().unwrap();
     assert!(!first.status.success(), "{first:?}");
     fs::remove_file(dir.join("failed")).unwrap();
+    found_at(&dir);
+}
+
+// The location of the controller, in the workspace's directory `dir` of it.
+fn found_at(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
     let found = json!({ "instance": INSTANCE, "address": "255.255.255.255" });
     let file = dir.join("found");
     fs::write(&file, found.to_string()).unwrap();
@@ -1318,10 +1384,15 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
 
 fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) {
     connect(scratch, client);
+    start_in(scratch, "repo", client)
+}
+
+// As `start`, from the repository `repo`, whose workspace has found the controller.
+fn start_in(scratch: &Scratch, repo: &str, client: &[(String, String); 2]) -> (String, String) {
     if !scratch.0.join("home/.pumpkin/serve").is_dir() {
         served(scratch);
     }
-    let mut run = on_client(scratch, client, &["run", "stand-in/task.star"]);
+    let mut run = on_repo(scratch, repo, client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&run);
     let ran = run.output().unwrap();
     let said = String::from_utf8(ran.stderr.clone()).unwrap();
@@ -2921,9 +2992,11 @@ fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
     frame.len()
 }
 
-// Status precedes Follow on the same link. The job is the only one in this controller home.
+// Status precedes Follow on the same link. The job is the only one in this controller home, and
+// names no member.
 fn named_bytes(id: &str) -> usize {
-    let body = serde_json::to_vec(&[id]).unwrap();
+    let jobs = json!({ "member": "alice", "jobs": [{ "id": id, "owner": { "type": "nobody" } }] });
+    let body = serde_json::to_vec(&jobs).unwrap();
     frame_bytes(&json!({ "type": "jobs", "body_bytes": body.len() }), &[])
         + frame_bytes(&serde_json::Value::Null, &body)
 }
@@ -3818,9 +3891,357 @@ fn wait_names_its_run_there() {
     );
 }
 
+// What `cmd` of a client said, as `$ pumpkin <args>` shows it.
+fn ran_by(scratch: &Scratch, mut cmd: Command, args: &[&str]) -> String {
+    let output = cmd.output().unwrap();
+    report(
+        format!("$ pumpkin {}", args.join(" ")),
+        &output,
+        &scratch.0,
+        false,
+    )
+}
+
+#[test]
+fn members_attributed() {
+    let scratch = Scratch::new();
+    let (_, id, _) = started_job(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    let member = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/member"))).unwrap();
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let argv: Vec<&str> = argv.lines().collect();
+    let unit = argv.iter().rposition(|line| *line == "--user").unwrap();
+    // Ended before its run started, so that its row's time is no clock's.
+    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    let ls = ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &["ls"]),
+        &["ls"],
+    );
+    let lines = [
+        format!("the job's member: {member:?}"),
+        format!("systemd-run {}", argv[unit..].join(" ")),
+        ls,
+    ];
+    let (install, tree) = (key(&client_bin(&scratch)), last_tree(&scratch));
+    let shown = [
+        (id.as_str(), "<id>"),
+        (&install, "<install>"),
+        (&tree, "<tree>"),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &shown,
+        &expect![[r#"
+        the job's member: "alice\n"
+        systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree> -- run -- stand-in/task.star
+        $ pumpkin ls
+        exit status: Some(0)
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        printed:
+          <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <id>
+          1 run: 1 unstarted"#]],
+    );
+}
+
+#[test]
+fn members_share_uploads() {
+    let scratch = Scratch::new();
+    let (_, _, ran) = started_job(&scratch);
+    let _ = calls(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    let (id, by_bob) = start_in(&scratch, "repo-bob", &bob);
+    let member = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/member"))).unwrap();
+    let lines = [
+        ran,
+        by_bob,
+        send_calls(&scratch),
+        format!("the job's member: {member:?}"),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+        $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` lacks all 6 of the task's files: sending 2.9 KiB
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        $ HOME=<scratch>/client-bob PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+        exit status: Some(0)
+        pumpkin: run <id> goes to controller `alice`
+        pumpkin: controller `alice` holds all 6 of the task's files
+        pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
+        pumpkin: to follow it: pumpkin wait <id>
+        pumpkin: to stop it: pumpkin cancel <id>
+        printed:
+          <id>
+        the calls: serve
+        the job's member: "bob\n""#]],
+    );
+}
+
+// Records each stop of a unit, as `systemctl` gets it.
+const SYSTEMCTL_NOTED: &str = "#!/bin/sh\necho \"$*\" >> \"${0%/*}/units\"\n";
+
+#[test]
+fn cancel_scoped() {
+    let scratch = Scratch::new();
+    let (_, id, _) = started_job(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
+    let (_, random) = id.rsplit_once('-').unwrap();
+    let prefix = &random[..4];
+    let mut lines = Vec::new();
+    for args in [&["cancel", prefix][..], &["cancel", "--any-member", prefix]] {
+        let cancel = on_repo(&scratch, "repo-bob", &bob, args);
+        lines.push(ran_by(&scratch, cancel, args));
+    }
+    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>"), (prefix, "<prefix>")],
+        &expect![[r#"
+            $ pumpkin cancel <prefix>
+            exit status: Some(1)
+            pumpkin: run <id> on controller `alice` is alice's: to stop it: pumpkin cancel --any-member <id>
+            $ pumpkin cancel --any-member <prefix>
+            exit status: Some(0)
+            pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+            --user stop pumpkin-job-<id>"#]],
+    );
+}
+
+#[test]
+fn cancel_full_id_refused() {
+    let scratch = Scratch::new();
+    let (_, id, _) = started_job(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
+    let args = ["cancel", &id];
+    let by_bob = ran_by(&scratch, on_repo(&scratch, "repo-bob", &bob, &args), &args);
+    // As a build of Bob's that skips its own check asks it.
+    let cancel = json!({ "type": "cancel", "id": id, "force": false, "any_member": false, "modal_bytes": null });
+    let mut asked = Vec::new();
+    schema::frame::write(&mut asked, &cancel, &[]).unwrap();
+    let served = serve_fed_for(&scratch, &["--member", "bob"], &asked);
+    let units = scratch.0.join("bin/units").exists();
+    let lines = [by_bob, served, format!("a unit stopped: {units}")];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>")],
+        &expect![[r#"
+        $ pumpkin cancel <id>
+        exit status: Some(1)
+        pumpkin: run <id> on controller `alice` is alice's: to stop it: pumpkin cancel --any-member <id>
+        exit status: 0
+          {"type":"serving"}, and a body of 0 bytes
+          {"message":"run <id> is alice's: to stop it: pumpkin cancel --any-member <id>","type":"refused"}, and a body of 0 bytes
+        a unit stopped: false"#]],
+    );
+}
+
+#[test]
+fn unattributed_jobs() {
+    let scratch = Scratch::new();
+    let (_, id, _) = started_job(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
+    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    // As a build from before members leaves a job: no `member` beside its log. Its digits sort
+    // it after the other job, which may share its second.
+    let older = id_ago(0, "ffffffff");
+    scratch.write(&format!("home/jobs/{older}/log"), "");
+    let mut lines = vec![ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &["ls"]),
+        &["ls"],
+    )];
+    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{older}"))).unwrap();
+    let args = ["cancel", "ffff"];
+    lines.push(ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &args),
+        &args,
+    ));
+    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&id, "<id>"), (&older, "<older>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <id>
+              <older> -     unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <older>
+              2 runs: 2 unstarted
+            $ pumpkin cancel ffff
+            exit status: Some(0)
+            pumpkin: run <older>'s job on controller `alice` is stopped, before the run started
+            show --property=ActiveState --property=ExecMainStatus --property=ExecMainExitTimestamp pumpkin-boot.service
+            --user stop pumpkin-job-<older>"#]],
+    );
+}
+
+// Jobs yet to start a run, each with the member that `member` names, or none, and its tmpfs
+// directory, so that a cancel stops its unit.
+fn waiting_jobs(scratch: &Scratch, jobs: &[(&str, Option<&str>)]) {
+    for (id, member) in jobs {
+        scratch.write(&format!("home/jobs/{id}/log"), "");
+        if let Some(member) = member {
+            scratch.write(&format!("home/jobs/{id}/member"), member);
+        }
+        fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
+    }
+}
+
+#[test]
+fn cancel_prefers_own_run() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
+    let (alices, bobs) = (id_ago(0, "0b000001"), id_ago(0, "0b000002"));
+    waiting_jobs(
+        &scratch,
+        &[(&alices, Some("alice\n")), (&bobs, Some("bob\n"))],
+    );
+    let mut lines = Vec::new();
+    for args in [&["cancel", "0b00"][..], &["cancel", "--any-member", "0b00"]] {
+        let cancel = on_repo(&scratch, "repo-bob", &bob, args);
+        lines.push(ran_by(&scratch, cancel, args));
+    }
+    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&alices, "<alice's>"), (&bobs, "<bob's>")],
+        &expect![[r#"
+            $ pumpkin cancel 0b00
+            exit status: Some(0)
+            pumpkin: run <bob's>'s job on controller `alice` is stopped, before the run started
+            $ pumpkin cancel --any-member 0b00
+            exit status: Some(1)
+            pumpkin: `0b00` matches 2 runs: name one by more of its id
+              <alice's>
+              <bob's>
+            --user stop pumpkin-job-<bob's>"#]],
+    );
+}
+
+#[test]
+fn member_unread() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let bob = set_up_member(&scratch, "bob");
+    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
+    let (unread, other) = (id_ago(0, "0c000001"), id_ago(0, "0c000002"));
+    waiting_jobs(&scratch, &[(&unread, Some("Bad!\n")), (&other, None)]);
+    // Ended before its run started, so that its row's time is no clock's.
+    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{other}"))).unwrap();
+    let mut lines = vec![ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &["ls"]),
+        &["ls"],
+    )];
+    let args = ["cancel", &unread];
+    lines.push(ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &args),
+        &args,
+    ));
+    let cancel = json!({ "type": "cancel", "id": unread, "force": false, "any_member": false, "modal_bytes": null });
+    let mut asked = Vec::new();
+    schema::frame::write(&mut asked, &cancel, &[]).unwrap();
+    lines.push(serve_fed_for(&scratch, &["--member", "bob"], &asked));
+    let args = ["cancel", "--any-member", &unread];
+    lines.push(ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bob, &args),
+        &args,
+    ));
+    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(&unread, "<unread>"), (&other, "<other>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: run <unread>: <scratch>/home/jobs/<unread>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            pumpkin: 1 run can't be listed, as said above
+            printed:
+              <other> unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <other>
+              1 run: 1 unstarted
+            $ pumpkin cancel <unread>
+            exit status: Some(1)
+            pumpkin: run <unread> on controller `alice` names a member that can't be read: <scratch>/home/jobs/<unread>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter: to stop it: pumpkin cancel --any-member <unread>
+            exit status: 0
+              {"type":"serving"}, and a body of 0 bytes
+              {"message":"run <unread> names a member that can't be read: <scratch>/home/jobs/<unread>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter: to stop it: pumpkin cancel --any-member <unread>","type":"refused"}, and a body of 0 bytes
+            $ pumpkin cancel --any-member <unread>
+            exit status: Some(0)
+            pumpkin: run <unread>'s job on controller `alice` is stopped, before the run started
+            show --property=ActiveState --property=ExecMainStatus --property=ExecMainExitTimestamp pumpkin-boot.service
+            --user stop pumpkin-job-<unread>"#]],
+    );
+}
+
+#[test]
+fn serve_refuses_member() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let bad = set_up_member(&scratch, "bob");
+    scratch.write("client-bob/.member", "Bad!\n");
+    let ls = ran_by(
+        &scratch,
+        on_repo(&scratch, "repo-bob", &bad, &["ls"]),
+        &["ls"],
+    );
+    // What follows is the repair's, which finds no controller, as no `aws` answers.
+    let (ls, _) = ls.split_once("; SSH at its last private address").unwrap();
+    check(
+        &scratch,
+        ls,
+        &[],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+            pumpkin: to read how to use it: pumpkin controller serve --help
+            pumpkin: controller `alice` didn't answer: ended before its hello: opening it again now, attempt 2 of 8
+            error: invalid value 'Bad!' for '--member <member>': `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+            pumpkin: to read how to use it: pumpkin controller serve --help
+            pumpkin: controller `alice` didn't answer: ended before its hello"#]],
+    );
+}
+
 fn serve_process(scratch: &Scratch) -> Child {
-    let mut serve = scratch.program(PUMPKIN, &["controller", "serve"]);
+    serve_for(scratch, &[])
+}
+
+// `controller serve` with `args`, such as the `--member` that a forced command gives.
+fn serve_for(scratch: &Scratch, args: &[&str]) -> Child {
+    let mut serve = scratch.program(PUMPKIN, &[&["controller", "serve"], args].concat());
     serve.env("HOME", scratch.0.join("home"));
+    serve.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
     serve
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3830,7 +4251,12 @@ fn serve_process(scratch: &Scratch) -> Child {
 
 /// What `controller serve` does with `input` on its standard input.
 fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
-    let mut child = serve_process(scratch);
+    serve_fed_for(scratch, &[], input)
+}
+
+/// As [`serve_fed`], of `controller serve` with `args`.
+fn serve_fed_for(scratch: &Scratch, args: &[&str], input: &[u8]) -> String {
+    let mut child = serve_for(scratch, args);
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), input).unwrap();
     let output = child.wait_with_output().unwrap();
     let mut lines = vec![output.status.to_string()];
@@ -4367,6 +4793,8 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     let scratch = Scratch::new();
     let (client, driver, [ended, live]) = viewed(&scratch);
     served(&scratch);
+    // The ended run's job is a member's; the live one's names none.
+    scratch.write(&format!("home/jobs/{ended}/member"), "alice\n");
     scratch.write("bin/cut-out", "1000");
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     let mut steps = vec![served.said.trim_end().to_owned()];
@@ -4376,7 +4804,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     let (status, listed) = served.ask("GET", "/api/runs", &[]);
     let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
     let rows: Vec<String> = (listed["runs"].as_array().unwrap().iter())
-        .map(|row| format!("{} {}", row["id"], row["state"]))
+        .map(|row| format!("{} {} {}", row["id"], row["state"], row["member"]))
         .collect();
     steps.push(format!("GET /api/runs\n{status}\n{}", rows.join("\n")));
     steps.push(got(
@@ -4397,8 +4825,8 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
             next: 309485, end: 309485
             GET /api/runs
             HTTP/1.1 200 OK
-            "<live>" "work"
-            "<ended>" "finished"
+            "<live>" "work" null
+            "<ended>" "finished" "alice"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
             state: "finished", end: 309485"#]],
