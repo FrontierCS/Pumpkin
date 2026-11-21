@@ -21,8 +21,8 @@ bucket of the account, so no laptop can lose it.
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
 | with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
 
-`ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
-of its envelope is that crate's module doc, "The envelope".
+`ami.tf`, `controller.tf` and the other files say more of each. What Pumpkin's code relies on of
+what this module makes is [the envelope](../../docs/envelope.md).
 
 ## Once per account
 
