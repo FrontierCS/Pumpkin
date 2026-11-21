@@ -846,13 +846,10 @@ fn library() {
     write_repository(&scratch, "served/");
     scratch.write("served/harness/codex/layer/Dockerfile", "FROM busybox\n");
     let pumpkin = |entry: &str| Step::from(scratch.pumpkin(&["check", entry, "--arg=model=m"]));
-    let lock = ["lock", "--arg=model=m", "served/tasks/bench/task.star"];
-    let lock = [&lock[..], &["served/harness/codex/layer/Dockerfile", "x"]].concat();
     let steps = [
         pumpkin("tasks/loads/task.star"),
         pumpkin("images/tasks/bench/task.star"),
         pumpkin("served/tasks/bench/task.star"),
-        Step::from(scratch.pumpkin(&lock)),
     ];
     check(
         &scratch,
@@ -880,10 +877,7 @@ fn library() {
             pumpkin: images/tasks/bench/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/images/tasks/bench/task.star
             $ pumpkin check served/tasks/bench/task.star --arg=model=m
-            exit status: Some(0)
-            $ pumpkin lock --arg=model=m served/tasks/bench/task.star served/harness/codex/layer/Dockerfile x
-            exit status: Some(1)
-            pumpkin: served/tasks/bench/task.star: the task declares no image of the recipe `//harness/codex/layer/Dockerfile`: name a recipe that an image() call of the task builds"#]],
+            exit status: Some(0)"#]],
     );
 }
 

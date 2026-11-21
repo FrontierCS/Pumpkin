@@ -201,16 +201,6 @@ impl Plan {
         }
     }
 
-    /// Each image's recipe, in the order the images were declared, with the images that each
-    /// recipe names its contexts by: each name's image, as its index in this order.
-    pub fn recipes(&self) -> impl Iterator<Item = (&Recipe, BTreeMap<&str, usize>)> {
-        (self.images.iter()).map(|Declaration { image, .. }| {
-            let Image { recipe, contexts } = image;
-            let contexts = contexts.iter().map(|(name, base)| (name.as_str(), base.0));
-            (recipe, contexts.collect())
-        })
-    }
-
     /// Checks each image's recipe with `recipes`, which gives the problems it finds (such as a
     /// recipe that is no file), sorted, given the recipe and the names of its contexts; and gives
     /// the workflow, its images standing as IDs of their own, which no build gave.
@@ -241,7 +231,7 @@ impl Plan {
         }
     }
 
-    /// The workflow, with every image built through `step`, which `build_for` describes.
+    /// The workflow, with every image built through `step`, as `jobs` at most run.
     ///
     /// # Errors
     ///
@@ -255,8 +245,7 @@ impl Plan {
         jobs: NonZeroUsize,
         step: impl FnMut(Vec<(usize, Declared<'_, B>)>) -> Vec<(usize, Result<B, String>)>,
     ) -> Result<Workflow, Problems> {
-        let every = Vec::from_iter((0..self.images.len()).map(|_| true));
-        let done = self.built(jobs, &every, step)?;
+        let done = self.built(jobs, step)?;
         let images: Vec<ir::Image> = (done.iter())
             .map(|done| match done {
                 Some(done) => done.as_ref().clone(),
@@ -270,56 +259,17 @@ impl Plan {
         workflow.map_err(|problems| Problems::new(self.sources, problems))
     }
 
-    /// What `then` gives, called once with each image `wanted` picks, in order, with its built
-    /// contexts. The images they are built on are built, and no other, not even the picked ones.
-    ///
-    /// `step` is given images to build, and gives the builds that ended by index, at least one
-    /// while any run, waiting if given none. At most `jobs` run, and after a failure none starts.
-    ///
-    /// # Panics
-    ///
-    /// `step` gives no build while some run, or one that it wasn't given or gave already.
-    pub fn build_for<B, T>(
-        &self,
-        jobs: NonZeroUsize,
-        mut wanted: impl FnMut(&Recipe) -> bool,
-        step: impl FnMut(Vec<(usize, Declared<'_, B>)>) -> Vec<(usize, Result<B, String>)>,
-        then: impl FnOnce(Vec<Declared<'_, B>>) -> T,
-    ) -> Result<T, Problems> {
-        let picked: Vec<bool> = (self.images.iter())
-            .map(|Declaration { image, .. }| wanted(&image.recipe))
-            .collect();
-        // Each image is declared after those it is built on, so that walking back from the last
-        // reaches an image after every image that needs it.
-        let mut needed = Vec::from_iter((0..self.images.len()).map(|_| false));
-        for (index, Declaration { image, .. }) in self.images.iter().enumerate().rev() {
-            if picked[index] || needed[index] {
-                image
-                    .contexts
-                    .values()
-                    .for_each(|base| needed[base.0] = true);
-            }
-        }
-        let done = self.built(jobs, &needed, step)?;
-        let declared = (self.images.iter().zip(&picked))
-            .filter(|(_, picked)| **picked)
-            .map(|(Declaration { image, .. }, _)| declared(image, &done))
-            .collect();
-        Ok(then(declared))
-    }
-
-    // Each image that `needed` marks, by its index, built as `build_for` says by `step`, and `None`
-    // for each other.
+    // Each image, by its index, built through `step`, which is given images to build and gives the
+    // builds that ended by index, at least one while any run, waiting if given none. After a
+    // failure no build starts.
     fn built<B>(
         &self,
         jobs: NonZeroUsize,
-        needed: &[bool],
         mut step: impl FnMut(Vec<(usize, Declared<'_, B>)>) -> Vec<(usize, Result<B, String>)>,
     ) -> Result<Vec<Option<B>>, Problems> {
         let count = self.images.len();
         let mut done: Vec<Option<B>> = (0..count).map(|_| None).collect();
-        // What isn't needed counts as started, so it never starts.
-        let mut started = Vec::from_iter((0..count).map(|index| !needed[index]));
+        let mut started = Vec::from_iter((0..count).map(|_| false));
         let mut running = 0_usize;
         let mut failed: Vec<(usize, String)> = Vec::new();
         loop {

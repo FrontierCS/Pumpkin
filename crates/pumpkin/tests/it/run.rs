@@ -127,7 +127,6 @@ fn usage() {
                 ls      List the runs and their states
                 cancel  Stop a run, and remove what it left
                 view    Serve the runs' records to this machine's browser
-                lock    Write a recipe's fetch stage, which pins what a step fetches
                 help    Print the help of a command or a topic
 
               Options:
@@ -787,7 +786,6 @@ fn usage() {
               ls      List the runs and their states
               cancel  Stop a run, and remove what it left
               view    Serve the runs' records to this machine's browser
-              lock    Write a recipe's fetch stage, which pins what a step fetches
               help    Print the help of a command or a topic
 
             Options:
@@ -900,13 +898,13 @@ fn usage() {
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin help bogus
             exit status: Some(2)
-            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help
             $ pumpkin help controller
             exit status: Some(2)
-            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `lock`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help"#]],

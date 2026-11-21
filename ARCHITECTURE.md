@@ -39,9 +39,8 @@ an EC2 instance that runs the runs a machine sends it.
 `pumpkin` (`crates/pumpkin`) is the operator's command line. `check` evaluates and checks a task
 without reaching an engine, `fmt` formats `.star` files, `build` builds a task's images and prints
 its IR, and `run` builds them and starts the run in a driver process. `wait`, `ls`, `cancel` and
-`reap` read runs, and end them, through their records, and `view` shows them in a browser. `lock`
-writes a recipe's fetch stage. `main.rs` dispatches the commands, and `run`'s path through the
-driver is the one to read first.
+`reap` read runs, and end them, through their records, and `view` shows them in a browser.
+`main.rs` dispatches the commands, and `run`'s path through the driver is the one to read first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
@@ -149,8 +148,7 @@ all providers at run end. An allocation can become visible only on a later sweep
 ### `crates/recipe`
 
 Image recipes, Dockerfiles. `check` refuses a recipe that may have Docker fetch what no digest
-pins, and `fetch` reads and writes a recipe's fetch stages (`FetchStage`), which pin each file
-that a step would fetch.
+pins.
 
 **Architecture Invariant:** it does no I/O and knows no Pumpkin crate, so the language, `pumpkin`'s
 check of a task and the engine's build share one check without depending on each other. It is
@@ -289,10 +287,9 @@ The operator's Docker engine, on which Pumpkin builds the images that sandboxes 
 provider runs them, and from which it publishes them. `Engine` reaches the engine of a named
 Docker context (`ContextName`), and reports it (`Report`) and what `docker info` says of its host
 and the limits it enforces (`Host`), which the Docker provider reads. It builds images tagged by
-the digest of their inputs, writes fetch stages (`Engine::lock`), says what a prune removes and
-when the disk is too full to build (`prune`), loads the image of `sandboxd`, and pushes
-(`Pusher`). `confinement` is the confinement of a role's container on every provider whose
-sandbox is one.
+the digest of their inputs, says what a prune removes and when the disk is too full to build
+(`prune`), loads the image of `sandboxd`, and pushes (`Pusher`). `confinement` is the
+confinement of a role's container on every provider whose sandbox is one.
 
 **Architecture Invariant:** it knows no provider, so a crate that only builds or publishes images
 depends on no provider. It depends on `recipe`, `schema` and `stdx` alone of Pumpkin's crates.
@@ -305,7 +302,7 @@ the Docker provider's calls (`docker_to`) alike: with the context as its first a
 **Architecture Invariant:** what a build fetches is pinned, an image by its digest, a file by its
 checksum and a Git tree by its full commit, so an image's tag names what it is built from. Each
 build runs `recipe::check` on its recipe first. What a step's own command fetches is outside this,
-unless a fetch stage pins it.
+unless a stage that pins each download by its checksum, with `ADD --checksum`, supplies it.
 
 ### `crates/aws`
 

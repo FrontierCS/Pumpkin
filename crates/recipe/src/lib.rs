@@ -21,8 +21,8 @@
 //! that is no instruction; a `FROM` other than `FROM <image>` or `FROM <image> AS <name>`; and, in
 //! a flag, a name or an `ADD`'s destination, a character other than printable ASCII, a quote or
 //! `\`, or, in a name, `$`, but for a `FROM`'s build argument. What a `RUN` step's own command
-//! fetches, which a fetch stage may pin instead ([`fetch`]), and a base's `ONBUILD` triggers are
-//! outside it.
+//! fetches, which a stage may pin by checksum instead (an `ADD --checksum` that a `RUN --mount`
+//! or a `COPY --from` reads), and a base's `ONBUILD` triggers are outside it.
 
 // Without `std`, the check can name no file, process or clock: it reads only the text it is given.
 #![no_std]
@@ -35,8 +35,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
-
-pub mod fetch;
 
 // The characters that separate an instruction's keyword and words: ASCII whitespace, as Docker
 // splits them, but the line feed, which no instruction holds once its lines are joined.
@@ -489,23 +487,6 @@ fn fields(value: &str) -> (String, &str) {
         }
     }
     (kind, from)
-}
-
-pub(crate) fn bound_from(text: &str) -> Vec<&str> {
-    let (keyword, rest) = text.split_once(BLANKS).unwrap_or((text, ""));
-    let Ok((flags, _)) = flags(rest) else {
-        return Vec::new();
-    };
-    if !keyword.eq_ignore_ascii_case("RUN") {
-        return Vec::new();
-    }
-    let mounts = flags
-        .into_iter()
-        .filter_map(|flag| flag.strip_prefix("--mount="));
-    let bound = mounts
-        .map(fields)
-        .filter(|(kind, from)| kind == "bind" && !from.is_empty());
-    bound.map(|(_, from)| from).collect()
 }
 
 fn flags(rest: &str) -> Result<(Vec<&str>, &str), String> {

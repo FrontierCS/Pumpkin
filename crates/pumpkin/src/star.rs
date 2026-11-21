@@ -17,8 +17,7 @@ use std::{fmt, fs, io, iter, thread};
 
 use engine::{BuildContext, Building, Built, Engine, Started};
 use lang::{Args, Declared, Label, Loader, Plan, Problems, Recipe};
-use recipe::fetch::FetchStage;
-use recipe::{Given, Stage};
+use recipe::Given;
 use schema::ir::Image;
 use schema::workflow::Workflow;
 use tempfile::TempDir;
@@ -317,31 +316,6 @@ impl Root {
         };
         (dir, file)
     }
-
-    fn below_root(&self, path: &str) -> Result<String, String> {
-        let given = Path::new(path);
-        let (dir, Some(name)) = (given.parent(), given.file_name()) else {
-            return Err(format!("`{path}` names no file: name the recipe's file"));
-        };
-        let dir = dir.filter(|dir| !dir.as_os_str().is_empty());
-        let dir = dir.unwrap_or(Path::new("."));
-        let dir = fs::canonicalize(dir).map_err(|error| {
-            format!("the recipe's directory {} can't be found ({error}): name the recipe by a path that exists", dir.display())
-        })?;
-        let below = dir.join(name);
-        let below = below.strip_prefix(&self.dir).map_err(|_| {
-            format!(
-                "`{path}` isn't below the task's root, {}: name a recipe of the task",
-                self.dir.display()
-            )
-        })?;
-        match below.to_str() {
-            Some(below) => Ok(below.to_owned()),
-            None => Err(format!(
-                "`{path}` isn't UTF-8 below the root: name one that is"
-            )),
-        }
-    }
 }
 
 fn named<'b>(contexts: &BTreeMap<&str, &'b Built>) -> BTreeMap<String, &'b Built> {
@@ -512,90 +486,6 @@ impl Task<'_> {
         let built = plan.build(jobs(), |ready| builds.step(&*root, engine, ready))?;
         Ok((built, builds.tags, sources))
     }
-}
-
-/// Rewrites the recipe at `recipe`, a path below the task's root, with the lock of its fetch
-/// `stage`, resolved on the engine that `reach` makes. It fails unless every image of the task that
-/// builds the recipe gives it the same inputs. The outcome is as `checked`'s, and `reach` is
-/// called only once the task is checked and the recipe found.
-pub(crate) fn lock(
-    entry: &Entry,
-    args: &Args,
-    recipe: &str,
-    stage: &Stage,
-    reach: impl FnOnce() -> Result<Engine, String> + Send,
-) -> Result<Result<(), Problems>, String> {
-    checked(entry, args, |Task { root, plan, .. }| {
-        let below = root.below_root(recipe)?;
-        let file = Placed {
-            root: lang::Root::Task,
-            path: below.clone(),
-        };
-        let picked = |declared: &Recipe| Root::located(declared).1 == file;
-        same_inputs(
-            entry,
-            &below,
-            plan.recipes().filter(|(declared, _)| picked(declared)),
-        )?;
-        let (path, text) = root.bytes(&below)?;
-        let fetch = FetchStage::read(&below, &text, stage)?;
-        let engine = reach()?;
-        let mut unadmitted = ();
-        let mut builds = Builds::new(&mut unadmitted);
-        let step = |ready: Vec<(usize, Declared<'_, Built>)>| builds.step(&*root, &engine, ready);
-        let written = plan.build_for(
-            jobs(),
-            picked,
-            step,
-            |declared: Vec<Declared<'_, Built>>| {
-                let Some(Declared { recipe, contexts }) = declared.first() else {
-                    unreachable!("an image of the recipe was found, so one is picked")
-                };
-                let (context, given, _library) = root.inputs(recipe, contexts)?;
-                engine.lock(&fetch, &context, given)
-            },
-        );
-        let written = match written {
-            Ok(written) => written?,
-            Err(problems) => return Ok(Err(problems)),
-        };
-        fs::write(&path, written)
-            .map_err(|error| format!("`{below}` can't be written: {error}"))?;
-        Ok(Ok(()))
-    })
-}
-
-fn same_inputs<'p>(
-    entry: &Entry,
-    below: &str,
-    mut picked: impl Iterator<Item = (&'p Recipe, BTreeMap<&'p str, usize>)>,
-) -> Result<(), String> {
-    let inputs = |(recipe, contexts): (&'p Recipe, BTreeMap<&'p str, usize>)| {
-        let Recipe {
-            context,
-            recipe: _,
-            mounts,
-            target: _,
-            args,
-            repository: _,
-        } = recipe;
-        (context, mounts, args, contexts)
-    };
-    let Some(first) = picked.next().map(inputs) else {
-        return Err(format!(
-            "{entry}: the task declares no image of the recipe `//{below}`: name a recipe that \
-             an image() call of the task builds"
-        ));
-    };
-    // The stage's step may read any of them, so they must all agree, not only those it reads.
-    if picked.map(inputs).any(|other| other != first) {
-        return Err(format!(
-            "{entry}: the task's images give the recipe `//{below}` different inputs, as its \
-             context, mounts, args or named contexts, for which its stage may resolve \
-             differently: give each image a recipe of its own, or the same inputs"
-        ));
-    }
-    Ok(())
 }
 
 struct Builds<'a> {
