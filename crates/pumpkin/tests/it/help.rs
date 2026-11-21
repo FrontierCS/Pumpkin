@@ -116,6 +116,12 @@ fn controller_serve_help() {
 }
 
 #[test]
+fn controller_policy_help() {
+    let expect = expect_file!["help/controller_policy.svg"];
+    check(&["controller", "policy", "--help"], &expect);
+}
+
+#[test]
 fn config_topic() {
     check(&["help", "config"], &expect_file!["help/config.svg"]);
 }

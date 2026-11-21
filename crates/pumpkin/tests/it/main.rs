@@ -36,6 +36,7 @@ mod driver;
 mod fmt;
 mod help;
 mod ls;
+mod policy;
 mod reap;
 mod run;
 mod view;

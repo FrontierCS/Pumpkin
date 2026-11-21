@@ -31,6 +31,7 @@ use self::notes::{
     ls_notes, reap_notes, run_notes, view_notes, wait_notes,
 };
 use crate::ending::Printed;
+use crate::iam::{self, Principal};
 use crate::member::Member;
 use crate::star::Entry;
 
@@ -141,7 +142,8 @@ enum Parsed {
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
-    /// `job` in a unit of its own. The controller's boot runs `boot`.
+    /// `job` in a unit of its own. The controller's boot runs `boot`. `policy` runs off the
+    /// controller too. It prints the IAM policy of a principal of the controller's deployment.
     #[command(hide = true, after_help = controller_notes())]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -198,10 +200,22 @@ enum Action {
         #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
         member: Option<Member>,
     },
+    /// Print the IAM policy of a principal of the controller's deployment.
+    ///
+    /// `policy` prints the policy as IAM's JSON. It holds each statement that this build's calls
+    /// on AWS need as that principal, and nothing else. A value that only the deployment knows,
+    /// such as its account, is a placeholder that Terraform's `templatefile` fills.
+    #[command(after_help = iam::placeholders())]
+    Policy {
+        /// The principal whose policy to print.
+        #[arg(value_name = "principal")]
+        principal: Principal,
+    },
 }
 
 /// What a command line asks for. `Job` and the variants after it are the controller's own side,
-/// `pumpkin controller <action>`; `Print` holds help or the version, for the standard output.
+/// `pumpkin controller <action>`; `Print` holds help, the version or a policy, for the standard
+/// output.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
@@ -595,6 +609,9 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
         Parsed::Controller {
             action: Action::Serve { member },
         } => Command::Serve(member),
+        Parsed::Controller {
+            action: Action::Policy { principal },
+        } => Command::Print(iam::policy(principal).into()),
         Parsed::Controller {
             action:
                 Action::Job {
