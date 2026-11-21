@@ -430,7 +430,8 @@ whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` describes the task tree and the client install that `send` transfers by content, and
 its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
 `start` starts each id once under the jobs' lock and keeps the install its unit runs, its
-`settings` checks the envelope that made the controller's settings, with the
+`settings` checks the envelope that made the controller's settings and refuses a job while
+they drain, with the
 prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
 their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs

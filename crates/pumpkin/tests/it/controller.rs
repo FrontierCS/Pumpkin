@@ -508,6 +508,11 @@ fn job_refusals() {
             UPSTREAMS.to_owned(),
         ),
         (
+            "a draining controller",
+            format!("draining = true\n{}", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
             "a sent [docker]",
             parameter(),
             format!("{UPSTREAMS}\n[docker]\ncontext = \"elsewhere\"\n"),
@@ -584,6 +589,10 @@ fn job_refusals() {
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are refused: invalid type: integer `1`, expected a string in `providers.aws.region`
+            a draining controller:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `draining = true`: the controller's admin is draining it for a cutover, so it starts no job while the jobs it runs end: run this one again once the admin has set `draining = false`
             a sent [docker]:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)

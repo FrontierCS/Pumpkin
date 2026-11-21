@@ -734,6 +734,8 @@ fn usage() {
               key that it doesn't know, unless the envelope is a later minor than 1.0, which
               this release knows; then it ignores the key, naming it in its log. A minor adds
               only keys that an older release may safely ignore.
+              With `draining = true`, which the admin sets for a cutover, the settings refuse
+              each job as it starts, and leave the jobs that run to end.
 
               [publish], on the controller, which deploy/aws writes into its settings: where
               each run's job publishes the runs, as `pumpkin controller publish --help` says;

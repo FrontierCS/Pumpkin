@@ -136,6 +136,12 @@ variable "client_users" {
   }
 }
 
+variable "draining" {
+  description = "Whether the controller's settings say `draining = true`, so that each job that starts is refused while those that run end, for a cutover."
+  type        = bool
+  default     = false
+}
+
 variable "public_page" {
   description = "Whether to make the public page: a bucket, the CloudFront distribution that serves it, and the controller's right to upload to it."
   type        = bool
