@@ -26,6 +26,7 @@ import {
   plural,
   post,
   route,
+  sentence,
   setKeys,
   setQuery,
   show,
@@ -39,6 +40,7 @@ import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf, windo
 import { RowList } from "./rows.js";
 import { jsonText, payloadLink, payloadOf } from "./payload.js";
 import { drawTalk, laneRole } from "./talk.js";
+import { failureBox, failureParts, laneMark } from "./failure.js";
 
 /**
  * @typedef {object} Run `/api/runs/<id>`
@@ -49,6 +51,8 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {boolean} has_result
  * @property {string} verdict
  * @property {{ values: { name: string, value: any }[] } | null} result the values a run that finished with a result shows, in the order the body returned them
+ * @property {Failure | null} failure how a run that ended without a result ended; null for a run with a result, one that is live, and one that is lost
+ * @property {Failure[]} failures each failure the log states, of a call, an agent, a lease, a shared sandbox or a model request
  * @property {{ command: string, error?: undefined } | { error: string, command?: undefined } | undefined} again
  * @property {string | null} other_build
  * @property {Times | null} times
@@ -95,6 +99,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @property {number[]} [failed] those of `answered` that stand for a failed answer
  * @property {{ count: number, failed: number }} [answers] how many model answers it has, and failed
  * @property {Work[] | null} [work]
+ * @property {Failure | null} [failure] the failure that the lane's sandbox, call or lease ended with
  * @typedef {{ kind: string, label: string, from: number, to: number | null, end: any }} Work
  * @typedef {{ roles: Role[], grants?: Grant[], edges: Edge[] }} Talk
  * @typedef {{ from: string, to: string, kind: string }} Grant a grant of the IR: its holder and the role it reaches
@@ -105,6 +110,7 @@ import { drawTalk, laneRole } from "./talk.js";
  * @typedef {import("./records.js").Window} Window
  * @typedef {{ end: number, live: boolean, run?: Run, records?: LogRecord[], next?: number }} Since `/since`
  * @typedef {import("./records.js").Item} Item
+ * @typedef {import("./failure.js").Failure} Failure
  */
 
 // The bounds of the characters of the lanes' names and places before the tracks, which the style
@@ -138,6 +144,7 @@ export async function runView(id) {
   const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
   const verdict = h("div", { class: "verdict" });
   const result = h("div", { class: "result" });
+  const failed = h("div", { class: "failure" });
   const facts = h("div", { class: "facts" });
   const dropped = h("div", { class: "dropped" });
   const again = h("div", { class: "again" });
@@ -171,14 +178,27 @@ export async function runView(id) {
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
   fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(verdict, result, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
+  show(verdict, result, failed, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
     setQuery({ sel: record.byte });
     redraw();
     list.select(list.selected, true);
-    inspectRecord(record, inspector, recordLinks(record), state.data);
+    inspectRecord(record, inspector, recordLinks(record), state.data, failureOf);
+  };
+  // Selects the record that states `failure`, which the lanes and the diagram then light; a
+  // record not read yet, or not among those shown, is selected by its byte alone.
+  const pickFailure = (/** @type {Failure} */ failure) => {
+    const record = state.shown.find((r) => r.byte === failure.mark.record);
+    if (record) return select(record);
+    setQuery({ sel: failure.mark.record });
+    redraw();
+  };
+  // A failure as the inspector shows it.
+  const failureOf = (/** @type {Failure} */ failure) => {
+    const data = /** @type {Run} */ (state.data);
+    return failureBox(data.id, failure, { base, started: data.times?.started_unix, pick: pickFailure });
   };
   // The record before (`step` -1) or after one on the lane `name`, among those shown.
   const near = (/** @type {LogRecord} */ record, /** @type {string} */ name, /** @type {number} */ step) => {
@@ -228,7 +248,7 @@ export async function runView(id) {
     setQuery({ lane: off ? null : lane.lane, role: null, sel: null });
     redraw();
     if (off) fill(inspector, unselected());
-    else inspectLane(lane, inspector, nearest, /** @type {Run} */ (state.data), callList);
+    else inspectLane(lane, inspector, nearest, /** @type {Run} */ (state.data), callList, failureOf);
   };
 
   // Draws what the address's filters keep of the records read, and what the selection lights.
@@ -290,10 +310,13 @@ export async function runView(id) {
     state.shown = shown;
     const lit = litOf(data, { lane, role, needle }, holder, shown);
     // Before the list, whose pane a lane added shrinks, so that a list kept to its end lands there.
-    drawLanes(lanes, data, jobs, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), pickLane);
+    drawLanes(lanes, data, jobs, { from, to, lit }, lane, (change) => (setQuery(change), redraw()), pickLane, pickFailure);
+    // The failure that the diagram marks: the one selected, by its record or its lane, else the
+    // one the run ended with.
+    const picked = data.failures.find((failure) => String(failure.mark.record) === selected) ?? (data.lanes || []).find((l) => l.lane === lane)?.failure ?? data.failure;
     const items = folded(shown, state.open);
     list.set(items, holder ? items.indexOf(holder) : -1);
-    drawTalk(talk, data, lit, role, (name) => {
+    drawTalk(talk, data, lit, role, picked, (name) => {
       const off = name === null || name === role;
       setQuery({ role: off ? null : name, lane: null, sel: null });
       redraw();
@@ -307,8 +330,10 @@ export async function runView(id) {
   // Draws the run's verdict and facts, which change with its clock.
   const drawHeading = () => {
     const data = /** @type {Run} */ (state.data);
-    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : data.verdict));
+    const failure = data.failure;
+    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : failure ? sentence(failure.state) : data.verdict));
     drawOnce(result, data.result, () => drawResult(result, data.result));
+    drawOnce(failed, failure, () => fill(failed, failure ? failureParts(data.id, failure, { base, started: data.times?.started_unix, pick: pickFailure }) : null));
     drawFacts(facts, data);
     const headers = data.model ? data.model.dropped_headers : [];
     drawOnce(dropped, [headers, data.model?.more_dropped_headers], () => drawDropped(dropped, headers, !!data.model?.more_dropped_headers));
@@ -459,9 +484,9 @@ export async function runView(id) {
     const record = state.records.find((r) => String(r.byte) === query.get("sel"));
     const role = query.get("role");
     if (record) {
-      inspectRecord(record, inspector, recordLinks(record), data);
+      inspectRecord(record, inspector, recordLinks(record), data, failureOf);
       list.select(list.selected, true);
-    } else if (lane) inspectLane(lane, inspector, nearest, data, callList);
+    } else if (lane) inspectLane(lane, inspector, nearest, data, callList, failureOf);
     else if (role) inspectRole(role, inspector, data);
     else fill(inspector, unselected());
   };
@@ -709,8 +734,8 @@ function drawTraces(node, data) {
 // The lanes of the run's sandboxes, each from when the core asked for it until it was gone: its
 // start faint, its life solid, its calls or a lease's work on it, and a tick at each model
 // answer. A sandbox that isn't gone runs to the last time the record knows, its end open.
-/** @param {HTMLElement} node @param {Run} data @param {Map<string, Lane[]>} jobs @param {{ from: number | null, to: number | null, lit: Lit | null }} view @param {string | null} picked @param {(change: Record<string, string | null>) => void} change @param {(lane: Lane) => void} pick */
-function drawLanes(node, data, jobs, view, picked, change, pick) {
+/** @param {HTMLElement} node @param {Run} data @param {Map<string, Lane[]>} jobs @param {{ from: number | null, to: number | null, lit: Lit | null }} view @param {string | null} picked @param {(change: Record<string, string | null>) => void} change @param {(lane: Lane) => void} pick @param {(failure: Failure) => void} pickFailure */
+function drawLanes(node, data, jobs, view, picked, change, pick, pickFailure) {
   const times = data.times;
   if (!data.lanes || !times) {
     node.replaceChildren(h("p", { class: "empty" }, "The run's log doesn't record its start yet."));
@@ -722,6 +747,19 @@ function drawLanes(node, data, jobs, view, picked, change, pick) {
   const width = (/** @type {number} */ from, /** @type {number} */ to) => Math.max(0.15, (100 * (to - from)) / span) + "%";
   const ticks = [];
   for (let index = 0; index <= 4; index++) ticks.push(h("span", { style: { left: index * 25 + "%" } }, clock((span * index) / 4)));
+  // Each failure's mark, by the lane it is drawn on: its subject's, a call on a resident sandbox
+  // on that sandbox's; the failure the run ended with among them once, and on the axis if its
+  // subject has no lane.
+  /** @type {Map<string | null, Failure[]>} */
+  const marks = new Map();
+  const ended = data.failure && !data.failures.some((failure) => failure.mark.record === data.failure?.mark.record) ? [data.failure] : [];
+  for (const failure of [...data.failures, ...ended]) {
+    if (failure.mark.at === null) continue;
+    const of = data.lanes.find((lane) => lane.lane === failure.mark.lane);
+    const on = of ? (of.service ?? of.lane) : null;
+    marks.set(on, [...(marks.get(on) || []), failure]);
+  }
+  const marksOn = (/** @type {string | null} */ lane) => (marks.get(lane) || []).map((failure) => laneMark(failure, at(failure.mark.at ?? 0), pickFailure));
   // A lane's name says its role and the role's place; the lane's own place, which can name its
   // GPU, is in its title and the inspector.
   const sandboxes = data.lanes.filter((lane) => !lane.service);
@@ -759,6 +797,7 @@ function drawLanes(node, data, jobs, view, picked, change, pick) {
       const failed = new Set(caller.failed || []);
       for (const answered of caller.answered || []) parts.push(h("div", { class: "tick" + (failed.has(answered) ? " failed" : ""), style: { left: at(answered) } }));
     }
+    parts.push(...marksOn(lane.lane));
     const role = laneRole(lane, data);
     const { name, place } = labels[index];
     const title = lane.lane + (role ? " of role " + role : "") + (lane.of ? ", " + calls(lane.of) : "") + (lane.grant ? ", grant " + lane.grant : "") + ", on " + lane.sandbox.place;
@@ -766,7 +805,7 @@ function drawLanes(node, data, jobs, view, picked, change, pick) {
     const classes = ["lane", lane.kind, picked === lane.lane ? "on" : "", lit && !lit.lanes.has(lane.lane) ? "dim" : "", lit && lit.here !== null && lit.lanes.has(lane.lane) ? "lit" : ""];
     return h("div", { class: classes.join(" ") }, h("div", { class: "name", title, onclick: () => pick(lane) }, name, " ", h("span", { class: "place" }, place)), h("div", { class: "track" }, parts));
   });
-  const axis = h("div", { class: "axis" }, h("div", { class: "ticks" }, ticks));
+  const axis = h("div", { class: "axis" }, h("div", { class: "ticks" }, ticks, marksOn(null)));
   const guides = ticks.map((_, index) => h("div", { class: "guide", style: { left: across(index / 4) } }));
   const tracks = h("div", { class: "tracks" }, guides, rows);
   if (times.now !== null) tracks.append(h("div", { class: "now", title: "Now", style: { left: across(times.now / span) } }));
@@ -852,8 +891,8 @@ function inspectRole(name, inspector, data) {
   );
 }
 
-/** @param {Lane} lane @param {HTMLElement} inspector @param {(lane: string, time: number) => void} nearest @param {Run} data @param {HTMLElement} callList */
-function inspectLane(lane, inspector, nearest, data, callList) {
+/** @param {Lane} lane @param {HTMLElement} inspector @param {(lane: string, time: number) => void} nearest @param {Run} data @param {HTMLElement} callList @param {(failure: Failure) => HTMLElement} failureOf */
+function inspectLane(lane, inspector, nearest, data, callList, failureOf) {
   const { place, asked, started, gone, deleted } = lane.sandbox;
   const at = (/** @type {number | null} */ seconds) => h("dd", { title: utc(data.times && data.times.started_unix, seconds) }, clock(seconds));
   const work = (lane.work || []).map((w) =>
@@ -872,6 +911,7 @@ function inspectLane(lane, inspector, nearest, data, callList) {
     inspector,
     h("h3", {}, h("span", { class: "kind " + lane.kind }, lane.kind), " ", lane.lane),
     h("p", { class: "said" }, lane.said),
+    lane.failure ? failureOf(lane.failure) : null,
     h(
       "dl",
       {},
@@ -894,16 +934,17 @@ function inspectLane(lane, inspector, nearest, data, callList) {
   );
 }
 
-// Shows `record` in the inspector: its kind and time, its fields that are no object, the buttons
-// `links`, a link to the payload it names, if any, then the record whole, as the log holds it,
-// its strings cut, coloured.
-/** @param {LogRecord} record @param {HTMLElement} inspector @param {Array<HTMLElement | false | null | undefined>} links @param {Run | null} data */
-function inspectRecord(record, inspector, links, data) {
+// Shows `record` in the inspector: its kind and time, the failure it states, if it states one,
+// its fields that are no object, the buttons `links`, a link to the payload it names, if any,
+// then the record whole, as the log holds it, its strings cut, coloured.
+/** @param {LogRecord} record @param {HTMLElement} inspector @param {Array<HTMLElement | false | null | undefined>} links @param {Run | null} data @param {(failure: Failure) => HTMLElement} failureOf */
+function inspectRecord(record, inspector, links, data, failureOf) {
   const [kind] = saidOf(record);
   const started = data && data.times && data.times.started_unix;
   const { byte, when, ...kept } = record;
   const event = /** @type {Record<string, any>} */ (record.event || {});
   const payload = data && payloadOf(record);
+  const failure = data && data.failures.find((failure) => failure.mark.record === byte);
   /** @type {Array<[string, any]>} */
   const scalars = [
     ["seq", record.seq],
@@ -915,6 +956,7 @@ function inspectRecord(record, inspector, links, data) {
   fill(
     inspector,
     h("h3", {}, h("span", { class: "kind" }, kind), " ", h("span", { class: "t", title: utc(started, when) }, clock(when))),
+    failure ? failureOf(failure) : null,
     h("dl", {}, scalars.filter(([, value]) => value !== undefined && value !== "").flatMap(([name, value]) => [h("dt", {}, name), h("dd", {}, String(value))])),
     links.some(Boolean) ? h("p", { class: "links" }, links) : null,
     payload && data ? payloadLink(data.id, payload) : null,

@@ -10,8 +10,8 @@ use expect_test::expect;
 use serde_json::{Value, json};
 
 use super::{
-    Prices, Scratch, Step, asked, check, cut, lease_places, logged, poll, returned, whole_log,
-    write_record, write_run,
+    Prices, Scratch, Step, asked, check, cut, lease_places, logged, payload, poll, returned,
+    whole_log, write_record, write_run,
 };
 
 /// A `pumpkin view` process that listens on loopback, and is killed when dropped.
@@ -250,7 +250,7 @@ fn write_team(scratch: &Scratch, id: &str) {
         .unwrap()
         .remove("sessions");
     ir["roles"].as_array_mut().unwrap().extend([peer, target]);
-    let selected = super::payload();
+    let selected = payload();
     let final_call = json!({"kind":"start_final_call","job":2,"timeout_ns":"3000000000",
         "selections":[{"role":"solver","selection":null},{"role":"peer","selection":selected}]});
     let call = |caller, job| {
@@ -479,6 +479,8 @@ fn serves_runs() {
             again: {"command":"pumpkin run --runs <scratch>/runs <scratch>/task.star"}
             cost: {"said":"$1.10, $0.66 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$1.10+"}
             end: 9485
+            failure: null
+            failures: [{"at":260.0,"evidence":[],"mark":{"at":260.0,"between":["solver","trainer"],"lane":"job 1","record":5403,"role":"trainer"},"reason":"the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","state":"failed","subject":{"job":1,"kind":"call"}},{"at":1020.0,"evidence":[],"mark":{"at":1020.0,"between":["scorer","model"],"lane":"job 4","record":8905,"role":"scorer"},"reason":null,"state":"failed","subject":{"caller":"job-4","kind":"request","request":3,"upstream":null}}]
             has_result: true
             id: "<ended>"
             lanes:
@@ -487,7 +489,7 @@ fn serves_runs() {
               {"grant":"box","holder":"job 0","kind":"runner","lane":"lease 0","role":"box","said":"box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\\nprint 7` exited 0; closed as its call ended","sandbox":{"asked":50.0,"deleted":true,"gone":102.0,"place":"aws/box","started":55.0},"work":[{"end":null,"from":56.0,"kind":"put","label":"/pumpkin/in/payload → /work/in","to":null},{"end":{"exited":{"code":0}},"from":58.0,"kind":"command","label":"sh -c set -e\nprint 7","to":62.0}]}
               {"grant":"gpu","holder":"agent 0","kind":"runner","lane":"lease 1","role":"gpu","said":"gpu lease 1 of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder","sandbox":{"asked":120.0,"deleted":true,"gone":145.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":126.0},"work":[{"end":{"exited":{"code":0}},"from":130.0,"kind":"command","label":"nvidia-smi","to":132.0}]}
               {"grant":"cpu","holder":"agent 0","kind":"runner","lane":"lease 2","role":"cpu","said":"cpu lease 2 of agent 0 on aws/judge, 14m45s: charged 14m10s, 30s of it busy, 1 command, the last `sleep 60` timed out; closed as the work phase ended","sandbox":{"asked":120.0,"deleted":true,"gone":1005.0,"place":"aws/judge","started":150.0},"work":[{"end":"timed_out","from":151.0,"kind":"command","label":"sleep 60","to":181.0}]}
-              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"holder":"agent 0","kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 1 of agent 0 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
+              {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-1","failed":[],"failure":{"at":260.0,"evidence":[],"mark":{"at":260.0,"between":["solver","trainer"],"lane":"job 1","record":5403,"role":"trainer"},"reason":"the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","state":"failed","subject":{"job":1,"kind":"call"}},"holder":"agent 0","kind":"target","lane":"job 1","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 1 of agent 0 on modal/a100_80, never started, ended after 1m: failed: the job's sandbox didn't start: Modal refused the helper's `create`: ResourceExhaustedError: Insufficient capacity to create sandbox: fix what Modal reports","sandbox":{"asked":200.0,"deleted":null,"gone":260.0,"place":"modal/a100_80","started":null}}
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-2","failed":[],"holder":"agent 0","kind":"target","lane":"job 2","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 2 of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 10s, ran 20s: failed: the call was stopped (stopped)","sandbox":{"asked":300.0,"deleted":true,"gone":330.0,"place":"modal/a100_80 with NVIDIA A100-SXM4-80GB","started":310.0}}
               {"answered":[],"answers":{"count":0,"failed":0},"caller":"job-3","failed":[],"holder":"agent 0","kind":"target","lane":"job 3","model":{"dropped_headers":[],"failed":[],"first_token":{"count":0,"median":null},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":0,"tokens":{"cached":null,"input":0,"output":0},"took":{"count":0,"median":null}},"of":{"function":"train"},"role":"trainer","said":"train job 3 of agent 0 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)","sandbox":{"asked":400.0,"deleted":true,"gone":415.0,"place":"modal/a100_80 with unknown GPUs","started":405.0}}
               {"grant":"gpu","holder":"agent 0","kind":"runner","lane":"lease 3","role":"gpu","said":"gpu lease 3 of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired","sandbox":{"asked":500.0,"deleted":true,"gone":570.0,"place":"modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)","started":505.0},"work":[{"end":{"exited":{"code":0}},"from":506.0,"kind":"command","label":"true","to":507.0}]}
@@ -1015,6 +1017,115 @@ fn counts_a_jobs_answers_under_its_caller_name() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the three runs' logs")]
+fn states_failures() {
+    let scratch = Scratch::new();
+    let none = || json!([]);
+    let call = |job: u64| {
+        json!({ "kind": "start_call", "caller": "agent-0", "job": job, "grant": "train",
+            "payload": payload(), "timeout_ns": "10000000000" })
+    };
+    let failed = |seconds, kind: &str, id: &str, n: u64, reason: &str| {
+        logged(
+            seconds,
+            json!({ "kind": kind, id: n, "reason": reason }),
+            none(),
+        )
+    };
+    let routed = "20261110-190000-00000014";
+    let mut refused = answered(
+        3,
+        "agent-0",
+        0,
+        403,
+        json!({ "response": { "bytes": 256 } }),
+        Some("responses"),
+    );
+    refused["event"]["answer"] = json!({ "kind": "refused", "status": 400,
+        "message": "the model provider refused the request, with a 403" });
+    let reason = "the upstream `zai` failed the agent's last model request, 0";
+    write_run(
+        &scratch,
+        routed,
+        asked(routed, 0),
+        &[started(2, "agent-0", 0), refused],
+        Some(json!({ "state": "failed", "reason": reason })),
+        &lease_places(Prices::Both),
+    );
+    let unjudged = "20261110-191000-00000015";
+    let final_call = json!({ "kind": "start_final_call", "job": 1, "timeout_ns": "3000000000",
+        "selections": [{ "role": "solver", "selection": payload() }] });
+    let stop = json!([{ "kind": "stop_call", "job": 0 }, final_call]);
+    let log = [
+        logged(1, json!({ "kind": "tick" }), json!([call(0)])),
+        logged(2, json!({ "kind": "tick" }), stop),
+        failed(3, "call_failed", "job", 0, "the call was stopped"),
+        failed(4, "call_failed", "job", 1, "the target's session ended"),
+    ];
+    write_run(
+        &scratch,
+        unjudged,
+        asked(unjudged, 0),
+        &log,
+        Some(super::unsubmitted()),
+        &lease_places(Prices::Both),
+    );
+    let went_on = "20261110-192000-00000016";
+    let lease = json!({ "kind": "start_lease", "grant": "gpu", "holder": "agent-0", "lease": 0 });
+    let log = [
+        logged(1, json!({ "kind": "tick" }), json!([call(0), lease])),
+        failed(2, "call_failed", "job", 0, "the job's sandbox didn't start"),
+        failed(
+            3,
+            "lease_failed",
+            "lease",
+            0,
+            "the runner's sandbox didn't start",
+        ),
+    ];
+    write_run(
+        &scratch,
+        went_on,
+        asked(went_on, 0),
+        &log,
+        Some(returned(1.0)),
+        &lease_places(Prices::Both),
+    );
+    let served = Served::start(&scratch);
+    let steps = [routed, unjudged, went_on].map(|id| {
+        let run = served.get(&format!("/api/runs/{id}"));
+        let failures = fields(&json!({ "failures": run["failures"] }), &["failures"]);
+        Step::Ran(format!(
+            "{}: {}\nfailure: {}\n{failures}",
+            run["state"], run["verdict"], run["failure"]
+        ))
+    });
+    check(
+        &scratch,
+        steps,
+        false,
+        &[],
+        &expect![[r#"
+        "failed": "Run 20261110-190000-00000014 failed: the upstream `zai` failed the agent's last model request, 0"
+        failure: {"at":3.0,"evidence":[],"mark":{"at":3.0,"between":null,"lane":null,"record":null,"role":null},"reason":"the upstream `zai` failed the agent's last model request, 0","state":"failed","subject":{"kind":"run"}}
+        failures:
+          {"at":3.0,"evidence":[{"bytes":256,"name":"The response, as kept","path":"exchange/0/response"}],"mark":{"at":3.0,"between":["solver","model"],"lane":"agent 0","record":294,"role":"solver"},"reason":"the model provider refused the request, with a 403","state":"failed","subject":{"caller":"agent-0","kind":"request","request":0,"upstream":"zai"}}
+
+        "finished": "Run 20261110-191000-00000015 finished without a result: the final call gave none (error: solver submitted nothing); it ran no command"
+        failure: {"at":4.0,"evidence":[],"mark":{"at":4.0,"between":null,"lane":"job 1","record":826,"role":"scorer"},"reason":"the target's session ended","state":"finished without a result","subject":{"job":1,"kind":"call"}}
+        failures:
+          {"at":4.0,"evidence":[],"mark":{"at":4.0,"between":null,"lane":"job 1","record":826,"role":"scorer"},"reason":"the target's session ended","state":"failed","subject":{"job":1,"kind":"call"}}
+
+        "finished": "Run 20261110-192000-00000016 finished with a result (score=1 metrics={\"solved\":3})"
+        failure: null
+        failures:
+          {"at":2.0,"evidence":[],"mark":{"at":2.0,"between":["solver","trainer"],"lane":"job 0","record":480,"role":"trainer"},"reason":"the job's sandbox didn't start","state":"failed","subject":{"job":0,"kind":"call"}}
+          {"at":3.0,"evidence":[],"mark":{"at":3.0,"between":["solver","gpu"],"lane":"lease 0","record":605,"role":"gpu"},"reason":"the runner's sandbox didn't start","state":"failed","subject":{"kind":"lease","lease":0}}
+    "#]],
+    );
+}
+
+#[test]
 fn starts_over_a_shortened_log() {
     let scratch = Scratch::new();
     let id = "20261110-180000-00000013";
@@ -1228,6 +1339,7 @@ fn serves_the_page() {
             head: <script type="module" src="/<digest>/app.js"></script>
             head: <link rel="modulepreload" href="/<digest>/app.js">
             head: <link rel="modulepreload" href="/<digest>/diff.js">
+            head: <link rel="modulepreload" href="/<digest>/failure.js">
             head: <link rel="modulepreload" href="/<digest>/h.js">
             head: <link rel="modulepreload" href="/<digest>/inspector.js">
             head: <link rel="modulepreload" href="/<digest>/key.js">
@@ -1247,6 +1359,7 @@ fn serves_the_page() {
             /<digest>/style.css: HTTP/1.1 200 OK text/css; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/app.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/diff.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/failure.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/h.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/inspector.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/key.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable

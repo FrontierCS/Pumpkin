@@ -35,6 +35,7 @@ const KEY = [
       { token: "--runner", look: "bar", words: "A runner, and a lease's work" },
       { token: "--model", look: "tick", words: "A model answer" },
       { token: "--fail-bar", look: "tick", words: "A failed model answer, or failed work" },
+      { token: "--fail-bar", look: "box", words: "What failed, at the time it failed" },
     ],
   },
   {

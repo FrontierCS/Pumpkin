@@ -329,9 +329,9 @@ fn exports_what_the_view_answers() {
         false,
         &[(EXPORTED, "<id>")],
         &expect![[r#"
-            pumpkin: exported 1 run into public, and left out 0: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 0: wrote 99 files
 
-            the page: index.html, and 21 files below its digest
+            the page: index.html, and 22 files below its digest
             robots.txt: -
             runs.json: /api/runs
             runs/<id>/diff/11-12-system.json: /api/runs/<id>/diff?a=11&b=12&part=system
@@ -486,7 +486,7 @@ fn rewrites_what_a_live_run_changed() {
         &[(EXPORTED, "<id>"), (UNREADABLE, "<unreadable>")],
         &expect![[r#"
             pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
-            pumpkin: exported 1 run into public, and left out 1: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 1: wrote 99 files
 
             pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
             pumpkin: exported 1 run into public, and left out 1: wrote 14 files
@@ -597,7 +597,7 @@ fn replaces_what_names_the_machines() {
         false,
         &[(EXPORTED, "<id>")],
         &expect![[r#"
-            pumpkin: exported 1 run into public, and left out 0: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 0: wrote 99 files
 
             <sandbox of agents/solver>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
             <sandbox of job-0>: in 4 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/log/0.json runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json

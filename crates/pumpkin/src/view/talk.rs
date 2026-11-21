@@ -126,6 +126,7 @@ impl Talk {
                 final_target: final_target.to_owned(),
                 granted,
                 jobs: BTreeMap::new(),
+                callers: BTreeMap::new(),
                 holders: BTreeMap::new(),
                 directions: BTreeMap::new(),
             },
@@ -142,16 +143,30 @@ impl Talk {
         self.event(at, &record["event"]);
     }
 
-    fn role(&self, caller: CallerName) -> Option<String> {
+    /// The role of `caller`, for an agent of the IR or a job whose call has started.
+    pub(super) fn role(&self, caller: CallerName) -> Option<String> {
         match caller {
             CallerName::Agent(_) => self.reading.agents.get(&caller).cloned(),
             CallerName::Job(job) => self.reading.jobs.get(&job).cloned(),
         }
     }
 
-    fn ends(&self, lease: u64) -> Option<(String, String)> {
+    /// The roles of `lease`'s holder and of its runner.
+    pub(super) fn ends(&self, lease: u64) -> Option<(String, String)> {
         let holder = self.reading.holders.get(&lease)?.clone();
         Some((holder, self.runners.get(&lease)?.clone()))
+    }
+
+    /// The roles of the caller and of the target of `job`'s call, for a call of a job function.
+    pub(super) fn call_ends(&self, job: u64) -> Option<(String, String)> {
+        let caller = self.reading.callers.get(&job)?.clone();
+        Some((caller, self.reading.jobs.get(&job)?.clone()))
+    }
+
+    /// The name of the role that the IR declares at `index`.
+    pub(super) fn role_at(&self, index: u64) -> Option<String> {
+        let role = self.roles.get(usize::try_from(index).ok()?)?;
+        role["name"].as_str().map(str::to_owned)
     }
 }
 
@@ -161,6 +176,8 @@ struct Reading {
     /// Each grant's role, by its holder and name, and how the page names a call of it.
     granted: BTreeMap<(String, String), (String, &'static str)>,
     jobs: BTreeMap<u64, String>,
+    /// The role that called each job of a job function.
+    callers: BTreeMap<u64, String>,
     holders: BTreeMap<u64, String>,
     directions: BTreeMap<(u64, u64), String>,
 }
@@ -229,6 +246,7 @@ impl Talk {
                     return;
                 };
                 self.edge(&from, &to, kind).add(Some(payload_bytes), None);
+                self.reading.callers.insert(job, from);
                 to
             }
             CallOf::Final => {
