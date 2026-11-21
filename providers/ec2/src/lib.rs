@@ -13,9 +13,10 @@
 //!
 //! The provider relies on the envelope, and checks none of this on AWS: each launch template, at
 //! the version the settings name, boots an AMI for `x86_64`, the only architecture `sandboxd` is
-//! built for, which holds Docker and nftables, as the instance's boot installs neither; has each
-//! network interface and EBS volume of its instances deleted when the instance is terminated, so
-//! that a sandbox is freed with its instance; serves its instances' metadata only with a token,
+//! built for, which runs cloud-init and systemd, as AL2023 does, and holds Docker, ECR's
+//! credential helper and nftables, as the instance's boot installs none; has each network
+//! interface and EBS volume of its instances deleted when the instance is terminated, so that a
+//! sandbox is freed with its instance; serves its instances' metadata only with a token,
 //! within one hop of the instance; and launches an instance type built on the Nitro System, the
 //! only kind whose latest serial console EC2 reads ([`Provider::console`]).
 
@@ -37,6 +38,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 mod launch;
+mod user_data;
 
 /// The most seconds a sandbox's start takes, as a class's [`Class::startup_seconds`] declares it
 /// unless its settings give another (`InstanceClass::startup_seconds`): the shares of the launch,
@@ -181,7 +183,6 @@ struct TemplateId(String);
 pub struct Ec2<'e> {
     reached: Reached,
     pusher: Pusher<'e>,
-    region: Region,
     classes: BTreeMap<Name, InstanceClass>,
     repositories: Repositories<Repository>,
     /// The timer's role, which each instance's schedule runs with.
@@ -220,7 +221,6 @@ impl<'e> Ec2<'e> {
         Ok(Self {
             reached: Reached { cli, group },
             pusher,
-            region: region.clone(),
             classes: classes.clone(),
             repositories,
             timer_role: role_arn,

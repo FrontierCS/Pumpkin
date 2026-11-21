@@ -1,15 +1,14 @@
-//! Boots a sandbox on its instance: reads the `Start` on standard input, locks the instance's
-//! network down, pulls the role's image and runs its container with `sandboxd` in it, until the
-//! container exits. Whatever happens, it reports on the serial console, each line behind
-//! [`CONSOLE_PREFIX`] and none holding the grant, and powers the instance off. Each command it
-//! runs is killed by the start's deadline, or at the hard end once the container starts. Its
-//! files are at their paths below the directory it runs in, which the user data makes `/`.
+//! Boots a sandbox on its instance: reads the `Start` in the user data ([`USER_DATA_FILE`]),
+//! locks the instance's network down, pulls the role's image and runs its container with
+//! `sandboxd` in it, until the container exits, then exits itself, with a failure if the boot
+//! failed. Whatever happens, it reports on its standard output, which its unit connects to the
+//! serial console, each line behind [`CONSOLE_PREFIX`] and none holding the grant. The `Start`'s
+//! deadlines say what bounds it. Its files are at their paths below the directory it runs in,
+//! which its unit makes `/`.
 
 #![expect(
-    clippy::print_stdout,
     clippy::print_stderr,
-    reason = "its console lines are its standard output, and a command line it can't run is \
-              reported on its standard error"
+    reason = "a command line it can't run is reported on its standard error"
 )]
 
 use std::ffi::OsString;
@@ -22,7 +21,9 @@ use std::process::{ExitCode, Output};
 use std::time::Duration;
 use std::{env, fmt};
 
-use schema::ec2_boot::{CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start};
+use schema::ec2_boot::{
+    CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start, USER_DATA_FILE, start_in,
+};
 use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
@@ -44,8 +45,8 @@ const DNS: Ipv4Addr = Ipv4Addr::LOCALHOST;
 // How many of the container's last lines the console gets.
 const LAST_LINES: &str = "20";
 
-// Each command of the end asks a local daemon one thing, in well under a second; the hard end's
-// shutdown, which the user data armed, follows whatever this bound cuts short.
+// Each command of the end asks a local daemon one thing, in well under a second; the unit's
+// poweroff follows whatever this bound cuts short.
 const END_TIMEOUT: Duration = Duration::from_mins(1);
 
 fn main() -> ExitCode {
@@ -54,8 +55,8 @@ fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     if args != ["start"] {
         eprintln!(
-            "ec2-boot: the command line is {args:?}: expected `ec2-boot start`, with a start on \
-             standard input"
+            "ec2-boot: the command line is {args:?}: expected `ec2-boot start`, with a start in \
+             {USER_DATA_FILE}"
         );
         return ExitCode::from(2);
     }
@@ -70,7 +71,6 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
     let Start {
         hard_end_unix_seconds,
         pulls_by_unix_seconds,
-        registry,
         role_image,
         sandboxd_image,
         confinement,
@@ -78,20 +78,12 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
         grant,
         ops,
         model,
-    } = serde_json::from_reader(io::stdin().lock()).map_err(|error| {
-        // Where alone: serde's message may quote a value, such as the grant.
-        format!(
-            "the start on standard input can't be read, at line {}, column {}: expected a \
-             start's JSON, as the provider writes it",
-            error.line(),
-            error.column()
-        )
-    })?;
+    } = read_start()?;
     let hard_end = Deadline::at_unix(Duration::from_secs(hard_end_unix_seconds));
     let pulls_by = Deadline::at_unix(Duration::from_secs(pulls_by_unix_seconds));
     lock_down(gateway, pulls_by)?;
     check_docker(pulls_by)?;
-    pull(&registry, &role_image, &sandboxd_image, pulls_by)?;
+    pull(&role_image, &sandboxd_image, pulls_by)?;
     copy_sandboxd(&sandboxd_image, pulls_by)?;
     let mut run = vec![
         "run".to_owned(),
@@ -103,8 +95,11 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
     run.extend(["--".to_owned(), role_image, gateway.to_string()]);
     run.extend(ops.then(|| "--ops".to_owned()));
     run.extend(model.then(|| "--model".to_owned()));
-    let container = container.insert(run_granted(&run, &grant, hard_end)?);
+    let container = container.insert(run_granted(&run, &grant, pulls_by)?);
     say(format_args!("container {container} started"));
+    // The start's deadline, which the unit scheduled, would power the instance off under the
+    // running container: the hard end bounds it from here on.
+    power_off_at(hard_end_unix_seconds, pulls_by)?;
     let status = command("docker", &["wait", container], b"", hard_end)?;
     say(format_args!(
         "container {container} exited with status {status}"
@@ -144,20 +139,42 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
             )),
         }
     }
-    // However the boot ended, the instance goes off, and a launched one terminates on it.
-    let off = command(
-        "shutdown",
-        &["--poweroff", "now"],
-        b"",
-        Deadline::after(END_TIMEOUT),
-    );
-    if let Err(error) = off {
-        say(format_args!("the instance can't power itself off: {error}"));
-    }
     match started {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
+}
+
+// Makes the grant's directory, root's alone, then reads the start out of cloud-init's copy of the
+// user data, which it leaves.
+fn read_start() -> Result<Start, String> {
+    let dir = Path::new(GRANT_DIR.trim_start_matches('/'));
+    let made = DirBuilder::new().mode(0o700).create(dir);
+    made.context(format_args!("making {} failed", dir.display()))?;
+    let file = Path::new(USER_DATA_FILE.trim_start_matches('/'));
+    let text =
+        fs::read_to_string(file).context(format_args!("reading {} failed", file.display()))?;
+    start_in(&text)
+        .map_err(|why| format!("the user data in {} can't be read: {why}", file.display()))
+}
+
+// Schedules the instance's poweroff at `at_unix_seconds` with logind, in place of the one
+// scheduled before: the call that `shutdown` makes, at an exact time, which fires at once if the
+// time has passed:
+// https://github.com/systemd/systemd-stable/blob/0f3ad617e60c1d037025ff29a45a6422630ad9e8/man/org.freedesktop.login1.xml#L632-L636
+fn power_off_at(at_unix_seconds: u64, by: Deadline) -> Result<(), String> {
+    let micros = Duration::from_secs(at_unix_seconds).as_micros().to_string();
+    let call = [
+        "call",
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+        "ScheduleShutdown",
+        "st",
+        "poweroff",
+        &micros,
+    ];
+    command("busctl", &call, b"", by).map(drop)
 }
 
 fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
@@ -203,12 +220,9 @@ fn check_docker(by: Deadline) -> Result<(), String> {
     Ok(())
 }
 
-fn pull(
-    registry: &str,
-    role_image: &str,
-    sandboxd_image: &str,
-    by: Deadline,
-) -> Result<(), String> {
+// By the instance's role, which ECR's credential helper gets a token with for each pull, as the
+// user data configures root's Docker.
+fn pull(role_image: &str, sandboxd_image: &str, by: Deadline) -> Result<(), String> {
     command("docker", &["pull", "--quiet", role_image], b"", by)?;
     // Docker's own record of what it pulled goes to the console, for an audit.
     for image in [role_image, sandboxd_image] {
@@ -222,8 +236,7 @@ fn pull(
         let pulled = command("docker", &inspect, b"", by)?;
         say(format_args!("pulled {image}: {pulled}"));
     }
-    // So that the login lasts only while the images are pulled.
-    command("docker", &["logout", registry], b"", by).map(drop)
+    Ok(())
 }
 
 // Puts `sandboxd` on the instance, to mount into the role's container, which holds none.
@@ -330,7 +343,10 @@ fn shown(program: &str, args: &[&str]) -> String {
 }
 
 fn say(text: impl fmt::Display) {
+    let mut console = io::stdout().lock();
     for line in text.to_string().lines() {
-        println!("{CONSOLE_PREFIX} {line}");
+        // A console that takes no more, as a hung-up terminal, ends no boot: its lines only
+        // report it.
+        let _ = writeln!(console, "{CONSOLE_PREFIX} {line}");
     }
 }
