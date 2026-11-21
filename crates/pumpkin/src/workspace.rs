@@ -39,7 +39,7 @@ impl Workspace {
             return Err(format!(
                 "this `pumpkin`, {}, is in no directory named `{DIR}`, which would hold all it \
                  writes: run the one that a repository's `./pumpkin` launches, or that `cargo \
-                 xtask install` installs in a checkout's `{DIR}/bin`",
+                 xtask build` puts in a checkout's `{DIR}/bin`",
                 exe.display()
             ));
         };

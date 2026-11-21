@@ -37,19 +37,27 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 ## Quickstart
 
-This repository is the source of the runner. A workflow lives in a repository of tasks, and that
-repository is where a run starts. Install Pumpkin there as `./pumpkin`, a copy of
-[`deploy/pumpkin`](deploy/pumpkin), beside a `.pumpkinversion` with the tag, its full commit and
-the SHA-256 checksum of its release archive. The [running guide](docs/running.md#installing)
-shows where to find them.
+From the root of a task repository on Linux x86-64, choose a release tag and run the commands
+below to install or upgrade Pumpkin. [Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases)
 
-```console
-$ tag='<tag>'
-$ curl --fail --location --proto '=https' --output pumpkin \
-    "https://raw.githubusercontent.com/FrontierCS/Pumpkin/$tag/deploy/pumpkin"
-$ chmod +x pumpkin
-$ printf '%s %s %s\n' "$tag" '<commit>' '<checksum>' > .pumpkinversion
+```sh
+(
+    set -o errexit
+    tag='<tag>'
+    url="https://github.com/FrontierCS/Pumpkin/releases/download/$tag"
+    stage=$(mktemp --directory "$PWD/.pumpkin-install.XXXXXXXX")
+    trap 'rm --recursive --force "$stage"' EXIT
+    cd "$stage"
+    curl --fail --location --proto '=https' --output pumpkin "$url/pumpkin"
+    curl --fail --location --proto '=https' --output .pumpkinversion "$url/pumpkinversion"
+    chmod +x pumpkin
+    ./pumpkin --version
+    mv --target-directory .. pumpkin .pumpkinversion
+)
 ```
+
+Commit `pumpkin` and `.pumpkinversion` to the task repository. To upgrade, repeat with the
+new tag and commit both files along with any workflow changes the release requires.
 
 On Linux x86-64, `./pumpkin` verifies and unpacks the release into the user's cache. Every
 repository that pins the release uses that install and keeps its own run state in `.pumpkin/`.
@@ -292,11 +300,9 @@ answers; [docs/language.md](docs/language.md) holds the language.
 
 ## Run it
 
-The operator, who runs `pumpkin` and holds the machine's configuration and keys, installs it in a
-repository of tasks as `./pumpkin`, a copy of [`deploy/pumpkin`](deploy/pumpkin) beside a
-`.pumpkinversion` that names the tag, the commit and the release's checksum, on Linux x86-64; the
-[running guide](docs/running.md#installing) says where to find them. A machine whose
-runs stay on its own Docker engine needs only this `~/.config/pumpkin/pumpkin.toml`:
+The operator runs Pumpkin from the task repository and holds the machine's configuration and keys.
+Install the launcher and pin as shown in the [quickstart](#quickstart). A machine whose runs
+stay on its own Docker engine needs only this `~/.config/pumpkin/pumpkin.toml`:
 
 ```toml
 [docker]
@@ -395,8 +401,8 @@ the connection and use the same commands to follow, list, stop, reap or view tho
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
   [`docs/dev/`](docs/dev/), the rules for changing it.
 - On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
-  the current checkout. Find the archive and its SHA-256 checksum in `target/release-assets/`.
-  Pushing a new tag builds both files, then runs `cargo xtask release <tag> --publish` to attach
+  the current checkout. The archive, launcher and pin are in `target/release-assets/preview/`.
+  Pushing a new tag builds its assets and runs `cargo xtask release <tag> --publish` to attach
   them to a GitHub draft and publish it as the latest release. If the workflow leaves a draft,
-  verify its assets against the local archive and checksum, attach any missing file, and publish
+  verify its assets against the local files for the tag, attach any missing file, and publish
   the draft as the latest release.

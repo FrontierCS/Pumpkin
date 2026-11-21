@@ -1,5 +1,5 @@
-//! A release contains the static install, its commit and the formatter's license. Publication
-//! attaches the checked archive and its checksum to a draft before making the release public.
+//! A release ships a launcher, its one-line pin and the static archive named by the pin.
+//! Publication checks all three against the tag before attaching them to a draft.
 
 use std::fs;
 use std::path::Path;
@@ -7,7 +7,25 @@ use std::path::Path;
 use stdx::Context as _;
 use xshell::{Shell, cmd};
 
-use crate::{Cargo, MUSL, Result, install, root};
+use crate::{Cargo, MUSL, Result, build, root};
+
+struct Release<'a> {
+    tag: &'a str,
+    commit: String,
+    archive: String,
+    launcher: Vec<u8>,
+}
+
+impl Release<'_> {
+    fn pin(&self, sh: &Shell) -> Result<String> {
+        let archive = &self.archive;
+        let sum = cmd!(sh, "sha256sum {archive}").read()?;
+        let (digest, _) = sum
+            .split_once(' ')
+            .ok_or("sha256sum omitted the archive name")?;
+        Ok(format!("{} {} {digest}\n", self.tag, self.commit))
+    }
+}
 
 pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
     if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -23,29 +41,43 @@ pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
     }
 
     let sh = cargo.sh.clone();
-    let output = root().join("target/release-assets");
-    let archive = format!("pumpkin-{tag}-{MUSL}.tar.xz");
+    let revision = if publish {
+        format!("refs/tags/{tag}^{{commit}}")
+    } else {
+        "HEAD".to_owned()
+    };
+    let commit = cmd!(sh, "git rev-parse --verify {revision}").read()?;
+    let launcher = cmd!(sh, "git show {commit}:deploy/pumpkin")
+        .output()?
+        .stdout;
+    let release = Release {
+        tag,
+        commit,
+        archive: format!("pumpkin-{tag}-{MUSL}.tar.xz"),
+        launcher,
+    };
+
+    let output = root().join("target/release-assets").join(tag);
     if publish {
-        let tag_ref = format!("refs/tags/{tag}^{{commit}}");
-        let commit = cmd!(sh, "git rev-parse --verify {tag_ref}").read()?;
         sh.change_dir(output);
-        return publish_assets(&sh, tag, &archive, &commit);
+        return publish_assets(&sh, &release);
     }
 
-    let commit = cmd!(sh, "git rev-parse HEAD").read()?;
     sh.create_dir(&output)?;
     sh.change_dir(&output);
     // Stage beside the outputs so a checked archive can replace a previous one by rename.
     let scratch = cmd!(sh, "mktemp --directory .build.XXXXXXXX").read()?;
     sh.change_dir(scratch);
-    let built = package(cargo, &sh, &output, &archive, &commit);
+    let built = package(cargo, &sh, &output, &release);
     let cleaned = sh.remove_path(sh.current_dir());
     built?;
     Ok(cleaned?)
 }
 
-fn package(cargo: &Cargo, sh: &Shell, output: &Path, archive: &str, commit: &str) -> Result<()> {
-    install(cargo, Some(sh.current_dir().join("dist")), MUSL)?;
+fn package(cargo: &Cargo, sh: &Shell, output: &Path, release: &Release<'_>) -> Result<()> {
+    let archive = &release.archive;
+    let commit = &release.commit;
+    build(cargo, Some(sh.current_dir().join("dist")), MUSL)?;
     sh.write_file("dist/commit", format!("{commit}\n"))?;
     sh.copy_file(
         root().join("deploy/buildifier-LICENSE"),
@@ -74,9 +106,14 @@ fn package(cargo: &Cargo, sh: &Shell, output: &Path, archive: &str, commit: &str
     .run()?;
     check(sh, commit)?;
 
-    let checksum = format!("{archive}.sha256");
-    sh.write_file(&checksum, checksum_line(sh, archive)?)?;
-    cmd!(sh, "mv --target-directory {output} {archive} {checksum}").run()?;
+    sh.write_file("pumpkin", &release.launcher)?;
+    cmd!(sh, "chmod 0755 pumpkin").run()?;
+    sh.write_file("pumpkinversion", release.pin(sh)?)?;
+    cmd!(
+        sh,
+        "mv --target-directory {output} pumpkin pumpkinversion {archive}"
+    )
+    .run()?;
     Ok(())
 }
 
@@ -115,29 +152,35 @@ fn check(sh: &Shell, commit: &str) -> Result<()> {
     Ok(())
 }
 
-fn checksum_line(sh: &Shell, archive: &str) -> Result<String> {
-    let sum = cmd!(sh, "sha256sum {archive}").read()?;
-    Ok(format!("{sum}\n"))
-}
-
-fn publish_assets(sh: &Shell, tag: &str, archive: &str, commit: &str) -> Result<()> {
-    let checksum = format!("{archive}.sha256");
-    if sh.read_file(&checksum)? != checksum_line(sh, archive)? {
-        return Err(format!("{checksum} differs from the checksum of {archive}").into());
+fn publish_assets(sh: &Shell, release: &Release<'_>) -> Result<()> {
+    let Release {
+        tag,
+        commit,
+        archive,
+        launcher,
+    } = release;
+    if sh.read_binary_file("pumpkin")? != *launcher {
+        return Err(format!("pumpkin differs from deploy/pumpkin at tag {tag}").into());
     }
-    let archived = cmd!(sh, "tar --extract --to-stdout --xz --file {archive} commit").read()?;
-    if archived != commit {
-        return Err(format!(
-            "{archive} contains commit {archived:?}, but tag {tag} names {commit}"
-        )
-        .into());
+    if sh.read_file("pumpkinversion")? != release.pin(sh)? {
+        return Err(
+            format!("pumpkinversion differs from the pin for tag {tag} and {archive}").into(),
+        );
+    }
+    let archived = cmd!(sh, "tar --extract --to-stdout --xz --file {archive} commit").output()?;
+    if archived.stdout != format!("{commit}\n").as_bytes() {
+        return Err(format!("the commit in {archive} differs from tag {tag} ({commit})").into());
     }
     cmd!(
         sh,
         "gh release create {tag} --draft --verify-tag --title {tag} --generate-notes"
     )
     .run()?;
-    cmd!(sh, "gh release upload {tag} {archive} {checksum}").run()?;
+    cmd!(
+        sh,
+        "gh release upload {tag} pumpkin pumpkinversion {archive}"
+    )
+    .run()?;
     cmd!(sh, "gh release edit {tag} --draft=false --latest=true").run()?;
     Ok(())
 }

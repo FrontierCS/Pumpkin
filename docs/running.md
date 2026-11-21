@@ -8,27 +8,17 @@ page says what each is for and how they fit.
 
 ## Installing
 
-A repository of tasks runs Pumpkin through `./pumpkin`, a copy of `deploy/pumpkin`, beside a
-one-line `.pumpkinversion` containing the release tag, its full commit and the SHA-256 checksum
-of its archive. Copy the checksum from the first word of the `.sha256` file on the release page.
-[Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases)
-
-```console
-$ tag='<tag>'
-$ curl --fail --location --proto '=https' --output pumpkin \
-    "https://raw.githubusercontent.com/FrontierCS/Pumpkin/$tag/deploy/pumpkin"
-$ chmod +x pumpkin
-$ printf '%s %s %s\n' "$tag" '<commit>' '<checksum>' > .pumpkinversion
-$ ./pumpkin --version
-```
+Follow the [quickstart](../README.md#quickstart) to install or upgrade Pumpkin in a task
+repository. Each release provides `pumpkin`, the launcher, and `pumpkinversion`, which the
+repository keeps as `.pumpkinversion`. Its one line pins the tag, full commit and SHA-256 of the
+release archive.
 
 The first run downloads the archive, verifies its checksum and unpacks the release under
 `${XDG_CACHE_HOME:-$HOME/.cache}/pumpkin/`. Every repository that pins the same release runs it
 from that cache. Installing an uncached release on Linux x86-64 needs curl or wget, `sha256sum`,
 tar, xz, `flock` from util-linux and TLS certificates.
 
-To update a two-word pin, choose a published release and write its tag, full commit and checksum.
-To build a checkout for development, run `cargo xtask install` from it and use its
+To build a checkout for development, run `cargo xtask build` from it and use its
 `.pumpkin/bin/pumpkin`.
 
 The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/` and the state

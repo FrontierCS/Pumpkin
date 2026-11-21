@@ -14,7 +14,7 @@ use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
-// What `cargo xtask install` lays out beside `pumpkin` in `bin/` (its `built`, in
+// What `cargo xtask build` lays out beside `pumpkin` in `bin/` (its `built`, in
 // `xtask/src/main.rs`, which this mirrors), of which a build may lack some.
 const BESIDE: [&str; 5] = [
     "buildifier",

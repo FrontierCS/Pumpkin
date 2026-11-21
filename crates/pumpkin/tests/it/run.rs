@@ -175,7 +175,7 @@ fn usage() {
                         The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
                         builds it, with the static ec2-boot beside it, which an ec2 provider's
                         instances boot with.
-                        Default: the one beside this pumpkin, where `cargo xtask install` puts
+                        Default: the one beside this pumpkin, where `cargo xtask build` puts
                         both
 
                     --wait
@@ -1002,16 +1002,16 @@ fn unrunnable() {
             pumpkin: the sandboxd script isn't a 64-bit ELF executable: name a static one, which `cargo xtask sandboxd` builds
             $ <scratch>/alone/pumpkin run workflow/task.star --runs runs
             exit status: Some(1)
-            pumpkin: the sandboxd beside `pumpkin`, <scratch>/alone/sandboxd, can't be read (No such file or directory (os error 2)): `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
+            pumpkin: the sandboxd beside `pumpkin`, <scratch>/alone/sandboxd, can't be read (No such file or directory (os error 2)): `cargo xtask build` puts `pumpkin` beside a static one, or name one with `--sandboxd`
             $ <scratch>/checkout/pumpkin run workflow/task.star --runs runs
             exit status: Some(1)
-            pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask install` installs `pumpkin` beside a static one, or name one with `--sandboxd`
+            pumpkin: the sandboxd beside `pumpkin`, <scratch>/checkout/sandboxd, is linked dynamically, and a sandbox runs only a static one: `cargo xtask build` puts `pumpkin` beside a static one, or name one with `--sandboxd`
             $ <scratch>/alone/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask build` puts in a checkout's `.pumpkin/bin`
             $ <scratch>/alone/pumpkin wait 6a
             exit status: Some(1)
-            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask install` installs in a checkout's `.pumpkin/bin`
+            pumpkin: this `pumpkin`, <scratch>/alone/pumpkin, is in no directory named `.pumpkin`, which would hold all it writes: run the one that a repository's `./pumpkin` launches, or that `cargo xtask build` puts in a checkout's `.pumpkin/bin`
             $ <scratch>/�/.pumpkin/pinned/pumpkin run workflow/task.star --sandboxd sandboxd
             exit status: Some(1)
             pumpkin: the workspace's runs directory <scratch>/�/.pumpkin/runs isn't UTF-8, as the commands that `pumpkin` says to run next name it: move the workspace to a UTF-8 path, or name a UTF-8 directory with `--runs`

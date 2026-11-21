@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Copy this launcher into a task repository as ./pumpkin. Its .pumpkinversion pins a release:
-# the tag, the full commit and the SHA-256 from the .sha256 beside the release archive.
+# Save the release assets pumpkin and pumpkinversion as ./pumpkin and .pumpkinversion.
+# The pin contains the release tag, the full commit and the SHA-256 of the archive.
 # The verified install is shared under ${XDG_CACHE_HOME:-$HOME/.cache}/pumpkin. The repository's
 # own .pumpkin holds its working state.
 set -o errexit -o nounset
@@ -65,7 +65,7 @@ checked() {
         fail "$2 lacks an executable bin/pumpkin or a valid commit file: check the release and the cache at $cache"
     fi
     [ "$found" = "$commit" ] ||
-        fail "$2 names commit $found, not $commit: fix the commit or checksum in .pumpkinversion"
+        fail "$2 names commit $found, not $commit: compare .pumpkinversion with $RELEASES/$tag/pumpkinversion"
 }
 
 installed() {
@@ -88,7 +88,7 @@ install() {
     downloaded=$(sha256sum < "$file")
     downloaded=${downloaded%% *}
     [ "$downloaded" = "$checksum" ] ||
-        fail "$url has the SHA-256 checksum $downloaded, not $checksum, which .pumpkinversion pins: check the release and its published $url.sha256"
+        fail "$url has the SHA-256 checksum $downloaded, not $checksum, which .pumpkinversion pins: compare .pumpkinversion with $RELEASES/$tag/pumpkinversion"
     mkdir "$stage"
     tar --extract --xz --file "$file" --directory "$stage" ||
         fail "$url could not be unpacked with the pinned checksum: check the release archive"
@@ -103,7 +103,7 @@ install() {
 root=$(cd "$(dirname "$0")" && pwd -P)
 workspace="$root/.pumpkin"
 releases=${RELEASES%/download}
-pin="write the release tag, its full commit and the 64-digit SHA-256 from the .sha256 at $releases"
+pin="download pumpkinversion from $releases and save it as .pumpkinversion"
 
 [ -f "$root/.pumpkinversion" ] || fail "there is no .pumpkinversion beside this script: $pin"
 read -r tag commit checksum < "$root/.pumpkinversion" || true
@@ -113,7 +113,7 @@ case "$tag" in
         fail ".pumpkinversion names an unsupported release tag: use a tag made of letters, digits, dots, underscores and hyphens, starting with a letter or digit" ;;
 esac
 hex "$commit" 40 ||
-    fail ".pumpkinversion does not name a commit after the tag: write the tag's full 40-digit hexadecimal commit"
+    fail ".pumpkinversion does not name a commit after the tag: $pin"
 [ -n "$checksum" ] || fail ".pumpkinversion has no release checksum: $pin"
 hex "$checksum" 64 ||
     fail ".pumpkinversion's third word is not a SHA-256 checksum: $pin"

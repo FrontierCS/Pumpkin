@@ -299,7 +299,7 @@ fn missing_pin() {
         None,
         false,
         &expect![[r#"
-            Some(1): pumpkin: there is no .pumpkinversion beside this script: write the release tag, its full commit and the 64-digit SHA-256 from the .sha256 at https://github.com/FrontierCS/Pumpkin/releases
+            Some(1): pumpkin: there is no .pumpkinversion beside this script: download pumpkinversion from https://github.com/FrontierCS/Pumpkin/releases and save it as .pumpkinversion
             workspace files: (none)
             cache entries: (none)"#]],
     );
@@ -312,7 +312,7 @@ fn legacy_pin() {
         Some(&format!("v1 {COMMIT}\n")),
         false,
         &expect![[r#"
-            Some(1): pumpkin: .pumpkinversion has no release checksum: write the release tag, its full commit and the 64-digit SHA-256 from the .sha256 at https://github.com/FrontierCS/Pumpkin/releases
+            Some(1): pumpkin: .pumpkinversion has no release checksum: download pumpkinversion from https://github.com/FrontierCS/Pumpkin/releases and save it as .pumpkinversion
             workspace files: (none)
             cache entries: (none)"#]],
     );
@@ -387,7 +387,7 @@ fn release_checksum() {
         false,
         &expect![[r#"
             Some(1): pumpkin: downloading Pumpkin v1 (1234567890123456789012345678901234567890) from file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz ...
-            pumpkin: file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz has the SHA-256 checksum <checksum>, not 0000000000000000000000000000000000000000000000000000000000000000, which .pumpkinversion pins: check the release and its published file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz.sha256
+            pumpkin: file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz has the SHA-256 checksum <checksum>, not 0000000000000000000000000000000000000000000000000000000000000000, which .pumpkinversion pins: compare .pumpkinversion with file://<scratch>/releases/download/v1/pumpkinversion
             workspace files: (none)
             cache entries: locks"#]],
     );
@@ -401,7 +401,7 @@ fn release_commit() {
         false,
         &expect![[r#"
             Some(1): pumpkin: downloading Pumpkin v1 (1234567890123456789012345678901234567890) from file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz ...
-            pumpkin: the release at file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz names commit 1234567890123456789012345678901234567891, not 1234567890123456789012345678901234567890: fix the commit or checksum in .pumpkinversion
+            pumpkin: the release at file://<scratch>/releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz names commit 1234567890123456789012345678901234567891, not 1234567890123456789012345678901234567890: compare .pumpkinversion with file://<scratch>/releases/download/v1/pumpkinversion
             workspace files: (none)
             cache entries: locks"#]],
     );
@@ -414,7 +414,7 @@ fn release_cached_commit() {
         Some(&format!("v1 {WRONG_COMMIT} <checksum>")),
         false,
         &expect![[r#"
-            Some(1): pumpkin: the cached release with SHA-256 <checksum> names commit 1234567890123456789012345678901234567890, not 1234567890123456789012345678901234567891: fix the commit or checksum in .pumpkinversion
+            Some(1): pumpkin: the cached release with SHA-256 <checksum> names commit 1234567890123456789012345678901234567890, not 1234567890123456789012345678901234567891: compare .pumpkinversion with file://<scratch>/releases/download/v1/pumpkinversion
             workspace files: (none)
             cache entries: <checksum> locks"#]],
     );
@@ -422,13 +422,13 @@ fn release_cached_commit() {
 
 #[test]
 #[ignore = "runs the installed pumpkin in an empty image: run cargo xtask live docker"]
-fn install_root() {
+fn build_root() {
     let held = TestDir::new();
     let root = held.path();
     let sh = Shell::new().unwrap();
     let printed = sh
         .cmd(env!("CARGO_BIN_EXE_xtask"))
-        .arg("install")
+        .arg("build")
         .arg("--root")
         .arg(root);
     let printed = printed

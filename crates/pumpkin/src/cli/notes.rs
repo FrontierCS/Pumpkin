@@ -64,7 +64,7 @@ Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
 why, and an exit of 1 then with the command that formats the files that
 failed, their paths made absolute. On success, `fmt` prints nothing.
 
-`fmt` runs the formatter beside `pumpkin`, where `cargo xtask install` puts it,
+`fmt` runs the formatter beside `pumpkin`, where `cargo xtask build` puts it,
 which reads no configuration, so that every `.star` file is written alike.";
 
 pub(super) const RUN_NOTES: &str = "\

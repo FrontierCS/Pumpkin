@@ -407,7 +407,7 @@ Default: $HOME/.config/pumpkin/pumpkin.toml")]
 The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
 builds it, with the static ec2-boot beside it, which an ec2 provider's
 instances boot with.
-Default: the one beside this pumpkin, where `cargo xtask install` puts
+Default: the one beside this pumpkin, where `cargo xtask build` puts
 both")]
     pub(crate) sandboxd: Option<String>,
     #[command(flatten)]

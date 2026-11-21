@@ -425,7 +425,7 @@ fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
     }
     copy_tree(&root().join("examples"), &repo)?;
     let workspace = repo.join(".pumpkin");
-    crate::install(cargo, Some(workspace.clone()), crate::MUSL)?;
+    crate::build(cargo, Some(workspace.clone()), crate::MUSL)?;
     let ignore = workspace.join(".gitignore");
     fs::write(&ignore, "*\n").map_err(|error| made(&ignore, error))?;
     let entry = repo.join("pumpkin");

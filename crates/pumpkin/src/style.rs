@@ -163,7 +163,7 @@ impl Formatter {
         if !formatter.is_file() {
             return Err(format!(
                 "{} doesn't exist: expected the formatter of `.star` files beside `pumpkin`, as \
-                 `cargo xtask install` installs it",
+                 `cargo xtask build` puts it",
                 formatter.display()
             ));
         }

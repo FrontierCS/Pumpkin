@@ -468,7 +468,7 @@ fn modal_helper() -> Result<PathBuf, String> {
         if !file.is_file() {
             return Err(format!(
                 "{} doesn't exist: expected Modal's helper and its lock beside `pumpkin`, as \
-                 `cargo xtask install` installs them",
+                 `cargo xtask build` puts them",
                 file.display()
             ));
         }

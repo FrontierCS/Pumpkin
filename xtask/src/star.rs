@@ -46,7 +46,7 @@ pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     Ok(buildifier)
 }
 
-/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask install`
+/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build`
 /// puts it beside an installed one: a link to it, which replaces what is there.
 pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
     let beside = pumpkin.with_file_name("buildifier");
