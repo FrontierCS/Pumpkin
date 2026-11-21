@@ -70,6 +70,7 @@ pub(crate) trait Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Ask {
     Copy(copy::CopyRequest),
+    Copied(copy::CopiedRequest),
     Follow {
         id: String,
         log_from_bytes: u64,

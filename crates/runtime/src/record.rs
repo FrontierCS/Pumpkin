@@ -284,8 +284,8 @@ fn fill(
     Ok(Lock { _file: pid })
 }
 
-/// A run's record on disk, which only [`Record::reap`] writes. Its methods read the files as they
-/// are, which change while the run lives.
+/// A run's record on disk, which only [`Record::reap`] writes and [`Record::remove`] removes. Its
+/// methods read the files as they are, which change while the run lives.
 #[derive(Debug)]
 pub struct Record {
     id: String,
@@ -391,8 +391,8 @@ impl Record {
     }
 
     /// The names of the directories in `runs` that may hold a record, in order, which is by id,
-    /// oldest first, but for those that start with `.`, each a record in the making, which isn't
-    /// there yet.
+    /// oldest first, but for those that start with `.`, each a record in the making or being
+    /// removed, which isn't there.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }

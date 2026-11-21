@@ -15,6 +15,7 @@ use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
+use crate::job::KEPT_DAYS;
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
 };
@@ -138,11 +139,11 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
     let every = ids(false);
     let id = match (runtime::named(&every, run, &on), among) {
         (Ok(id), _) => id,
-        (Err(error), Among::Every) => return Err(error),
+        (Err(error), Among::Every) => return Err(unnamed(&every, run, error)),
         // A prefix that matches several runs, of which one is the member's own, names that one.
         (Err(error), Among::Own) => {
             let own = ids(true);
-            let id = runtime::named(&own, run, &on).map_err(|_| error)?;
+            let id = runtime::named(&own, run, &on).map_err(|_| unnamed(&every, run, error))?;
             return Ok((build, id.to_owned()));
         }
     };
@@ -153,6 +154,21 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
         return Err(format!("run {id} {on} {whose}: to stop it: {any}"));
     }
     Ok((build, id.to_owned()))
+}
+
+/// `error`, which says that `run` names none of the jobs `ids` or several, and if none, where the
+/// run's record may be instead.
+fn unnamed(ids: &[String], run: &str, error: String) -> String {
+    // A run whose record the controller removed has no job there either.
+    let none = !run.is_empty()
+        && (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());
+    if !none {
+        return error;
+    }
+    format!(
+        "{error}; the controller removes a run's record {KEPT_DAYS} days after a machine copied \
+         it: read the copy on that machine"
+    )
 }
 
 fn follow(

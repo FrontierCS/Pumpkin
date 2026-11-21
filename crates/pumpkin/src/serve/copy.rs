@@ -3,12 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use provider::RunTag;
+use runtime::Record;
 use schema::frame;
 use schema::ir::Mode;
 use stdx::Context as _;
@@ -36,18 +37,18 @@ fn send(
 ) -> Result<(), String> {
     let id = RunTag::try_from(request.id)?;
     let root = home.join(crate::job::runs()).join(id.as_str());
-    let pid = root.join("driver.pid");
-    let driver = File::open(&pid).context(pid.display())?;
-    match driver.try_lock_shared() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            return Err(format!(
-                "run {} is still writing its record: wait until it ends and copy it again",
-                id.as_str()
-            ));
-        }
-        Err(TryLockError::Error(error)) => return Err(error).context(pid.display()),
-    }
+    let Some(sent) = Record::released(&root, || send_ended(output, &root, body))? else {
+        return Err(format!(
+            "run {} is still writing its record: wait until it ends and copy it again",
+            id.as_str()
+        ));
+    };
+    sent
+}
+
+/// Sends the record at `root`, whose driver has let go of it, but for the files that `body` says
+/// the copy holds.
+fn send_ended(output: &mut impl Write, root: &Path, body: &[u8]) -> Result<(), String> {
     let held = serde_json::Deserializer::from_slice(body)
         .into_iter::<(OsString, Stamp)>()
         .map(|entry| entry.map(|(path, stamp)| (PathBuf::from(path), stamp)))
@@ -57,7 +58,7 @@ fn send(
         dirs,
         mut files,
         mut unread,
-    } = Entries::at(&root)?;
+    } = Entries::at(root)?;
     let record = PathBuf::from("record.json");
     let last = files.remove_entry(&record);
     if last.is_none() && unread.is_none() {
@@ -82,13 +83,13 @@ fn send(
         }
         let path = root.join(&name);
         match open(&path, stamp) {
-            Ok((file, mode)) => send_file(output, &root, name, stamp, mode, file, &mut buffer)?,
+            Ok((file, mode)) => send_file(output, root, name, stamp, mode, file, &mut buffer)?,
             Err(error) => {
                 unread.get_or_insert(error);
             }
         }
     }
-    let writer = match runtime::writer(&root) {
+    let writer = match runtime::writer(root) {
         Ok(runtime::Writer::Other(build)) => Some(build),
         Ok(runtime::Writer::This | runtime::Writer::Older) | Err(_) => None,
     };
