@@ -1,10 +1,11 @@
 //! Cloud-init starts the instance's host tools until the pinned `ec2-boot` is available.
 //! It gives the boot its private input in memory. Only the boot's diagnostics reach the console.
 
-use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, START_FILE, Start};
+use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
 use serde_json::{Value, json};
 
 const REBOOT_UNIT: &str = "pumpkin-boots-once.service";
+const START_FILE: &str = "/run/pumpkin-start.json";
 
 pub(super) fn user_data(start: &Start, region: &str) -> String {
     // The hard end and the marker in /run are lost across a reboot. Enabling the unit without
@@ -36,7 +37,8 @@ fn commands(start: &Start, region: &str) -> Value {
     // https://docs.cloud-init.io/en/25.3/reference/yaml_examples/boot_cmds.html
     let finish = format!(
         "trap 'echo \"{CONSOLE_PREFIX} the entry ended with status $? in its step: $step\" \
-         >/dev/console || true; timeout --signal=KILL 60 docker logout \"$registry\" || true; \
+         >/dev/console || true; rm --force {START_FILE} || true; \
+         timeout --signal=KILL 60 docker logout \"$registry\" || true; \
          shutdown --poweroff now' EXIT"
     );
     // date truncates to the second and shutdown counts whole minutes. Round down so the
@@ -103,6 +105,7 @@ fn commands(start: &Start, region: &str) -> Value {
         ],
         ["cd", "/"],
         "step='running ec2-boot'",
-        format!("{binary} start >/dev/console")
+        // Open the private file as stdin, then unlink it before handing off to the image's boot.
+        format!("(rm -- {START_FILE} && exec {binary} start) <{START_FILE} >/dev/console")
     ])
 }

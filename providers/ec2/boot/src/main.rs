@@ -1,4 +1,4 @@
-//! Boots a sandbox on its instance: reads the private `Start` file, locks the instance's
+//! Boots a sandbox on its instance: reads the `Start` on standard input, locks the instance's
 //! network down, pulls the role's image and runs its container with `sandboxd` in it, until the
 //! container exits. Whatever happens, it reports on the serial console, each line behind
 //! [`CONSOLE_PREFIX`] and none holding the grant, and powers the instance off. Each command it
@@ -14,7 +14,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{self, Path, PathBuf};
@@ -22,7 +22,7 @@ use std::process::{ExitCode, Output};
 use std::time::Duration;
 use std::{env, fmt};
 
-use schema::ec2_boot::{CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, START_FILE, Start};
+use schema::ec2_boot::{CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start};
 use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
@@ -53,7 +53,10 @@ fn main() -> ExitCode {
     stdx::abort_on_panic();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     if args != ["start"] {
-        eprintln!("ec2-boot: the command line is {args:?}: expected `ec2-boot start`");
+        eprintln!(
+            "ec2-boot: the command line is {args:?}: expected `ec2-boot start`, with a start on \
+             standard input"
+        );
         return ExitCode::from(2);
     }
     // `start` sets it as soon as the container runs, so `end` shows its last lines even if
@@ -64,9 +67,6 @@ fn main() -> ExitCode {
 }
 
 fn start(container: &mut Option<String>) -> Result<(), String> {
-    let file = START_FILE.trim_start_matches('/');
-    let input = fs::File::open(file).context(format_args!("opening {file} failed"))?;
-    fs::remove_file(file).context(format_args!("removing {file} failed"))?;
     let Start {
         hard_end_unix_seconds,
         pulls_by_unix_seconds,
@@ -78,10 +78,10 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
         grant,
         ops,
         model,
-    } = serde_json::from_reader(input).map_err(|error| {
+    } = serde_json::from_reader(io::stdin().lock()).map_err(|error| {
         // Where alone: serde's message may quote a value, such as the grant.
         format!(
-            "the start in {file} can't be read, at line {}, column {}: expected a \
+            "the start on standard input can't be read, at line {}, column {}: expected a \
              start's JSON, as the provider writes it",
             error.line(),
             error.column()
