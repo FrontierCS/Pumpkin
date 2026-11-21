@@ -43,8 +43,10 @@ use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, publish, say, star};
 
+mod member;
 mod start;
 
+pub(crate) use member::{member, write_member};
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";

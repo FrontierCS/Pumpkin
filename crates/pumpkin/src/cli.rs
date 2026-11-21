@@ -29,6 +29,7 @@ use self::notes::{
     LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
+use crate::member::Member;
 use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
@@ -86,7 +87,7 @@ how long it ran, its task, and the values its result shows.")]
     #[command(long_about = "\
 Stop a run, wait until it has ended, remove what it left, and say how it ended.")]
     #[command(after_help = CANCEL_NOTES)]
-    Cancel(Cancel),
+    Cancel(CancelRun),
     #[command(about = "Serve the runs' records to this machine's browser")]
     #[command(long_about = "\
 Serve the runs in --runs, or a controller's, to a browser on this machine, until
@@ -176,7 +177,16 @@ writes.")]
     #[command(about = "Cancel a run for a client, which says its ending")]
     Cancel(Cancel),
     #[command(about = "Answer a client's link, on the standard input and output")]
-    Serve,
+    Serve {
+        #[arg(long, value_name = "member")]
+        #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
+        #[arg(help = "\
+The member that the link acts for, as the controller's forced command names
+them, which `serve` trusts: each job it starts is theirs, and it refuses to
+cancel another member's job unless asked to.
+Default: none, for a link that names no member")]
+        member: Option<Member>,
+    },
     #[command(about = "Upload the runs to the bucket of the public page")]
     #[command(long_about = PUBLISH_ABOUT, after_help = PUBLISH_NOTES)]
     Publish(Publish),
@@ -231,7 +241,7 @@ pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
     Ls(Ls),
-    Cancel(Cancel),
+    Cancel(CancelRun),
     Reap(Reap),
     Check(Check),
     Fmt(Fmt),
@@ -240,7 +250,7 @@ pub(crate) enum Command {
     Job(Job),
     Boot,
     CancelFor(Cancel),
-    Serve,
+    Serve(Option<Member>),
     Publish(Publish),
     Print(String),
 }
@@ -502,6 +512,21 @@ Default: every run")]
     pub(crate) prefixes: Vec<String>,
 }
 
+/// What `pumpkin cancel` is asked for: a [`Cancel`], and whose runs its run is named among.
+#[derive(Args)]
+pub(crate) struct CancelRun {
+    #[command(flatten)]
+    pub(crate) cancel: Cancel,
+    #[arg(
+        long,
+        help = "\
+Name the run among every member's runs on the controller. Without it, a
+prefix or an id is matched among this member's runs, and those that no member
+started, and a run of another member's is refused."
+    )]
+    pub(crate) any_member: bool,
+}
+
 #[derive(Args)]
 pub(crate) struct Cancel {
     #[arg(value_name = "run", value_parser = run_name(), help = RUN_HELP)]
@@ -701,8 +726,8 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Cancel(cancel),
         } => Command::CancelFor(cancel),
         Parsed::Controller {
-            action: Action::Serve,
-        } => Command::Serve,
+            action: Action::Serve { member },
+        } => Command::Serve(member),
         Parsed::Controller {
             action: Action::Publish(publish),
         } => Command::Publish(publish),
@@ -741,7 +766,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Job(_)
         | Command::Boot
         | Command::CancelFor(_)
-        | Command::Serve
+        | Command::Serve(_)
         | Command::Publish(_)
         | Command::Print(_) => {
             let problem = "the job's command is neither `run` nor `build`: give one";

@@ -24,11 +24,15 @@ use crate::{
 };
 
 /// Stops the run, waits for it to end, and reaps it, as `pumpkin cancel` does.
-pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
+pub(crate) fn cancel(flags: cli::CancelRun) -> Result<ExitCode, String> {
+    let cli::CancelRun {
+        cancel: flags,
+        any_member,
+    } = flags;
     if let (cli::RunName::Prefix(prefix), None) = (&flags.run, &flags.runs)
         && let Some(client) = config::client(None)?
     {
-        return controller::cancel(&client, prefix, flags.force);
+        return controller::cancel(&client, prefix, flags.force, any_member);
     }
     let Cancelled {
         record,

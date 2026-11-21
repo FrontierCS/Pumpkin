@@ -27,6 +27,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
+use crate::member::Member;
 use crate::progress::Listing;
 use crate::{config, manifest, workspace};
 
@@ -258,36 +259,74 @@ pub(crate) struct Listed {
     pub(crate) unlisted_count: u64,
 }
 
-/// The ids of the runs' jobs there, as `crate::job::ids` lists them.
+/// The runs' jobs there, as `crate::job::ids` lists them, each with its member.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct JobsRequest {}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum JobsHead {
-    /// The ids, a JSON array of strings, in a body of `body_bytes`, as they may outgrow a frame's
-    /// message.
+    /// The [`Jobs`]' JSON, in a body of `body_bytes`, as it may outgrow a frame's message.
     Jobs { body_bytes: u64 },
 }
 
+/// The jobs there, and the member that `serve` acts for, if the link names one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Jobs {
+    pub(crate) member: Option<Member>,
+    pub(crate) jobs: Vec<Job>,
+}
+
+/// A run's job, and whom it names as the member who started it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Job {
+    pub(crate) id: String,
+    pub(crate) owner: Owner,
+}
+
+/// The member that a job names.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Owner {
+    /// It names none, as a job that a build from before members started.
+    Nobody,
+    Member {
+        member: Member,
+    },
+    /// What names it can't be read, for the reason that `error` gives.
+    Unread {
+        error: String,
+    },
+}
+
+impl From<Result<Option<Member>, String>> for Owner {
+    fn from(member: Result<Option<Member>, String>) -> Self {
+        match member {
+            Ok(None) => Self::Nobody,
+            Ok(Some(member)) => Self::Member { member },
+            Err(error) => Self::Unread { error },
+        }
+    }
+}
+
 impl Request for JobsRequest {
-    type Answer = Vec<String>;
+    type Answer = Jobs;
     type Head = JobsHead;
 
     fn ask(self) -> Ask {
         Ask::Jobs(self)
     }
 
-    fn sent(ids: Vec<String>) -> io::Result<(JobsHead, Vec<u8>)> {
-        let body = serde_json::to_vec(&ids)?;
+    fn sent(jobs: Jobs) -> io::Result<(JobsHead, Vec<u8>)> {
+        let body = serde_json::to_vec(&jobs)?;
         let body_bytes = body.len() as u64;
         Ok((JobsHead::Jobs { body_bytes }, body))
     }
 
-    fn received(head: JobsHead, link: &mut Link) -> Result<Vec<String>, Unanswered> {
+    fn received(head: JobsHead, link: &mut Link) -> Result<Jobs, Unanswered> {
         let JobsHead::Jobs { body_bytes } = head;
         serde_json::from_slice(&link.body(body_bytes)?)
-            .map_err(|error| Unanswered::Failed(format!("its jobs' ids don't read: {error}")))
+            .map_err(|error| Unanswered::Failed(format!("its jobs don't read: {error}")))
     }
 }
 
@@ -393,11 +432,13 @@ impl Request for StartRequest {
     }
 }
 
-/// Stops a job, with the optional Modal credentials needed to reap its run.
+/// Stops a job, with the optional Modal credentials needed to reap its run. Unless
+/// `any_member`, a job of another member than the one `serve` acts for is refused.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CancelRequest {
     pub(crate) id: String,
     pub(crate) force: bool,
+    pub(crate) any_member: bool,
     pub(crate) modal_bytes: Option<usize>,
 }
 
@@ -584,7 +625,8 @@ fn installed(digest: &Sha256Digest) -> String {
 
 /// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
 /// build whose manifest has the SHA-256 `digest`, or the frame of [`Hello::Absent`] if it is
-/// missing.
+/// missing. `serve` takes the shell's positional parameters, which the controller's forced
+/// command gives, as `--member <name>`.
 pub(crate) fn command(digest: &Sha256Digest) -> String {
     let mut absent = Vec::new();
     if let Err(error) = frame::write(&mut absent, &Hello::Absent, &[]) {
@@ -593,7 +635,7 @@ pub(crate) fn command(digest: &Sha256Digest) -> String {
     // Each byte as the octal escape that `printf` reads in its format, so that none is the shell's.
     let escaped: Vec<String> = absent.iter().map(|byte| format!("\\{byte:03o}")).collect();
     format!(
-        "serve={}\ncd && [ -x \"$serve\" ] && exec \"$serve\" controller serve\nprintf '{}'\n",
+        "serve={}\ncd && [ -x \"$serve\" ] && exec \"$serve\" controller serve \"$@\"\nprintf '{}'\n",
         installed(digest),
         escaped.concat()
     )

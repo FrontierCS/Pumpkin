@@ -8,6 +8,10 @@
 //! Then it answers each request until its input ends, brings no request for [`IDLE`], or breaks
 //! the protocol, which it refuses and exits 1. It marks its install as used again as each request
 //! arrives, so that a `serve` kept for days by an open page keeps its install.
+//!
+//! It acts for the member that `--member` names, as the controller's forced command gives it: each
+//! job it starts names that member, its listings name each job's, and it cancels another member's
+//! job only when asked to.
 
 mod copy;
 mod follow;
@@ -31,9 +35,11 @@ use stdx::{Context as _, Deadline};
 
 use crate::job::{JOBS, WAITING};
 use crate::link::{
-    self, Ask, Boot, Health, HealthRequest, Hello, JobsRequest, ListRequest, Listed, ViewRequest,
+    self, Ask, Boot, Health, HealthRequest, Hello, Job, Jobs, JobsRequest, ListRequest, Listed,
+    Owner, ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
+use crate::member::Member;
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 use crate::view::Answering;
@@ -53,8 +59,8 @@ const BOOT_UNIT: &str = "pumpkin-boot.service";
 
 const UPTIME: &str = "/proc/uptime";
 
-/// Answers a client's link on the standard input and output, as the module says.
-pub(crate) fn serve() -> Result<ExitCode, String> {
+/// Answers a client's link on the standard input and output, as the module says, for `member`.
+pub(crate) fn serve(member: Option<&Member>) -> Result<ExitCode, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
     let install = own_install();
     match &install {
@@ -69,7 +75,8 @@ pub(crate) fn serve() -> Result<ExitCode, String> {
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
         return Ok(ExitCode::SUCCESS);
     }
-    requests(&mut input, &mut output, &home, install.as_deref().ok())
+    let install = install.as_deref().ok();
+    requests(&mut input, &mut output, &home, install, member)
 }
 
 fn requests(
@@ -77,9 +84,10 @@ fn requests(
     output: &mut impl Write,
     home: &Path,
     install: Option<&Path>,
+    member: Option<&Member>,
 ) -> Result<ExitCode, String> {
     // Kept for the link's life: it holds what it read of the live runs.
-    let mut view = Answering::new(home.join(crate::job::runs()));
+    let mut view = Answering::new(home);
     while arrives(input)? {
         let ask = match request_head(input) {
             Ok(Some(ask)) => ask,
@@ -115,13 +123,13 @@ fn requests(
             },
             Ask::Start(request) => link::answer(output, request, |request| {
                 let (start, credentials) = request.decode(&body)?;
-                crate::job::start(home, start, credentials)
+                crate::job::start(home, start, credentials, member)
             }),
             Ask::Reap(request) => link::answer(output, request, |request| {
                 reaping::reap(home, request, &body)
             }),
             Ask::Cancel(request) => link::answer(output, request, |request| {
-                reaping::cancel(home, request, &body)
+                reaping::cancel(home, request, &body, member)
             }),
             Ask::Follow {
                 id,
@@ -129,9 +137,9 @@ fn requests(
                 after_cut,
             } => follow::answer(output, home, id, log_from_bytes, after_cut),
             Ask::Health(request) => link::answer(output, request, |HealthRequest {}| health(home)),
-            Ask::Jobs(request) => link::answer(output, request, |JobsRequest {}| {
-                crate::job::ids(&home.join(JOBS))
-            }),
+            Ask::Jobs(request) => {
+                link::answer(output, request, |JobsRequest {}| jobs(home, member))
+            }
             Ask::List(request) => link::answer(output, request, |ListRequest { prefixes }| {
                 listed(home, &prefixes)
             }),
@@ -146,6 +154,20 @@ fn requests(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The runs' jobs in `home`, each with its member, for a link that acts for `member`.
+fn jobs(home: &Path, member: Option<&Member>) -> Result<Jobs, String> {
+    let dir = home.join(JOBS);
+    let ids = crate::job::ids(&dir)?;
+    let jobs = ids.into_iter().map(|id| {
+        let owner = Owner::from(crate::job::member(&dir.join(&id)));
+        Job { id, owner }
+    });
+    Ok(Jobs {
+        member: member.cloned(),
+        jobs: jobs.collect(),
+    })
 }
 
 fn request_head(input: &mut impl io::Read) -> io::Result<Option<Ask>> {
@@ -397,8 +419,26 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
     let now = crate::unix_now();
     let since = progress::listed_since(prefixes, now);
     let runs = home.join(crate::job::runs());
-    let (mut listing, unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
+    let (mut listing, mut unlisted) = crate::listed_in(&runs, prefixes, since, now, None)?;
     unstarted(home, prefixes, since, now, &mut listing)?;
+    let jobs = home.join(JOBS);
+    // A run whose member can't be read is left out and said, as one whose record can't be.
+    listing.runs.retain(|id, entry| {
+        let Entry::Row(row) = entry else {
+            return true;
+        };
+        match crate::job::member(&jobs.join(id)) {
+            Ok(member) => {
+                row.member = member;
+                true
+            }
+            Err(error) => {
+                say(format_args!("run {id}: {error}"));
+                unlisted += 1;
+                false
+            }
+        }
+    });
     Ok(Listed {
         listing,
         unlisted_count: unlisted as u64,

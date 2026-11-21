@@ -12,12 +12,16 @@ use stdx::process::Environment;
 use tempfile::NamedTempFile;
 
 use crate::link::{CancelAnswer, CancelRequest};
-use crate::{cli, job};
+use crate::member::Member;
+use crate::{cli, job, next};
 
+/// Stops job `request.id`, refusing, with nothing done, one of another member's than `member`
+/// unless `request.any_member`.
 pub(super) fn cancel(
     home: &Path,
     request: CancelRequest,
     body: &[u8],
+    member: Option<&Member>,
 ) -> Result<CancelAnswer, String> {
     let tag = RunTag::try_from(request.id)?;
     let id = tag.as_str();
@@ -28,8 +32,25 @@ pub(super) fn cancel(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context(jobs.display()),
     }
-    if !super::exists(&home.join(job::JOBS).join(id))? {
+    let dir = home.join(job::JOBS).join(id);
+    if !super::exists(&dir)? {
         return Err(format!("there is no job {id} here"));
+    }
+    if let Some(member) = member
+        && !request.any_member
+    {
+        let any = next::again("cancel", &["--any-member".to_owned()], &[id.to_owned()]);
+        // A job whose member can't be read may be another's, so it is refused as theirs is.
+        match job::member(&dir) {
+            Ok(None) => {}
+            Ok(Some(owner)) if owner == *member => {}
+            Ok(Some(owner)) => return Err(format!("run {id} is {owner}'s: to stop it: {any}")),
+            Err(error) => {
+                return Err(format!(
+                    "run {id} names a member that can't be read: {error}: to stop it: {any}"
+                ));
+            }
+        }
     }
     let held = jobs.join(id);
     let record = home.join(job::runs()).join(id);

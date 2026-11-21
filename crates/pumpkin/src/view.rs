@@ -33,7 +33,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -91,7 +91,7 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
     } else {
         let (runs, named) = crate::runs_dir(runs)?;
         let serving = format!("the runs in {runs}");
-        let view = View::new(PathBuf::from(&runs), named);
+        let view = Box::new(View::new(PathBuf::from(&runs), named));
         let runs_given = runs;
         (Source::Here { view, runs_given }, serving)
     };
@@ -117,15 +117,16 @@ pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
 }
 
 /// The view of the runs below a controller's home that `serve` keeps for a link's life, which
-/// holds what it has read of the runs that are live.
+/// holds what it has read of the runs that are live, and lists each run with its member.
 pub(crate) struct Answering(View);
 
 impl Answering {
-    pub(crate) fn new(runs: PathBuf) -> Self {
+    pub(crate) fn new(home: &Path) -> Self {
         // The command that runs a run again from here would name the controller's paths.
         Self(View {
             again: false,
-            ..View::new(runs, None)
+            jobs: Some(home.join(crate::job::JOBS)),
+            ..View::new(home.join(crate::job::runs()), None)
         })
     }
 
@@ -165,7 +166,7 @@ struct Local {
 enum Source {
     /// The runs in a directory here, which a cancel names as `runs_given`, as it was given, or
     /// found by default.
-    Here { view: View, runs_given: String },
+    Here { view: Box<View>, runs_given: String },
     /// The controller's runs, which its `serve` answers requests for.
     Controller(Box<Viewing>),
 }
@@ -177,6 +178,8 @@ struct View {
     named: Option<String>,
     /// Whether a run's reply carries the command that runs it again.
     again: bool,
+    /// The directory of the runs' jobs, which name each run's member, on a controller.
+    jobs: Option<PathBuf>,
     /// The list row of each run that has ended, or is lost.
     ended: BTreeMap<String, Row>,
     /// Each run held as a fold of its log.
@@ -579,6 +582,7 @@ impl View {
             runs,
             named,
             again: true,
+            jobs: None,
             ended: BTreeMap::new(),
             held: BTreeMap::new(),
             log_epochs: BTreeMap::new(),
@@ -635,7 +639,17 @@ impl View {
         );
         row["requests"] = Value::Null;
         row["tokens"] = Value::Null;
-        Ok(row.into())
+        Ok(self.membered(id, row)?.into())
+    }
+
+    /// `row`, of run `id`, with the run's member, if its job names one.
+    fn membered(&self, id: &str, mut row: Value) -> Result<Value, String> {
+        if let Some(jobs) = &self.jobs
+            && let Some(member) = crate::job::member(&jobs.join(id))?
+        {
+            row["member"] = json!(member);
+        }
+        Ok(row)
     }
 
     fn row(&mut self, id: &str) -> Result<Option<JsonRow>, ReadError> {
@@ -663,7 +677,11 @@ impl View {
         let named = self.named.clone();
         let held = self.looked(id, record)?;
         match &held.ending {
-            None => Ok(Some(live_row(held, named.as_deref()).into())),
+            None => {
+                let row = live_row(held, named.as_deref());
+                let row = self.membered(id, row).map_err(ReadError::Failed)?;
+                Ok(Some(row.into()))
+            }
             Some(ending) => {
                 let ending = ending.clone();
                 let record = Record::open(held.record.dir())?;
@@ -708,7 +726,7 @@ impl View {
             row
         };
         let id = record.id().to_owned();
-        let json = JsonRow::from(json);
+        let json = JsonRow::from(self.membered(&id, json).map_err(ReadError::Failed)?);
         let row = Row {
             record,
             lost,

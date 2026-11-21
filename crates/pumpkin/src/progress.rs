@@ -18,6 +18,7 @@ use schema::ir::Name;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::member::Member;
 use crate::next;
 
 mod agent;
@@ -179,13 +180,17 @@ impl State {
 
 /// The lines of `ls` of `listing`, its runs by id, so oldest first, and so the live ones, which
 /// started last, nearest the line of totals that follows them, each live run with a line for
-/// each of its calls and leases that hasn't ended. The totals line ends with the command
-/// that lists the runs left out, unless there are none; `runs` is their runs directory, as
-/// commands name it.
+/// each of its calls and leases that hasn't ended, and a column of each run's member if one
+/// names one. The totals line ends with the command that lists the runs left out, unless there
+/// are none; `runs` is their runs directory, as commands name it.
 pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
     let mut lines = String::new();
     let mut totals = Totals::default();
     let mut older = Vec::new();
+    let members = listing.runs.values().filter_map(Entry::row);
+    let members = members.filter_map(|row| row.member.as_ref());
+    // A machine's own runs name no member, and read as they did before members.
+    let member_width = members.map(|member| member.to_string().len()).max();
     for (id, entry) in &listing.runs {
         let row = match entry {
             Entry::Row(row) => row,
@@ -195,9 +200,21 @@ pub(crate) fn lines(listing: &Listing, runs: Option<&str>) -> String {
             }
         };
         totals.add(row);
-        lines.push_str(&line(id, &row.cells));
+        let Some(width) = member_width else {
+            lines.push_str(&line(id, &row.cells));
+            lines.push('\n');
+            lines.push_str(row.under());
+            continue;
+        };
+        let member = row
+            .member
+            .as_ref()
+            .map_or("-".to_owned(), Member::to_string);
+        lines.push_str(&line(&format!("{id} {member:<width$}"), &row.cells));
         lines.push('\n');
-        lines.push_str(row.under());
+        for under in row.under().lines() {
+            let _ = writeln!(lines, "{:width$} {under}", "");
+        }
     }
     let mut parts = Vec::new();
     let rows = !totals.states.is_empty();
@@ -265,6 +282,7 @@ impl Totals {
             cells: _,
             stage,
             spent,
+            member: _,
         } = row;
         *self.states.entry(stage.state()).or_default() += 1;
         match stage {
