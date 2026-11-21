@@ -2502,7 +2502,7 @@ fn wait_names_its_run_there() {
               20261107-130000-2c9b0002
             $ pumpkin wait 9f
             exit status: Some(1)
-            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine
+            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
             the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
@@ -3712,6 +3712,6 @@ fn view_cancels_on_the_controller() {
         &expect![[r#"
             POST /api/runs/<live>/cancel
             HTTP/1.1 202 Accepted
-            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine"#]],
+            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path"#]],
     );
 }

@@ -97,7 +97,7 @@ pub(crate) const WAITING: &str = "waiting";
 // own.
 pub(crate) const KEPT_DAYS: u64 = 14;
 
-const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
+pub(crate) const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
 
 // How long a manifest or a partial blob lasts in the store, and so what no tree links of the
 // files a manifest names. A day is long enough that a send cut off, or a start that failed,
@@ -151,7 +151,11 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             path.display()
         ));
     };
-    // Before the build, so that it has room.
+    // Before the build, so that it has room, the records first, so that the prune removes the
+    // directory of each run's job whose record goes.
+    if let Err(error) = records::collect(&home, &jobs) {
+        say(format_args!("the prune of the records failed: {error}"));
+    }
     if let Err(error) = prune(&home, &path, &jobs) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
@@ -510,7 +514,6 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Prunes what the jobs keep on the controller's volume. It removes, in this order:
-/// - each record that a machine copied more than `KEPT` ago (`records::collect`);
 /// - each tree in `home` older than `KEPT`;
 /// - each install that `installs::collect` finds idle, given the jobs in `jobs`;
 /// - what of the store no tree or install links or needs (`collect_store`);
@@ -520,8 +523,6 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
 ///   at `config` (`collect`), sparing what the jobs in `jobs` hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    // First, so that the directory of a run's job whose record it removes goes too.
-    records::collect(home, &runs, jobs)?;
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
     for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
