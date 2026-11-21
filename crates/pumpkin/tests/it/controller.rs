@@ -2524,6 +2524,8 @@ fn members_attributed() {
     let (_, id, _) = started_job(&scratch);
     let bob = set_up_member(&scratch, "bob");
     let member = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/member"))).unwrap();
+    let release = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/release"))).unwrap();
+    let envelope = fs::read_to_string(scratch.0.join(format!("home/jobs/{id}/envelope"))).unwrap();
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     let argv: Vec<&str> = argv.lines().collect();
     let unit = argv.iter().rposition(|line| *line == "--user").unwrap();
@@ -2536,6 +2538,11 @@ fn members_attributed() {
     );
     let lines = [
         format!("the job's member: {member:?}"),
+        format!(
+            "the job's release is the build's: {}",
+            release == format!("{}\n", runtime::BUILD)
+        ),
+        format!("the envelopes it takes: {envelope:?}"),
         format!("systemd-run {}", argv[unit..].join(" ")),
         ls,
     ];
@@ -2550,14 +2557,16 @@ fn members_attributed() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-        the job's member: "alice\n"
-        systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree> -- run -- stand-in/task.star
-        $ pumpkin ls
-        exit status: Some(0)
-        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-        printed:
-          <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <id>
-          1 run: 1 unstarted"#]],
+            the job's member: "alice\n"
+            the job's release is the build's: true
+            the envelopes it takes: "^1.0\n"
+            systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree> -- run -- stand-in/task.star
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <id>
+              1 run: 1 unstarted"#]],
     );
 }
 
