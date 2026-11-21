@@ -60,8 +60,9 @@ const MIB: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 /// timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
 /// classes.cpu = { template = "lt-0123456789abcdef0", version = 1, vcpus = 8, memory_mib = 8192 }
 /// ```
+// Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
+// version adds, and one that refuses such a key finds it through `serde_ignored`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Settings {
     /// The region of the envelope, which every call to AWS names.
     region: Region,
@@ -79,8 +80,8 @@ pub struct Settings {
 /// ([`launch::HardEnd::timer`]), then deletes itself. A create that can't make it fails and leaves
 /// the instance, as its errors say ([`Ec2::create_instance`]); a delete deletes it once the
 /// instance is terminated, and one a lost run leaves fires on an instance gone already.
+// Without `deny_unknown_fields`, as `Settings`.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Timer {
     group: GroupName,
     role_arn: RoleArn,
@@ -91,8 +92,8 @@ struct Timer {
 struct GroupName(String);
 
 /// The envelope's image repositories, one for each kind of image a sandbox pulls, each as a `T`.
+// Without `deny_unknown_fields`, as `Settings`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Repositories<T> {
     /// The roles' images.
     roles: T,
@@ -106,8 +107,8 @@ struct Repositories<T> {
 /// seconds an instance's start takes. Without `cpu_features`, it states no flag, without
 /// `cpu_model`, no model, without `usd_per_hour`, no price, and without `startup_seconds`,
 /// [`STARTUP_SECONDS`].
+// Without `deny_unknown_fields`, as `Settings`.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct InstanceClass {
     template: TemplateId,
     version: NonZeroU64,

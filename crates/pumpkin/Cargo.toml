@@ -32,6 +32,7 @@ libc.workspace = true
 miniz_oxide.workspace = true
 rustix = { workspace = true, features = ["event", "fs", "process", "stdio", "thread"] }
 serde.workspace = true
+serde_ignored.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

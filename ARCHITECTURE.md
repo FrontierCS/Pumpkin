@@ -429,7 +429,8 @@ and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` describes the task tree and the client install that `send` transfers by content, and
 its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
-`start` starts each id once under the jobs' lock and keeps the install its unit runs, with the
+`start` starts each id once under the jobs' lock and keeps the install its unit runs, its
+`settings` checks the envelope that made the controller's settings, with the
 prune and the slots that admit its builds and publishes
 (`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
 their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
@@ -483,6 +484,13 @@ names (`--member`, a `member::Member`), and each run's job it starts records tha
 `cancel` matches only that member's runs, and those that name no member, unless asked
 otherwise. This prevents accidents, not members: each member's build runs as the controller's
 one user.
+
+**Architecture Invariant:** a job takes the controller's settings of its own envelope major alone.
+It refuses a key that no table takes in settings of a minor it knows, and leaves one out of its
+configuration, naming it in its log, in settings of a later minor, which adds only keys that an
+older release may safely ignore; a machine's `pumpkin.toml` refuses such a key all the same.
+`config` tells the keys apart through `serde_ignored`, so no table that the settings hold has
+`deny_unknown_fields`.
 
 **Architecture Invariant:** each `pumpkin` process adds 022 to its umask as it starts (`main`), so
 nothing it makes, a run's record included, is writable by another user.

@@ -56,8 +56,8 @@ const WRITTEN_ONCE: [&str; 3] = ["exchange", "diff", "kept"];
 const PART: &str = "part";
 
 /// `[publish]` of the controller's settings, as `pumpkin help config` says.
+// Without `deny_unknown_fields`, as `config`'s tables of a controller's settings.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Settings {
     bucket: Bucket,
     #[expect(

@@ -110,6 +110,32 @@ and reload the units with `systemctl daemon-reload`. The next boot runs each job
 that published a `bin/pumpkin-boot` link. Older installs need their matching client to reap
 subsequent jobs. Sandboxes that remain unreachable expire at the run's hard end.
 
+## Versions
+
+The controller's settings are of a version of the envelope, `M.m`, which each job reads from
+their `envelope` key as it starts; settings without one, as this module writes, are of 1.0.
+
+- A minor adds only what a release of an older minor may safely ignore: a key of the settings, a
+  package of the AMI, an IAM action, software on the controller's host. A key that every release
+  must honour needs a major. A job refuses a key of the settings that its release doesn't know, as
+  a typo, unless `envelope` names a later minor than its release knows; then it ignores the key,
+  and names it in its log. So a minor that adds a key writes `envelope` with it.
+- A major removes or changes what a release relies on. A job refuses settings of a major other
+  than its release's, and says what to do.
+- A new provider kind, such as `[providers.<name>.gce]`, or a new key beside a provider's kind in
+  `[providers.<name>]`, is refused by every older release, so either is a major. A job keeps only
+  `images` of the Modal provider's table in the settings, as the client sends the rest, so any
+  other key there is dropped, with no word in the log.
+- An upgrade changes the envelope first, then the releases, and removes what an older release
+  relied on only once no pinned release does, as Kubernetes upgrades its API server before its
+  kubelets
+  ([version skew policy](https://github.com/kubernetes/website/blob/b2fed83accab4d0a607783d21740e7de43551369/content/en/releases/version-skew-policy.md#L148-L186)).
+- The module serves the releases of the current tag and of the one before it, as Consul stays
+  compatible with at least one prior version
+  ([compatibility](https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/consul/v1.22.x/content/docs/upgrade/compatibility.mdx#L22-L33)).
+- A release that reads no `envelope` refuses settings that hold a key it doesn't know, `envelope`
+  among them, so the module writes the key only once no pinned release is that old.
+
 ## The public page
 
 A read-only page of the controller's runs, for a team that knows its address: CloudFront serves it

@@ -181,7 +181,11 @@ fn job() {
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
-    let parameter = format!("{}\n{EC2}\n{modal}", docker_table("default"));
+    // Of a later minor, with keys that this build doesn't know, which the job leaves out.
+    let parameter = format!(
+        "envelope = \"1.3\"\nlater = 1\n{}\n{EC2}\n{modal}\n[providers.aws.ec2.later]\nkey = 1\n",
+        docker_table("default")
+    );
     write_parameter(&scratch, &parameter);
     let id = id_ago(0, "0b000001");
     let (recent, old) = (id_ago(3, "0b000002"), id_ago(30, "0b000003"));
@@ -338,6 +342,7 @@ fn job() {
         &expect![[r#"
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             out names the image: true
             pumpkin.toml:
@@ -411,6 +416,7 @@ fn job() {
             another job's run started: true
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
             docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -419,6 +425,7 @@ fn job() {
             another job's run started: false
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
             docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -427,6 +434,7 @@ fn job() {
             freed while the prune waited for the lock:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
             df --block-size=1 --output=size,avail -- /
             df --block-size=1 --output=size,avail -- /
             the providers: ["aws"]"#]],
@@ -473,6 +481,31 @@ fn job_refusals() {
             "a parameter with no Modal provider",
             format!("{}\n{EC2}", docker_table("default")),
             format!("{UPSTREAMS}\n{SENT_MODAL}"),
+        ),
+        (
+            "a parameter of a later envelope major",
+            format!("envelope = \"2.0\"\n{}", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter of an earlier envelope major",
+            format!("envelope = \"0.9\"\n{}", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter of no envelope version",
+            format!("envelope = 1.5\n{}", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter of envelope 1.0 with a key that no table takes",
+            format!("drainig = true\n{}", parameter()),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter with a value of the wrong type",
+            parameter().replace("region = \"us-west-1\"\nclasses", "region = 1\nclasses"),
+            UPSTREAMS.to_owned(),
         ),
         (
             "a sent [docker]",
@@ -531,6 +564,26 @@ fn job_refusals() {
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, name no Modal provider, whose `images` the client's `[controller.modal]` needs: apply `deploy/aws`, whose settings name one
+            a parameter of a later envelope major:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.0, a major that this release, of envelope 1.x from 1.0, doesn't know: run a release that takes 2.x, raising `.pumpkinversion` as the controller's admin says
+            a parameter of an earlier envelope major:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 0.9, older than this release takes, 1.x from 1.0: ask the controller's admin to apply an envelope that it takes
+            a parameter of no envelope version:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `envelope = 1.5`, which is no envelope's version: expected one as "M.m", such as "1.0"
+            a parameter of envelope 1.0 with a key that no table takes:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `drainig`, which no table of envelope 1.0's settings takes: correct or remove each
+            a parameter with a value of the wrong type:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are refused: invalid type: integer `1`, expected a string in `providers.aws.region`
             a sent [docker]:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)

@@ -513,6 +513,15 @@ settings:
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
+On a controller, each job reads its configuration from the controller's
+settings, which deploy/aws writes, but [gateway], which the job sets, and
+[upstreams] and [controller.modal], which the client sends. Before any table,
+the settings name `envelope`, the version \"M.m\" of the envelope that wrote
+them; absent, \"1.0\". A job refuses an envelope whose major isn't 1, and each
+key that it doesn't know, unless the envelope is a later minor than 1.0, which
+this release knows; then it ignores the key, naming it in its log. A minor adds
+only keys that an older release may safely ignore.
+
 [publish], on the controller, which deploy/aws writes into its settings: where
 each run's job publishes the runs, as `pumpkin controller publish --help` says;
 without it, nothing is published:

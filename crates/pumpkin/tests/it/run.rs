@@ -726,6 +726,15 @@ fn usage() {
               Each entry of a workflow's model route reaches the one upstream that serves
               every model it allows.
 
+              On a controller, each job reads its configuration from the controller's
+              settings, which deploy/aws writes, but [gateway], which the job sets, and
+              [upstreams] and [controller.modal], which the client sends. Before any table,
+              the settings name `envelope`, the version "M.m" of the envelope that wrote
+              them; absent, "1.0". A job refuses an envelope whose major isn't 1, and each
+              key that it doesn't know, unless the envelope is a later minor than 1.0, which
+              this release knows; then it ignores the key, naming it in its log. A minor adds
+              only keys that an older release may safely ignore.
+
               [publish], on the controller, which deploy/aws writes into its settings: where
               each run's job publishes the runs, as `pumpkin controller publish --help` says;
               without it, nothing is published:
@@ -1643,11 +1652,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/unserved.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config placed.toml
             exit status: Some(1)
-            pumpkin: placed.toml: TOML parse error at line 11, column 2
-               |
-            11 | [placement.agent]
-               |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`, `publish`
+            pumpkin: placed.toml: no table of a configuration takes `placement`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)
@@ -1659,11 +1664,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/podman.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config context.toml
             exit status: Some(1)
-            pumpkin: context.toml: TOML parse error at line 10, column 1
-               |
-            10 | context = "remote"
-               | ^^^^^^^
-            unknown field `context`, there are no fields
+            pumpkin: context.toml: no table of a configuration takes `providers.local.docker.context`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/context.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config valued.toml
             exit status: Some(1)
@@ -1683,11 +1684,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/mixed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config bundled.toml
             exit status: Some(1)
-            pumpkin: bundled.toml: TOML parse error at line 7, column 74
-              |
-            7 | repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd", bundles = "pumpkin/bundles" }
-              |                                                                          ^^^^^^^
-            unknown field `bundles`, expected `roles` or `sandboxd`
+            pumpkin: bundled.toml: no table of a configuration takes `providers.aws.ec2.repositories.bundles`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/bundled.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config regional.toml
             exit status: Some(1)

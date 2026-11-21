@@ -47,6 +47,7 @@ mod boot;
 mod installs;
 mod member;
 mod records;
+mod settings;
 mod start;
 
 pub(crate) use boot::{boot, state as boot_state};
@@ -379,6 +380,7 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     let named = format!("the controller's settings, SSM parameter `{parameter}`,");
     let mut tables: toml::Table = toml::from_str(&got.parameter.value)
         .map_err(|error| format!("{named} aren't TOML: {}", error.to_string().trim_end()))?;
+    let envelope = settings::take(&mut tables, &named)?;
     let (private, public) = addresses()?;
     for key in ["gateway", "upstreams"] {
         if tables.contains_key(key) {
@@ -425,6 +427,7 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     upstreams.keys_in(sent);
     let upstreams = toml::Value::try_from(upstreams).map_err(written)?;
     tables.insert("upstreams".to_owned(), upstreams);
+    settings::remove_unknown(&mut tables, &named, envelope)?;
     toml::to_string(&tables).map_err(written)
 }
 
