@@ -24,7 +24,7 @@ use crate::{manifest, say};
 /// one out meanwhile; and says which it removed. Removes none while the boot unit runs.
 pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     // The boot may be running an old install's reap, as after a stop of days.
-    if matches!(crate::serve::boot(home), Boot::Running) {
+    if matches!(super::boot_state(home), Boot::Running) {
         return Ok(());
     }
     let own = workspace::exe("expected it to keep its own install")?;

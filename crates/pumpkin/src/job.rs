@@ -43,10 +43,12 @@ use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, publish, say, star};
 
+mod boot;
 mod installs;
 mod member;
 mod start;
 
+pub(crate) use boot::{boot, state as boot_state};
 pub(crate) use member::{member, write_member};
 pub(crate) use start::start;
 
@@ -260,21 +262,6 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     made.context(aside.path().display())?;
     aside.persist(&copy).context(copy.display())?;
     Ok(copy)
-}
-
-/// Reaps what this build's ended or lost runs may have left, using each job's configuration.
-/// Returns the reap's exit status, 0 though a provider can't be reached.
-pub(crate) fn boot() -> Result<ExitCode, String> {
-    // No prune, which each job's start makes: a client may start a job as soon as the
-    // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
-    // system's, can't see that it runs, as systemd names the user's runtime directory, which
-    // holds each job's directory, to the user's own units alone. A prune here would remove the
-    // images that the job has built, which no IR that the boot reads names yet.
-    let reap = cli::Reap {
-        runs: None,
-        modal_config: None,
-    };
-    crate::reap(reap, crate::Reaper::Boot)
 }
 
 /// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
