@@ -42,7 +42,7 @@ const AWS: &str = r#"#!/bin/sh
 { echo aws; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
 case "$*" in
     --version) echo aws-cli/2.38.1 Python/3.14.6 Linux/7.0.0 exe/x86_64.stand-in ;;
-    *" ssm get-parameter "*) cat "${0%/*}/parameter.json" ;;
+    "ssm get-parameter "*) cat "${0%/*}/parameter.json" ;;
     *) echo "the stand-in aws answers only \`--version\` and \`ssm get-parameter\`" >&2; exit 1 ;;
 esac
 "#;
@@ -396,7 +396,7 @@ fn job() {
             upstream_name = "provider/model-a"
 
             aws --version
-            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+            aws ssm get-parameter --name /pumpkin-alice/settings --no-cli-pager --output json --region us-west-1
             curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
@@ -975,9 +975,9 @@ fn job_publish_fails() {
         pumpkin: run <run> started
         pumpkin: to stop it: pumpkin cancel <run>
         pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
-        pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports; the next publish uploads what this one didn't
+        pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what it reports; the next publish uploads what this one didn't
         aws --version
-        aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+        aws ssm get-parameter --name /pumpkin-alice/settings --no-cli-pager --output json --region us-west-1
         curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
         curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
         curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
@@ -989,7 +989,7 @@ fn job_publish_fails() {
         curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
         curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
         aws --version
-        aws --no-cli-pager --output json --region us-west-1 s3 sync <scratch>/home/.pumpkin/public/…
+        aws s3 sync <scratch>/home/.pumpkin/public/…
         the run ended: true"#]],
     );
 }
@@ -1096,13 +1096,13 @@ fn boot() {
             exit status: Some(0)
             pumpkin: run <local>'s sandbox sandbox-<local> on provider `local` had ended, as it isn't listed there now: what it left there is now removed
             pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports
+            pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what it reports
             pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             printed:
               <local>
               <lost>
             aws --version
-            aws --no-cli-pager --output json --region us-west-1 sts get-caller-identity
+            aws sts get-caller-identity --no-cli-pager --output json --region us-west-1
             <clean>'s outcome.json: {"agents":[{"role":"solver","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]}}}
             <local>'s outcome.json: {
               "reason": "its driver ended without an outcome",
@@ -4946,7 +4946,7 @@ fn view_asks_ec2_once_no_link_opens() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error"
+            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error: expected it to exit with 0"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 310332"#]],

@@ -48,9 +48,12 @@ fn publish(scratch: &Scratch, since: &str) -> String {
     let noted = noted
         .split_terminator("\n\n")
         .map(|call| call.replace('\n', " "));
-    let common = "--no-cli-pager --output json --region us-west-1 s3 ";
-    let uploads = noted.filter_map(|call| call.strip_prefix(common).map(str::to_owned));
-    lines.extend(uploads.map(|upload| format!("aws s3 {upload}")));
+    let common = " --no-cli-pager --output json --region us-west-1";
+    let uploads = noted.filter_map(|call| {
+        let upload = call.strip_prefix("s3 ")?.strip_suffix(common)?;
+        Some(format!("aws s3 {upload}"))
+    });
+    lines.extend(uploads);
     lines.join("\n")
 }
 
