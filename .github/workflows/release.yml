@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.ref_name }}
-      TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -22,36 +21,13 @@ jobs:
       - name: Build and check the release
         shell: bash
         run: |
-          case "$TAG" in
-            [!a-zA-Z0-9]*|*[!a-zA-Z0-9._-]*) echo "Unsupported release tag: $TAG" >&2; exit 1 ;;
-          esac
           RUSTUP_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           export RUSTUP_TOOLCHAIN
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TARGET" --no-self-update
-          cargo xtask install --root dist
-          git rev-parse HEAD > dist/commit
-
-          for program in pumpkin sandboxd ec2-boot buildifier; do
-            file --brief "dist/bin/$program" | grep --extended-regexp 'ELF 64-bit.*x86-64.*static(-pie|ally)? linked'
-          done
-          test -s dist/bin/pumpkin-modal.py
-          test -s dist/bin/pumpkin-modal.py.lock
-          # The upstream formatter includes compressed Go debug sections in its release binary.
-          strip --strip-debug dist/bin/buildifier
-          dist/bin/buildifier --version
-          cp deploy/buildifier-LICENSE dist/
-          archive="pumpkin-$TAG-$TARGET.tar.xz"
-          tar --create --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-            --file - --directory dist bin buildifier-LICENSE commit | xz --threads=1 --stdout > "$archive"
-          sha256sum "$archive" > "$archive.sha256"
-          mkdir unpacked
-          tar --extract --xz --file "$archive" --directory unpacked
-          cmp dist/commit unpacked/commit
-          unpacked/bin/pumpkin --version | grep --fixed-strings "($(cut --characters=1-9 dist/commit) "
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target x86_64-unknown-linux-musl --no-self-update
+          .github/release.sh "$TAG"
 
       - name: Publish the archive and checksum
+        working-directory: target/release-assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          archive="pumpkin-$TAG-$TARGET.tar.xz"
-          gh release create "$TAG" "$archive" "$archive.sha256" --verify-tag --title "$TAG" --generate-notes
+        run: gh release create "$TAG" *.tar.xz *.sha256 --verify-tag --title "$TAG" --generate-notes
