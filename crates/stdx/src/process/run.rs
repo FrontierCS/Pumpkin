@@ -1,147 +1,245 @@
-//! A command run to its end with its output captured, killed with its group at a deadline.
+//! A command run to its end within the bound that its caller states, and killed at the bound,
+//! or once a captured stream passes what a run holds: with what it started, where it has a process
+//! group of its own.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::process::CommandExt as _;
-use std::panic;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::thread::{self, Scope, ScopedJoinHandle};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
-use super::children::kill;
-use super::{FIRST_PAUSE, MAX_PAUSE};
+use super::Failure;
+use super::command::{name, shown};
+use super::watch::{Group, watched};
 use crate::Deadline;
 
-/// Runs `command` as [`Command::output`] does, with no standard input, in a process group of its
-/// own, until `by`.
+// Every run states its bound, as each of TigerBeetle's `exec` and `exec_options` runs within a
+// timeout, which `exec_options` lets its caller change:
+// https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/shell.zig#L401-L415
+// https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/shell.zig#L462-L469
+/// When [`run`] kills a command that hasn't ended.
+#[derive(Clone, Copy, Debug)]
+pub enum Bound {
+    /// This long after it starts.
+    Within(Duration),
+    /// At this deadline, however late the command starts: one whose deadline has passed never
+    /// starts.
+    By(Deadline),
+}
+
+/// Whether [`run`] first writes the command to this process's standard error, as `$ ` and what
+/// [`shown`](super::shown) shows.
+#[derive(Clone, Copy, Debug)]
+pub enum Echo {
+    Line,
+    Silent,
+}
+
+/// Where [`run`] sends the command's standard output or error.
 ///
-/// `None` if it hasn't ended, exited with its output closed, by then, and never started if `by`
-/// has passed; at `by` its group is killed. If this process dies first, the command outlives it.
-pub fn output(command: &mut Command, by: Deadline) -> io::Result<Option<Output>> {
-    run(command, None, by)
+/// A run with neither stream inherited leads a process group of its own, killed whole as the run
+/// ends, so what the command started ends with it, but for a process that leaves the group, as
+/// `setsid` does; and no signal to this process's group, such as a terminal's Ctrl-C, reaches it.
+/// A run with a stream inherited stays in this process's group, so that a terminal's Ctrl-C reaches
+/// it, and it reads and writes the terminal unstopped; at its bound, its command alone is killed,
+/// and what the command started may outlive it.
+#[derive(Clone, Copy, Debug)]
+pub enum Stream {
+    /// Into the [`Output`] that the run gives, up to 128 MiB, past which the command is killed.
+    Captured,
+    /// To this process's own.
+    Inherited,
+    /// To `/dev/null`.
+    Discarded,
 }
 
-/// Runs `command` as [`output`] does, but with `input` on its standard input, which then closes,
-/// though the command may read none of it.
-pub fn fed(command: &mut Command, input: &[u8], by: Deadline) -> io::Result<Option<Output>> {
-    run(command, Some(input), by)
+/// How [`run`] runs a command.
+#[must_use]
+#[derive(Clone, Copy, Debug)]
+pub struct Run<'a> {
+    bound: Bound,
+    echo: Echo,
+    input: Option<&'a [u8]>,
+    stdout: Stream,
+    stderr: Stream,
+    name: Option<&'a str>,
 }
 
-fn run(command: &mut Command, input: Option<&[u8]>, by: Deadline) -> io::Result<Option<Output>> {
-    if by.remaining().is_none() {
-        return Ok(None);
+impl<'a> Run<'a> {
+    /// A run killed at `bound`, echoed as `echo` says, with no standard input, and both its
+    /// standard output and error captured.
+    pub fn new(bound: Bound, echo: Echo) -> Self {
+        Self {
+            bound,
+            echo,
+            input: None,
+            stdout: Stream::Captured,
+            stderr: Stream::Captured,
+            name: None,
+        }
+    }
+
+    /// With `input` on the command's standard input, which then closes, though the command may
+    /// read none of it.
+    pub fn input(self, input: &'a [u8]) -> Self {
+        Self {
+            input: Some(input),
+            ..self
+        }
+    }
+
+    pub fn stdout(self, to: Stream) -> Self {
+        Self { stdout: to, ..self }
+    }
+
+    pub fn stderr(self, to: Stream) -> Self {
+        Self { stderr: to, ..self }
+    }
+
+    /// Named `name` by its [`Failure`], in place of the command's program and the words after it,
+    /// up to two, before the first option.
+    pub fn named(self, name: &'a str) -> Self {
+        Self {
+            name: Some(name),
+            ..self
+        }
+    }
+}
+
+/// Runs `command` to its end as `how` says, and gives its output if it exits with 0.
+///
+/// The command is killed at its bound, or once a captured stream passes 128 MiB, with what it
+/// started where [`Stream`] says; a stream not captured is empty in the output. A command whose
+/// bound leaves it no time neither starts nor echoes, and one outlives this process if it dies.
+///
+/// # Panics
+///
+/// Panics if `how`'s bound is never reached, as one past what the clock can hold is.
+pub fn run(command: &mut Command, how: Run<'_>) -> Result<Output, Failure> {
+    let Run {
+        bound,
+        echo,
+        input,
+        stdout,
+        stderr,
+        name: named,
+    } = how;
+    let name = named.map_or_else(|| name(command), str::to_owned);
+    let unstarted = |name| Failure::Unended {
+        name,
+        bound,
+        started: false,
+    };
+    // A command whose bound leaves it no time never starts, so a failure says it didn't.
+    let by = match bound {
+        Bound::Within(timeout) if timeout.is_zero() => return Err(unstarted(name)),
+        Bound::Within(timeout) => Deadline::after(timeout),
+        Bound::By(by) if by.remaining().is_none() => return Err(unstarted(name)),
+        Bound::By(by) => by,
+    };
+    assert!(
+        by.remaining() < Some(Duration::MAX),
+        "the bound of a run of `{name}` is past what the clock can hold, so it is never reached: \
+         expected one that is, as a run that is to outlive any bound starts by `spawn`"
+    );
+    if let Echo::Line = echo
+        && let Err(error) = echoed(command)
+    {
+        let expected = "expected this process's standard error to take the echo".to_owned();
+        return Err(Failure::Unstarted {
+            name,
+            error,
+            expected,
+        });
     }
     let stdin = if input.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
     };
-    let mut child = command
+    command
         .stdin(stdin)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A group of its own, so that the kill at `by` reaches what the command started too. The
-        // cost: no signal to this process's group, such as a terminal's Ctrl-C, reaches the
-        // command.
-        .process_group(0)
-        .spawn()?;
-    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
-        unreachable!(
-            "the child's piped standard output or error is missing, though both are piped just \
-             above, so the child has both, which `Child` holds as `Option`s all the same"
-        )
+        .stdout(stdio(stdout))
+        .stderr(stdio(stderr));
+    let group = if matches!(stdout, Stream::Inherited) || matches!(stderr, Stream::Inherited) {
+        // This process's group by its ID, as a `Command` keeps a group that an earlier run set.
+        command.process_group(rustix::process::getpgrp().as_raw_nonzero().get());
+        Group::Callers
+    } else {
+        // A group of its own, so that its kill reaches what the command started too.
+        command.process_group(0);
+        Group::Own
     };
-    let fed = child.stdin.take().zip(input);
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let status = thread::scope(|scope| {
-        // Each pipe is read on a thread of its own, as `Command::output` reads both at once, so
-        // that the command never waits on a full pipe; and the input is written on one too, so
-        // that the command's output never waits on it.
-        let readers = read_all(scope, out, &mut stdout)
-            .and_then(|first| Ok([first, read_all(scope, err, &mut stderr)?]));
-        let writer = readers.and_then(|readers| {
-            let writer = fed
-                .map(|(stdin, input)| write_all(scope, stdin, input))
-                .transpose()?;
-            Ok((readers, writer))
-        });
-        let (readers, writer) = match writer {
-            Ok(threads) => threads,
-            Err(error) => {
-                // A thread that started ends once the command, killed, closes its pipes.
-                kill(&mut child)?;
-                return Err(error);
-            }
-        };
-        let status = wait(&mut child, &readers, by);
-        if !matches!(status, Ok(Some(_))) {
-            kill(&mut child)?;
-        }
-        for thread in readers.into_iter().chain(writer) {
-            thread
-                .join()
-                .unwrap_or_else(|panic| panic::resume_unwind(panic))?;
-        }
-        status
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(Failure::unstarted(command, name, error)),
+    };
+    match watched(&mut child, input, by, group) {
+        Ok(Some(output)) if output.status.success() => Ok(output),
+        Ok(Some(output)) => Err(Failure::Exited {
+            name,
+            output,
+            stderr,
+        }),
+        Ok(None) => Err(Failure::Unended {
+            name,
+            bound,
+            started: true,
+        }),
+        Err(error) => Err(Failure::Unwatched { name, error }),
+    }
+}
+
+/// Writes `command` to this process's standard error, as `$ ` and what [`shown`] shows.
+fn echoed(command: &Command) -> io::Result<()> {
+    let line = format!("$ {}\n", shown(command));
+    (io::stderr().write_all(line.as_bytes()))
+        .map_err(|error| io::Error::new(error.kind(), format!("echoing it failed: {error}")))
+}
+
+fn stdio(stream: Stream) -> Stdio {
+    match stream {
+        Stream::Captured => Stdio::piped(),
+        Stream::Inherited => Stdio::inherit(),
+        Stream::Discarded => Stdio::null(),
+    }
+}
+
+/// What `output`'s command printed on its standard output, as text, less one trailing `\n`, then
+/// one trailing `\r`, as xshell's `read` gives it; an error if it isn't UTF-8.
+// https://github.com/matklad/xshell/blob/9a405946ecbbfe50fe4a7229bd764194154e4ce6/src/lib.rs#L991-L998
+pub fn printed(output: Output) -> Result<String, String> {
+    let mut printed = String::from_utf8(output.stdout).map_err(|error| {
+        let error = error.utf8_error();
+        format!("the standard output isn't UTF-8: {error}: expected text")
     })?;
-    Ok(status.map(|status| Output {
-        status,
-        stdout,
-        stderr,
-    }))
-}
-
-fn read_all<'scope>(
-    scope: &'scope Scope<'scope, '_>,
-    mut pipe: impl Read + Send + 'scope,
-    into: &'scope mut Vec<u8>,
-) -> io::Result<ScopedJoinHandle<'scope, io::Result<()>>> {
-    let spawned =
-        thread::Builder::new().spawn_scoped(scope, move || pipe.read_to_end(into).map(drop));
-    spawned.map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("a thread to read the command's output didn't start: {error}"),
-        )
-    })
-}
-
-fn write_all<'scope>(
-    scope: &'scope Scope<'scope, '_>,
-    mut pipe: impl Write + Send + 'scope,
-    input: &'scope [u8],
-) -> io::Result<ScopedJoinHandle<'scope, io::Result<()>>> {
-    let spawned = thread::Builder::new().spawn_scoped(scope, move || match pipe.write_all(input) {
-        // A command that closes its end first takes no more, which is no failure.
-        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
-        Ok(()) | Err(_) => Ok(()),
-    });
-    spawned.map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("a thread to write the command's input didn't start: {error}"),
-        )
-    })
-}
-
-/// Waits until `child` has exited and `readers` have read all of its output, and returns how it
-/// exited: `None` if that hasn't happened by `by`.
-fn wait(
-    child: &mut Child,
-    readers: &[ScopedJoinHandle<'_, io::Result<()>>],
-    by: Deadline,
-) -> io::Result<Option<ExitStatus>> {
-    let mut pause = FIRST_PAUSE;
-    loop {
-        // Reaped only once its output has closed, so that its group, which a process it started
-        // may still be in, is killed, if it must be, while `child`, which leads it, holds its ID.
-        if readers.iter().all(ScopedJoinHandle::is_finished)
-            && let Some(status) = child.try_wait()?
-        {
-            return Ok(Some(status));
+    for end in ['\n', '\r'] {
+        if printed.ends_with(end) {
+            printed.pop();
         }
-        let Some(left) = by.remaining() else {
-            return Ok(None);
-        };
-        thread::sleep(pause.min(left));
-        pause = (pause * 2).min(MAX_PAUSE);
+    }
+    Ok(printed)
+}
+
+/// Runs `command` as [`run`] does, silently, with no standard input and both outputs captured,
+/// until `by`, and gives its output however it exited.
+///
+/// `None` if it hasn't ended, exited with its output closed, by then, and never started if `by`
+/// has passed. An error if it didn't start or couldn't be followed to its end.
+pub fn output(command: &mut Command, by: Deadline) -> io::Result<Option<Output>> {
+    unchecked(run(command, Run::new(Bound::By(by), Echo::Silent)))
+}
+
+/// Runs `command` as [`output`] does, but with `input` on its standard input, which then closes,
+/// though the command may read none of it.
+pub fn fed(command: &mut Command, input: &[u8], by: Deadline) -> io::Result<Option<Output>> {
+    let how = Run::new(Bound::By(by), Echo::Silent).input(input);
+    unchecked(run(command, how))
+}
+
+fn unchecked(ran: Result<Output, Failure>) -> io::Result<Option<Output>> {
+    match ran {
+        Ok(output) | Err(Failure::Exited { output, .. }) => Ok(Some(output)),
+        Err(Failure::Unended { .. }) => Ok(None),
+        Err(Failure::Unstarted { error, .. } | Failure::Unwatched { error, .. }) => Err(error),
     }
 }

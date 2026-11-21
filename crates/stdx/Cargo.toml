@@ -10,10 +10,12 @@ test = false
 
 [dependencies]
 libc.workspace = true
-rustix = { workspace = true, features = ["net", "process"] }
+rustix = { workspace = true, features = ["event", "net", "process"] }
 
 [dev-dependencies]
 expect-test.workspace = true
+# To see what a run writes to this process's standard output and error.
+rustix = { workspace = true, features = ["stdio"] }
 tempfile.workspace = true
 
 [lints]
