@@ -32,6 +32,11 @@ The rules for writing Pumpkin's tests and their snapshots.
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
   files, Pumpkin's own processes and loopback sockets are fine. IGNORE each test that needs a Docker engine, the static `sandboxd` or
   a server elsewhere (`#[ignore = "…: run cargo xtask live docker"]`)
+- REFRESH the EC2 provider's table of AWS's identity certificates, when AWS rotates one or adds
+  a region, with `cargo xtask aws-certificates`, which fetches AWS's page and rewrites the table
+  in place: it is the one command that reaches the network for it, and `cargo xtask ci` only
+  tests the table committed. Read the diff, and refill the `identity_certificates` snapshot of
+  `providers/ec2` with `cargo xtask refill --package ec2 identity_certificates`
 - SET each bound that a test chooses at its floor, and script the clock (`SimHost`) for a case
   past a bound; wait on the real clock only for a bound that production states in whole seconds
 - NEVER test against an invented model of a cloud or a service, which pins what the model answers,

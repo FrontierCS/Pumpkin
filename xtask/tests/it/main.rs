@@ -12,6 +12,7 @@ use expect_test::{Expect, expect};
 use test_support::TestDir;
 use xshell::{Shell, cmd};
 
+mod aws_certificates;
 #[path = "../../src/diff.rs"]
 mod diff;
 mod entry;

@@ -280,6 +280,6 @@ fn identity_certificates() {
             us-gov-west-1: FB:6B:DE:DA:4F:10:3E:7B:85:E4:2C:3A:B0:62:BB:9F:7A:09:C4:15:E7:C8:E5:EC:4C:8F:16:01:B3:CE:2E:63: Ok(())
             us-west-1: CB:58:43:D1:CE:7C:F0:A8:2D:40:C4:BB:D8:50:61:B6:E8:4D:74:0E:C5:2A:E9:99:DD:00:D6:00:ED:C8:38:27: Ok(())
             us-west-2: A7:52:02:A6:4F:F3:C4:02:2E:6D:97:EB:91:E5:F4:33:E8:1A:F9:AA:3E:04:40:77:96:D1:92:85:1F:37:3A:20: Ok(())
-            mars-1: Err("the provider holds no AWS certificate for region `mars-1`, whose key signs the identity documents of its instances: add it to `IDENTITY_CERTIFICATES`, from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html")"#]],
+            mars-1: Err("the provider holds no AWS certificate for region `mars-1`, whose key signs the identity documents of its instances: `cargo xtask aws-certificates` adds it to `IDENTITY_CERTIFICATES`, from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html")"#]],
     );
 }

@@ -12,9 +12,9 @@
 //! <https://github.com/hashicorp/vault/blob/558abfa75702b5dab4c98e86b802fb9aef43b0eb/builtin/credential/aws/path_login.go#L477-L513>,
 //! <https://github.com/hashicorp/vault/blob/558abfa75702b5dab4c98e86b802fb9aef43b0eb/builtin/credential/aws/path_login.go#L771-L779>.
 //!
-//! The key is the one in AWS's certificate for the region ([`IDENTITY_CERTIFICATES`]), whose
-//! dates go unchecked, as SPIRE checks none of its certificate's and AWS's own steps take the key
-//! alone out of it:
+//! The key is the one in AWS's certificate for the region ([`IDENTITY_CERTIFICATES`], which
+//! `cargo xtask aws-certificates` writes from AWS's page), whose dates go unchecked, as SPIRE
+//! checks none of its certificate's and AWS's own steps take the key alone out of it:
 //! <https://github.com/spiffe/spire/blob/a676d95d6e6992ce73715f01c17525e60b50b5e8/pkg/server/plugin/nodeattestor/awsiid/awsca.go#L10-L42>,
 //! <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/verify-iid.html>.
 
@@ -65,8 +65,9 @@ impl Documents {
         let Some(certificate) = certificate else {
             return Err(format!(
                 "the provider holds no AWS certificate for region `{region}`, whose key signs \
-                 the identity documents of its instances: add it to `IDENTITY_CERTIFICATES`, \
-                 from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html"
+                 the identity documents of its instances: `cargo xtask aws-certificates` adds \
+                 it to `IDENTITY_CERTIFICATES`, from \
+                 https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html"
             ));
         };
         Self::of(certificate, account, region.to_owned())
