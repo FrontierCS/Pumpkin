@@ -735,7 +735,7 @@ fn summarizes() {
             exit status: Some(0)
             pumpkin: run 20261110-100000-0000000a started 30s after it was asked for, and ran 18m20s:
                  0:00 solver on aws/judge, started at 0:05, exited 0 at 16:40; its work ended at 16:40
-                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.66 at the models' prices, but for 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.65925 at the models' prices; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
                  0:40 train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 54s: score=49.53
                  0:50   box lease 0 of job 0 on aws/box, 52s: charged 45s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; closed as its call ended
                  2:00 gpu lease 1 of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, 25s: charged 14s, 2s of it busy, 1 command, the last `nvidia-smi` exited 0; closed by its holder
@@ -746,12 +746,13 @@ fn summarizes() {
                  6:40 train job 3 of agent 0 on modal/a100_80 with unknown GPUs, started after 5s, ran 10s: a result (timed out)
                  8:20 gpu lease 3 of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), 1m10s: charged 1m, 1s of it busy, 1 command, the last `true` exited 0; expired
                 16:46 final call job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB, started after 4s, ran 1m30s: score=49.36 metrics={"solved":3}
-                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
-              model: 6 requests, answered 5 200, 1 barred; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 4500 in (2600 cached, 150 written to the cache), 450 out (40 reasoning), as 4 responses reported them; $1.11 at the models' prices, but for model-b's tokens, which lack a price, and 1 response's unreported tokens; of 4 good answers, by the median, 1.38s to the first token (of 2) and 3.50s to the end
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; unpriced tokens for model-b
+              model: 6 requests, answered 5 200, 1 barred; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 4500 in (2600 cached, 150 written to the cache), 450 out (40 reasoning), as 4 responses reported them; $1.10925 at the models' prices; unpriced tokens for model-b; 1 response's unreported tokens; of 4 good answers, by the median, 1.38s to the first token (of 2) and 3.50s to the end
               budget solver (model-a, model-b): at least $0.66 of $0.50, exhausted
               budget trainer (model-a): $0.45 of $0.10, exhausted
-              sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.19 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.25 at $2.5 an hour, 6 created, all deleted
-              cost: $1.55, $1.11 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens
+              sandboxes: 1 on aws/box, 52s in all, leases charged 45s, 5s of it busy, no hourly rate, 1 created, all deleted; 2 on aws/judge, 31m27s in all, leases charged 14m10s, 30s of it busy, $0.192474 at $0.3672 an hour, 2 created, all deleted; 7 on modal/a100_80, 5m54s in all, leases charged 1m14s, 3s of it busy, $0.245833 at $2.5 an hour, 6 created, all deleted
+              estimated cost: $1.547557 ($1.10925 for tokens, $0.438307 for worker sandboxes); unpriced tokens for model-b; 1 response's unreported tokens; some worker sandbox time is unpriced
+                Covers reported model tokens and worker sandbox time at recorded rates. Excludes controller time, image builds, storage, network and provider billing adjustments.
             pumpkin: run 20261110-100000-0000000a finished with a result (score=49.36 metrics={"solved":3}); its record is <scratch>/runs/20261110-100000-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-110000-0000000b
@@ -760,24 +761,26 @@ fn summarizes() {
                  0:00 solver on aws/judge, started at 0:05; its work ended at 30:05
                         model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
               model: 5 requests, answered 4 200, 1 refused; 3 failed upstream: 1 with no code, 2 rate_limit_exceeded; dropped request headers: x-a, x-h00, x-h01, x-h02, x-h03, x-h04, x-h05, x-h06, x-h07, x-h08, x-h09, x-h10, x-h11, x-h12, x-h13, x-h14, x-h15, x-h16, x-h17, x-h18, x-h19, x-h20, x-h21, x-h22, x-h23, x-h24, x-h25, x-h26, x-h27, x-h28, x-h29, x-h30, and more; no response reported its tokens
-              sandboxes: 1 on aws/judge, 30m06s in all, 1 created, all deleted
+              sandboxes: 1 on aws/judge, 30m06s in all, no hourly rate, 1 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run 20261110-110000-0000000b finished without a result: the final call gave none (error: solver submitted nothing); its commands' logs can't be found: <scratch>/runs/20261110-110000-0000000b/log.jsonl names no final call: expected a `start_final_call`; its record is <scratch>/runs/20261110-110000-0000000b
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star
             $ pumpkin wait --runs runs 20261110-120000-0000000c
-                        model: 5 requests, all answered 200; tokens 5000 in (2600 cached, 150 written to the cache), 500 out (40 reasoning), as 4 responses reported them; $1.56 at the models' prices, but for 1 response's unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
-                        model: 2 requests, answered 1 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out, as 1 response reported them; $0.23 at the models' prices, but for 1 response's unreported tokens
-              model: 7 requests, answered 6 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 5500 in (2600 cached, 150 written to the cache), 550 out (40 reasoning), as 5 responses reported them; $1.78 at the models' prices, but for 2 responses' unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
+                        model: 5 requests, all answered 200; tokens 5000 in (2600 cached, 150 written to the cache), 500 out (40 reasoning), as 4 responses reported them; $1.55925 at the models' prices; 1 response's unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
+                        model: 2 requests, answered 1 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out, as 1 response reported them; $0.225 at the models' prices; 1 response's unreported tokens
+              model: 7 requests, answered 6 200, 1 abandoned; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 5500 in (2600 cached, 150 written to the cache), 550 out (40 reasoning), as 5 responses reported them; $1.78425 at the models' prices; 2 responses' unreported tokens; of 5 good answers, by the median, 1.38s to the first token (of 2) and 2.00s to the end
               budget solver (model-a): at least $0.66 of $1.00
-              cost: $1.78 for tokens, and more for sandboxes, which lack a price, and for 2 responses' unreported tokens
+              estimated cost: $1.78425 for tokens; 2 responses' unreported tokens; some worker sandbox time is unpriced
             $ pumpkin wait --runs runs 20261110-120000-0000000d
-                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; model-a's tokens lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; model-b's tokens lack a price
-              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; model-a's and model-b's tokens lack a price; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-              cost: $0.44 for sandboxes, and more for tokens, which lack a price
+                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; unpriced tokens for model-a; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; unpriced tokens for model-b
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; unpriced tokens for model-a, model-b; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              estimated cost: $0.438307 for worker sandboxes; unpriced tokens for model-a, model-b; 1 response's unreported tokens; some worker sandbox time is unpriced
             $ pumpkin wait --runs runs 20261110-120000-0000000e
-                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out
-              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end"#]],
+                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; unpriced tokens for model-a; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+                        model: 1 request, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 500 in, 50 out; unpriced tokens for model-b
+              model: 4 requests, all answered 200; 1 failed upstream: rate_limit_exceeded; dropped request headers: x-stainless-lang, x-title; tokens 3500 in (2600 cached, 150 written to the cache), 350 out (40 reasoning), as 3 responses reported them; unpriced tokens for model-a, model-b; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              estimated cost: unavailable (no priced usage)"#]],
     );
 }
 
@@ -1078,7 +1081,8 @@ fn reads_a_deep_result_and_a_log_cut_short() {
                  0:00 train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: deep=[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
                  0:01 final call job 1 on modal/a100_80 with unknown GPUs, started after 0s, ran 1s: whole={"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"score":6}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
               model: 0 requests
-              sandboxes: 1 on aws/judge, 2s in all, 1 created, all deleted; 2 on modal/a100_80, 2s in all, 2 created, all deleted
+              sandboxes: 1 on aws/judge, 2s in all, no hourly rate, 1 created, all deleted; 2 on modal/a100_80, 2s in all, no hourly rate, 2 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run 20261113-123335-0000000a finished with a result (whole={"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"d":{"score":6}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}); its record is <scratch>/runs/20261113-123335-0000000a
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );
@@ -1143,12 +1147,13 @@ fn summarizes_an_interrupted_run() {
             exit status: Some(1)
             pumpkin: run 20261113-123335-5ea1ea5f started 0s after it was asked for, and ran 1m20s:
                  0:00 solver on aws/judge, started at 0:05
-                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.66 at the models' prices, but for 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+                        model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.65925 at the models' prices; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
                  0:40 train job 0 of agent 0 on modal/a100_80 with unknown GPUs, started after 6s, ran 26s: deleted as the run stopped
                  0:50   box lease 0 of job 0 on aws/box, 21s: charged 16s, 5s of it busy, 2 commands, the last `sh -c set -e\nprint 7` exited 0; deleted as the run stopped
-              model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.66 at the models' prices, but for 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
-              sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.01 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.02 at $2.5 an hour, 1 created, all deleted
-              cost: $0.69, $0.66 of it for tokens and $0.03 for sandboxes, and more without a price, and for 1 response's unreported tokens
+              model: 3 requests, all answered 200; tokens 3000 in (2600 cached, 150 written to the cache), 300 out (40 reasoning), as 2 responses reported them; $0.65925 at the models' prices; 1 response's unreported tokens; of 3 good answers, by the median, 1.38s to the first token (of 2) and 5.00s to the end
+              sandboxes: 1 on aws/box, 21s in all, leases charged 16s, 5s of it busy, no hourly rate, 1 created, all deleted; 1 on aws/judge, 1m20s in all, $0.00816 at $0.3672 an hour, 1 created, all deleted; 1 on modal/a100_80, 32s in all, $0.022222 at $2.5 an hour, 1 created, all deleted
+              estimated cost: $0.689632 ($0.65925 for tokens, $0.030382 for worker sandboxes); 1 response's unreported tokens; some worker sandbox time is unpriced
+                Covers reported model tokens and worker sandbox time at recorded rates. Excludes controller time, image builds, storage, network and provider billing adjustments.
             pumpkin: run 20261113-123335-5ea1ea5f was interrupted by SIGTERM; its record is <scratch>/runs/20261113-123335-5ea1ea5f
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs <scratch>/task.star"#]],
     );

@@ -2,14 +2,14 @@
 
 Every run has a record: a directory of its own in the runs directory, `.pumpkin/runs/<id>/` by
 default, which the run's driver writes as the run goes and which no sandbox can reach. `pumpkin
-wait`, `pumpkin ls` and the page read only the record, so each says the same of a run, wherever
-it ran. This page says where to look in a record, and what the page shows.
+wait`, `pumpkin ls` and the page read the record wherever the run took place. This page says where
+to look in a record, and what the page shows.
 
 ## What a record holds
 
 | To see | Read |
 | --- | --- |
-| how the run ended, its result's values, its usage and cost | `outcome.json` |
+| how the run ended, its result's values, its usage and estimated cost | `outcome.json` |
 | every event of the run, in order, and what the driver did about it | `log.jsonl` |
 | the workflow as it ran, where each role was placed, and each provider's report, whose strings name the provider's account | `ir.json`, `provider.json` |
 | the text of each file the evaluation read, from which each body is evaluated | `sources/task/`, `sources/library/` |
@@ -83,10 +83,10 @@ the headers it left behind, never their values.
 ## The page
 
 `pumpkin view` serves the runs of a runs directory, or a controller's, to this machine's browser,
-and prints the address to open. The page lists the runs, newest first, each with what `ls` says of
-it, and for a run shows its summary, a lane for each sandbox over time, who talks to whom, and its
-log, which it follows while the run is live. Each caller that used a model has a trace: its requests
-as threads of steps, each with what it added and the model's answer.
+and prints the address to open. The page lists the runs, newest first. Open a run for its summary,
+a lane for each sandbox over time, who talks to whom, and its log, which the page follows while the
+run is live. Each caller that used a model has a trace of its requests as threads of steps, each
+with what it added and the model's answer.
 
 The page listens on 127.0.0.1 alone and asks for the token in its address, so neither another
 machine, another user of this one nor another site's page can read the runs. Its only change to a
@@ -99,10 +99,37 @@ kept as it is. A controller deployed with a public page publishes its runs this 
 run, to a page that a team reads at one address; [`deploy/aws`](../deploy/aws/README.md) says how to
 set it up and take a run down.
 
-## Spend
+## Estimated cost
 
-A record keeps what a run spent: each sandbox's class and its price an hour, as the provider's
-settings give it, each model's prices for its tokens, as the configuration gave them when the run
-started, and the tokens each response reported. `pumpkin ls` totals the cost; `wait`'s summary
-gives it with the tokens and what each model budget spent. A cost with a `+` has parts without a
-price, such as sandboxes on the machine's own engine.
+Pumpkin estimates the cost of reported model tokens and worker sandbox time at the rates recorded
+for the run. Controller time, image builds, storage, network and provider billing adjustments are
+outside the estimate.
+
+- `./pumpkin ls RUN` shows the estimate so far to the nearest cent. A trailing `+` means some
+  tokens or worker time within that scope are unpriced, or a response left usage unreported.
+  A dash means there is no priced amount.
+- `./pumpkin wait RUN` shows the token and worker subtotals to the nearest millionth of a dollar.
+  The summary names unpriced models and shows the time and hourly rate, when recorded, for each
+  worker class. The summary and the run page show an unavailable estimate when nothing is priced.
+- `./pumpkin wait --outcome RUN | jq '.usage.usd'` reads the recorded estimate in dollars.
+  An absent `usd` field means the run recorded no priced amount. In `.usage.sandboxes[]`, a
+  class without `usd_per_hour` contributed time but no dollars.
+
+The viewer's list takes a finished run's estimate from its outcome when that outcome records
+usage. Older outcomes can omit a model's entire cost if a token category lacked a rate. `ls`,
+`wait` and the detailed run page replay the log and include the priced categories.
+
+Model input is split into regular input, reported cache reads and reported cache writes. Input
+without a cache breakdown takes the regular input rate. Reasoning tokens are part of output.
+If cache reads and writes together exceed the reported input for a model on an API, Pumpkin
+omits that model's input and output on that API from the estimate. With a valid breakdown,
+a missing rate omits only that category. The viewer's model trace sums only steps whose token
+cost it can price in full.
+
+A worker's `usd_per_hour` covers the whole sandbox, including all its GPUs. Pumpkin multiplies
+that rate by `lasted_ns` in hours, from the request for the sandbox to its recorded end, or the
+last log entry while it is live. A lease's `charged_ns` measures time against its lease budget.
+Provider invoices can differ even when all usage is priced. For example, EC2 bills by instance
+state and applies a minimum on start, and Modal accounts for CPU and memory bursts.
+[EC2 instance billing](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html)
+and [Modal sandbox pricing](https://modal.com/docs/guide/sandbox-resources) describe those rules.

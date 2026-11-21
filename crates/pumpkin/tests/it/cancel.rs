@@ -98,7 +98,8 @@ fn cancels() {
             pumpkin: stopping run <id>, recorded in <scratch>/runs/<id>: it ends once its sandboxes are deleted
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
@@ -109,7 +110,8 @@ fn cancels() {
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             outcome.json: {"reason":"its driver ended without an outcome","state":"failed"}

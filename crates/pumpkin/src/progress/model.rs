@@ -9,7 +9,7 @@ use super::{cost, span};
 
 pub(super) fn model(
     model: &runtime::ModelUse,
-    prices: Option<&BTreeMap<String, runtime::TokenPrices>>,
+    prices: &BTreeMap<String, runtime::TokenPrices>,
 ) -> String {
     let requests = crate::counted(
         usize::try_from(model.requests).unwrap_or(usize::MAX),
@@ -63,9 +63,7 @@ pub(super) fn model(
         let responses = crate::counted(*reported, "response");
         let _ = write!(line, ", as {responses} reported them");
     }
-    if let Some(prices) = prices {
-        line.push_str(&cost::tokens(model, prices));
-    }
+    line.push_str(&cost::tokens(model, prices));
     line.push_str(&timed(model));
     line
 }

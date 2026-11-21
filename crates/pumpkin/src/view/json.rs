@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use runtime::{CallerName, Cost, Ending, ModelUse, Progress, Readout, Tokens};
+use runtime::{CallerName, Ending, ModelUse, Progress, Readout, Tokens};
 use serde_json::{Value, json};
 
 use super::failure::{self, Failures};
@@ -216,7 +216,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "lanes": lanes,
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
-        "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
+        "cost": progress.as_ref().and_then(cost_json),
         "summary": summary,
         "unread": unread,
         "end": held.fold.taken(),
@@ -231,11 +231,16 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
     run
 }
 
-fn cost_json(cost: &Cost) -> Value {
-    json!({
-        "shown": progress::usd(cost.usd(), cost.partial()),
-        "said": progress::cost::line(cost),
-    })
+fn cost_json(progress: &Progress) -> Option<Value> {
+    let cost = progress.cost()?;
+    let mut shown = progress::cost::dollars(cost.usd());
+    if cost.partial() {
+        shown.push('+');
+    }
+    Some(json!({
+        "shown": shown,
+        "said": progress::cost::line(&cost, &progress.model),
+    }))
 }
 
 fn model_json(model: &ModelUse) -> Value {

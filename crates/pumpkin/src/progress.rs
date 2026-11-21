@@ -715,7 +715,8 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
     let Some(progress) = progress else {
         return unread.map(|unread| format!("run {}: {unread}\n", record.id()));
     };
-    let ran = span(progress.end.unwrap_or(progress.last));
+    let now = progress.end.unwrap_or(progress.last);
+    let ran = span(now);
     let mut summary = match runtime::minted(record.id()) {
         Some(asked) => format!(
             "run {} started {} after it was asked for, and ran {ran}:\n",
@@ -724,11 +725,8 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         ),
         None => format!("run {} ran {ran}:\n", record.id()),
     };
-    let now = progress.end.unwrap_or(progress.last);
-    let cost = progress.cost();
-    // Only a run that has a cost says what its tokens cost.
-    let prices = cost.is_some().then_some(&progress.token_prices);
-    agent::summarize(&mut summary, progress, prices);
+    let prices = &progress.token_prices;
+    agent::summarize(&mut summary, progress);
     shared_summary(&mut summary, progress);
     let calls = (progress.calls.iter()).map(|call| {
         let asked = call.sandbox.asked;
@@ -774,9 +772,11 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         }
     }
     let _ = writeln!(summary, "  sandboxes: {}", sandboxes(progress));
-    if let Some(cost) = &cost {
-        let _ = writeln!(summary, "  cost: {}", cost::line(cost));
-    }
+    let cost = progress.cost().map_or_else(
+        || "unavailable (no priced usage)".to_owned(),
+        |cost| cost::line(&cost, &progress.model),
+    );
+    let _ = writeln!(summary, "  estimated cost: {cost}");
     if let Some(unread) = unread {
         let _ = writeln!(summary, "  {unread}");
     }
@@ -826,7 +826,9 @@ fn sandboxes(progress: &Progress) -> String {
                 let _ = write!(placed, ", {} of it busy", span(busy));
             }
             if let (Some(price), Some(usd)) = (used.usd_per_hour, used.usd()) {
-                let _ = write!(placed, ", ${usd:.2} at ${price} an hour");
+                let _ = write!(placed, ", {} at ${price} an hour", cost::dollars(usd));
+            } else {
+                placed.push_str(", no hourly rate");
             }
             let _ = match (used.created, used.deleted) {
                 (0, _) => write!(placed, ", none created"),

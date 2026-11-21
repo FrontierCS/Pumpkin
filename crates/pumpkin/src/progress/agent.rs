@@ -1,6 +1,5 @@
 //! The agent's phase during work and its command's ending in a record.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -132,16 +131,17 @@ pub(super) fn children(
         })
 }
 
-pub(super) fn summarize(
-    summary: &mut String,
-    progress: &runtime::Progress,
-    prices: Option<&BTreeMap<String, runtime::TokenPrices>>,
-) {
+pub(super) fn summarize(summary: &mut String, progress: &runtime::Progress) {
     for agent in progress.agents.values() {
         let line = line(agent);
         let _ = writeln!(summary, "  {:>7} {line}", clock(agent.sandbox.asked));
         if let Some(usage) = &agent.model {
-            let _ = writeln!(summary, "{:>9}   model: {}", "", model(usage, prices));
+            let _ = writeln!(
+                summary,
+                "{:>9}   model: {}",
+                "",
+                model(usage, &progress.token_prices)
+            );
         }
     }
 }

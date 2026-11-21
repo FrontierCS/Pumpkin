@@ -27,7 +27,7 @@ const COLUMNS = [
   ["Run", ""],
   ["Time", "num"],
   ["Bound", ""],
-  ["Cost", "num"],
+  ["Est. cost", "num"],
   ["Requests", "num"],
   ["Tokens in", "num"],
   ["Out", "num"],

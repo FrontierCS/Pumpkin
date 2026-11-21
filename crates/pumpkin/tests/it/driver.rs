@@ -348,7 +348,8 @@ fn detaches() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its work ended at <t>
                  <t> final call job 0 on local/container, never started, ended after <t>: failed: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
-              sandboxes: 2 on local/container, <t> in all, none created
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished without a result: the final call gave none (error: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports); it ran no command; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"},"kind":"no_result"}}
@@ -367,7 +368,8 @@ fn detaches() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its work ended at <t>
                  <t> final call job 0 on local/container, never started, ended after <t>: failed: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
-              sandboxes: 2 on local/container, <t> in all, none created
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished without a result: the final call gave none (error: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports); it ran no command; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"},"kind":"no_result"}}
@@ -384,7 +386,8 @@ fn detaches() {
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, failed at <t>: the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports; its work ended at <t>
                  <t> final call job 0 on local/container, never started, ended after <t>: failed: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports
-              sandboxes: 2 on local/container, <t> in all, none created
+              sandboxes: 2 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> finished without a result: the final call gave none (error: the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports); it ran no command; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"agents":[{"role":"agent","submission":null,"work_end":{"kind":"agent_failed","reason":"the agent's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"}}],"state":"finished","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":2,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}},"verdict":{"failure":{"kind":"error","reason":"the job's sandbox didn't start: `docker create` failed with exit status: 1: the stand-in creates nothing: fix what Docker reports"},"kind":"no_result"}}
@@ -475,7 +478,8 @@ fn signaled_after_the_start() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
@@ -485,7 +489,8 @@ fn signaled_after_the_start() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGHUP; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"signal":"SIGHUP","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
@@ -495,7 +500,8 @@ fn signaled_after_the_start() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGINT; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"signal":"SIGINT","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
@@ -505,7 +511,8 @@ fn signaled_after_the_start() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container
-              sandboxes: 1 on local/container, <t> in all, none created
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, none created
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/stand-in/task.star
             printed outcome.json: {"signal":"SIGTERM","state":"interrupted","usage":{"model_requests":0,"ran_ns":"<ns>","sandboxes":[{"class":"container","count":1,"lasted_ns":"<ns>","provider":"local"}],"tokens":{"input":0,"output":0,"responses":0}}}
@@ -657,7 +664,8 @@ fn lost_on_docker() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>
-              sandboxes: 1 on local/container, <t> in all, 1 created, 0 deleted
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, 1 created, 0 deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> is lost: its driver ended without writing outcome.json, so nothing says how it ended; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
             pumpkin: to remove what it left: pumpkin cancel --runs <scratch>/runs <id>
@@ -669,7 +677,8 @@ fn lost_on_docker() {
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>
-              sandboxes: 1 on local/container, <t> in all, 1 created, 0 deleted
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, 1 created, 0 deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> failed: its driver ended without an outcome; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
             $ pumpkin reap --runs runs
@@ -745,7 +754,8 @@ fn signaled_on_docker() {
             exit status: Some(1)
             pumpkin: run <id> started <t> after it was asked for, and ran <t>:
                  <t> agent on local/container, started at <t>
-              sandboxes: 1 on local/container, <t> in all, 1 created, all deleted
+              sandboxes: 1 on local/container, <t> in all, no hourly rate, 1 created, all deleted
+              estimated cost: unavailable (no priced usage)
             pumpkin: run <id> was interrupted by SIGTERM; its record is <scratch>/runs/<id>
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/sleeps/task.star
             the run log's last note: "the run was interrupted by SIGTERM"
