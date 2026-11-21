@@ -1,7 +1,5 @@
-//! `lock`: a task checked as `check` checks it, and its recipe's fetch stage read, before the
-//! configuration and the engine are reached; then the stage written afresh, in place, from the files
-//! its resolver finds online on the engine in the image of the recipe up to the step that
-//! reads it, built with the inputs that the task's images give the recipe.
+//! `pumpkin lock` checks the task and reads its fetch stage before reaching the engine.
+//! The resolver runs in the recipe prefix image. A successful resolution rewrites the stage.
 
 use std::fs;
 
