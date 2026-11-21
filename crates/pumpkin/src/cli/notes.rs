@@ -257,23 +257,6 @@ controller answers, each request asks EC2 whether it runs (`aws ec2
 describe-instances`) in place of connecting. --runs serves a directory here,
 such as the copies of the controller's runs that `wait` makes.";
 
-pub(super) const LOCK_NOTES: &str = "\
-Examples:
-  pumpkin lock tasks/bench/task.star tasks/bench/verifier/Dockerfile apt
-  pumpkin lock tasks/bench/task.star tasks/bench/agent/Dockerfile apt --arg model=m
-
-Exit status:
-  0  The stage is written.
-  1  The task has problems; its images give the recipe different inputs; the
-     recipe has no such fetch stage; or a build, the resolver or the write
-     failed; or another error.
-  2  A usage error.
-Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-why. The task is checked as `pumpkin check` checks it, and the stage read,
-before the configuration is read and the engine reached. The builds' output
-goes to the standard error. The image the resolver runs in is tagged in
-pumpkin/lock, where a later lock finds it.";
-
 pub(super) const HELP_NOTES: &str = "\
 Examples:
   pumpkin help run

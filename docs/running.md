@@ -22,8 +22,8 @@ To build a checkout for development, run `cargo xtask build` from it and use its
 
 The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/` and the state
 its builds and providers keep. The directory ignores itself in Git. The shared release cache,
-Docker engine's images, records written to an explicit `--runs` directory, files `fmt` and
-`lock` rewrite, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live elsewhere.
+Docker engine's images, records written to an explicit `--runs` directory, files `fmt`
+rewrites, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live elsewhere.
 
 ## The machine's configuration
 
@@ -50,8 +50,8 @@ $ ./pumpkin check tasks/*/task.star --arg model=model-a
 
 Each problem is said at its file, line and column, with the source line under it. A recipe must
 pin what it fetches: an image by its digest, a file by its checksum, a Git repository by its full
-commit. `pumpkin lock` writes the fetch stage that pins a step's downloads, and `pumpkin fmt`
-formats `.star` files as the lint expects.
+commit; a stage that pins a step's downloads by checksum, as `ADD --checksum` does, satisfies it.
+`pumpkin fmt` formats `.star` files as the lint expects.
 
 ## Running
 

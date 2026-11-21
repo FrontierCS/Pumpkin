@@ -25,7 +25,6 @@ use stdx::Deadline;
 use stdx::process::Environment;
 
 mod build;
-mod lock;
 pub mod prune;
 mod sandboxd;
 

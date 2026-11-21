@@ -29,7 +29,6 @@ mod driver;
 mod ending;
 mod job;
 mod link;
-mod lock;
 mod manifest;
 mod next;
 mod progress;
@@ -80,7 +79,6 @@ fn main() -> ExitCode {
         Ok(cli::Command::Check(flags)) => check(flags),
         Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
         Ok(cli::Command::Build(flags)) => build(flags, Reader::Operator),
-        Ok(cli::Command::Lock(flags)) => lock::lock(flags),
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
