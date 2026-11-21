@@ -181,7 +181,8 @@ fn serve<H: Host>(
             }
             None => End::Call(call.job, Err("the shared sandbox never started".to_owned())),
         };
-        child.report(end.report(child.clock.now()));
+        // The shared sandbox outlives the call, which holds none of its own.
+        child.close(end, || Ok(()));
     }
 }
 

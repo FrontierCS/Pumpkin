@@ -140,7 +140,8 @@ the session name. The target sees it through its own `sandboxctl ops`.
 | `call_timeout_seconds` | each call's timeout, counted from its body's start |
 
 An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
-cumulative time, or with the work phase, whichever comes first.
+cumulative time, or with the work phase, whichever comes first. Its caller hears how it ended at
+once, while its sandbox is deleted, and the grant takes its next call once the sandbox is gone.
 
 ### A now function
 
@@ -332,7 +333,7 @@ the ends of the command's output; and `close <lease>` ends it.
 A refusal says why, and what to do instead. Each of these is a real reply:
 
 ```json
-{"kind":"refused","message":"`count` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged","busy":true}
+{"kind":"refused","message":"`count` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged","busy":true}
 {"kind":"refused","message":"you have no job 7: ask about a job that one of your calls returned"}
 {"kind":"refused","message":"the work was ended: make no more ops"}
 ```

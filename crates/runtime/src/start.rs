@@ -12,7 +12,7 @@ use schema::ir::{ArgumentValue, Name};
 use schema::workflow::{AgentId, JobFunctionId, SessionId};
 use stdx::Context;
 
-use crate::child::{Child, Deadlines, End, Message};
+use crate::child::{Child, Deadlines, End, Message, Report};
 use crate::sandbox::Which;
 use crate::{Called, Clock, Host, Inbox, Input, Runtime, body, call, lease};
 
@@ -211,9 +211,12 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         if let Err(error) = spawned {
             // Reported as the child's thread would have, behind what reached the host before.
             let reason = format!("{} thread didn't start: {error}", which.noun());
-            let failed = End::failed(which, reason).report(self.clock.now());
-            // The inbox holds its receiver, so the send can't fail.
-            let _ = self.inbox.sender().send(Input::Child(failed));
+            let at = self.clock.now();
+            let (before, after) = End::failed(which, reason).reports(at);
+            for report in before.into_iter().chain([Report::Event(at, after)]) {
+                // The inbox holds its receiver, so the send can't fail.
+                let _ = self.inbox.sender().send(Input::Child(report));
+            }
         }
         Ok(sender)
     }

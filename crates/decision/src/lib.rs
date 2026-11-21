@@ -170,20 +170,25 @@ pub enum Event {
     CallTimedOut {
         job: JobId,
     },
-    /// A call's body returned, as [`CallResult::returned_by`] takes its return, and the call's
-    /// target has been destroyed. `model_requests_over_budget` is how many of the target's model
+    /// A call's body returned, as [`CallResult::returned_by`] takes its return, and what its target
+    /// held has been collected. `model_requests_over_budget` is how many of the target's model
     /// requests the route barred for a spent model budget, if any.
     CallReturned {
         job: JobId,
         result: CallResult,
         model_requests_over_budget: Option<NonZeroU64>,
     },
-    /// A call failed, or was stopped as [`Action::StopCall`] asked, and its target has been
-    /// destroyed; `model_requests_over_budget` as for [`Event::CallReturned`].
+    /// A call failed, or was stopped as [`Action::StopCall`] asked;
+    /// `model_requests_over_budget` as for [`Event::CallReturned`].
     CallFailed {
         job: JobId,
         reason: String,
         model_requests_over_budget: Option<NonZeroU64>,
+    },
+    /// A call whose end has been reported holds no sandbox: its fresh target, if one was created,
+    /// has been destroyed.
+    CallTornDown {
+        job: JobId,
     },
     /// A lease's runner has started, and runs the commands it is given from now.
     LeaseReady {
@@ -240,8 +245,9 @@ pub enum Action {
     /// target is to be done within `timeout` of the body's start: the call is cut short at the
     /// body's first step past it, or as it passes while a command runs, and when the core stops
     /// it. The runtime reports [`Event::CallStarted`] when the body starts,
-    /// [`Event::CallTimedOut`] if its timeout passes, and last [`Event::CallReturned`], or
-    /// [`Event::CallFailed`] at any point, once the target is gone.
+    /// [`Event::CallTimedOut`] if its timeout passes, [`Event::CallReturned`], or
+    /// [`Event::CallFailed`] at any point, and last [`Event::CallTornDown`], once the target is
+    /// gone.
     StartCall {
         job: JobId,
         function: JobFunctionId,
@@ -549,6 +555,7 @@ impl<'w> Core<'w> {
                 };
                 self.on_job(job, report, &mut actions);
             }
+            Event::CallTornDown { job } => self.on_job(job, jobs::State::torn_down, &mut actions),
             Event::LeaseReady { lease } => self.on_lease(lease, |lease| lease.state.ready(at)),
             Event::CommandEnded {
                 lease,

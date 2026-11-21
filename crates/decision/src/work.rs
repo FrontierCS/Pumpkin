@@ -1,5 +1,6 @@
 //! Each agent owns its submission and finalize grace. The final body receives every submission,
-//! in declaration order, once all agents, jobs and leases have ended.
+//! in declaration order, once all agents and jobs are torn down and all leases have ended. The
+//! run finishes once the final call is torn down too.
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -105,7 +106,7 @@ impl Core<'_> {
                     .agents
                     .values()
                     .all(|work| work.ended.as_ref().is_some_and(|end| end.torn_down))
-                    && self.jobs.all_ended()
+                    && self.jobs.all_torn_down()
                     && self.leases.all_ended()
                 {
                     if !self.shared.is_empty() {
@@ -134,7 +135,12 @@ impl Core<'_> {
             }
             Phase::Final { job } => {
                 if let Some(jobs::Job {
-                    state: jobs::State::Ended { outcome, .. },
+                    state:
+                        jobs::State::Ended {
+                            outcome,
+                            torn_down: true,
+                            ..
+                        },
                     ..
                 }) = self.jobs.get(job)
                     && self.leases.all_ended()

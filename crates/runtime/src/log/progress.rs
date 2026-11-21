@@ -129,8 +129,9 @@ pub struct Sandbox {
     pub asked: Duration,
     /// When its command started, or its runner was ready.
     pub started: Option<Duration>,
-    /// When the agent's sandbox was deleted or its teardown finished without a sandbox, or a
-    /// call or lease ended. The deletion also ends a sandbox when its run stops early.
+    /// When the agent's sandbox was deleted or its teardown finished without a sandbox, a call's
+    /// sandbox was deleted, a call with no sandbox of its own ended, or a lease ended. The deletion
+    /// also ends a sandbox when its run stops early.
     pub gone: Option<Duration>,
     /// Whether its `sandbox.json` records the provider's delete as done; `None` if it has no
     /// `sandbox.json`, so was never created.
@@ -397,13 +398,16 @@ pub(super) fn readout(
     for lease in &mut progress.leases {
         lease.sandbox.deleted = deleted(&dir.join(format!("leases/{}", lease.lease)))?;
     }
-    for call in progress
-        .calls
-        .iter_mut()
-        .filter(|call| call.shared.is_none())
-    {
-        let job = dir.join(format!("jobs/{}", call.job));
-        call.sandbox.deleted = deleted(&job)?;
+    for call in &mut progress.calls {
+        if call.shared.is_none() {
+            let job = dir.join(format!("jobs/{}", call.job));
+            call.sandbox.deleted = deleted(&job)?;
+        }
+        // A call with no sandbox of its own, none created or a shared one, holds none once it ends.
+        if call.sandbox.deleted.is_none() {
+            let ended = call.end.as_ref().map(|(at, ..)| *at);
+            call.sandbox.gone = call.sandbox.gone.or(ended);
+        }
     }
     Ok(Readout {
         progress: Some(progress),

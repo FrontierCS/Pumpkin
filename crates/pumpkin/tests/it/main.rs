@@ -878,6 +878,7 @@ fn whole_log() -> Vec<Value> {
     let call_returned = |job: u64, returned: Value| json!({ "kind": "call_returned", "job": job, "returned": returned });
     let failed =
         |job: u64, reason: &str| json!({ "kind": "call_failed", "job": job, "reason": reason });
+    let deleted = |sandbox: &str| json!({ "kind": "sandbox_deleted", "sandbox": sandbox });
     let sxm = "NVIDIA A100-SXM4-80GB";
     let target_put = json!({
         "kind": "target_put", "job": 0, "path": "/work/payload", "bytes": 6,
@@ -966,6 +967,8 @@ fn whole_log() -> Vec<Value> {
             json!([close(0)]),
         ),
         logged(102, of_lease("lease_ended", 0), none()),
+        logged(110, deleted("job-0"), none()),
+        logged(110, of_job("call_torn_down", 0), none()),
         logged(120, opened_1, start_1_lease),
         logged(120, opened_2, start_2_lease),
         logged(126, saw("lease-1", sxm), none()),
@@ -979,15 +982,20 @@ fn whole_log() -> Vec<Value> {
         logged(181, ended(2, json!("timed_out")), none()),
         logged(200, asked_1, start_1),
         logged(260, failed(1, unstarted), none()),
+        logged(260, of_job("call_torn_down", 1), none()),
         logged(300, asked_2, start_2),
         logged(310, saw("job-2", sxm), none()),
         logged(310, of_job("call_started", 2), none()),
         logged(320, tick(), json!([of_job("stop_call", 2)])),
         logged(330, failed(2, "the call was stopped"), none()),
+        logged(335, deleted("job-2"), none()),
+        logged(335, of_job("call_torn_down", 2), none()),
         logged(400, asked_3, start_3),
         logged(405, of_job("call_started", 3), none()),
         logged(410, of_job("call_timed_out", 3), none()),
         logged(415, call_returned(3, json!([])), none()),
+        logged(415, deleted("job-3"), none()),
+        logged(415, of_job("call_torn_down", 3), none()),
         logged(500, opened_3, start_3_lease),
         logged(505, saw("lease-3", "NVIDIA A100 80GB PCIe"), none()),
         logged(505, of_lease("lease_ready", 3), none()),
@@ -1011,7 +1019,9 @@ fn whole_log() -> Vec<Value> {
         logged(1010, of_job("call_started", 4), none()),
         logged(1012, final_asked, none()),
         logged(1020, final_answered, none()),
-        logged(1100, call_returned(4, values), finish),
+        logged(1100, call_returned(4, values), none()),
+        logged(1100, deleted("job-4"), none()),
+        logged(1100, of_job("call_torn_down", 4), finish),
     ]
 }
 

@@ -381,16 +381,16 @@ fn lists_phases() {
             $ pumpkin ls --runs runs 20261110
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  -          $1.10+  example/lease: score=49.36 metrics={"solved":3}
+              20261110-100000-0000000a finished     18m20s  -          $1.11+  example/lease: score=49.36 metrics={"solved":3}
               20261110-110000-0000000b finished     30m06s  -               -  example/lease
               20261110-120000-0000000c finished     18m20s  -          $0.66+  example/lease: score=49.36 metrics={"solved":3}
-              20261110-120000-0000000d finished     18m20s  -          $0.44+  example/lease: score=49.36 metrics={"solved":3}
+              20261110-120000-0000000d finished     18m20s  -          $0.45+  example/lease: score=49.36 metrics={"solved":3}
               20261110-120000-0000000e finished     18m20s  -               -  example/lease: score=49.36 metrics={"solved":3}
-              5 runs: 5 finished (1 without a result); $2.20 so far, and more without a price, and for 2 responses' unreported tokens
+              5 runs: 5 finished (1 without a result); $2.22 so far, and more without a price, and for 2 responses' unreported tokens
             $ pumpkin ls --runs runs 20261110-10 20261111
             exit status: Some(0)
             printed:
-              20261110-100000-0000000a finished     18m20s  -          $1.10+  example/lease: score=49.36 metrics={"solved":3}
+              20261110-100000-0000000a finished     18m20s  -          $1.11+  example/lease: score=49.36 metrics={"solved":3}
               20261111-090000-0000000a starting        <t>  of 2m       $0.00  example/lease: 1 agent
                                        starting        <t>  of 2m              solver on aws/judge
               20261111-090000-0000000b work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>
@@ -399,7 +399,7 @@ fn lists_phases() {
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        job 0           <t>  of 10m06s          train call on modal/a100_80 with unknown GPUs for agent 0
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
-              20261111-090000-0000000d final call      <t>  of 15m04s  $1.04+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
+              20261111-090000-0000000d final call      <t>  of 15m04s  $1.05+  example/lease: job 4 on modal/a100_80 with NVIDIA A100-SXM4-80GB; model request 3 in flight for <t>
               20261111-090000-0000000e work            <t>  of 30m      $0.66  example/lease: 1 agent working; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
                                        solver          <t>  of 30m             2 model requests, the last answered <t> ago; model request 2 in flight for <t>; it is past its bound, which is a bug: to stop it: pumpkin cancel --runs <scratch>/runs 20261111-090000-0000000e
               20261111-090000-0000000f publishing      <t>                  -  example/lease
@@ -411,7 +411,7 @@ fn lists_phases() {
                                        solver          <t>  of 30m             2 model requests, answered 1 200, 1 429; the last good one answered <t> ago
               20261111-090000-0000000j work            <t>  of 30m      $0.00  example/lease: 1 agent working
                                        solver          <t>  of 30m             2 model requests, answered 1 200, 1 200 cut; the last good one answered <t> ago
-              11 runs: 10 running, 1 finished; $4.15 so far, and more without a price, and for 3 responses' unreported tokens; every live run ends by <t> UTC"#]],
+              11 runs: 10 running, 1 finished; $4.17 so far, and more without a price, and for 3 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
 
@@ -459,29 +459,30 @@ fn lists_leases() {
                                        lease 0         <t>  of 1m              box of job 0 on aws/box, ready, 5s busy; `sh -c set -e\nprint 7` exited 0
               20261114-090000-00000003 work            <t>  of 30m     $0.71+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
+                                       job 0           <t>                     train call on modal/a100_80 with unknown GPUs for agent 0, ended: score=49.53; its sandbox isn't gone yet
                                        lease 0         <t>                     box of job 0 on aws/box, closed as its call ended; its sandbox isn't gone yet; `sh -c set -e\nprint 7` exited 0
-              20261114-090000-00000004 work            <t>  of 30m     $0.71+  example/lease: 1 agent working
+              20261114-090000-00000004 work            <t>  of 30m     $0.72+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 1         <t>  of 30m             gpu of agent 0 on modal/a100_80, starting
                                        lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
-              20261114-090000-00000005 work            <t>  of 30m     $0.72+  example/lease: 1 agent working
+              20261114-090000-00000005 work            <t>  of 30m     $0.73+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 1         <t>  of 1m              gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, ready, 2s busy; `nvidia-smi` exited 0
                                        lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
-              20261114-090000-00000006 work            <t>  of 30m     $0.73+  example/lease: 1 agent working
+              20261114-090000-00000006 work            <t>  of 30m     $0.74+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 1         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100-SXM4-80GB, closed by its holder; its sandbox isn't gone yet; `nvidia-smi` exited 0
                                        lease 2         <t>  of 2m              cpu of agent 0 on aws/judge, starting
               20261114-090000-00000007 work            <t>  of 30m     $0.74+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 2s busy; `sleep 60` running
-              20261114-090000-00000008 work            <t>  of 30m     $0.94+  example/lease: 1 agent working
+              20261114-090000-00000008 work            <t>  of 30m     $0.95+  example/lease: 1 agent working
                                        solver          <t>  of 30m             3 model requests, the last answered <t> ago
                                        lease 2         <t>  of 30m             cpu of agent 0 on aws/judge, ready, 30s busy; `sleep 60` timed out
                                        lease 3         <t>                     gpu of agent 0 on modal/a100_80 with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB), expired; its sandbox isn't gone yet; `true` exited 0
-              20261114-090000-00000009 ending          <t>  of 1h43m   $1.03+  example/lease: the end of lease 2
+              20261114-090000-00000009 ending          <t>  of 1h43m   $1.04+  example/lease: the end of lease 2
                                        lease 2         <t>                     cpu of agent 0 on aws/judge, closed as the work phase ended; its sandbox isn't gone yet; `sleep 60` timed out
-              9 runs: 9 running; $6.95 so far, and more without a price, and for 9 responses' unreported tokens; every live run ends by <t> UTC"#]],
+              9 runs: 9 running; $6.99 so far, and more without a price, and for 9 responses' unreported tokens; every live run ends by <t> UTC"#]],
     );
 }
 

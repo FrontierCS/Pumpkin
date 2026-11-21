@@ -70,8 +70,8 @@ impl Core<'_> {
             return Ok(OpReply::Refused {
                 busy: true,
                 message: format!(
-                    "`{name}` runs one call at a time, and already has one queued or running: call \
-                 again once it has finished; this call is not charged"
+                    "`{name}` runs one call at a time, and already has one queued, running or \
+                 releasing its sandbox: call again once it has finished; this call is not charged"
                 ),
             });
         }
