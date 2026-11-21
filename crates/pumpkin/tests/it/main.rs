@@ -83,6 +83,19 @@ def final_call(target: Target, submissions):
     )
 }
 
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let to = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
 /// Field `0` is its canonical path.

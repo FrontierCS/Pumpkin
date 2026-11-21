@@ -11,7 +11,7 @@ use std::path::Path;
 use expect_test::expect;
 use test_support::BUSYBOX;
 
-use super::{Scratch, Step, check, ran};
+use super::{Scratch, Step, check, copy_tree, ran};
 
 /// A neutral library, which writes a task's workflow from the task's own values: Codex works
 /// as the agent, on the image that the package's agent recipe builds, and a trainer and the final
@@ -921,22 +921,60 @@ const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
     ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
 
+fn write_benchmark_inputs(scratch: &Scratch) {
+    // Preparation supplies the upstream recipes, source trees and replay selections.
+    for context in [
+        "agent-base",
+        "verifier-base",
+        "native-agent",
+        "native-verifier",
+    ] {
+        scratch.write(
+            &format!("examples/benchmark-input/{context}/Dockerfile"),
+            "FROM scratch\n",
+        );
+    }
+    for mount in [
+        "benchmark-input/generation",
+        "benchmark-input/agent",
+        "benchmark-input/judge",
+        "benchmark-replay",
+    ] {
+        fs::create_dir_all(scratch.0.join("examples").join(mount)).unwrap();
+    }
+}
+
 #[test]
 fn examples() {
     let scratch = Scratch::new();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-    let mut names: Vec<String> = (fs::read_dir(&examples).unwrap())
-        .map(Result::unwrap)
-        .filter(|entry| entry.file_type().unwrap().is_dir())
-        .map(|entry| format!("{}/task.star", entry.file_name().into_string().unwrap()))
-        .collect();
-    names.push("team/codex.star".into());
+    let mut names = Vec::new();
+    let root = scratch.0.join("examples");
+    fs::create_dir(&root).unwrap();
+    for entry in fs::read_dir(examples).unwrap() {
+        let entry = entry.unwrap();
+        let dest = root.join(entry.file_name());
+        if entry.path().join("task.star").is_file() {
+            copy_tree(&entry.path(), &dest);
+            names.push(format!(
+                "{}/task.star",
+                entry.file_name().into_string().unwrap()
+            ));
+        } else if entry.path().is_file() {
+            fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+    write_benchmark_inputs(&scratch);
+    names.extend([
+        "team/codex.star".into(),
+        "hypergraph-benchmark/replay/task.star".into(),
+    ]);
     names.sort();
     let steps = names.iter().map(|name| {
         let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
         let mut command = scratch.pumpkin(&["check", name]);
         command.args(args.map_or(&[][..], |(_, args)| args));
-        command.current_dir(&examples);
+        command.current_dir(&root);
         Step::from(command)
     });
     check(
@@ -948,6 +986,10 @@ fn examples() {
             $ pumpkin check codex/task.star --arg model=model-a
             exit status: Some(0)
             $ pumpkin check hello/task.star
+            exit status: Some(0)
+            $ pumpkin check hypergraph-benchmark/replay/task.star
+            exit status: Some(0)
+            $ pumpkin check hypergraph-benchmark/task.star
             exit status: Some(0)
             $ pumpkin check hypergraph/task.star --arg model=model-a
             exit status: Some(0)

@@ -2,3 +2,5 @@
 /bin/
 target/
 /mutants.out*
+/examples/benchmark-input/
+/examples/benchmark-replay/
