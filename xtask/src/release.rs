@@ -1,5 +1,5 @@
-//! A release contains the static install, its commit and the formatter's license. The tag
-//! workflow publishes the archive and checksum once the extracted install passes its checks.
+//! A release contains the static install, its commit and the formatter's license. Publication
+//! attaches the checked archive and its checksum to a draft before making the release public.
 
 use std::fs;
 use std::path::Path;
@@ -9,7 +9,7 @@ use xshell::{Shell, cmd};
 
 use crate::{Cargo, MUSL, Result, install, root};
 
-pub(super) fn build(cargo: &Cargo, tag: &str) -> Result<()> {
+pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
     if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
         || !tag
             .bytes()
@@ -23,19 +23,28 @@ pub(super) fn build(cargo: &Cargo, tag: &str) -> Result<()> {
     }
 
     let sh = cargo.sh.clone();
+    let output = root().join("target/release-assets");
+    let archive = format!("pumpkin-{tag}-{MUSL}.tar.xz");
+    if publish {
+        let tag_ref = format!("refs/tags/{tag}^{{commit}}");
+        let commit = cmd!(sh, "git rev-parse --verify {tag_ref}").read()?;
+        sh.change_dir(output);
+        return publish_assets(&sh, tag, &archive, &commit);
+    }
+
     let commit = cmd!(sh, "git rev-parse HEAD").read()?;
-    let output = sh.create_dir("target/release-assets")?;
+    sh.create_dir(&output)?;
     sh.change_dir(&output);
     // Stage beside the outputs so a checked archive can replace a previous one by rename.
     let scratch = cmd!(sh, "mktemp --directory .build.XXXXXXXX").read()?;
     sh.change_dir(scratch);
-    let built = package(cargo, &sh, &output, tag, &commit);
+    let built = package(cargo, &sh, &output, &archive, &commit);
     let cleaned = sh.remove_path(sh.current_dir());
     built?;
     Ok(cleaned?)
 }
 
-fn package(cargo: &Cargo, sh: &Shell, output: &Path, tag: &str, commit: &str) -> Result<()> {
+fn package(cargo: &Cargo, sh: &Shell, output: &Path, archive: &str, commit: &str) -> Result<()> {
     install(cargo, Some(sh.current_dir().join("dist")), MUSL)?;
     sh.write_file("dist/commit", format!("{commit}\n"))?;
     sh.copy_file(
@@ -45,7 +54,6 @@ fn package(cargo: &Cargo, sh: &Shell, output: &Path, tag: &str, commit: &str) ->
     // The upstream formatter includes compressed Go debug sections in its release binary.
     cmd!(sh, "strip --strip-debug dist/bin/buildifier").run()?;
 
-    let archive = format!("pumpkin-{tag}-{MUSL}.tar.xz");
     cmd!(sh, "tar --create --file {archive} --directory dist")
         .args([
             "--sort=name",
@@ -67,8 +75,7 @@ fn package(cargo: &Cargo, sh: &Shell, output: &Path, tag: &str, commit: &str) ->
     check(sh, commit)?;
 
     let checksum = format!("{archive}.sha256");
-    let sum = cmd!(sh, "sha256sum {archive}").read()?;
-    sh.write_file(&checksum, format!("{sum}\n"))?;
+    sh.write_file(&checksum, checksum_line(sh, archive)?)?;
     cmd!(sh, "mv --target-directory {output} {archive} {checksum}").run()?;
     Ok(())
 }
@@ -105,5 +112,32 @@ fn check(sh: &Shell, commit: &str) -> Result<()> {
         );
     }
     println!("{version}");
+    Ok(())
+}
+
+fn checksum_line(sh: &Shell, archive: &str) -> Result<String> {
+    let sum = cmd!(sh, "sha256sum {archive}").read()?;
+    Ok(format!("{sum}\n"))
+}
+
+fn publish_assets(sh: &Shell, tag: &str, archive: &str, commit: &str) -> Result<()> {
+    let checksum = format!("{archive}.sha256");
+    if sh.read_file(&checksum)? != checksum_line(sh, archive)? {
+        return Err(format!("{checksum} differs from the checksum of {archive}").into());
+    }
+    let archived = cmd!(sh, "tar --extract --to-stdout --xz --file {archive} commit").read()?;
+    if archived != commit {
+        return Err(format!(
+            "{archive} contains commit {archived:?}, but tag {tag} names {commit}"
+        )
+        .into());
+    }
+    cmd!(
+        sh,
+        "gh release create {tag} --draft --verify-tag --title {tag} --generate-notes"
+    )
+    .run()?;
+    cmd!(sh, "gh release upload {tag} {archive} {checksum}").run()?;
+    cmd!(sh, "gh release edit {tag} --draft=false --latest=true").run()?;
     Ok(())
 }

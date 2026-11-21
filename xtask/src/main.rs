@@ -127,6 +127,9 @@ mod flags {
             cmd release {
                 /// The tag to put in the archive's name.
                 required tag: String
+                /// Publishes the existing archive and checksum as the latest GitHub release
+                /// for the tag. The default is to build both files locally.
+                optional --publish
             }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
@@ -219,6 +222,8 @@ mod flags {
     #[derive(Debug)]
     pub struct Release {
         pub tag: String,
+
+        pub publish: bool,
     }
 
     #[derive(Debug)]
@@ -316,7 +321,9 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Install(flags::Install { root, target }) => {
             install(&cargo, root, target.as_deref().unwrap_or(MUSL))
         }
-        flags::XtaskCmd::Release(flags::Release { tag }) => release::build(&cargo, &tag),
+        flags::XtaskCmd::Release(flags::Release { tag, publish }) => {
+            release::run(&cargo, &tag, publish)
+        }
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
         }

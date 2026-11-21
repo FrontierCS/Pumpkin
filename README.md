@@ -396,4 +396,7 @@ the connection and use the same commands to follow, list, stop, reap or view tho
   [`docs/dev/`](docs/dev/), the rules for changing it.
 - On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
   the current checkout. Find the archive and its SHA-256 checksum in `target/release-assets/`.
-  Pushing a new tag runs the same command with the tag and publishes both files.
+  Pushing a new tag builds both files, then runs `cargo xtask release <tag> --publish` to attach
+  them to a GitHub draft and publish it as the latest release. If the workflow leaves a draft,
+  verify its assets against the local archive and checksum, attach any missing file, and publish
+  the draft as the latest release.

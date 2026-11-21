@@ -23,11 +23,11 @@ jobs:
         run: |
           RUSTUP_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           export RUSTUP_TOOLCHAIN
+          echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" >> "$GITHUB_ENV"
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target x86_64-unknown-linux-musl --no-self-update
           cargo xtask release "$TAG"
 
       - name: Publish the archive and checksum
-        working-directory: target/release-assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$TAG" *.tar.xz *.sha256 --verify-tag --title "$TAG" --generate-notes
+        run: cargo xtask release "$TAG" --publish
