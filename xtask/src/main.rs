@@ -26,6 +26,7 @@ mod figure;
 mod live;
 mod op_stats;
 mod page;
+mod release;
 mod settings;
 mod star;
 mod tidy;
@@ -121,6 +122,13 @@ mod flags {
                 optional --target triple: String
             }
 
+            /// Builds and checks the Linux x86-64 release archive and its SHA-256 checksum in
+            /// `target/release-assets/` from this checkout.
+            cmd release {
+                /// The tag to put in the archive's name.
+                required tag: String
+            }
+
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
             /// listed in `mutants.out`, is a finding to read, not a failure. Given paths whose
             /// source the changes leave as it is, it mutates that source whole, and names the
@@ -167,6 +175,7 @@ mod flags {
         OpStats(OpStats),
         Sandboxd(Sandboxd),
         Install(Install),
+        Release(Release),
         Mutants(Mutants),
         Refill(Refill),
         InstallTools(InstallTools),
@@ -205,6 +214,11 @@ mod flags {
     pub struct Install {
         pub root: Option<PathBuf>,
         pub target: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub struct Release {
+        pub tag: String,
     }
 
     #[derive(Debug)]
@@ -302,6 +316,7 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Install(flags::Install { root, target }) => {
             install(&cargo, root, target.as_deref().unwrap_or(MUSL))
         }
+        flags::XtaskCmd::Release(flags::Release { tag }) => release::build(&cargo, &tag),
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
         }
@@ -559,14 +574,14 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
 /// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
 /// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    release(cargo, "ec2-boot", MUSL)?;
-    release(cargo, "sandboxd", MUSL)
+    release_binary(cargo, "ec2-boot", MUSL)?;
+    release_binary(cargo, "sandboxd", MUSL)
 }
 
 /// Builds the release binary of `package`, which has its name, for `target`,
 /// and returns the path cargo reports for it, so that the path is right wherever cargo's
 /// configuration puts the target directory.
-fn release(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
+fn release_binary(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
     let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
     let build = build.args(["--target", target]);
     let build = if package == "pumpkin" && target == MUSL {
@@ -623,7 +638,7 @@ fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
     let mut built = vec![
-        ("pumpkin", release(cargo, "pumpkin", target)?, 0o755),
+        ("pumpkin", release_binary(cargo, "pumpkin", target)?, 0o755),
         ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
     let sandboxd = sandboxd(cargo)?;

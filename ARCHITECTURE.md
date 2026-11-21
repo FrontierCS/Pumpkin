@@ -486,8 +486,8 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 The contributor tasks, which `cargo xtask --help` says. `ci` runs the checks every change passes,
 among them the checks of Rust files, of documents and their figures (`tidy`), of `.star` files
 (`star`), of the figure of the crates (`figure`) and of the types of the page that `view` serves
-(`page`); `live` runs those that reach a real environment; `install` installs `pumpkin` and what it
-needs beside it; `tools` pins the contributor tools.
+(`page`). `live` runs those that reach a real environment. `install` installs `pumpkin` and what it
+needs beside it. `release` packages and checks that install. `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 

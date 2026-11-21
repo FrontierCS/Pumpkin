@@ -394,6 +394,6 @@ the connection and use the same commands to follow, list, stop, reap or view tho
 - Models: [routes, budgets and prices](docs/models.md).
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
   [`docs/dev/`](docs/dev/), the rules for changing it.
-- On Linux x86-64, run `.github/release.sh preview` to build and check the release archive for
+- On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
   the current checkout. Find the archive and its SHA-256 checksum in `target/release-assets/`.
   Pushing a new tag runs the same command with the tag and publishes both files.
