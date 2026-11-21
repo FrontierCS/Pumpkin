@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::fmt::{Display, Write as _};
 use std::fs::Permissions;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
@@ -47,9 +47,7 @@ mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
-/// The directory of an `aws` that fails each call, which [`Scratch::program`] puts first on the
-/// `PATH` of each command.
-const POISON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../xtask/poison");
+const AWS_GUARD: &str = ".pumpkin/no-aws";
 
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
@@ -126,6 +124,9 @@ impl Scratch {
         fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
         let scratch = Self(fs::canonicalize(dir.path()).unwrap(), dir);
         install(&scratch, ".pumpkin/bin");
+        let guard = scratch.0.join(AWS_GUARD);
+        fs::create_dir(&guard).unwrap();
+        symlink("/bin/false", guard.join("aws")).unwrap();
         scratch
     }
 
@@ -226,7 +227,7 @@ impl Scratch {
         // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
         // own first on the `PATH` it gives.
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let poisoned = iter::once(PathBuf::from(POISON)).chain(std::env::split_paths(&path));
+        let poisoned = iter::once(self.0.join(AWS_GUARD)).chain(std::env::split_paths(&path));
         command.env("PATH", std::env::join_paths(poisoned).unwrap());
         command
     }
@@ -367,12 +368,14 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 
 fn invocation(command: &Command) -> String {
     // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
-    // one that starts with `POISON`, are the rule: they are not shown.
+    // one that starts with its AWS guard, are the rule: they are not shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
         Some(value)
             if name == "PATH"
-                && std::env::split_paths(value).next() == Some(PathBuf::from(POISON)) =>
+                && std::env::split_paths(value)
+                    .next()
+                    .is_some_and(|dir| dir.ends_with(AWS_GUARD)) =>
         {
             None
         }

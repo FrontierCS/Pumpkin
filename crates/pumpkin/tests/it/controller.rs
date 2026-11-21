@@ -4516,7 +4516,7 @@ fn view_asks_ec2_once_no_link_opens() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1: : fix what `aws` reports"
+            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 309485"#]],
