@@ -75,14 +75,25 @@ const RELEASES: [Release; 3] = [BUILDIFIER, TSC, ZIG];
 
 /// Sets the musl C compiler for a build of `pumpkin`. The host compiler still links the binary.
 pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
+    const FLAGS: &str = "CFLAGS_x86_64-unknown-linux-musl";
     let zig = fetched(cargo, ZIG)?;
+    let dir = zig
+        .parent()
+        .ok_or("the pinned Zig executable has no parent directory")?;
+    // cc-rs splits a compiler command with arguments on spaces. Find the pinned Zig via PATH
+    // so a space in the checkout path does not split its name.
+    let inherited = env::var_os("PATH").unwrap_or_default();
+    let path =
+        env::join_paths(std::iter::once(dir.to_owned()).chain(env::split_paths(&inherited)))?;
+    // Target-specific CFLAGS are appended after cc-rs's own --target, which uses Rust's spelling.
+    let mut flags = env::var_os(FLAGS).unwrap_or_default();
+    flags.push(" --target=x86_64-linux-musl -fno-sanitize=all");
     Ok(build
-        .env("ZIG_LIB_DIR", zig.with_file_name("lib"))
-        .env("ZIG_GLOBAL_CACHE_DIR", zig.with_file_name("cache"))
-        .env(
-            "CC_x86_64_unknown_linux_musl",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("zig-cc"),
-        ))
+        .env("PATH", path)
+        .env("ZIG_LIB_DIR", dir.join("lib"))
+        .env("ZIG_GLOBAL_CACHE_DIR", dir.join("cache"))
+        .env("CC_x86_64_unknown_linux_musl", "zig cc")
+        .env(FLAGS, flags))
 }
 
 /// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root,
