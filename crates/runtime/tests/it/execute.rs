@@ -296,6 +296,8 @@ enum Also {
     ChangedItem,
     Polls,
     Reaped,
+    /// A kind of event whose record races the run's failure, which the shown log leaves out.
+    Racing(&'static str),
 }
 
 fn interruption(also: &[Also]) -> Option<At> {
@@ -307,7 +309,8 @@ fn interruption(also: &[Also]) -> Option<At> {
         | Also::Exchanges
         | Also::ChangedItem
         | Also::Polls
-        | Also::Reaped => None,
+        | Also::Reaped
+        | Also::Racing(_) => None,
     })
 }
 
@@ -370,7 +373,7 @@ fn executed_ir<H: Shown>(
         lines.splice(1..1, polls(&log));
     }
     lines.push("log.jsonl:".to_owned());
-    let (log, start, last) = logged(log, &started, H::SCRIPTED);
+    let (log, start, last) = logged(log, &started, H::SCRIPTED, also);
     lines.extend(log);
     if let Some(last) = last {
         let last = when(&placed, last);
@@ -1018,6 +1021,7 @@ fn logged(
     log: Vec<Value>,
     started: &RangeInclusive<u64>,
     scripted: bool,
+    also: &[Also],
 ) -> (Vec<String>, Option<u64>, Option<Duration>) {
     let (mut records, mut start, mut dropped) = (Vec::new(), None, 0);
     let last = in_order(&log);
@@ -1025,6 +1029,11 @@ fn logged(
         // A poll answered by its own kind, and a call refused as busy, which the agent makes
         // again, are dropped, as how many an `await` or a call makes depends on timing, and the
         // later op numbers drop with them.
+        let racing =
+            |also: &Also| matches!(also, Also::Racing(kind) if logged["event"]["kind"] == *kind);
+        if also.iter().any(racing) {
+            continue;
+        }
         let kind = &logged["event"]["request"]["kind"];
         if kind == "call" && logged.pointer("/actions/0/reply/busy") == Some(&json!(true)) {
             dropped += 1;
@@ -2287,6 +2296,37 @@ fn abandoned() {
     );
 }
 
+// The clock passes the hard end as the agent's exit is recorded, before the call is stopped: the
+// call's failure, observed past the hard end, comes after the tick that abandons the run.
+#[test]
+fn stopped_past_the_hard_end() {
+    let argv = ["ops", "call train slow", "await_log target_run", "exit"];
+    let ir = short_workflow(&argv, 2);
+    let slow = SlowSync {
+        record: Synced::Holding("log.jsonl", r#""kind":"stop_call""#),
+        queued: 0,
+        at: PAST_THE_HARD_END,
+    };
+    let dir = TestDir::new();
+    let host = SimHost::new().slow_sync(slow);
+    let (record, outcome) = execute_agents(&host, SHORT_STARTUP, ir, &dir, None);
+    let Err(runtime::Stopped::Failed(reason)) = outcome else {
+        panic!("expected the run to be abandoned: {outcome:?}")
+    };
+    assert!(
+        reason.starts_with("the run was still going at its hard end"),
+        "{reason}"
+    );
+    let log = read_log(&record);
+    let abandon = |line: &Value| line["actions"][0]["kind"] == "abandon";
+    let abandoned = log.iter().position(abandon).unwrap();
+    let failed = |line: &Value| line["event"]["kind"] == "call_failed";
+    let failed = log.iter().position(failed).unwrap();
+    assert!(abandoned < failed);
+    assert_eq!(log[failed]["event"]["reason"], "the call was stopped");
+    assert_eq!(log[failed]["observed_ns"], "6500000000");
+}
+
 // The call's delete waits for the agent's, which begins once the agent has heard the result: the
 // result comes before the delete, which the final call waits for, as the finish waits for its.
 #[test]
@@ -2330,43 +2370,45 @@ fn returns_before_its_delete() {
     );
 }
 
-// As `returns_before_its_delete`, but the call's delete fails, which fails the run, its final
-// call unstarted, and its sandbox left listed.
+// As `returns_before_its_delete`, but the call's delete fails, which fails the run with its final
+// call unstarted; the agent's teardown races that failure, so the log shown leaves it out.
 #[test]
 fn undeleted_after_its_return() {
     let argv = ["ops", "call train 6", "await_result 0 completed", "exit"];
     let mut ir = short_workflow(&argv, 30);
     ir["roles"][1]["image"] = json!(sim::image(UNDELETABLE_LAST).as_str());
-    check(
+    let providers = [(PROVIDER, &Sim::new())];
+    let racing = [Also::Racing("agent_torn_down")];
+    let shown = executed(
         &System,
         "undeleted-after-its-return",
-        &[(PROVIDER, &Sim::new())],
+        &providers,
         &ir,
         SANDBOXD,
-        &expect![[r#"
-            failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
-            job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-2","provider":"simulated"}
-            payloads hold: ["xxxxxx"]
-            log.jsonl:
-            {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
-            {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
-            {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":5}
-            {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":6}
-            {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":7}
-            {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":8}
-            {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":9}
-            {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
-            {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
-            {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
-            {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_torn_down"},"observed_ns":"<ns>","seq":14}
-            {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":15}
-            its last record came before the agent's teardown was to end
-            listed once it ended: ["sim-2"]"#]],
+        &racing,
     );
+    expect![[r#"
+        failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`
+        job 0's sandbox, jobs/0/sandbox.json: {"delete":{"state":"failed"},"id":"sim-2","provider":"simulated"}
+        payloads hold: ["xxxxxx"]
+        log.jsonl:
+        {"actions":[{"kind":"start_agents"}],"at_ns":"<ns>","event":{"hard_end_ns":"121000000000","kind":"run_started","unix_ns":"<during execute>"},"observed_ns":"0","seq":0}
+        {"actions":[],"at_ns":"<ns>","event":{"kind":"work_started"},"observed_ns":"<ns>","seq":1}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_started"},"observed_ns":"<ns>","seq":2}
+        {"actions":[{"kind":"reply","reply":{"job":0,"kind":"call","remaining":{"calls":99,"seconds":null}}},{"caller":"agent-0","grant":"train","job":0,"kind":"start_call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6},"timeout_ns":"1000000000"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"op_arrived","op":0,"request":{"grant":"train","kind":"call","payload":{"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","size":6}}},"observed_ns":"<ns>","seq":3}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_started"},"observed_ns":"<ns>","seq":4}
+        {"actions":[],"at_ns":"<ns>","event":{"bytes":6,"digest":"sha256:b7fb217694ae2d305e766608d250f797daa984e4ac4b5fa638a729be352f2fcd","job":0,"kind":"target_put","path":"/work/payload"},"observed_ns":"<ns>","seq":5}
+        {"actions":[],"at_ns":"<ns>","event":{"argv":["judge","/work/payload","/work/result.json"],"command":0,"job":0,"kind":"target_run"},"observed_ns":"<ns>","seq":6}
+        {"actions":[],"at_ns":"<ns>","event":{"command":0,"end":{"exited":{"code":0}},"job":0,"kind":"command_ended"},"observed_ns":"<ns>","seq":7}
+        {"actions":[],"at_ns":"<ns>","event":{"bytes":15,"digest":"sha256:68e3ea1c52db57d6e28c6d873ef07678bc738b836a1ec8ae5f831875083035e9","job":0,"kind":"target_get","path":"/work/result.json"},"observed_ns":"<ns>","seq":8}
+        {"actions":[],"at_ns":"<ns>","event":{"job":0,"kind":"call_returned","returned":[{"name":"raw_score","value":6}]},"observed_ns":"<ns>","seq":9}
+        {"actions":[{"caller":"agent-0","kind":"tear_down_agent"}],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_exited","status":{"code":0}},"observed_ns":"<ns>","seq":10}
+        {"at_ns":"<ns>","note":"collected from agent `agent`'s sandbox: out, 1 file of 9 bytes; log, 1 file of 9 bytes","seq":11}
+        {"actions":[],"at_ns":"<ns>","event":{"caller":"agent-0","kind":"agent_collected"},"seq":12}
+        {"actions":[],"at_ns":"<ns>","event":{"id":"sim-1","kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0"},"seq":13}
+        {"at_ns":"<ns>","note":"the run failed: deleting the sandbox failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`; deleting the sandboxes the run left on provider `simulated` failed: sim-2 can't be deleted by the simulated provider: create one with another `sandboxd`","seq":14}
+        its last record came before the agent's teardown was to end
+        listed once it ended: ["sim-2"]"#]].assert_eq(&shown);
 }
 
 // The provider finishes the agent's delete only after the stopped call's, whose reports come as
@@ -2380,13 +2422,24 @@ fn deleted_while_torn_down() {
     ir["roles"][0]["image"] = json!(sim::image(LAST).as_str());
     let dir = TestDir::new();
     let (record, outcome) = execute_agents(&System, SHORT_STARTUP, ir, &dir, None);
-    assert!(outcome.is_ok(), "{outcome:?}");
+    outcome.unwrap();
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(record.join("outcome.json")).unwrap()).unwrap();
+    let score =
+        json!({ "kind": "returned", "result": { "values": [{ "name": "score", "value": 0 }] } });
+    assert_eq!(recorded["verdict"], score);
+    let exited = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+    assert_eq!(recorded["agents"][0]["work_end"], exited);
     let log = read_log(&record);
     let line = |kind: &str, of: (&str, Value)| {
         let event = |line: &Value| line["event"]["kind"] == kind && line["event"][of.0] == of.1;
         log.iter().position(event).unwrap()
     };
+    let exited = line("agent_exited", ("caller", json!("agent-0")));
+    let stop = json!({ "kind": "stop_call", "job": 0 });
+    assert_eq!(log[exited]["actions"][0], stop);
     let ended = line("call_failed", ("job", json!(0)));
+    assert_eq!(log[ended]["event"]["reason"], "the call was stopped");
     let deleted = line("sandbox_deleted", ("sandbox", json!("job-0")));
     let torn_down = line("call_torn_down", ("job", json!(0)));
     let agent_deleted = line("sandbox_deleted", ("sandbox", json!("agent-0")));

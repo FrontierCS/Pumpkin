@@ -157,11 +157,14 @@ impl State {
         };
     }
 
-    /// A teardown reported before the job's end changes nothing.
     pub(super) fn torn_down(&mut self) {
-        if let Self::Ended { torn_down, .. } = self {
-            *torn_down = true;
-        }
+        let Self::Ended { torn_down, .. } = self else {
+            unreachable!(
+                "a call's teardown came before its end, though `Event::CallTornDown` comes only \
+                 after the call's end, which the runtime reports first"
+            )
+        };
+        *torn_down = true;
     }
 }
 

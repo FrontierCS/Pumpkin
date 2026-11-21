@@ -3431,7 +3431,8 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
         210 @bob call board 7
         220 call_started 0
         230 call_returned 0 count=1
-        230 call_torn_down 0
+        232 @zoe call board 3
+        235 call_torn_down 0
         240 @bob call board 7
         250 shared_failed board exited
         255 @bob call board 1
@@ -3447,45 +3448,47 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
         350 call_torn_down 2
     "#,
         &expect![[r#"
-        start
-          start agents
-          (tick due at 30000)
-        100 work_started
-          (tick due at 20100)
-        200 @zoe call board 3
-          reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
-          start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
-        210 @bob call board 7
-          refuse op 2 (busy): `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
-        220 call_started 0
-        230 call_returned 0 count=1
-        230 call_torn_down 0
-        240 @bob call board 7
-          reply to op 3: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
-          start call 1 of board on op 3's payload of 7 bytes, with a timeout of 19.86s
-        250 shared_failed board exited
-          stop call 1
-        255 @bob call board 1
-          refuse op 4: `board` cannot run because its shared sandbox is unavailable
-        260 call_failed 1 lost
-        260 call_torn_down 1
-        270 @zoe call board 1
-          refuse op 5: `board` cannot run because its shared sandbox is unavailable
-        300 @zoe agent_exited 0
-          tear down zoe
-        310 @bob agent_exited 0
-          tear down bob
-          (tick due at 180000)
-        320 @bob agent_torn_down
-        330 @zoe agent_torn_down
-          tear down shared board
-        340 shared_torn_down board
-          start call 2 of final on zoe=missing, bob=missing, with a timeout of 120s
-        350 call_returned 2 score=0
-        350 call_torn_down 2
-          finish: zoe: AgentExited(Code(0)), missing
-          bob: AgentExited(Code(0)), missing
-          final returned [score=0]
-    "#]],
+            start
+              start agents
+              (tick due at 30000)
+            100 work_started
+              (tick due at 20100)
+            200 @zoe call board 3
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
+            210 @bob call board 7
+              refuse op 2 (busy): `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
+            220 call_started 0
+            230 call_returned 0 count=1
+            232 @zoe call board 3
+              refuse op 3 (busy): `board` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
+            235 call_torn_down 0
+            240 @bob call board 7
+              reply to op 4: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+              start call 1 of board on op 4's payload of 7 bytes, with a timeout of 19.86s
+            250 shared_failed board exited
+              stop call 1
+            255 @bob call board 1
+              refuse op 5: `board` cannot run because its shared sandbox is unavailable
+            260 call_failed 1 lost
+            260 call_torn_down 1
+            270 @zoe call board 1
+              refuse op 6: `board` cannot run because its shared sandbox is unavailable
+            300 @zoe agent_exited 0
+              tear down zoe
+            310 @bob agent_exited 0
+              tear down bob
+              (tick due at 180000)
+            320 @bob agent_torn_down
+            330 @zoe agent_torn_down
+              tear down shared board
+            340 shared_torn_down board
+              start call 2 of final on zoe=missing, bob=missing, with a timeout of 120s
+            350 call_returned 2 score=0
+            350 call_torn_down 2
+              finish: zoe: AgentExited(Code(0)), missing
+              bob: AgentExited(Code(0)), missing
+              final returned [score=0]
+        "#]],
     );
 }

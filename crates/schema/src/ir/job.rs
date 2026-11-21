@@ -10,7 +10,8 @@ use super::{Body, Name};
 /// a handle to that sandbox and the caller's payload. Its return is the job's result.
 ///
 /// The function runs one call at a time: a call made while one of its calls is queued, running or
-/// releasing its sandbox is refused. The caller hears how a call ended before its sandbox is gone.
+/// releasing its sandbox is refused. The caller may hear how a call ended while its sandbox is
+/// still being deleted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobFunction {

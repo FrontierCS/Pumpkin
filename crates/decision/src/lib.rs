@@ -186,7 +186,7 @@ pub enum Event {
         model_requests_over_budget: Option<NonZeroU64>,
     },
     /// A call whose end has been reported holds no sandbox: its fresh target, if one was created,
-    /// has been destroyed.
+    /// has been destroyed. It comes only after [`Event::CallReturned`] or [`Event::CallFailed`].
     CallTornDown {
         job: JobId,
     },
@@ -255,7 +255,8 @@ pub enum Action {
         arguments: BTreeMap<Name, ArgumentValue>,
         timeout: Duration,
     },
-    /// Stops a call wherever it is, and destroys its target. Its last report follows as usual.
+    /// Stops a call wherever it is, and destroys its fresh target; a shared target outlives it. Its
+    /// reports follow as usual.
     StopCall { job: JobId },
     /// Opens lease `lease` of grant `grant` for `holder`: starts a fresh sandbox of the grant's
     /// runner. The instance number is local to this holder and grant. The runtime

@@ -140,8 +140,9 @@ the session name. The target sees it through its own `sandboxctl ops`.
 | `call_timeout_seconds` | each call's timeout, counted from its body's start |
 
 An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
-cumulative time, or with the work phase, whichever comes first. Its caller hears how it ended at
-once, while its sandbox is deleted, and the grant takes its next call once the sandbox is gone.
+cumulative time, or with the work phase, whichever comes first. Its caller may hear how it ended
+while its sandbox is still being deleted. The grant takes its next call once that sandbox is gone
+and the call's leases have ended.
 
 ### A now function
 
@@ -172,7 +173,8 @@ bounds each call afresh.
 
 `final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which
 may be left out, `payload_max_bytes`, at most 64 MiB, and `timeout_seconds`, counted from its
-target's start. The body drives a fresh sandbox once all agents, calls and leases have ended.
+target's start. The body drives a fresh sandbox once all agents and calls are torn down, each
+sandbox's delete confirmed, and all leases have ended.
 The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
 as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
 
