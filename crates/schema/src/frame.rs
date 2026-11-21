@@ -56,20 +56,47 @@ pub fn read<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<(T
 pub(crate) fn read_bodiless<T: DeserializeOwned>(
     reader: &mut impl Read,
     max: usize,
-    [the, a]: [&str; 2],
+    names: [&str; 2],
 ) -> io::Result<Option<T>> {
+    let read = read_capped(reader, max, 0, names)?;
+    Ok(read.map(|(message, _)| message))
+}
+
+/// Reads a frame of a message of at most `max_message` bytes, then a body of at most `max_body`,
+/// named as `the` one and as `a` one in what it says of a frame that it refuses. The message is
+/// read, and refused if it is no `T`, before the body's length is.
+pub(crate) fn read_capped<T: DeserializeOwned>(
+    reader: &mut impl Read,
+    max_message: usize,
+    max_body: usize,
+    [the, a]: [&str; 2],
+) -> io::Result<Option<(T, Vec<u8>)>> {
     let Some(len) = read_len(reader)? else {
         return Ok(None);
     };
-    let over = || invalid_data(format!("{the} is {len} bytes: {a} holds at most {max}"));
-    let message = read_message(reader, capped(len, max).ok_or_else(over)?)?;
-    match read_len(reader)? {
-        Some(0) => Ok(Some(message)),
-        Some(len) => Err(invalid_data(format!(
-            "{the} has a {len}-byte body: {a} has none"
-        ))),
-        None => Err(io::ErrorKind::UnexpectedEof.into()),
-    }
+    let over = || {
+        invalid_data(format!(
+            "{the} is {len} bytes: {a} holds at most {max_message}"
+        ))
+    };
+    let message = read_message(reader, capped(len, max_message).ok_or_else(over)?)?;
+    let Some(body_len) = read_len(reader)? else {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    };
+    let body_len = match capped(body_len, max_body) {
+        Some(len) => len,
+        None if max_body == 0 => {
+            return Err(invalid_data(format!(
+                "{the} has a {body_len}-byte body: {a} has none"
+            )));
+        }
+        None => {
+            return Err(invalid_data(format!(
+                "{the}'s body is {body_len} bytes: {a}'s holds at most {max_body}"
+            )));
+        }
+    };
+    Ok(Some((message, read_bytes(reader, body_len)?)))
 }
 
 fn encode_len(len: usize, max: usize, what: &str) -> io::Result<[u8; 4]> {

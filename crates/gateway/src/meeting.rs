@@ -4,11 +4,11 @@
 //! `accept` waits for that sandbox, reads its hello and opens its [`Session`]. Dropping a
 //! registration unspent withdraws what its meeting issued. What identifies a sandbox is how it
 //! meets, as [the sandbox protocol](schema::sandbox) says.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -21,8 +21,8 @@ use std::time::Duration;
 use schema::frame;
 use schema::ir::{GpuModel, Name};
 use schema::sandbox::{
-    Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, OpPayloadLimit,
-    REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial, TcpDial,
+    Attestation, Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Listening, OpPayloadLimit,
+    PrivateDial, REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial,
 };
 use stdx::Deadline;
 
@@ -48,10 +48,10 @@ const REDIAL_FIRST: Duration = Duration::from_secs(1);
 // Shorter than gRPC's 120 s, as a start's window is minutes, of which a wait spends little.
 const REDIAL_MOST: Duration = Duration::from_secs(15);
 
-// Bounds the threads that connections hold before they have said who they are: the grant
-// listener's address is open to whatever can reach it, and each connection holds a thread until
-// its hello is read or its time is up. Each of a run's sandboxes dials once, and says hello as it
-// connects, so a run needs far fewer.
+// Bounds the threads that connections hold before they have said who they are: the listener's
+// address is open to whatever can reach it, and each connection holds a thread until its hello is
+// read and admitted or refused, or its time is up. Each of a run's sandboxes dials once, and says
+// hello as it connects, so a run needs far fewer.
 const MAX_HELLOS: usize = 100;
 
 /// Gives each sandbox a socket of its own below one directory, which dropping removes.
@@ -91,7 +91,7 @@ impl Sockets {
             let what = format_args!("the mode of {} can't be set", dir.display());
             context(what, &error)
         })?;
-        let listener = Listener::bind(&dir)?;
+        let listener = SocketListener::bind(&dir)?;
         let registration = Registration {
             meeting: Meeting::Socket(listener),
         };
@@ -107,7 +107,7 @@ impl Drop for Sockets {
     }
 }
 
-/// The TCP address of a run's [`GrantListener`], which it binds and its sandboxes dial.
+/// The TCP address of a run's [`Listener`], which it binds and its sandboxes dial.
 ///
 /// It is any address but an unspecified one, such as `0.0.0.0`, or `[::ffff:0.0.0.0]`, its
 /// IPv4-mapped form, which a listener binds but no sandbox can dial. The port is the one that the
@@ -131,22 +131,27 @@ impl TryFrom<SocketAddr> for GatewayAddress {
     }
 }
 
-/// Listens at one address that every sandbox of a run dials, and tells them apart by the grant each
-/// presents in its hello.
+/// Listens at one address on a private network that every sandbox of a run dials.
 ///
-/// It refuses a hello that presents no grant, one it doesn't await, or one presented already,
-/// saying which. Dropping it stops the listening; sessions already accepted live on.
-// A peer costs little until its hello presents a grant the listener awaits: at most a hello's
-// bytes, within its hello timeout, before the connection closes untold.
+/// It tells the sandboxes apart by the [`Attestation`] that each hello presents and the address
+/// it comes from, which the check of each registration that it issued admits or not
+/// ([`Unattested::admitting`]). The first registration whose check admits a hello takes it. It
+/// refuses a hello that presents no attestation, one that a registration admits after it has
+/// admitted another, and one that no check admits, saying which; a hello that no check admits
+/// while a registration issued before it still awaits its check waits for that check, until the
+/// registration's deadline. Dropping it stops the listening; sessions already accepted live on.
+// A peer costs little until a check admits its hello: at most a hello's bytes and a thread, within
+// its hello timeout and the deadlines of the registrations that await their checks, before the
+// connection closes untold.
 #[derive(Debug)]
-pub struct GrantListener {
+pub struct Listener {
     gateway: SocketAddr,
-    grants: Arc<Mutex<Grants>>,
+    registry: Arc<Mutex<Registry>>,
     listening: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Default)]
-struct Grants {
+struct Registry {
     awaited: BTreeMap<u64, Awaited>,
     next: u64,
     hellos: usize,
@@ -155,8 +160,21 @@ struct Grants {
 
 #[derive(Debug)]
 struct Awaited {
-    grant: RegistrationGrant,
+    // None until the registration is given its check.
+    check: Option<Check>,
+    // Until when a hello that no check admits waits for this registration's check.
+    by: Deadline,
     presented: Option<Met>,
+}
+
+type Admits = dyn Fn(&Attestation, IpAddr) -> bool + Send;
+
+struct Check(Box<Admits>);
+
+impl fmt::Debug for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Check(..)")
+    }
 }
 
 #[derive(Debug)]
@@ -165,7 +183,7 @@ struct Met {
     gpus: Option<Vec<GpuModel>>,
 }
 
-impl GrantListener {
+impl Listener {
     /// Binds `address`, and gives each connection `hello_timeout` to say its hello
     /// ([`HELLO_TIMEOUT`] is the protocol's), from when it takes the connection. Where the port of
     /// `address` is 0, the dials issued name the port that was bound.
@@ -173,73 +191,106 @@ impl GrantListener {
         let GatewayAddress(address) = *address;
         let listener = TcpListener::bind(address).map_err(|error| {
             context(
-                format_args!("the grant listener can't bind {address}"),
+                format_args!("the private listener can't bind {address}"),
                 &error,
             )
         })?;
         let gateway = listener
             .local_addr()
-            .map_err(|error| context("the grant listener's address can't be read", &error))?;
+            .map_err(|error| context("the private listener's address can't be read", &error))?;
         listener
             .set_nonblocking(true)
-            .map_err(|error| context("the grant listener can't be made non-blocking", &error))?;
-        let grants = Arc::new(Mutex::new(Grants::default()));
-        let shared = Arc::clone(&grants);
+            .map_err(|error| context("the private listener can't be made non-blocking", &error))?;
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let shared = Arc::clone(&registry);
         let listening = thread::Builder::new()
-            .name("grants".to_owned())
+            .name("private".to_owned())
             .spawn(move || listen(&listener, &shared, hello_timeout))
-            .map_err(|error| context("the grant listener's thread didn't start", &error))?;
+            .map_err(|error| context("the private listener's thread didn't start", &error))?;
         Ok(Self {
             gateway,
-            grants,
+            registry,
             listening: Some(listening),
         })
     }
 
-    /// Issues the grant of one sandbox, in the dial that gives it to the sandbox, and the
-    /// registration that waits for the sandbox to present it. The grant opens one session.
-    pub fn issue(&self) -> io::Result<(TcpDial, Registration)> {
-        let grant = random_grant()?;
-        let mut grants = lock(&self.grants);
-        let number = grants.next;
-        grants.next += 1;
+    /// Issues the dial of one sandbox, and its registration, which awaits the check that admits
+    /// the sandbox's hello until `by`, and takes no hello until it has it.
+    pub fn issue(&self, by: Deadline) -> (PrivateDial, Unattested) {
+        let mut registry = lock(&self.registry);
+        let number = registry.next;
+        registry.next += 1;
         let awaited = Awaited {
-            grant: grant.clone(),
+            check: None,
+            by,
             presented: None,
         };
-        grants.awaited.insert(number, awaited);
-        let granted = Granted {
-            grants: Arc::clone(&self.grants),
+        registry.awaited.insert(number, awaited);
+        let awaiting = Awaiting {
+            registry: Arc::clone(&self.registry),
             number,
         };
-        let meeting = Meeting::Grant(granted);
-        let dial = TcpDial {
+        let dial = PrivateDial {
             gateway: self.gateway,
-            grant,
         };
-        Ok((dial, Registration { meeting }))
+        (dial, Unattested { awaiting })
     }
 }
 
-impl Drop for GrantListener {
+impl Drop for Listener {
     fn drop(&mut self) {
-        lock(&self.grants).closed = true;
+        lock(&self.registry).closed = true;
         if let Some(listening) = self.listening.take()
             && listening.join().is_err()
         {
             unreachable!(
-                "the grant listener's thread panicked, though a panic aborts the process \
+                "the private listener's thread panicked, though a panic aborts the process \
                  (`stdx::abort_on_panic`), so the thread never ends in one"
             )
         }
     }
 }
 
-fn listen(listener: &TcpListener, grants: &Arc<Mutex<Grants>>, hello_timeout: Duration) {
+/// A registration of a [`Listener`]'s that awaits the check that admits its sandbox's hello,
+/// which the provider makes only as it creates the sandbox.
+#[derive(Debug)]
+pub struct Unattested {
+    awaiting: Awaiting,
+}
+
+impl Unattested {
+    /// Registers `check`, which says whether a hello's attestation, from the address given, is
+    /// this sandbox's. It is asked once of each hello that no registration has taken, under the
+    /// listener's lock, so it must return at once, as a check of a signature does.
+    pub fn admitting(
+        self,
+        check: impl Fn(&Attestation, IpAddr) -> bool + Send + 'static,
+    ) -> Registration {
+        let Self { awaiting } = self;
+        let mut registry = lock(&awaiting.registry);
+        let Some(awaited) = registry.awaited.get_mut(&awaiting.number) else {
+            unreachable!(
+                "an unattested registration is not awaited, though it is from its issue until \
+                 it drops, and only its registration's accept, which this makes, takes it"
+            )
+        };
+        awaited.check = Some(Check(Box::new(check)));
+        drop(registry);
+        Registration {
+            meeting: Meeting::Private(awaiting),
+        }
+    }
+}
+
+fn listen(listener: &TcpListener, registry: &Arc<Mutex<Registry>>, hello_timeout: Duration) {
     // The listener doesn't block, so that `closed` is seen.
-    while !lock(grants).closed {
+    while !lock(registry).closed {
         match listener.accept() {
-            Ok((stream, _)) => admit(grants, stream, Deadline::after(hello_timeout)),
+            Ok((stream, peer)) => {
+                // As an IPv4 address, where a socket of both families gives it mapped to IPv6.
+                let peer = peer.ip().to_canonical();
+                admit(registry, stream, peer, Deadline::after(hello_timeout));
+            }
             // None waits, or one was reset before it was taken, or the process has no file
             // descriptor to spare: each passes, and the kernel keeps the rest waiting.
             Err(_) => thread::sleep(POLL),
@@ -247,31 +298,33 @@ fn listen(listener: &TcpListener, grants: &Arc<Mutex<Grants>>, hello_timeout: Du
     }
 }
 
-fn admit(grants: &Arc<Mutex<Grants>>, stream: TcpStream, by: Deadline) {
-    let mut locked = lock(grants);
+fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, by: Deadline) {
+    let mut locked = lock(registry);
     // Past the bound the connection closes unread and untold: the peer may dial again.
     if locked.hellos >= MAX_HELLOS {
         return;
     }
     locked.hellos += 1;
     drop(locked);
-    let reader = Arc::clone(grants);
+    let reader = Arc::clone(registry);
     let spawned = thread::Builder::new()
         .name("hello".to_owned())
-        .spawn(move || register(&reader, stream, by));
+        .spawn(move || register(&reader, stream, peer, by));
     // A thread that doesn't start drops its closure, which closes the connection.
     if spawned.is_err() {
-        lock(grants).hellos -= 1;
+        lock(registry).hellos -= 1;
     }
 }
 
-fn register(grants: &Mutex<Grants>, stream: TcpStream, by: Deadline) {
+fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, by: Deadline) {
     let set = stdx::net::set_options(&stream)
         .map_err(|error| context("the connection's TCP options can't be set", &error));
     let connection = Connection::Tcp(stream);
-    // Only its own deadline ends the read: no accept waits on it until it presents a grant.
+    // Only its own deadline ends the read: no accept waits on it until a check admits it.
     let unopened = match set.and_then(|()| read_hello(&connection, by, &|| false)) {
-        Ok(Hello { grant, gpus }) => present(grants, grant, Met { connection, gpus }).err(),
+        Ok((Hello { gpus }, attestation)) => {
+            present(registry, attestation, peer, Met { connection, gpus }).err()
+        }
         Err(error) => Some((connection, error)),
     };
     // No accept waits on a connection that opens no session, so its error goes no further.
@@ -279,46 +332,72 @@ fn register(grants: &Mutex<Grants>, stream: TcpStream, by: Deadline) {
         refuse(&connection, by, error);
     }
     // Freed last, so that the threads reading hellos, or refusing them, stay within bounds.
-    lock(grants).hellos -= 1;
+    lock(registry).hellos -= 1;
 }
 
 fn present(
-    grants: &Mutex<Grants>,
-    grant: Option<RegistrationGrant>,
+    registry: &Mutex<Registry>,
+    attestation: Option<Attestation>,
+    peer: IpAddr,
     met: Met,
 ) -> Result<(), (Connection, io::Error)> {
-    let refused = |message| io::Error::new(io::ErrorKind::InvalidData, message);
-    let Some(grant) = grant else {
-        let message = "the hello presents no registration grant: expected the one the gateway \
-                       issued for the sandbox, at an address that several sandboxes share";
+    let refused = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+    let Some(attestation) = attestation else {
+        let message = "the hello presents no attestation: expected the sandbox's, at an address \
+                       that several sandboxes share";
+        return Err((met.connection, refused(message.to_owned())));
+    };
+    // Each registration's check is asked once, as what it answers never changes.
+    let mut asked = BTreeSet::new();
+    // The hello waits only for the checks of registrations issued before it was read, as a
+    // sandbox's registration is issued before its create, so that later ones keep no hello.
+    let issued = lock(registry).next;
+    loop {
+        // A check admits and its registration is given the connection under one lock, so no two
+        // connections are given one.
+        let mut locked = lock(registry);
+        let mut unchecked = false;
+        let mut admitting = None;
+        for (&number, awaited) in &locked.awaited {
+            let Some(Check(check)) = &awaited.check else {
+                unchecked |= number < issued && awaited.by.remaining().is_some();
+                continue;
+            };
+            if asked.insert(number) && check(&attestation, peer) {
+                admitting = Some(number);
+                break;
+            }
+        }
+        // The listener's drop ends the wait for a check.
+        unchecked &= !locked.closed;
+        let message = match admitting.and_then(|number| locked.awaited.get_mut(&number)) {
+            Some(Awaited {
+                presented: presented @ None,
+                ..
+            }) => {
+                *presented = Some(met);
+                return Ok(());
+            }
+            Some(Awaited {
+                presented: Some(_), ..
+            }) => {
+                "the attestation was presented already, on another connection: expected it once, \
+                 as it opens one session"
+                    .to_owned()
+            }
+            // Nothing wakes the wait on a check, so it looks again.
+            None if unchecked => {
+                drop(locked);
+                thread::sleep(POLL);
+                continue;
+            }
+            None => format!(
+                "the attestation, from {peer}, opens no session: expected that of a sandbox whose \
+                 start waits, from the sandbox's own address, presented once"
+            ),
+        };
         return Err((met.connection, refused(message)));
-    };
-    // A grant is found and taken under one lock, so no two connections take one.
-    let mut locked = lock(grants);
-    // By the grants' `==`, which takes as long whichever bytes differ, as they hold no order that a
-    // map could look one up by.
-    let awaited = (locked.awaited.values_mut()).find(|awaited| awaited.grant == grant);
-    let message = match awaited {
-        Some(Awaited {
-            grant: _,
-            presented: presented @ None,
-        }) => {
-            *presented = Some(met);
-            return Ok(());
-        }
-        Some(Awaited {
-            grant: _,
-            presented: Some(_),
-        }) => {
-            "the registration grant was presented already, on another connection: expected it \
-             once, as a grant opens one session"
-        }
-        None => {
-            "the registration grant opens no session: expected one the gateway issued for a \
-             sandbox whose start waits, presented once"
-        }
-    };
-    Err((met.connection, refused(message)))
+    }
 }
 
 /// Where the gateway dials the sandboxes that listen ([`Listening`]), each at the endpoint its
@@ -441,10 +520,10 @@ impl Dialed {
             Err(error) => return Err(DialError::Again(error)),
         };
         match read_hello(&connection, by, stopped) {
-            Ok(Hello { grant: None, gpus }) => Ok(Met { connection, gpus }),
-            Ok(Hello { grant: Some(_), .. }) => {
-                let message = "the hello presents a registration grant where the gateway dialed \
-                               the sandbox, which its endpoint identifies: expected none there";
+            Ok((Hello { gpus }, None)) => Ok(Met { connection, gpus }),
+            Ok((_, Some(_))) => {
+                let message = "the hello presents an attestation where the gateway dialed the \
+                               sandbox, which its endpoint identifies: expected none there";
                 let error = io::Error::new(io::ErrorKind::InvalidData, message);
                 Err(DialError::Never(refuse(&connection, by, error)))
             }
@@ -511,8 +590,8 @@ fn random_grant() -> io::Result<RegistrationGrant> {
 
 /// Where one sandbox meets the gateway, and the accept of the session it opens there.
 ///
-/// Dropping the registration ends the meeting: it removes the socket, or ends the grant, closing
-/// any connection that presented it.
+/// Dropping the registration ends the meeting: it removes the socket, or ends the wait for the
+/// sandbox's hello, closing any connection that its check admitted.
 #[derive(Debug)]
 pub struct Registration {
     meeting: Meeting,
@@ -520,8 +599,8 @@ pub struct Registration {
 
 #[derive(Debug)]
 enum Meeting {
-    Socket(Listener),
-    Grant(Granted),
+    Socket(SocketListener),
+    Private(Awaiting),
     Dial(Dialed),
 }
 
@@ -546,7 +625,7 @@ impl Registration {
     ) -> io::Result<Session> {
         let (Met { connection, gpus }, grant) = match self.meeting {
             Meeting::Socket(listener) => (listener.connected(by, &stopped)?, None),
-            Meeting::Grant(granted) => (granted.presented(by, &stopped)?, None),
+            Meeting::Private(awaiting) => (awaiting.presented(by, &stopped)?, None),
             // A `sandboxd` that listens serves only a peer that answers its hello with its grant.
             Meeting::Dial(dialed) => (dialed.connected(by, &stopped)?, Some(dialed.grant)),
         };
@@ -579,12 +658,12 @@ fn unstopped(
 }
 
 #[derive(Debug)]
-struct Listener {
+struct SocketListener {
     listener: UnixListener,
     path: PathBuf,
 }
 
-impl Listener {
+impl SocketListener {
     fn bind(dir: &Path) -> io::Result<Self> {
         let path = dir.join(SOCKET_NAME);
         let bound = File::open(dir)
@@ -639,9 +718,9 @@ impl Listener {
         let connection = Connection::Unix(stream);
         let hello = read_hello(&connection, by, stopped);
         let hello = hello.map_err(|error| refuse(&connection, by, error))?;
-        let Hello { grant: None, gpus } = hello else {
-            let message = "the hello presents a registration grant on a socket of the sandbox's \
-                           own, which identifies it: expected none there";
+        let (Hello { gpus }, None) = hello else {
+            let message = "the hello presents an attestation on a socket of the sandbox's own, \
+                           which identifies it: expected none there";
             let error = io::Error::new(io::ErrorKind::InvalidData, message);
             return Err(refuse(&connection, by, error));
         };
@@ -649,7 +728,7 @@ impl Listener {
     }
 }
 
-impl Drop for Listener {
+impl Drop for SocketListener {
     fn drop(&mut self) {
         // Removing the socket keeps a second connection out; a socket already gone is fine.
         let _ = fs::remove_file(&self.path);
@@ -657,39 +736,34 @@ impl Drop for Listener {
 }
 
 #[derive(Debug)]
-struct Granted {
-    grants: Arc<Mutex<Grants>>,
+struct Awaiting {
+    registry: Arc<Mutex<Registry>>,
     number: u64,
 }
 
-impl Granted {
+impl Awaiting {
     fn presented(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         loop {
-            let awaited = "a sandbox presented the registration grant";
-            unstopped(
-                stopped,
-                awaited,
-                "the sandbox it was issued for to present it",
-            )?;
-            let mut grants = lock(&self.grants);
-            let Some(awaited) = grants.awaited.get_mut(&self.number) else {
+            let awaited = "the sandbox's hello was admitted";
+            unstopped(stopped, awaited, "the sandbox to say it")?;
+            let mut registry = lock(&self.registry);
+            let Some(awaited) = registry.awaited.get_mut(&self.number) else {
                 unreachable!(
-                    "a registration's grant is not awaited while it waits, though a grant is \
-                     awaited from its issue until its registration takes the connection that \
-                     presented it, here, which then returns, or drops; and the registration's \
-                     accept takes it by value"
+                    "a registration is not awaited while it waits, though it is awaited from its \
+                     issue until it takes the connection that its check admitted, here, which \
+                     then returns, or drops; and the registration's accept takes it by value"
                 )
             };
             if let Some(met) = awaited.presented.take() {
-                grants.awaited.remove(&self.number);
+                registry.awaited.remove(&self.number);
                 return Ok(met);
             }
-            drop(grants);
+            drop(registry);
             if by.remaining().is_none() {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "no sandbox presented the registration grant by the deadline: expected the \
-                     sandbox it was issued for to present it while the deadline lasts",
+                    "no hello that the sandbox's check admits came by the deadline: expected the \
+                     sandbox to say it while the deadline lasts",
                 ));
             }
             // Nothing wakes the wait on a presentation or a stop, so it looks again.
@@ -698,11 +772,11 @@ impl Granted {
     }
 }
 
-impl Drop for Granted {
+impl Drop for Awaiting {
     fn drop(&mut self) {
-        // The grant ends here, unless a connection presented it and was taken, closing the
-        // connection that presented it, if any.
-        lock(&self.grants).awaited.remove(&self.number);
+        // The registration ends here, unless it took a connection, closing the connection that its
+        // check admitted, if any.
+        lock(&self.registry).awaited.remove(&self.number);
     }
 }
 
@@ -710,7 +784,7 @@ fn read_hello(
     connection: &Connection,
     by: Deadline,
     stopped: &dyn Fn() -> bool,
-) -> io::Result<Hello> {
+) -> io::Result<(Hello, Option<Attestation>)> {
     // Read without blocking, as the connection was waited for, so that a stop and the deadline
     // interrupt the wait; blocking again after, as the session's reads carry none of its bounds.
     connection.set_nonblocking(true).map_err(|error| {

@@ -33,7 +33,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
-pub use meeting::{Dialer, GatewayAddress, GrantListener, Registration, Sockets, Unreached};
+pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
 use schema::ir::{AbsolutePath, GpuModel, Mode};

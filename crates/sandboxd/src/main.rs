@@ -3,7 +3,8 @@
 //!
 //! It meets the gateway, at a Unix socket of the sandbox's own, at a TCP address, or with
 //! `--listen` where the gateway dials it, opens the session ([`schema::sandbox`]) with its hello,
-//! presenting the grant in [`SANDBOXD_GRANT`] over TCP, and serves it until the gateway closes it.
+//! presenting the attestation in [`SANDBOXD_ATTESTATION`] where it dials a TCP address, and serves
+//! it until the gateway closes it.
 //! When the session ends it kills its commands and exits, which stops a sandbox it is first in.
 //!
 //! As a sandbox's first process (PID 1) it reaps the orphans the kernel hands it, and freezing
@@ -25,6 +26,7 @@ use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, fchown};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,7 +34,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use schema::ir::User;
-use schema::sandbox::{HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_GRANT, pumpkin_dir};
+use schema::sandbox::{
+    Attestation, HELLO_TIMEOUT, RegistrationGrant, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
+    pumpkin_dir,
+};
 use stdx::{Context, Deadline};
 
 use crate::session::Gateway;
@@ -72,7 +77,7 @@ mod flags {
         cmd sandboxd {
             /// The gateway's address, over which the session runs: the absolute path of the
             /// sandbox's own Unix socket, or a TCP address, such as `192.0.2.1:7433`. Over TCP,
-            /// sandboxd presents the registration grant that the environment's SANDBOXD_GRANT
+            /// sandboxd presents the attestation that the environment's SANDBOXD_ATTESTATION
             /// holds, which it keeps from the commands it starts.
             required gateway: Address
             /// Listens at the gateway's address, a TCP address of the sandbox's own, such as
@@ -188,7 +193,9 @@ fn main() -> ExitCode {
              or no --listen with a socket"
                 .to_owned(),
         ),
-        (Address::Tcp(address), false, None) => grant().map(|grant| Gateway::Tcp(address, grant)),
+        (Address::Tcp(address), false, None) => {
+            attestation().map(|attestation| Gateway::Tcp(address, attestation))
+        }
         (Address::Tcp(address), true, Some(by)) => {
             grant().map(|grant| Gateway::Listen(address, grant, by))
         }
@@ -285,13 +292,23 @@ fn grant() -> Result<RegistrationGrant, String> {
     let Some(grant) = env::var_os(SANDBOXD_GRANT) else {
         return Err(format!(
             "{SANDBOXD_GRANT} is not set: set it to the registration grant issued for the \
-             sandbox, which a sandboxd that meets its gateway over TCP presents"
+             sandbox, which the gateway that dials a sandboxd that listens presents"
         ));
     };
     // A value that isn't UTF-8 isn't hexadecimal digits either, so it is refused as any other
     // value that isn't a grant's digits.
     let digits = grant.into_string().unwrap_or_default();
     RegistrationGrant::try_from(digits).context(SANDBOXD_GRANT)
+}
+
+fn attestation() -> Result<Attestation, String> {
+    let Some(attestation) = env::var_os(SANDBOXD_ATTESTATION) else {
+        return Err(format!(
+            "{SANDBOXD_ATTESTATION} is not set: set it to the sandbox's attestation, which a \
+             sandboxd that dials its gateway over TCP presents"
+        ));
+    };
+    Attestation::try_from(attestation.into_vec()).context(SANDBOXD_ATTESTATION)
 }
 
 fn print_line(mut stream: impl Write, line: impl Display) {

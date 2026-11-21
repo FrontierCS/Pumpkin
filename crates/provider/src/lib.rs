@@ -3,10 +3,11 @@
 //! A provider is a crate `<name>` at `providers/<name>`.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::path::Path;
 
 use schema::ir::Image;
-use schema::sandbox::{Endpoint, Listening, SocketDial, TcpDial};
+use schema::sandbox::{Attestation, Endpoint, Listening, PrivateDial, SocketDial};
 pub use values::{
     Console, Create, Created, ImageRef, Listed, Ready, Role, RunTag, SandboxId, SandboxdRef,
     Undeleted, UnixTime,
@@ -81,12 +82,19 @@ pub enum Meeting<'p> {
     /// On the gateway's host, each dialing a socket of its own.
     Local(&'p dyn Creator<SocketDial>),
     /// On a private network that the gateway's host is on, each dialing a TCP address the host
-    /// has there.
-    Private(&'p dyn Creator<TcpDial>),
+    /// has there, and presenting an attestation that the check its create gives admits.
+    Private(&'p dyn Creator<PrivateDial, (Created, Admits)>),
     /// Across the Internet, each listening, and the gateway dialing it at the endpoint its create
     /// gives.
     Listen(&'p dyn Creator<Listening, (Created, Endpoint)>),
 }
+
+/// Whether a hello over a private network ([`Meeting::Private`]) is from the sandbox that a create
+/// made.
+///
+/// It is asked of the hello's attestation and the address that the hello comes from, admits that
+/// sandbox's alone, and answers at once, the same each time it is asked.
+pub type Admits = Box<dyn Fn(&Attestation, IpAddr) -> bool + Send>;
 
 /// The create of a provider's sandboxes that are given `D` to meet the gateway by, which returns
 /// `C`.

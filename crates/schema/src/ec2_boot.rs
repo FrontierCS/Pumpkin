@@ -12,8 +12,6 @@ use std::net::SocketAddrV4;
 
 use serde::{Deserialize, Serialize};
 
-use crate::sandbox::RegistrationGrant;
-
 /// Where `sandboxd` is in the image of it that a provider whose sandboxes pull from a registry
 /// pushes.
 pub const SANDBOXD_IN_IMAGE: &str = "/sandboxd";
@@ -22,8 +20,8 @@ pub const SANDBOXD_IN_IMAGE: &str = "/sandboxd";
 pub const BOOT_IN_IMAGE: &str = "/ec2-boot";
 
 /// The directory, in memory and root's alone, that `ec2-boot` makes on an instance's first boot,
-/// and in which it keeps the grant's file.
-pub const GRANT_DIR: &str = "/run/pumpkin";
+/// and in which it keeps the file that gives `sandboxd` its attestation ([`Identity`]).
+pub const ATTESTATION_DIR: &str = "/run/pumpkin";
 
 /// Where cloud-init keeps the instance's user data as it got it, root's alone:
 /// <https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/stages.py#L483-L487>.
@@ -65,13 +63,25 @@ pub struct Start {
     pub confinement: Vec<String>,
     /// The gateway's address, the only one the container reaches.
     pub gateway: SocketAddrV4,
-    /// The grant that `sandboxd` presents, in its environment alone.
-    pub grant: RegistrationGrant,
     /// Whether the role makes ops (`provider::Create::ops`).
     pub ops: bool,
     /// Whether `sandboxd` serves the model endpoint
     /// (`provider::Create::model`).
     pub model: bool,
+}
+
+/// What the attestation of an EC2 sandbox holds, as JSON: its instance's identity document.
+///
+/// Its document and the document's signature by AWS are each as the instance's metadata serves
+/// them, by which the provider knows the instance:
+/// <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-identity-documents.html>.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Identity {
+    /// The document, JSON, byte for byte as it is signed.
+    pub document: String,
+    /// The base64 of the document's RSA signature with SHA-256, in lines.
+    pub signature: String,
 }
 
 /// The user data of a MIME multipart message, which cloud-init reads: `cloud_config`, a
@@ -90,7 +100,7 @@ pub fn user_data(cloud_config: &str, start: &Start) -> Result<String, String> {
     let delimiter = format!("--{BOUNDARY}");
     for (part, text) in [("cloud-config", cloud_config), ("start", &start)] {
         if text.contains(&delimiter) {
-            // The part alone, never its text, which may hold the grant.
+            // The part alone, never its text, which may be long.
             return Err(format!(
                 "the user data's {part} holds `{delimiter}`, the parts' boundary: expected none"
             ));
@@ -108,7 +118,7 @@ pub fn user_data(cloud_config: &str, start: &Start) -> Result<String, String> {
 /// # Errors
 ///
 /// `user_data` is no message that [`user_data`] wrote, or its start doesn't parse. The message
-/// says where, never what the text holds, which may be the grant.
+/// says where, never what the text holds.
 pub fn start_in(user_data: &str) -> Result<Start, String> {
     let Some(parts) = user_data.strip_prefix(&header()) else {
         return Err(format!(

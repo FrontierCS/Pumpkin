@@ -3,7 +3,7 @@
 The agent leases a CPU runner, and a GPU runner if `gpu_model` names a GPU's model, runs
 `probe.py` in its own sandbox and in each runner, and submits what each printed; the final call
 runs it in its target too, and scores each of its lines that says the sandbox is confined as it
-should be: 5 for each sandbox, so 15 without a GPU runner, and 20 with one.
+should be: 6 for each sandbox, so 18 without a GPU runner, and 24 with one.
 """
 
 load("//smoke/final.star", "final_call")

@@ -18,7 +18,7 @@ use std::thread::{self, Scope};
 use std::time::Duration;
 
 use decision::{Action, Caller, Core, Event, JobId, LeaseId, OpId, Outcome, Request, lasts};
-use gateway::{Arrival, Dialer, GrantListener, RefusedOp, Trees};
+use gateway::{Arrival, Dialer, Listener, RefusedOp, Trees};
 use provider::{Provider, Reservation, RunTag, UnixTime};
 use route::Serving;
 use schema::ir::{Label, ModelName};
@@ -180,7 +180,7 @@ impl<'r, H: Host> Run<'r, H> {
     pub fn execute(
         self,
         sandboxd: &Path,
-        private: Option<&GrantListener>,
+        private: Option<&Listener>,
         dialer: &Dialer,
         bodies: &dyn Bodies,
         started: impl FnOnce() -> Result<(), String>,
@@ -206,7 +206,7 @@ impl<'r, H: Host> Run<'r, H> {
     fn run_on(
         &self,
         sandboxd: &Path,
-        (private, dialer): (Option<&GrantListener>, &Dialer),
+        (private, dialer): (Option<&Listener>, &Dialer),
         bodies: &dyn Bodies,
         started: impl FnOnce() -> Result<(), String>,
     ) -> Result<Outcome, Stopped> {

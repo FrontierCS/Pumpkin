@@ -2,17 +2,24 @@
 or keep open, `<sandbox> <check>: ok|FAILED (<what it saw>)`, where `ok` says the sandbox is as
 it should be: its role's user isn't root; the instance metadata address and a public address
 can't be reached; DNS can't be either, but where `sandboxd` listens, as on Modal, whose
-sandboxes reach Modal's resolver and nothing else, so a name resolves there; and the gateway
-can, as `sandboxd` holds the session that this probe runs over."""
+sandboxes reach Modal's resolver and nothing else, so a name resolves there; the gateway
+can, as `sandboxd` holds the session that this probe runs over; and where the gateway's address
+is one that several sandboxes dial, as on EC2, the gateway refuses a hello that presents an
+attestation of no sandbox's, as this sandbox's code can make."""
 
+import json
 import os
 import socket
+import struct
 import sys
 
 METADATA = ("169.254.169.254", 80)
 PUBLIC = ("1.1.1.1", 443)
 NAME = "example.com"
 TIMEOUT_SECONDS = 5
+# The sandbox protocol's version, `schema::sandbox::PROTOCOL_VERSION`, so that the gateway reads the
+# attestation rather than refuse the hello for its version.
+PROTOCOL_VERSION = 3
 
 
 def line(sandbox, check, ok, seen):
@@ -70,6 +77,55 @@ def gateway(sandbox, words):
         )
 
 
+def frame(message, body=b""):
+    """A frame of the sandbox protocol: a message's length and its JSON, then a body's."""
+    encoded = json.dumps(message).encode()
+    return struct.pack(">I", len(encoded)) + encoded + struct.pack(">I", len(body)) + body
+
+
+def exactly(connection, size):
+    read = b""
+    while len(read) < size:
+        more = connection.recv(size - len(read))
+        if not more:
+            raise OSError("the gateway closed the connection")
+        read += more
+    return read
+
+
+def answer(address, attestation):
+    """The gateway's answer to a hello that presents `attestation`, or the error that ended it."""
+    try:
+        with socket.create_connection(address, timeout=TIMEOUT_SECONDS) as connection:
+            connection.sendall(frame({"version": PROTOCOL_VERSION}, attestation))
+            (size,) = struct.unpack(">I", exactly(connection, 4))
+            return json.loads(exactly(connection, size))
+    except (OSError, ValueError) as error:
+        return error
+
+
+def forged(sandbox, words):
+    check = "forged hello"
+    if words is None:
+        line(sandbox, check, False, "no sandboxd process found")
+    elif "--listen" in words or words[0].startswith("/"):
+        line(sandbox, check, True, "no address that several sandboxes share to say it at")
+    else:
+        host, _, port = words[0].rpartition(":")
+        # An instance's identity document that AWS never signed, as no instance's is.
+        document = json.dumps({"instanceId": "i-0123456789abcdef0", "privateIp": host})
+        attestation = json.dumps({"document": document, "signature": "AAAA"}).encode()
+        answered = answer((host, int(port)), attestation)
+        # Refused for its attestation, not for its version or its form, which would leave the
+        # check of the attestation unprobed.
+        refused = (
+            isinstance(answered, dict)
+            and answered.get("type") == "refused"
+            and "attestation" in answered.get("message", "")
+        )
+        line(sandbox, check, refused, f"{words[0]} answered {answered}")
+
+
 def main():
     sandbox = sys.argv[1]
     words = sandboxd()
@@ -86,6 +142,7 @@ def main():
     except OSError as error:
         line(sandbox, "dns", not listens, f"{NAME}: {error}")
     gateway(sandbox, words)
+    forged(sandbox, words)
 
 
 if __name__ == "__main__":

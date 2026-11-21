@@ -247,15 +247,7 @@ fn fake_sandbox(
     hangs_up: Option<u32>,
 ) -> Vec<String> {
     let mut connection = UnixStream::connect(socket).unwrap();
-    frame::write(
-        &mut connection,
-        &Hello {
-            grant: None,
-            gpus: None,
-        },
-        &[],
-    )
-    .unwrap();
+    frame::write(&mut connection, &Hello { gpus: None }, &[]).unwrap();
     let (reply, _) = frame::read::<HelloReply>(&mut connection).unwrap().unwrap();
     assert_eq!(
         reply,

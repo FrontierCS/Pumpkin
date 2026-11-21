@@ -13,7 +13,7 @@ use crate::settings::{Provider, Settings};
 use crate::{Cargo, Result, install_file, root, sandboxd, star, tools, wait};
 
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
-const CHECKS_PER_SANDBOX: usize = 5;
+const CHECKS_PER_SANDBOX: usize = 6;
 
 /// The Modal SDK that the check of a run's sandboxes there uses: the one the provider's helper
 /// pins (`providers/modal/helper/pumpkin-modal.py`).

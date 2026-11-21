@@ -12,7 +12,7 @@
 
 use std::cell::Cell;
 use std::io::{Read as _, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
@@ -25,8 +25,8 @@ use std::{fs, iter, panic};
 
 use expect_test::{Expect, expect};
 use gateway::{
-    Arrival, Dialer, GatewayAddress, GrantListener, IncomingModelRequest, IncomingOp, Process, Put,
-    Registration, Session, Sockets,
+    Arrival, Dialer, GatewayAddress, IncomingModelRequest, IncomingOp, Listener, Process, Put,
+    Registration, Session, Sockets, Unattested,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, Env, Name, Resources};
@@ -35,8 +35,7 @@ use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, HELLO_TIMEOUT, Hello, HelloReply, Launch, Listening, MAX_HELLO_BYTES,
     MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT, MAX_OP_PAYLOAD_BYTES, OpPayloadLimit,
-    PROTOCOL_VERSION, REGISTRATION_GRANT_BYTES, RegistrationGrant, RelativePath, SOCKET_NAME,
-    SocketDial, TcpDial, ToSandbox, file_mode,
+    PROTOCOL_VERSION, PrivateDial, RelativePath, SOCKET_NAME, SocketDial, ToSandbox, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::Deadline;
@@ -53,9 +52,9 @@ type Opening = fn(&mut UnixStream);
 // on a margin.
 const PAUSE: Duration = Duration::from_millis(30);
 
-// How long a grant listener gives a peer to say its hello, where a silent one shows the bound: each
-// other peer says its hello as it dials, which the listener reads even once the bound has passed,
-// so no outcome rests on a margin.
+// How long a private listener gives a peer to say its hello, where a silent one shows the bound:
+// each other peer says its hello as it dials, which the listener reads even once the bound has
+// passed, so no outcome rests on a margin.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
 fn short() -> Deadline {
@@ -129,7 +128,7 @@ fn connect(
     let sandbox_socket = socket.clone();
     let sandbox = thread::spawn(move || {
         let mut connection = UnixStream::connect(sandbox_socket).unwrap();
-        frame::write(&mut connection, &hello(None), &[]).unwrap();
+        frame::write(&mut connection, &hello(), &[]).unwrap();
         let reply = frame::read::<HelloReply>(&mut connection).unwrap();
         let reply = reply.map(|(reply, _)| reply);
         assert_eq!(
@@ -1281,10 +1280,10 @@ fn stopped() {
 fn hellos() {
     check(
         |dir| {
-            let cases: [(&str, Opening, Deadline); 15] = [
+            let cases: [(&str, Opening, Deadline); 14] = [
                 (
                     "this version",
-                    |c| frame::write(c, &hello(None), &[]).unwrap(),
+                    |c| frame::write(c, &hello(), &[]).unwrap(),
                     hung(),
                 ),
                 (
@@ -1309,14 +1308,6 @@ fn hellos() {
                     hung(),
                 ),
                 (
-                    "this version, with a grant",
-                    |c| {
-                        let grant = RegistrationGrant::try_from("07".repeat(16)).unwrap();
-                        frame::write(c, &hello(Some(grant)), &[]).unwrap();
-                    },
-                    hung(),
-                ),
-                (
                     "a later version, as long as a hello may be",
                     |c| {
                         let mut hello = json!({ "version": PROTOCOL_VERSION + 1, "later": "" });
@@ -1335,8 +1326,8 @@ fn hellos() {
                     hung(),
                 ),
                 (
-                    "this version, with a body",
-                    |c| frame::write(c, &hello(None), b"x").unwrap(),
+                    "this version, with an attestation",
+                    |c| frame::write(c, &hello(), b"x").unwrap(),
                     hung(),
                 ),
                 (
@@ -1366,7 +1357,7 @@ fn hellos() {
                     "a hello's message, then the connection's end",
                     |c| {
                         let mut written = Vec::new();
-                        frame::write(&mut written, &hello(None), &[]).unwrap();
+                        frame::write(&mut written, &hello(), &[]).unwrap();
                         c.write_all(&written[..written.len() - 4]).unwrap();
                         c.shutdown(Shutdown::Write).unwrap();
                     },
@@ -1388,13 +1379,12 @@ fn hellos() {
         },
         &expect![[r#"
             this version: heard {"type":"accepted"}; ok
-            a v0 sandboxd: heard {"message":"sandboxd speaks sandbox protocol 0: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 0: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does
-            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 2's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 2's form: unknown field `later`, expected one of `version`, `grant`, `gpus`
-            this version, with a grant: heard {"message":"the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there","type":"refused"}; InvalidData: the gateway refused the session: the hello presents a registration grant on a socket of the sandbox's own, which identifies it: expected none there
-            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a v0 sandboxd: heard {"message":"sandboxd speaks sandbox protocol 0: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 0: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            a later version, with a field this one lacks: heard {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            this version, with a field it lacks: heard {"message":"the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`","type":"refused"}; InvalidData: the gateway refused the session: the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`
+            a later version, as long as a hello may be: heard {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}; InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
             a length a byte over a hello's, and nothing more: heard {"message":"the hello is 1025 bytes: a hello holds at most 1024","type":"refused"}; InvalidData: the gateway refused the session: the hello is 1025 bytes: a hello holds at most 1024
-            this version, with a body: heard {"message":"the hello has a 1-byte body: a hello has none","type":"refused"}; InvalidData: the gateway refused the session: the hello has a 1-byte body: a hello has none
+            this version, with an attestation: heard {"message":"the hello presents an attestation on a socket of the sandbox's own, which identifies it: expected none there","type":"refused"}; InvalidData: the gateway refused the session: the hello presents an attestation on a socket of the sandbox's own, which identifies it: expected none there
             a reply, not a hello: heard {"message":"the session's first frame is no hello: missing field `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: missing field `version`: open the session with one
             a frame whose message, `null`, is no object: heard {"message":"the session's first frame is no hello: invalid type: null, expected an object with a `version`: open the session with one","type":"refused"}; InvalidData: the gateway refused the session: the session's first frame is no hello: invalid type: null, expected an object with a `version`: open the session with one
             a frame whose message, `hello`, isn't JSON: heard {"message":"a frame's message isn't JSON: expected value at line 1 column 1","type":"refused"}; InvalidData: the gateway refused the session: a frame's message isn't JSON: expected value at line 1 column 1
@@ -1405,11 +1395,11 @@ fn hellos() {
     );
 }
 
-fn listen(hello_timeout: Duration) -> (GrantListener, SocketAddr) {
+fn listen(hello_timeout: Duration) -> (Listener, SocketAddr) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let address = GatewayAddress::try_from(loopback).unwrap();
-    let listener = GrantListener::bind(&address, hello_timeout).unwrap();
-    let (TcpDial { gateway, grant: _ }, _) = listener.issue().unwrap();
+    let listener = Listener::bind(&address, hello_timeout).unwrap();
+    let (PrivateDial { gateway }, _) = listener.issue(hung());
     (listener, gateway)
 }
 
@@ -1427,24 +1417,45 @@ fn answered(connection: &mut TcpStream) -> String {
     }
 }
 
-fn present(address: SocketAddr, hello: &Value) -> String {
+/// A hello's message and its body.
+type Said = (Value, Vec<u8>);
+
+/// A hello of this version that presents `attestation`.
+fn attesting(attestation: &str) -> Said {
+    let hello = serde_json::to_value(hello()).unwrap();
+    (hello, attestation.as_bytes().to_vec())
+}
+
+fn present(address: SocketAddr, (hello, body): &Said) -> String {
     let mut connection = dial(address);
-    frame::write(&mut connection, hello, &[]).unwrap();
+    frame::write(&mut connection, hello, body).unwrap();
     answered(&mut connection)
 }
 
-fn issue(listener: &GrantListener, address: SocketAddr) -> (RegistrationGrant, Registration) {
-    let (TcpDial { gateway, grant }, registration) = listener.issue().unwrap();
+fn issue(listener: &Listener, address: SocketAddr, by: Deadline) -> Unattested {
+    let (PrivateDial { gateway }, unattested) = listener.issue(by);
     assert_eq!(gateway, address, "the address the dial names");
-    (grant, registration)
+    unattested
 }
 
-fn granted(grant: &RegistrationGrant) -> Value {
-    serde_json::to_value(hello(Some(grant.clone()))).unwrap()
+/// The registration whose check admits `attestation` from `from` alone.
+fn admitting(unattested: Unattested, attestation: &'static str, from: Ipv4Addr) -> Registration {
+    unattested.admitting(move |presented, peer| {
+        presented.bytes() == attestation.as_bytes() && peer == IpAddr::V4(from)
+    })
 }
 
-fn hello(grant: Option<RegistrationGrant>) -> Hello {
-    Hello { grant, gpus: None }
+/// A registration whose check admits `attestation` from the loopback, where each hello comes from.
+fn admitted(listener: &Listener, address: SocketAddr, attestation: &'static str) -> Registration {
+    admitting(
+        issue(listener, address, hung()),
+        attestation,
+        Ipv4Addr::LOCALHOST,
+    )
+}
+
+fn hello() -> Hello {
+    Hello { gpus: None }
 }
 
 type Named = fn(stream: u32, name: &str) -> Vec<Value>;
@@ -1455,7 +1466,7 @@ fn named(stream: u32, name: &str) -> Vec<Value> {
 
 fn sandbox(
     address: SocketAddr,
-    hello: Value,
+    (hello, body): Said,
     pause: Duration,
     answer: Named,
     said: (Sender<String>, &'static str),
@@ -1463,7 +1474,7 @@ fn sandbox(
     thread::spawn(move || {
         thread::sleep(pause);
         let mut connection = dial(address);
-        frame::write(&mut connection, &hello, &[]).unwrap();
+        frame::write(&mut connection, &hello, &body).unwrap();
         let opened = answered(&mut connection);
         let (said, name) = said;
         said.send(format!("{name}: {opened}")).unwrap();
@@ -1478,15 +1489,10 @@ fn sandbox(
     })
 }
 
-fn twice(
-    address: SocketAddr,
-    hello: &Value,
-    said: &Sender<String>,
-    name: &'static str,
-) -> [JoinHandle<()>; 2] {
+fn twice(address: SocketAddr, said: &Sender<String>, name: &'static str) -> [JoinHandle<()>; 2] {
     [(); 2].map(|()| {
         let said = (said.clone(), name);
-        sandbox(address, hello.clone(), Duration::ZERO, named, said)
+        sandbox(address, attesting(name), Duration::ZERO, named, said)
     })
 }
 
@@ -1496,43 +1502,57 @@ fn accept_and_freeze(registration: Registration, by: Deadline) -> String {
     outcome(accepted.and_then(|mut session| session.freeze(hung())))
 }
 
-fn refusals(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
-    let [(late, late_registration), (dropped, dropped_registration)] =
-        [(); 2].map(|()| issue(listener, address));
-    let waited = accept_and_freeze(late_registration, Deadline::after(Duration::ZERO));
-    drop(dropped_registration);
-    let foreign = granted(&RegistrationGrant::from([7; REGISTRATION_GRANT_BYTES]));
+fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
+    let late = admitted(listener, address, "late");
+    let waited = accept_and_freeze(late, Deadline::after(Duration::ZERO));
+    drop(admitted(listener, address, "dropped"));
+    let unspent = issue(listener, address, hung());
+    let elsewhere = admitting(unspent, "elsewhere", Ipv4Addr::new(192, 0, 2, 1));
+    // Its check never comes, and no hello waits for it, as its deadline has passed.
+    let _expired = issue(listener, address, Deadline::after(Duration::ZERO));
+    let version = |version| json!({ "version": version });
     let hellos = [
-        ("no grant", json!({ "version": PROTOCOL_VERSION })),
+        ("no attestation", (version(PROTOCOL_VERSION), Vec::new())),
         (
             "a later version",
-            json!({ "version": PROTOCOL_VERSION + 1 }),
+            (version(PROTOCOL_VERSION + 1), b"late".to_vec()),
         ),
         (
             "a field this version lacks",
-            json!({ "version": PROTOCOL_VERSION, "later": true }),
+            (
+                json!({ "version": PROTOCOL_VERSION, "later": true }),
+                b"late".to_vec(),
+            ),
         ),
-        ("a grant it didn't issue", foreign),
+        ("an attestation that no check admits", attesting("foreign")),
+        (
+            "an attestation from where its check admits none",
+            attesting("elsewhere"),
+        ),
     ];
     let mut lines: Vec<String> = (hellos.iter())
         .map(|(name, hello)| format!("{name}: {}", present(address, hello)))
         .collect();
     lines.extend([
         format!("an accept by a passed deadline: {waited}"),
-        format!("  its grant: {}", present(address, &granted(&late))),
         format!(
-            "a grant whose registration dropped: {}",
-            present(address, &granted(&dropped))
+            "  its attestation: {}",
+            present(address, &attesting("late"))
+        ),
+        format!(
+            "an attestation whose registration dropped: {}",
+            present(address, &attesting("dropped"))
         ),
     ]);
+    drop(elsewhere);
     lines
 }
 
-fn awaited(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+fn awaited(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
-    let (grant, registration) = issue(listener, address);
-    let hello = granted(&grant);
+    let registration = admitted(listener, address, "awaited");
     let answer: Named = |s, _| vec![done(s).0, op(0, json!({ "kind": "ops" }), 0).0];
+    let hello = attesting("awaited");
     let sandbox = sandbox(address, hello.clone(), PAUSE, answer, (said, "awaited"));
     let ops = Some(OpPayloadLimit::NONE);
     let (sender, arrivals) = mpsc::channel();
@@ -1545,16 +1565,18 @@ fn awaited(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     session.reply(op, no_grants(), hung()).unwrap();
     drop(session);
     sandbox.join().unwrap();
-    lines.push(format!("  its grant, again: {}", present(address, &hello)));
+    lines.push(format!(
+        "  its attestation, again: {}",
+        present(address, &hello)
+    ));
     lines
 }
 
-fn early(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+fn early(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
     let pairs = ["a", "b"].map(|name| {
-        let (grant, registration) = issue(listener, address);
-        let sandboxes = twice(address, &granted(&grant), &said, name);
-        (name, registration, sandboxes)
+        let registration = admitted(listener, address, name);
+        (name, registration, twice(address, &said, name))
     });
     let mut refused: Vec<String> = (0..2).map(|_| heard.recv().unwrap()).collect();
     refused.sort();
@@ -1569,11 +1591,34 @@ fn early(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     lines
 }
 
-fn dropped(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
+fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let (said, heard) = mpsc::channel();
-    let (grant, registration) = issue(listener, address);
-    let hello = granted(&grant);
-    let sandboxes = twice(address, &hello, &said, "c");
+    let [checked, withdrawn] = [(); 2].map(|()| issue(listener, address, hung()));
+    let hellos = ["checked", "withdrawn"].map(|name| {
+        let said = (said.clone(), name);
+        sandbox(address, attesting(name), Duration::ZERO, named, said)
+    });
+    // The hellos wait for the checks, which come once they have been read, as a create's do, or
+    // never: no outcome rests on which comes first.
+    thread::sleep(PAUSE);
+    let registration = admitting(checked, "checked", Ipv4Addr::LOCALHOST);
+    drop(withdrawn);
+    let accepted = accept_and_freeze(registration, hung());
+    let mut told: Vec<String> = (0..2).map(|_| heard.recv().unwrap()).collect();
+    told.sort();
+    for sandbox in hellos {
+        sandbox.join().unwrap();
+    }
+    vec![
+        format!("presented before the checks: {}", told.join("; ")),
+        format!("  checked accepted, then a freeze: {accepted}"),
+    ]
+}
+
+fn dropped(listener: &Listener, address: SocketAddr) -> Vec<String> {
+    let (said, heard) = mpsc::channel();
+    let registration = admitted(listener, address, "c");
+    let sandboxes = twice(address, &said, "c");
     let refused = heard.recv().unwrap();
     drop(registration);
     let closed = heard.recv().unwrap();
@@ -1582,12 +1627,12 @@ fn dropped(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
     }
     vec![
         format!("a registration dropped once presented: {refused}; then {closed}"),
-        format!("  its grant: {}", present(address, &hello)),
+        format!("  its attestation: {}", present(address, &attesting("c"))),
     ]
 }
 
-fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> {
-    let (grant, registration) = issue(listener, address);
+fn stopped_accept(listener: &Listener, address: SocketAddr) -> Vec<String> {
+    let registration = admitted(listener, address, "stopped");
     let by = hung();
     let looks = Cell::new(0);
     let stopped = || {
@@ -1598,15 +1643,16 @@ fn stopped_accept(listener: &GrantListener, address: SocketAddr) -> Vec<String> 
     let accepted = registration.accept(by, None, false, sender, |arrival| arrival, stopped);
     let accepted = outcome(accepted.map(drop));
     let returned = by.remaining().map_or("past", |_| "before");
+    let presented = present(address, &attesting("stopped"));
     vec![
         format!("an accept stopped as it waits returned {returned} its deadline: {accepted}"),
-        format!("  its grant: {}", present(address, &granted(&grant))),
+        format!("  its attestation: {presented}"),
     ]
 }
 
-fn meet(address: SocketAddr, grant: &RegistrationGrant, waiting: JoinHandle<String>) -> String {
+fn meet(address: SocketAddr, attestation: &str, waiting: JoinHandle<String>) -> String {
     let (said, heard) = mpsc::channel();
-    let hello = granted(grant);
+    let hello = attesting(attestation);
     let sandbox = sandbox(address, hello, Duration::ZERO, named, (said, "meanwhile"));
     let accepted = waiting.join().unwrap();
     sandbox.join().unwrap();
@@ -1625,7 +1671,7 @@ fn crowd() -> String {
 
 fn turns() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
-    let hello = json!({ "version": PROTOCOL_VERSION });
+    let hello = (json!({ "version": PROTOCOL_VERSION }), Vec::new());
     let mut heard: Vec<String> = (0..=100).map(|_| present(address, &hello)).collect();
     heard.dedup();
     format!("101 hellos, each in turn: {}", heard.join("; "))
@@ -1667,13 +1713,13 @@ fn registrations() {
         |_| {
             let (listener, address) = listen(HELLO_BOUND);
             let mut silent = dial(address);
-            let (meanwhile_grant, meanwhile) = issue(&listener, address);
+            let meanwhile = admitted(&listener, address, "meanwhile");
             let waiting = thread::spawn(|| accept_and_freeze(meanwhile, hung()));
             let mut lines = refusals(&listener, address);
-            for meeting in [awaited, early, dropped, stopped_accept] {
+            for meeting in [awaited, early, unchecked, dropped, stopped_accept] {
                 lines.extend(meeting(&listener, address));
             }
-            lines.push(meet(address, &meanwhile_grant, waiting));
+            lines.push(meet(address, "meanwhile", waiting));
             let untold = answered(&mut silent);
             lines.push(format!("the peer silent from the first: heard {untold}"));
             drop(listener);
@@ -1683,28 +1729,31 @@ fn registrations() {
             lines
         },
         &expect![[r#"
-            no grant: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}
-            a later version: {"message":"sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
-            a field this version lacks: {"message":"the hello isn't of sandbox protocol 2's form: unknown field `later`, expected one of `version`, `grant`, `gpus`","type":"refused"}
-            a grant it didn't issue: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
-            an accept by a passed deadline: TimedOut: no sandbox presented the registration grant by the deadline: expected the sandbox it was issued for to present it while the deadline lasts
-              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
-            a grant whose registration dropped: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            no attestation: {"message":"the hello presents no attestation: expected the sandbox's, at an address that several sandboxes share","type":"refused"}
+            a later version: {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
+            a field this version lacks: {"message":"the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`","type":"refused"}
+            an attestation that no check admits: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            an attestation from where its check admits none: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            an accept by a passed deadline: TimedOut: no hello that the sandbox's check admits came by the deadline: expected the sandbox to say it while the deadline lasts
+              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            an attestation whose registration dropped: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
             awaited: {"type":"accepted"}; freeze: ok
               its op: Ops
-              its grant, again: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
-            presented early: a: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}; b: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}
+              its attestation, again: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            presented early: a: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}; b: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}
               b accepted, then a freeze: Other: I am b
               a accepted, then a freeze: Other: I am a
-            a registration dropped once presented: c: {"message":"the registration grant was presented already, on another connection: expected it once, as a grant opens one session","type":"refused"}; then c: none
-              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
-            an accept stopped as it waits returned before its deadline: Other: the accept was stopped before a sandbox presented the registration grant: expected the sandbox it was issued for to present it before the stop
-              its grant: {"message":"the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once","type":"refused"}
+            presented before the checks: checked: {"type":"accepted"}; withdrawn: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+              checked accepted, then a freeze: Other: I am checked
+            a registration dropped once presented: c: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}; then c: none
+              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            an accept stopped as it waits returned before its deadline: Other: the accept was stopped before the sandbox's hello was admitted: expected the sandbox to say it before the stop
+              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
             the accept waiting meanwhile: meanwhile: {"type":"accepted"}; then a freeze: Other: I am meanwhile
             the peer silent from the first: heard none
             a dial once the listener dropped: Err(ConnectionRefused)
             one past the hellos read at once: heard none
-            101 hellos, each in turn: {"message":"the hello presents no registration grant: expected the one the gateway issued for the sandbox, at an address that several sandboxes share","type":"refused"}"#]],
+            101 hellos, each in turn: {"message":"the hello presents no attestation: expected the sandbox's, at an address that several sandboxes share","type":"refused"}"#]],
     );
 }
 
@@ -1725,7 +1774,7 @@ fn dials() {
                     .map_err(|error| format!("{:?}: {error}", error.kind()))
             };
             let (grant, unreached) = issue();
-            let (port, sandbox) = listening(true, json!(hello(None)));
+            let (port, sandbox) = listening(true, (json!(hello()), Vec::new()));
             let session = accepted(unreached.at(endpoint(port)), hung(), false);
             let heard = sandbox.join().unwrap();
             let presented = heard == Some(HelloReply::Accepted { grant: Some(grant) });
@@ -1733,9 +1782,9 @@ fn dials() {
                 "a sandbox that listens once a dial has failed: {session:?}; it heard its grant: \
                  {presented}"
             )];
-            let grant = Some(RegistrationGrant::from([7; 16]));
-            let later = json!({ "version": PROTOCOL_VERSION + 1 });
-            for (case, hello) in [("with a grant", json!(hello(grant))), ("later", later)] {
+            let attested = attesting("an attestation");
+            let later = (json!({ "version": PROTOCOL_VERSION + 1 }), Vec::new());
+            for (case, hello) in [("with an attestation", attested), ("later", later)] {
                 let (_, unreached) = issue();
                 let (port, sandbox) = listening(false, hello);
                 let session = accepted(unreached.at(endpoint(port)), hung(), false);
@@ -1765,8 +1814,8 @@ fn dials() {
         },
         &expect![[r#"
             a sandbox that listens once a dial has failed: Ok(()); it heard its grant: true
-            a hello with a grant: Err("InvalidData: the gateway refused the session: the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there"); it heard Some(Refused { message: "the hello presents a registration grant where the gateway dialed the sandbox, which its endpoint identifies: expected none there" })
-            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 3: expected 2, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
+            a hello with an attestation: Err("InvalidData: the gateway refused the session: the hello presents an attestation where the gateway dialed the sandbox, which its endpoint identifies: expected none there"); it heard Some(Refused { message: "the hello presents an attestation where the gateway dialed the sandbox, which its endpoint identifies: expected none there" })
+            a hello later: Err("InvalidData: the gateway refused the session: sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"); it heard Some(Refused { message: "sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does" })
             nothing listening: Err("TimedOut: the gateway didn't reach the sandbox at localhost:$PORT by the deadline: its last dial failed: dialing localhost:$PORT failed: Connection refused (os error 111): expected its sandboxd to listen there while the deadline lasts")
             a certificate the dialer doesn't trust: Err("InvalidData: the gateway can't trust the sandbox's endpoint localhost:$PORT: the TLS handshake failed: invalid peer certificate: UnknownIssuer: expected TLS 1.3 from `localhost`, with a certificate trusted for it"); Err(InvalidData)
             stopped: Err("Other: the accept was stopped before the gateway reached the sandbox at localhost:$PORT: expected its sandboxd to listen there before the stop")"#]],
@@ -1796,7 +1845,7 @@ fn endpoint(port: u16) -> Endpoint {
     Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap()
 }
 
-fn listening(closes_first: bool, hello: Value) -> (u16, JoinHandle<Option<HelloReply>>) {
+fn listening(closes_first: bool, (hello, body): Said) -> (u16, JoinHandle<Option<HelloReply>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let sandbox = thread::spawn(move || {
@@ -1805,7 +1854,7 @@ fn listening(closes_first: bool, hello: Value) -> (u16, JoinHandle<Option<HelloR
         }
         let (stream, _) = listener.accept().unwrap();
         let stream = test_support::edge::server().accept(stream, hung()).unwrap();
-        frame::write(&mut &stream, &hello, &[]).unwrap();
+        frame::write(&mut &stream, &hello, &body).unwrap();
         frame::read::<HelloReply>(&mut &stream)
             .unwrap()
             .map(|(answer, _)| answer)

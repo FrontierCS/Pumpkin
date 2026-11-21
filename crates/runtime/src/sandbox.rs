@@ -16,16 +16,16 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
-use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
+use gateway::{Arrival, Dialer, Listener, Session, Sockets};
 use provider::{
-    Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
+    Admits, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Role, RunTag, SandboxId,
     SandboxdRef, Sweep, Undeleted, UnixTime,
 };
 use schema::ir::{Command, GpuModel, Image, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
-    command_env, command_stderr, command_stdout, pumpkin_dir,
+    Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, PrivateDial, RelativePath,
+    SocketDial, command_env, command_stderr, command_stdout, pumpkin_dir,
 };
 use schema::workflow::{
     AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
@@ -198,16 +198,21 @@ struct Hosting<'p> {
 #[derive(Clone, Copy)]
 enum Meets<'p> {
     Sockets(&'p dyn Creator<SocketDial>),
-    Grants(&'p dyn Creator<TcpDial>, &'p GrantListener),
+    Private(
+        &'p dyn Creator<PrivateDial, (Created, Admits)>,
+        &'p Listener,
+    ),
     Dials(&'p dyn Creator<Listening, (Created, Endpoint)>, &'p Dialer),
 }
 
 impl Meets<'_> {
-    /// Issues what the new sandbox dials, creates it, and returns the registration of its session.
+    /// Issues what the new sandbox dials, creates it, and returns the registration of its session,
+    /// which awaits it by `by`.
     fn create(
         self,
         sockets: &Sockets,
         create: &Create,
+        by: Deadline,
     ) -> Result<(Created, gateway::Registration), String> {
         let issued = |error: io::Error| error.to_string();
         match self {
@@ -215,9 +220,10 @@ impl Meets<'_> {
                 let (dial, registration) = sockets.issue(&create.name).map_err(issued)?;
                 Ok((creator.create(create, dial)?, registration))
             }
-            Self::Grants(creator, listener) => {
-                let (dial, registration) = listener.issue().map_err(issued)?;
-                Ok((creator.create(create, dial)?, registration))
+            Self::Private(creator, listener) => {
+                let (dial, unattested) = listener.issue(by);
+                let (created, admits) = creator.create(create, dial)?;
+                Ok((created, unattested.admitting(admits)))
             }
             Self::Dials(creator, dialer) => {
                 let (dial, unreached) = dialer.issue().map_err(issued)?;
@@ -386,7 +392,7 @@ impl<'p> Published<'p> {
         providers: &ByProvider<&'p dyn Provider>,
         placed: &Placed,
         sandboxd: &Path,
-        private: Option<&'p GrantListener>,
+        private: Option<&'p Listener>,
         dialer: &'p Dialer,
         record: &Path,
     ) -> Result<Self, Stopped> {
@@ -401,11 +407,11 @@ impl<'p> Published<'p> {
                 Meeting::Private(creator) => {
                     let listener = private.ok_or_else(|| {
                         format!(
-                            "private provider `{name}` has no grant listener: bind one for its \
-                             sandboxes to dial"
+                            "private provider `{name}` has no private listener: bind one for \
+                             its sandboxes to dial"
                         )
                     })?;
-                    Meets::Grants(creator, listener)
+                    Meets::Private(creator, listener)
                 }
                 Meeting::Listen(creator) => Meets::Dials(creator, dialer),
             };
@@ -517,7 +523,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        let started = hosting.meets.create(&self.sockets, &create);
+        let started = hosting.meets.create(&self.sockets, &create, by);
         let (Created { id }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
             inventory.unnamed.insert(&placement.provider);

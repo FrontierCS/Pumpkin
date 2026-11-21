@@ -23,7 +23,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::{env, io, thread};
 
 use schema::ir::Env;
-use schema::sandbox::{ExitStatus, FromSandbox, Launch, SANDBOXCTL_PATH, SANDBOXD_GRANT};
+use schema::sandbox::{
+    ExitStatus, FromSandbox, Launch, SANDBOXCTL_PATH, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
+};
 use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 
@@ -199,6 +201,7 @@ fn spawn(launch: &Launch, serve_ops: bool) -> Result<i32, String> {
     command
         .args(argv.args())
         .env_remove(SANDBOXD_GRANT)
+        .env_remove(SANDBOXD_ATTESTATION)
         .envs(env.as_slice().iter().map(|var| (var.name(), var.value())));
     if serve_ops {
         command.env("PATH", ops_path(env));
