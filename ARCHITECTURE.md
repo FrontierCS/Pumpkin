@@ -521,8 +521,6 @@ says: the EC2 envelope
 that `ec2` relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI,
 and the controller, with the SSM parameter of its jobs' settings and the units that stop it when
 idle and reap at its boot. No crate depends on it; its outputs feed a machine's configuration.
-What Pumpkin's code relies on of it, which another module may meet instead, is
-[the envelope](docs/envelope.md).
 
 ### `examples`
 

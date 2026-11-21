@@ -4,9 +4,8 @@ A provider makes a run's sandboxes: containers on the machine's own Docker engin
 EC2 instances, or Modal sandboxes. A controller is an EC2 instance that runs the runs that the
 operator's machine sends it. The operator is whoever runs `pumpkin` and holds the machine's
 configuration and keys. This page says what each is, what it needs, and where each is set up:
-`pumpkin help config` holds every key of the machine's configuration,
-[`deploy/aws`](../deploy/aws/README.md) the AWS side, and [the envelope](envelope.md) what
-Pumpkin's code relies on of that side.
+`pumpkin help config` holds every key of the machine's configuration, and
+[`deploy/aws`](../deploy/aws/README.md) the AWS side.
 
 ![On the operator's machine, pumpkin builds images on the Docker engine, where the Docker provider's containers also run; a machine with a controller sends its runs over ssh to the controller, which builds the images on its own engine, pushes them to ECR, launches EC2 instances that pull them, and creates Modal sandboxes, which Modal imports from the same repositories.](figures/providers.svg)
 

@@ -49,7 +49,7 @@ variable "classes" {
     startup_seconds = optional(number)
   }))
 
-  # Each name is a TOML key of the settings and a Pumpkin name, as docs/envelope.md says.
+  # Each name is a bare TOML key of the settings and a Pumpkin name.
   validation {
     condition     = alltrue([for name in keys(var.classes) : can(regex("^[a-z][a-z0-9_-]{0,63}$", name))])
     error_message = "A class's name is not 1 to 64 of a-z, 0-9, `_` and `-`, starting with a letter: give one such as `judge_60`."
