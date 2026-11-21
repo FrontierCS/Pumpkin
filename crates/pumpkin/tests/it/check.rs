@@ -921,6 +921,29 @@ const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
     ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
 
+fn write_benchmark_inputs(scratch: &Scratch) {
+    // Preparation supplies the upstream recipes, source trees and replay selections.
+    for context in [
+        "agent-base",
+        "verifier-base",
+        "native-agent",
+        "native-verifier",
+    ] {
+        scratch.write(
+            &format!("examples/benchmark-input/{context}/Dockerfile"),
+            "FROM scratch\n",
+        );
+    }
+    for mount in [
+        "benchmark-input/generation",
+        "benchmark-input/agent",
+        "benchmark-input/judge",
+        "benchmark-replay",
+    ] {
+        fs::create_dir_all(scratch.0.join("examples").join(mount)).unwrap();
+    }
+}
+
 #[test]
 fn examples() {
     let scratch = Scratch::new();
@@ -941,15 +964,7 @@ fn examples() {
             fs::copy(entry.path(), dest).unwrap();
         }
     }
-    // The operator supplies the two native repositories and the replay selections.
-    scratch.write("examples/benchmark-input/images.star", "\"\"\"Native repositories.\"\"\"\n\nAGENT_REPOSITORY = \"example.org/image/agent\"\n\nVERIFIER_REPOSITORY = \"example.org/image/judge\"\n");
-    for mount in [
-        "benchmark-input/agent",
-        "benchmark-input/judge",
-        "benchmark-replay",
-    ] {
-        fs::create_dir_all(root.join(mount)).unwrap();
-    }
+    write_benchmark_inputs(&scratch);
     names.extend([
         "team/codex.star".into(),
         "hypergraph-benchmark/replay/task.star".into(),

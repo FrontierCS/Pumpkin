@@ -14,14 +14,15 @@ Configure the controller and a priced Responses API route for `glm-5.3-flash` wi
 tools. The five model budgets permit up to $25 in total model usage. Compute is billed separately.
 
 Save the public JSON binding from the [official workload recipe](https://github.com/FrontierCS/Pumpkin/pull/297#official-workload-binding)
-outside the task repository. It names the native image repositories,
-packaging and verification interfaces, selector and license sources, and asset credits. The
-preparation command verifies the pinned bytes and writes the image inputs to
-`examples/benchmark-input/`. The controller must be able to list these files with
-`git ls-files --cached --others --exclude-standard` in the operator's repository.
+outside the task repository. Fetch the public source commit into a separate Git repository as
+shown in the recipe. Preparation reads the commit's Git objects and writes role-specific build
+contexts to `examples/benchmark-input/`. The controller builds the shared runtime and task
+Dockerfiles, runs the upstream manifest generator, and verifies its five output files. Only the
+verifier build fetches the four checksum-pinned graph files. The controller must be able to list
+the prepared files with `git ls-files --cached --others --exclude-standard` in the task repository.
 
 ```sh
-python3 examples/hypergraph-benchmark/prepare.py "${BINDING:?set BINDING to the binding JSON path}" &&
+python3 examples/hypergraph-benchmark/prepare.py "${BINDING:?set BINDING to the binding JSON path}" "${SOURCE:?set SOURCE to the public Git repository}" &&
 ./pumpkin check examples/hypergraph-benchmark/task.star &&
 ./pumpkin run examples/hypergraph-benchmark/task.star --wait --outcome
 ```

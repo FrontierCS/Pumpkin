@@ -1,5 +1,4 @@
-ARG BASE
-FROM ${BASE}
+FROM native
 USER root
 COPY binding/LICENSE binding/ATTRIBUTION /usr/share/doc/hypergraph-team/
 COPY binding/interface.json start.py /opt/team/

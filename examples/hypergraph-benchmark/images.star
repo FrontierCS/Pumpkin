@@ -1,6 +1,13 @@
-"""Native benchmark images and their content pins."""
+"""Images built from the pinned native benchmark source."""
 
-load("//benchmark-input/images.star", "AGENT_REPOSITORY", "VERIFIER_REPOSITORY")
+def _native(role):
+    generated = image("Dockerfile", context = "//hypergraph-benchmark/generation", mount = {
+        "source": "//benchmark-input/generation",
+    })
+    return image("Dockerfile", context = "//benchmark-input/native-" + role, contexts = {
+        "generated": generated,
+        "shared": image("Dockerfile", context = "//benchmark-input/" + role + "-base"),
+    })
 
 def agent_image():
     """Builds the agent image with its native packager.
@@ -10,9 +17,7 @@ def agent_image():
     """
     return image("Dockerfile", context = "//hypergraph-benchmark/agent", mount = {
         "binding": "//benchmark-input/agent",
-    }, args = {
-        "BASE": AGENT_REPOSITORY + "@sha256:4af4092b321758c658b5058da3a3d3bc277ac3547188876b1dacdde86b770bba",
-    })
+    }, contexts = {"native": _native("agent")})
 
 def judge_image(stage):
     """Builds the development, final, or replay verifier.
@@ -26,6 +31,6 @@ def judge_image(stage):
     mounts = {"binding": "//benchmark-input/judge"}
     if stage == "replay":
         mounts = mounts | {"selections": "//benchmark-replay"}
-    return image("Dockerfile", context = "//hypergraph-benchmark/judge", target = stage, mount = mounts, args = {
-        "BASE": VERIFIER_REPOSITORY + "@sha256:928a04bc4b49b1e18af8bd716a6b11157bbaba856901bbc88628d9adaf774874",
+    return image("Dockerfile", context = "//hypergraph-benchmark/judge", target = stage, mount = mounts, contexts = {
+        "native": _native("verifier"),
     })
