@@ -70,7 +70,7 @@ resource "aws_launch_template" "class" {
     device_name = data.aws_ami.al2023.root_device_name
 
     ebs {
-      volume_size           = var.root_volume_gib
+      volume_size           = coalesce(each.value.root_volume_gib, var.root_volume_gib)
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
