@@ -5,10 +5,13 @@
 use std::fmt::Write as _;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::{env, process};
 
 use sha2::{Digest as _, Sha256};
+use stdx::process::Environment;
 use xshell::{Cmd, Shell, cmd};
 
 use crate::{Cargo, Result};
@@ -73,27 +76,53 @@ const ZIG: Release = Release {
 
 const RELEASES: [Release; 3] = [BUILDIFIER, TSC, ZIG];
 
-/// Sets the musl C compiler for a build of `pumpkin`. The host compiler still links the binary.
+/// The name of the link to xtask that cc-rs runs as the musl C compiler ([`musl_cc`]).
+const MUSL_CC: &str = "x86_64-linux-musl-cc";
+
+/// Sets the musl C compiler for a build of `pumpkin`, the pinned Zig's. The host compiler
+/// still links the binary.
 pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
-    const FLAGS: &str = "CFLAGS_x86_64-unknown-linux-musl";
     let zig = fetched(cargo, ZIG)?;
-    let dir = zig
-        .parent()
-        .ok_or("the pinned Zig executable has no parent directory")?;
-    // cc-rs splits a compiler command with arguments on spaces. Find the pinned Zig via PATH
-    // so a space in the checkout path does not split its name.
-    let inherited = env::var_os("PATH").unwrap_or_default();
-    let path =
-        env::join_paths(std::iter::once(dir.to_owned()).chain(env::split_paths(&inherited)))?;
-    // Target-specific CFLAGS are appended after cc-rs's own --target, which uses Rust's spelling.
-    let mut flags = env::var_os(FLAGS).unwrap_or_default();
-    flags.push(" --target=x86_64-linux-musl -fno-sanitize=all");
+    // One executable, xtask as `MUSL_CC`: cc-rs drops the arguments of a compiler named as
+    // `zig cc` from its flag and family checks, which then all fail.
+    let cc = zig.with_file_name(MUSL_CC);
+    let xtask = env::current_exe()
+        .map_err(|error| format!("finding xtask's own executable failed: {error}"))?;
+    // Made beside it, then renamed over it, so that a build at once never finds it missing.
+    let made = zig.with_file_name(format!(".{MUSL_CC}.{}", process::id()));
+    let linked = std::os::unix::fs::symlink(&xtask, &made).and_then(|()| fs::rename(&made, &cc));
+    if let Err(error) = linked {
+        // Made and not renamed, or not made.
+        let _ = fs::remove_file(&made);
+        return Err(format!("linking {} failed: {error}", cc.display()).into());
+    }
     Ok(build
-        .env("PATH", path)
-        .env("ZIG_LIB_DIR", dir.join("lib"))
-        .env("ZIG_GLOBAL_CACHE_DIR", dir.join("cache"))
-        .env("CC_x86_64_unknown_linux_musl", "zig cc")
-        .env(FLAGS, flags))
+        .env("ZIG_LIB_DIR", zig.with_file_name("lib"))
+        .env("ZIG_GLOBAL_CACHE_DIR", zig.with_file_name("cache"))
+        .env("CC_x86_64_unknown_linux_musl", cc))
+}
+
+/// Runs the pinned Zig's C compiler with this process's arguments, if xtask runs as
+/// [`MUSL_CC`], and returns how that failed; otherwise returns `None`.
+pub(crate) fn run_as_musl_cc() -> Option<ExitCode> {
+    let mut args = env::args_os();
+    let cc = PathBuf::from(args.next()?);
+    if cc.file_name()? != MUSL_CC {
+        return None;
+    }
+    let zig = cc.with_file_name("zig");
+    // cc-rs passes `--target` in Rust's spelling: Zig takes the last, its own.
+    // Zig finds its library and cache directories in the environment that cc-rs gives it.
+    let error = stdx::process::command(&zig, Environment::Inherited)
+        .arg("cc")
+        .args(args)
+        .args(["--target=x86_64-linux-musl", "-fno-sanitize=all"])
+        .exec();
+    eprintln!(
+        "xtask: running {} failed: {error}: run `cargo xtask install-tools` to fetch it again",
+        zig.display()
+    );
+    Some(ExitCode::FAILURE)
 }
 
 /// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root,

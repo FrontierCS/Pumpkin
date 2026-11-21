@@ -261,6 +261,9 @@ mod flags {
 }
 
 fn main() -> ExitCode {
+    if let Some(failed) = tools::run_as_musl_cc() {
+        return failed;
+    }
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

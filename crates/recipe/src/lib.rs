@@ -726,14 +726,9 @@ fn pinned(image: &str, stage: bool, named: &Named<'_>) -> Result<(), String> {
 }
 
 fn digest(text: &str) -> bool {
-    text.strip_prefix("sha256:").is_some_and(sha256_hex)
-}
-
-fn sha256_hex(hex: &str) -> bool {
-    hex.len() == 64
-        && hex
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    (text.strip_prefix("sha256:")).is_some_and(|hex| {
+        hex.len() == 64 && (hex.bytes()).all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 pub(crate) fn name(word: &str) -> Result<(), String> {

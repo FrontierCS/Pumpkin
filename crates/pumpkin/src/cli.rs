@@ -649,7 +649,7 @@ const LOCK_ABOUT: &str = "\
 Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
 lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
 above its line `FROM scratch AS <stage>`, up to the blank line that ends it: an
-`ADD` for each file the resolver finds, pinned by its SHA-256. The
+`ADD` for each file that the resolver prints, pinned by its SHA-256. The
 resolver runs online, in the image of the recipe up to the one later `RUN` that
 mounts the stage, built on the machine's Docker engine with the inputs that the
 task's images give the recipe: its context, mounts, args and named contexts,

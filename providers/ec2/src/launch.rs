@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use provider::{
     Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, Undeleted, UnixTime,
 };
-use schema::ec2_boot::{CONSOLE_PREFIX, Start};
+use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
 use schema::ir::Name;
 use schema::sandbox::TcpDial;
 use serde::Deserialize;
@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 use stdx::{Context as _, Deadline};
 
 use crate::{Ec2, InstanceClass, Reached};
+
+const ENTRY: &str = include_str!("entry.sh");
 
 // The tag by which a run finds its instances, and a delete knows an instance is the run's.
 const RUN_TAG: &str = "pumpkin:run";
@@ -107,7 +109,7 @@ impl Ec2<'_> {
             run,
             name,
             &tags,
-            &crate::entry::user_data(&start, self.region.as_str()),
+            &user_data(&start, self.region.as_str()),
             by,
         )?;
         self.set_timer(run, &id, hard_end, by)?;
@@ -593,6 +595,31 @@ struct ConsoleOutput {
     output: Option<String>,
 }
 
+// Fills the entry's placeholders with the start's values, quoted as the shell reads them.
+fn user_data(start: &Start, region: &str) -> String {
+    let Ok(json) = serde_json::to_string(start) else {
+        unreachable!(
+            "a start can't be written as JSON, though it holds only strings, numbers, booleans \
+             and an address"
+        )
+    };
+    let filled = [
+        ("@PREFIX@", CONSOLE_PREFIX.to_owned()),
+        ("@HARD_END@", start.hard_end_unix_seconds.to_string()),
+        ("@PULLS_BY@", start.pulls_by_unix_seconds.to_string()),
+        ("@REGION@", quote(region)),
+        ("@REGISTRY@", quote(&start.registry)),
+        ("@SANDBOXD_IMAGE@", quote(&start.sandboxd_image)),
+        ("@BOOT_IN_IMAGE@", BOOT_IN_IMAGE.to_owned()),
+        ("@GRANT_DIR@", GRANT_DIR.to_owned()),
+        // On one line, which is never the heredoc's delimiter, as JSON begins with `{`.
+        ("@START@", json),
+    ];
+    (filled.iter()).fold(ENTRY.to_owned(), |script, (placeholder, value)| {
+        script.replace(placeholder, value)
+    })
+}
+
 fn tag_specifications(run: &RunTag, name: &Name, role: &Name) -> String {
     // `<run>.<name>`, what EC2's console shows of the instance: which sandbox of which run it is,
     // read back as both, as a name holds no `.`.
@@ -623,4 +650,13 @@ fn write_private(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
             path.display()
         )
     })
+}
+
+fn quote(word: &str) -> String {
+    let literal = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./:=,@+%".contains(&byte);
+    if !word.is_empty() && word.bytes().all(literal) {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
 }

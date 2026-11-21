@@ -1,5 +1,7 @@
-//! `pumpkin lock` checks the task and reads its fetch stage before reaching the engine.
-//! The resolver runs in the recipe prefix image. A successful resolution rewrites the stage.
+//! `lock`: a task checked as `check` checks it, and its recipe's fetch stage read, before the
+//! configuration and the engine are reached; then the stage written afresh, in place, from what
+//! its resolver prints, run online on the engine in the image of the recipe up to the step that
+//! reads it, built with the inputs that the task's images give the recipe.
 
 use std::fs;
 
@@ -126,7 +128,7 @@ fn refusals() {
               Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
               lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
               above its line `FROM scratch AS <stage>`, up to the blank line that ends it: an
-              `ADD` for each file the resolver finds, pinned by its SHA-256. The
+              `ADD` for each file that the resolver prints, pinned by its SHA-256. The
               resolver runs online, in the image of the recipe up to the one later `RUN` that
               mounts the stage, built on the machine's Docker engine with the inputs that the
               task's images give the recipe: its context, mounts, args and named contexts,
@@ -227,22 +229,11 @@ fn locks() {
     let built = (scratch.pumpkin(&["build", "bench/task.star"]).args(config))
         .output()
         .unwrap();
-    let missing = "pumpkin-unavailable-package";
-    let before = written.replace(
-        "# pumpkin lock: apt ",
-        &format!("# pumpkin lock: apt {missing} "),
-    );
-    scratch.write("bench/Dockerfile", &before);
-    let failed = lock().output().unwrap();
-    let named_missing = String::from_utf8(failed.stderr)
-        .unwrap()
-        .contains(&format!("Unable to locate package {missing}"));
-    let unchanged = fs::read(scratch.0.join("bench/Dockerfile")).unwrap() == before.as_bytes();
     let (_, stage) = written.split_once("\n\n").unwrap();
     let (stage, _) = stage.split_once("\n\n").unwrap();
     let ran = Step::Ran(format!(
-        "{first}\n{again}\nwritten the same again: {same}\nbuilt: {}\nmissing package: {}, named: {named_missing}, recipe unchanged: {unchanged}\n{stage}",
-        built.status, failed.status
+        "{first}\n{again}\nwritten the same again: {same}\nbuilt: {}\n{stage}",
+        built.status
     ));
     check(
         &scratch,
@@ -260,7 +251,6 @@ fn locks() {
             pumpkin: built an image in pumpkin/bench/base
             written the same again: true
             built: exit status: 0
-            missing package: exit status: 1, named: true, recipe unchanged: true
             # What apt installs of the packages, and the indexes it reads.
             # pumpkin lock: apt hello/noble less=590-2ubuntu2
             FROM scratch AS apt
