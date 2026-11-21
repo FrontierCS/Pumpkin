@@ -19,13 +19,7 @@ jobs:
           persist-credentials: false
 
       - name: Build and check the release
-        shell: bash
-        run: |
-          RUSTUP_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
-          export RUSTUP_TOOLCHAIN
-          echo "RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN" >> "$GITHUB_ENV"
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target x86_64-unknown-linux-musl --no-self-update
-          cargo xtask release "$TAG"
+        run: cargo xtask release "$TAG"
 
       - name: Publish the launcher, pin and archive
         env:

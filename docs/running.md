@@ -1,17 +1,16 @@
 # Running workflows
 
 This page is for the operator: whoever runs workflows with `pumpkin` and holds the machine's
-configuration and keys. It goes through what the operator does, in order: install Pumpkin in a
-repository of tasks, configure the machine, check a task, run it, and follow, list, stop and
-clean up its runs. Each command's `--help` holds its every argument, output and exit status; this
-page says what each is for and how they fit.
+configuration and keys. It goes through how to configure the machine, check a task, run it,
+and follow, list, stop and clean up its runs. Each command's `--help` lists its arguments, output
+and exit status. This page says what each command is for and how they fit together.
 
 ## Installing
 
-Follow the [quickstart](../README.md#quickstart) to install or upgrade Pumpkin in a task
-repository. Each release provides `pumpkin`, the launcher, and `pumpkinversion`, which the
-repository keeps as `.pumpkinversion`. Its one line pins the tag, full commit and SHA-256 of the
-release archive.
+The task maintainer follows the README's
+[install or upgrade instructions](../README.md#installing-or-upgrading-a-task-repository).
+Each release provides `pumpkin`, the launcher, and `pumpkinversion`, which the repository keeps as
+`.pumpkinversion`. Its one line pins the tag, full commit and SHA-256 of the release archive.
 
 The first run downloads the archive, verifies its checksum and unpacks the release under
 `${XDG_CACHE_HOME:-$HOME/.cache}/pumpkin/`. Every repository that pins the same release runs it

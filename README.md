@@ -37,31 +37,11 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 ## Quickstart
 
-From the root of a task repository on Linux x86-64, choose a release tag and run the commands
-below to install or upgrade Pumpkin. [Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases)
-
-```sh
-(
-    set -o errexit
-    tag='<tag>'
-    url="https://github.com/FrontierCS/Pumpkin/releases/download/$tag"
-    stage=$(mktemp --directory "$PWD/.pumpkin-install.XXXXXXXX")
-    trap 'rm --recursive --force "$stage"' EXIT
-    cd "$stage"
-    curl --fail --location --proto '=https' --output pumpkin "$url/pumpkin"
-    curl --fail --location --proto '=https' --output .pumpkinversion "$url/pumpkinversion"
-    chmod +x pumpkin
-    ./pumpkin --version
-    mv --target-directory .. pumpkin .pumpkinversion
-)
-```
-
-Commit `pumpkin` and `.pumpkinversion` to the task repository. To upgrade, repeat with the
-new tag and commit both files along with any workflow changes the release requires.
-
-On Linux x86-64, `./pumpkin` verifies and unpacks the release into the user's cache. Every
-repository that pins the release uses that install and keeps its own run state in `.pumpkin/`.
-Docker runs the sandboxes.
+On Linux x86-64, run `./pumpkin` from the root of the task repository. The `.pumpkinversion` file
+beside the launcher selects the release. If that release is missing from your cache, the launcher
+downloads it, verifies it and unpacks it there. Every repository that pins the release uses that
+install and keeps its own run state in `.pumpkin/`. Docker runs the sandboxes.
+For a new task repository, [install the launcher and pin](#installing-or-upgrading-a-task-repository).
 
 One file configures the machine for every task: `~/.config/pumpkin/pumpkin.toml`. A machine whose
 runs stay on its own Docker engine needs only this:
@@ -93,6 +73,33 @@ browser. The record is `.pumpkin/runs/<id>/`.
 
 [Run it](#run-it) shows these commands with their output.
 [docs/running.md](docs/running.md) goes through installing, configuring and each command.
+
+### Installing or upgrading a task repository
+
+For a first install or an upgrade, the task maintainer chooses a tag from the
+[published Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases).
+Replace `<tag>` below with your chosen tag and run the commands from the task repository root on
+Linux x86-64. Staging the files is optional. This recipe creates and removes its own temporary
+directory (`install_dir`) so a failed download or version check leaves the working pair in place.
+
+```sh
+(
+    set -o errexit
+    tag='<tag>'
+    url="https://github.com/FrontierCS/Pumpkin/releases/download/$tag"
+    install_dir=$(mktemp --directory "$PWD/.pumpkin-install.XXXXXXXX")
+    trap 'rm --recursive --force "$install_dir"' EXIT
+    cd "$install_dir"
+    curl --fail --location --proto '=https' --output pumpkin "$url/pumpkin"
+    curl --fail --location --proto '=https' --output .pumpkinversion "$url/pumpkinversion"
+    chmod +x pumpkin
+    ./pumpkin --version
+    mv --target-directory .. pumpkin .pumpkinversion
+)
+```
+
+Commit `pumpkin` and `.pumpkinversion` together, along with any workflow changes the release
+requires.
 
 ## Workflow in Pumpkin
 
@@ -300,9 +307,9 @@ answers; [docs/language.md](docs/language.md) holds the language.
 
 ## Run it
 
-The operator runs Pumpkin from the task repository and holds the machine's configuration and keys.
-Install the launcher and pin as shown in the [quickstart](#quickstart). A machine whose runs
-stay on its own Docker engine needs only this `~/.config/pumpkin/pumpkin.toml`:
+The operator runs the task repository's `./pumpkin` and holds the machine's configuration and
+keys. A machine whose runs stay on its own Docker engine needs only this
+`~/.config/pumpkin/pumpkin.toml`:
 
 ```toml
 [docker]
