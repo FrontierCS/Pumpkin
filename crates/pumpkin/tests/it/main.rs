@@ -47,7 +47,7 @@ mod wait;
 
 const PUMPKIN: &str = env!("CARGO_BIN_EXE_pumpkin");
 
-const AWS_GUARD: &str = ".pumpkin/no-aws";
+const AWS_GUARD: &str = "no-aws";
 
 // The command of the final call of each task that a test writes: it scores the payload by its
 // size.
@@ -97,10 +97,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
 /// Field `0` is its canonical path.
-struct Scratch(
-    PathBuf,
-    #[expect(dead_code, reason = "held for its drop, which removes it")] TestDir,
-);
+struct Scratch(PathBuf, TestDir);
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
@@ -119,15 +116,21 @@ const FINAL_BODY: &str = "<the body of final.star>";
 impl Scratch {
     fn new() -> Self {
         let dir = TestDir::new();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
         // `run` refuses a runs directory below one that its group may write, which the umask, or a
         // setgid temporary directory, could make this one.
-        fs::set_permissions(dir.path(), Permissions::from_mode(0o755)).unwrap();
-        let scratch = Self(fs::canonicalize(dir.path()).unwrap(), dir);
+        fs::set_permissions(&repo, Permissions::from_mode(0o755)).unwrap();
+        let scratch = Self(fs::canonicalize(repo).unwrap(), dir);
         install(&scratch, ".pumpkin/bin");
-        let guard = scratch.0.join(AWS_GUARD);
+        let guard = scratch.0.with_file_name(AWS_GUARD);
         fs::create_dir(&guard).unwrap();
         symlink("/bin/false", guard.join("aws")).unwrap();
         scratch
+    }
+
+    fn engine_id(&self) -> &str {
+        self.1.path().file_name().unwrap().to_str().unwrap()
     }
 
     fn write(&self, name: &str, contents: &(impl Display + ?Sized)) {
@@ -227,7 +230,8 @@ impl Scratch {
         // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
         // own first on the `PATH` it gives.
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let poisoned = iter::once(self.0.join(AWS_GUARD)).chain(std::env::split_paths(&path));
+        let poisoned =
+            iter::once(self.0.with_file_name(AWS_GUARD)).chain(std::env::split_paths(&path));
         command.env("PATH", std::env::join_paths(poisoned).unwrap());
         command
     }
@@ -1250,7 +1254,7 @@ impl<'a> StandIn<'a> {
 
     #[expect(clippy::too_many_lines, reason = "most of it is the stand-in's script")]
     fn with(scratch: &'a Scratch, info: &str, image: &str) -> Self {
-        let id = scratch.0.file_name().unwrap().to_str().unwrap();
+        let id = scratch.engine_id();
         let info = info.replace(r#""MemTotal""#, &format!(r#""ID":"{id}","MemTotal""#));
         let dir = scratch.0.display();
         let digest = format!("sha256:{}", "0".repeat(64));
@@ -1405,5 +1409,5 @@ impl Drop for StandIn<'_> {
 ///
 /// The engine is the scratch directory's own, so that the stand-in's runs never wait for others.
 fn ledger(scratch: &Scratch) -> PathBuf {
-    Path::new("/var/tmp/pumpkin-cpus").join(scratch.0.file_name().unwrap())
+    Path::new("/var/tmp/pumpkin-cpus").join(scratch.engine_id())
 }
