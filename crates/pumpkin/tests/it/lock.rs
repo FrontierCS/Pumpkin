@@ -229,11 +229,22 @@ fn locks() {
     let built = (scratch.pumpkin(&["build", "bench/task.star"]).args(config))
         .output()
         .unwrap();
+    let missing = "pumpkin-unavailable-package";
+    let before = written.replace(
+        "# pumpkin lock: apt ",
+        &format!("# pumpkin lock: apt {missing} "),
+    );
+    scratch.write("bench/Dockerfile", &before);
+    let failed = lock().output().unwrap();
+    let named_missing = String::from_utf8(failed.stderr)
+        .unwrap()
+        .contains(&format!("Unable to locate package {missing}"));
+    let unchanged = fs::read(scratch.0.join("bench/Dockerfile")).unwrap() == before.as_bytes();
     let (_, stage) = written.split_once("\n\n").unwrap();
     let (stage, _) = stage.split_once("\n\n").unwrap();
     let ran = Step::Ran(format!(
-        "{first}\n{again}\nwritten the same again: {same}\nbuilt: {}\n{stage}",
-        built.status
+        "{first}\n{again}\nwritten the same again: {same}\nbuilt: {}\nmissing package: {}, named: {named_missing}, recipe unchanged: {unchanged}\n{stage}",
+        built.status, failed.status
     ));
     check(
         &scratch,
@@ -251,6 +262,7 @@ fn locks() {
             pumpkin: built an image in pumpkin/bench/base
             written the same again: true
             built: exit status: 0
+            missing package: exit status: 1, named: true, recipe unchanged: true
             # What apt installs of the packages, and the indexes it reads.
             # pumpkin lock: apt hello/noble less=590-2ubuntu2
             FROM scratch AS apt
