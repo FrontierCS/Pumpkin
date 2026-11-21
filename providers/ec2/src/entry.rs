@@ -52,19 +52,6 @@ fn commands(start: &Start, region: &str) -> Value {
          test \"$left\" -gt 0 && timeout --signal=KILL \"$left\" \"$@\"; }}",
         start.pulls_by_unix_seconds
     );
-    let pipe = r#"aws ecr get-login-password --region "$1" | docker login --username AWS --password-stdin "$2""#;
-    let login = [
-        "bounded",
-        "logging in to the registry",
-        "bash",
-        "-o",
-        "pipefail",
-        "-c",
-        pipe,
-        "bash",
-        region,
-        &start.registry,
-    ];
     let copy = "pumpkin-boot-image";
     let create = [
         "bounded",
@@ -94,7 +81,7 @@ fn commands(start: &Start, region: &str) -> Value {
         bounded,
         ["bounded", "starting Docker", "systemctl", "start", "docker"],
         "# shellcheck disable=SC2016 # The inner bash expands its positional arguments.",
-        login,
+        registry_login(region, &start.registry),
         create,
         extract,
         [
@@ -108,5 +95,23 @@ fn commands(start: &Start, region: &str) -> Value {
         "step='running ec2-boot'",
         "# shellcheck disable=SC2094 # The shell opens stdin before rm unlinks the file.",
         format!("(rm -- {START_FILE} && exec {binary} start) <{START_FILE} >/dev/console")
+    ])
+}
+
+// Either side of the pipe can fail. Keep the password in the pipe and pass the two
+// variable arguments separately from the shell program.
+fn registry_login(region: &str, registry: &str) -> Value {
+    let pipe = r#"aws ecr get-login-password --region "$1" | docker login --username AWS --password-stdin "$2""#;
+    json!([
+        "bounded",
+        "logging in to the registry",
+        "bash",
+        "-o",
+        "pipefail",
+        "-c",
+        pipe,
+        "bash",
+        region,
+        registry
     ])
 }
