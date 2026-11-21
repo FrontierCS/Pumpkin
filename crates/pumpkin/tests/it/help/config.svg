@@ -1,4 +1,4 @@
-<svg width="740px" height="3638px" xmlns="http://www.w3.org/2000/svg">
+<svg width="740px" height="3674px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -370,53 +370,57 @@
 </tspan>
     <tspan x="10px" y="3196px"><tspan>it in its log. A minor adds only keys that an older release may safely ignore.</tspan>
 </tspan>
-    <tspan x="10px" y="3214px">
+    <tspan x="10px" y="3214px"><tspan>With `draining = true`, which the admin sets for a cutover, the settings refuse</tspan>
 </tspan>
-    <tspan x="10px" y="3232px"><tspan>[controller] is the person's controller, which deploy/aws makes. `run`, `wait`,</tspan>
+    <tspan x="10px" y="3232px"><tspan>each job as it starts, and leave the jobs that run to end.</tspan>
 </tspan>
-    <tspan x="10px" y="3250px"><tspan>`ls`, `cancel`, `view` and `reap` go to it, as each one's help says.</tspan>
+    <tspan x="10px" y="3250px">
 </tspan>
-    <tspan x="10px" y="3268px"><tspan>Each run is sent the [upstreams.&lt;name&gt;] tables, their keys, [controller.modal]</tspan>
+    <tspan x="10px" y="3268px"><tspan>[controller] is the person's controller, which deploy/aws makes. `run`, `wait`,</tspan>
 </tspan>
-    <tspan x="10px" y="3286px"><tspan>and Modal's configuration file. They go into a directory of the run's own in</tspan>
+    <tspan x="10px" y="3286px"><tspan>`ls`, `cancel`, `view` and `reap` go to it, as each one's help says.</tspan>
 </tspan>
-    <tspan x="10px" y="3304px"><tspan>the controller's tmpfs, which the run's end removes. The job runs the client's</tspan>
+    <tspan x="10px" y="3304px"><tspan>Each run is sent the [upstreams.&lt;name&gt;] tables, their keys, [controller.modal]</tspan>
 </tspan>
-    <tspan x="10px" y="3322px"><tspan>install with the module's settings and [controller.modal].</tspan>
+    <tspan x="10px" y="3322px"><tspan>and Modal's configuration file. They go into a directory of the run's own in</tspan>
 </tspan>
-    <tspan x="10px" y="3340px"><tspan>The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the</tspan>
+    <tspan x="10px" y="3340px"><tspan>the controller's tmpfs, which the run's end removes. The job runs the client's</tspan>
 </tspan>
-    <tspan x="10px" y="3358px"><tspan>task's files and starts its job over SSH to the controller's private address.</tspan>
+    <tspan x="10px" y="3358px"><tspan>install with the module's settings and [controller.modal].</tspan>
 </tspan>
-    <tspan x="10px" y="3376px"><tspan>It uses up to four connections for large task uploads. The machine needs a</tspan>
+    <tspan x="10px" y="3376px"><tspan>The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the</tspan>
 </tspan>
-    <tspan x="10px" y="3394px"><tspan>route there, and deploy/aws's `ssh_from` must admit it. The first command</tspan>
+    <tspan x="10px" y="3394px"><tspan>task's files and starts its job over SSH to the controller's private address.</tspan>
 </tspan>
-    <tspan x="10px" y="3412px"><tspan>creates a key and enrols it through EC2 Instance Connect. The client keeps that</tspan>
+    <tspan x="10px" y="3412px"><tspan>It uses up to four connections for large task uploads. The machine needs a</tspan>
 </tspan>
-    <tspan x="10px" y="3430px"><tspan>key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
+    <tspan x="10px" y="3430px"><tspan>route there, and deploy/aws's `ssh_from` must admit it. The first command</tspan>
 </tspan>
-    <tspan x="10px" y="3448px"><tspan>  name          The `name` that deploy/aws was applied with.</tspan>
+    <tspan x="10px" y="3448px"><tspan>creates a key and enrols it through EC2 Instance Connect. The client keeps that</tspan>
 </tspan>
-    <tspan x="10px" y="3466px"><tspan>  region        The region it was applied in.</tspan>
+    <tspan x="10px" y="3466px"><tspan>key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
 </tspan>
-    <tspan x="10px" y="3484px">
+    <tspan x="10px" y="3484px"><tspan>  name          The `name` that deploy/aws was applied with.</tspan>
 </tspan>
-    <tspan x="10px" y="3502px"><tspan>[controller.modal] is the Modal provider that the controller's runs may place</tspan>
+    <tspan x="10px" y="3502px"><tspan>  region        The region it was applied in.</tspan>
 </tspan>
-    <tspan x="10px" y="3520px"><tspan>roles on, if any. It takes the settings of a provider of kind modal, but</tspan>
+    <tspan x="10px" y="3520px">
 </tspan>
-    <tspan x="10px" y="3538px"><tspan>`images`, which the module's settings give, and `dials_from`, which each run</tspan>
+    <tspan x="10px" y="3538px"><tspan>[controller.modal] is the Modal provider that the controller's runs may place</tspan>
 </tspan>
-    <tspan x="10px" y="3556px"><tspan>sets:</tspan>
+    <tspan x="10px" y="3556px"><tspan>roles on, if any. It takes the settings of a provider of kind modal, but</tspan>
 </tspan>
-    <tspan x="10px" y="3574px"><tspan>  profile       As modal's. The profile is in Modal's configuration file,</tspan>
+    <tspan x="10px" y="3574px"><tspan>`images`, which the module's settings give, and `dials_from`, which each run</tspan>
 </tspan>
-    <tspan x="10px" y="3592px"><tspan>                ~/.modal.toml. Each run is sent that file if it is there.</tspan>
+    <tspan x="10px" y="3592px"><tspan>sets:</tspan>
 </tspan>
-    <tspan x="10px" y="3610px"><tspan>  classes       As modal's.</tspan>
+    <tspan x="10px" y="3610px"><tspan>  profile       As modal's. The profile is in Modal's configuration file,</tspan>
 </tspan>
-    <tspan x="10px" y="3628px">
+    <tspan x="10px" y="3628px"><tspan>                ~/.modal.toml. Each run is sent that file if it is there.</tspan>
+</tspan>
+    <tspan x="10px" y="3646px"><tspan>  classes       As modal's.</tspan>
+</tspan>
+    <tspan x="10px" y="3664px">
 </tspan>
   </text>
 

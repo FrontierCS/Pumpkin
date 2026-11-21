@@ -142,3 +142,9 @@ variable "client_users" {
     error_message = "A client user is not an IAM user name (1 to 64 of A-Z, a-z, 0-9 and `+=,.@_-`, with no path): give one such as `alice`."
   }
 }
+
+variable "draining" {
+  description = "Whether the controller's settings say `draining = true`, so that each job that starts is refused while those that run end, for a cutover."
+  type        = bool
+  default     = false
+}
