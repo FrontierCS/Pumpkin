@@ -8,6 +8,7 @@ import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, 
  * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null }} Runs
  * @typedef {object} ListedRun a run as `ls` lists it
  * @property {string} id
+ * @property {string} [member] the member whose job the run is, on a controller whose job names one
  * @property {boolean} live
  * @property {string} state "unread" for a run that another build made, whose page this build can't draw
  * @property {boolean} has_result
@@ -34,10 +35,18 @@ const COLUMNS = [
   ["", "rest"],
 ];
 
+// After the run's id, when some run names its member.
+const MEMBER = ["Member", ""];
+
 export async function runsView() {
   const body = h("tbody");
   const more = h("div", { class: "more" });
-  const table = h("table", { class: "runs" }, h("thead", {}, h("tr", {}, COLUMNS.map(([name, cls]) => h("th", { class: cls }, name)))), body);
+  const head = h("tr", {});
+  const table = h("table", { class: "runs" }, h("thead", {}, head), body);
+  // Whether the columns hold the member's, as `ls` shows it only when some run names one.
+  /** @type {boolean | null} */
+  let membered = null;
+  const columns = () => (membered ? [...COLUMNS.slice(0, 2), MEMBER, ...COLUMNS.slice(2)] : COLUMNS);
   /** @type {{ first: Array<ListedRun | Unlisted>, older: Array<ListedRun | Unlisted>, next: string | null, cursor: number }} */
   const state = { first: [], older: [], next: null, cursor: -1 };
   // Each run's row, by its id, made once and changed after.
@@ -55,7 +64,7 @@ export async function runsView() {
       return /** @type {Cell[]} */ ([
         { cls: "", title: null, text: "" },
         { cls: "id", title: null, text: run.id },
-        { cls: "error", title: null, text: run.error, span: COLUMNS.length - 2 },
+        { cls: "error", title: null, text: run.error, span: columns().length - 2 },
       ]);
     }
     const listed = /** @type {ListedRun} */ (run);
@@ -66,6 +75,7 @@ export async function runsView() {
     return /** @type {Cell[]} */ ([
       { cls: "state", title: null, text: sentence(listed.state), mark: "mark " + tone(listed) },
       { cls: "id", title: null, text: listed.id },
+      ...(membered ? [{ cls: "", title: null, text: listed.member ?? "-" }] : []),
       { cls: "num", title: null, text: listed.time },
       { cls: "mono", title: null, text: listed.bound },
       { cls: "num", title: null, text: listed.usd },
@@ -106,6 +116,11 @@ export async function runsView() {
   const draw = () => {
     const runs = [...state.first, ...state.older];
     if (!runs.length) return show(h("p", { class: "empty" }, "No runs here yet."));
+    const members = runs.some((run) => run.error === undefined && run.member !== undefined);
+    if (members !== membered) {
+      membered = members;
+      head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
+    }
     const shown = runs.map(row);
     // Rows are moved only where the order changed, and the rows of unlisted runs removed.
     shown.forEach((tr, index) => {

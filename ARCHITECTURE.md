@@ -414,7 +414,7 @@ file by file, with `record.json` last, its
 `listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
 `linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
 client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
-lists the jobs that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
+lists the jobs, each with its member (`member`), that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
 and is of the client's own build, installed there
 whole, its executable and the files beside it, by a SHA-256 of theirs;
 `manifest` describes the task tree and the client install that `send` transfers by content, and
@@ -465,6 +465,12 @@ sends only what the store lacks, and no secret of a job's goes there.
 or that the IR of a running job's started run names. Each job names what it holds in its directory
 in tmpfs, which its unit removes as it ends, and a prune reads those names under the lock of the
 jobs' directory.
+
+**Architecture Invariant:** `serve` acts for the member that the controller's forced command
+names (`--member`, a `member::Member`), and each run's job it starts records that member.
+`cancel` matches only that member's runs, and those that name no member, unless asked
+otherwise. This prevents accidents, not members: each member's build runs as the controller's
+one user.
 
 **Architecture Invariant:** each `pumpkin` process adds 022 to its umask as it starts (`main`), so
 nothing it makes, a run's record included, is writable by another user.
@@ -677,7 +683,7 @@ ledger of CPUs, which every run on the engine shares; and the machine's key to i
 with the host keys it pinned. On a controller, below the controller user's home, as the `job`
 module lays out, the jobs also keep the store of the files that clients sent, the trees of links
 into it and each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the
-clients upload.
+clients upload; each run's job directory also names its member.
 
 ### Testing
 

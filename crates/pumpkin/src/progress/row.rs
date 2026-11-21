@@ -6,6 +6,7 @@ use runtime::{Ending, Stopped};
 use serde::{Deserialize, Serialize};
 
 use super::{Columns, Listed, State, columns, under};
+use crate::member::Member;
 
 /// A run in a listing, rendered at the time and with the runs directory that it was made with.
 #[derive(Serialize, Deserialize)]
@@ -14,6 +15,8 @@ pub(crate) struct Row {
     pub(crate) cells: Columns,
     pub(super) stage: Stage,
     pub(super) spent: Spent,
+    /// The member whose job the run is, on a controller whose job names one.
+    pub(crate) member: Option<Member>,
 }
 
 /// What a run is doing or how it ended, with what only that stage has.
@@ -74,6 +77,7 @@ impl Row {
             cells: columns(id, listed, stage.state(), now, runs),
             stage,
             spent: Spent::of(listed),
+            member: None,
         }
     }
 
