@@ -39,13 +39,14 @@ variable "modal_workspace" {
 # `usd_per_hour` is what its instance type costs an hour in the region, as AWS's pricing page
 # gives it.
 variable "classes" {
-  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars, and its instances' root volume, in GiB, which is `root_volume_gib` without it."
+  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars, its instances' root volume, in GiB, which is `root_volume_gib` without it, and the most seconds an instance's start may take, its images' pulls among them, which is 1740 without it."
   type = map(object({
     instance_type   = string
     cpu_features    = set(string)
     cpu_model       = optional(string)
     usd_per_hour    = optional(number)
     root_volume_gib = optional(number)
+    startup_seconds = optional(number)
   }))
   default = {
     # Targets of up to 8 CPUs (AMD EPYC 7R13, Zen 3).

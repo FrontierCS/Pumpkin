@@ -38,10 +38,11 @@ use serde_json::{Value, json};
 
 mod launch;
 
-/// The most seconds a sandbox's start takes, as each class's [`Class::startup_seconds`] declares
-/// it: the shares of the launch, the boot, and Docker's install and the images' pulls, then the
-/// container's create and start, and its `sandboxd`'s dial and set-up. The boot's steps are bounded
-/// by the create's deadline alone, so a start asked with less than this ahead is still tried.
+/// The most seconds a sandbox's start takes, as a class's [`Class::startup_seconds`] declares it
+/// unless its settings give another (`InstanceClass::startup_seconds`): the shares of the launch,
+/// the boot, and Docker's install and the images' pulls, then the container's create and start,
+/// and its `sandboxd`'s dial and set-up. The boot's steps are bounded by the create's deadline
+/// alone, so a start asked with less than this ahead is still tried.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(600 + 300 + 300 + 240 + 180 + 120).unwrap();
 
 const MILLIS_PER_CPU: NonZeroU64 = NonZeroU64::new(ir::MILLIS_PER_CPU).unwrap();
@@ -99,9 +100,10 @@ struct Repositories<T> {
 
 /// An instance class, as the envelope made it: its launch template, at the version that each
 /// create launches; its instance type's CPUs and memory, in MiB; its CPU's flags and model, as
-/// `/proc/cpuinfo` names them; and the price that the operator says an instance costs. Without
-/// `cpu_features`, it states no flag, without `cpu_model`, no model, and without
-/// `usd_per_hour`, no price.
+/// `/proc/cpuinfo` names them; the price that the operator says an instance costs; and the most
+/// seconds an instance's start takes. Without `cpu_features`, it states no flag, without
+/// `cpu_model`, no model, without `usd_per_hour`, no price, and without `startup_seconds`,
+/// [`STARTUP_SECONDS`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstanceClass {
@@ -114,6 +116,9 @@ struct InstanceClass {
     cpu_model: Option<CpuModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usd_per_hour: Option<UsdPerHour>,
+    // A class whose roles' images take longer to pull than the default allows, at the instance's
+    // disk's throughput, needs a longer start.
+    startup_seconds: Option<NonZeroU64>,
 }
 
 impl InstanceClass {
@@ -325,7 +330,7 @@ fn ready(report: Value, classes: &BTreeMap<Name, InstanceClass>) -> Ready {
         };
         let class = Class {
             offers,
-            startup_seconds: STARTUP_SECONDS,
+            startup_seconds: class.startup_seconds.unwrap_or(STARTUP_SECONDS),
             usd_per_hour: class.usd_per_hour,
         };
         (name.clone(), class)
