@@ -17,12 +17,17 @@ resource "aws_iam_role_policy" "controller" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # A create's `run-instances`, from the envelope's templates alone, with its run's tags.
+      # A create's `run-instances`, from the envelope's templates alone, with none of the
+      # resources they name overridden, with its run's tags:
+      # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html#iam-example-runinstances-launch-templates
       {
-        Effect    = "Allow"
-        Action    = "ec2:RunInstances"
-        Resource  = "*"
-        Condition = { ArnEquals = { "ec2:LaunchTemplate" = [for template in aws_launch_template.class : template.arn] } }
+        Effect   = "Allow"
+        Action   = "ec2:RunInstances"
+        Resource = "*"
+        Condition = {
+          ArnEquals = { "ec2:LaunchTemplate" = [for template in aws_launch_template.class : template.arn] }
+          Bool      = { "ec2:IsLaunchTemplateResource" = "true" }
+        }
       },
       {
         Effect    = "Allow"

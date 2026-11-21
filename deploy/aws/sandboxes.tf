@@ -76,6 +76,18 @@ resource "aws_launch_template" "class" {
       delete_on_termination = true
     }
   }
+
+  # `sandboxd` is built for x86-64 alone, and EC2 serves the latest serial console, which a
+  # sandbox's console reads, only on the Nitro System, its bare metal types included.
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        contains(data.aws_ec2_instance_type.class[each.key].supported_architectures, "x86_64"),
+        data.aws_ec2_instance_type.class[each.key].hypervisor == "nitro" || data.aws_ec2_instance_type.class[each.key].bare_metal,
+      ])
+      error_message = "Class ${each.key}'s instance type, ${each.value.instance_type}, is not an x86-64 one built on the Nitro System: give one such as `c6a.2xlarge`."
+    }
+  }
 }
 
 # The timer outside each instance's guest: one-shot schedules in this group terminate an instance
@@ -111,11 +123,15 @@ resource "aws_iam_role_policy" "timer" {
 }
 
 locals {
-  # Terminate an instance that a run launched, as its `pumpkin:run` tag says.
+  # Terminate an instance that a run of this envelope launched, as its `pumpkin:run` tag and its
+  # instance profile say, so that no other envelope's in the account is reached.
   terminate_sandboxes = {
-    Effect    = "Allow"
-    Action    = "ec2:TerminateInstances"
-    Resource  = "${local.ec2}:instance/*"
-    Condition = { Null = { "ec2:ResourceTag/pumpkin:run" = "false" } }
+    Effect   = "Allow"
+    Action   = "ec2:TerminateInstances"
+    Resource = "${local.ec2}:instance/*"
+    Condition = {
+      Null      = { "ec2:ResourceTag/pumpkin:run" = "false" }
+      ArnEquals = { "ec2:InstanceProfile" = aws_iam_instance_profile.sandbox.arn }
+    }
   }
 }
