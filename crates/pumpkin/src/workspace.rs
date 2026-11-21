@@ -8,9 +8,8 @@ pub(crate) const DIR: &str = ".pumpkin";
 
 pub(crate) const RUNS: &str = "runs";
 
-/// The nearest [`DIR`] above the executable of this `pumpkin`: all that `pumpkin` writes on this
-/// machine is below it, so that what a repository's Pumpkin builds and records goes with the
-/// repository.
+/// The repository's working state. The launcher names it when the executable is in the user's
+/// release cache. A directly installed executable finds its enclosing [`DIR`].
 pub(crate) struct Workspace(PathBuf);
 
 /// The path of this executable. `expected` ends the message of a failure to find it.
@@ -21,6 +20,15 @@ pub(crate) fn exe(expected: &str) -> Result<PathBuf, String> {
 
 impl Workspace {
     pub(crate) fn find() -> Result<Self, String> {
+        if let Some(dir) = env::var_os("PUMPKIN_WORKSPACE") {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() && dir.file_name() == Some(DIR.as_ref()) {
+                return Ok(Self(dir));
+            }
+            return Err(format!(
+                "PUMPKIN_WORKSPACE must be an absolute path to a `{DIR}` directory"
+            ));
+        }
         let exe = exe(&format!(
             "expected it in a workspace's `{DIR}` directory, which holds all it writes"
         ))?;
@@ -30,15 +38,15 @@ impl Workspace {
         let Some(dir) = found else {
             return Err(format!(
                 "this `pumpkin`, {}, is in no directory named `{DIR}`, which would hold all it \
-                 writes: run the one that a repository's `./pumpkin` builds, or that `cargo \
-                 xtask install` installs in a checkout's `{DIR}/bin`",
+                 writes: run the one that a repository's `./pumpkin` launches, or that `cargo \
+                 xtask build` puts in a checkout's `{DIR}/bin`",
                 exe.display()
             ));
         };
         Ok(Self(dir.to_owned()))
     }
 
-    /// The directory that holds [`DIR`]: the repository whose `./pumpkin` builds this `pumpkin`.
+    /// The repository that holds [`DIR`].
     pub(crate) fn repository(&self) -> &Path {
         self.0.parent().unwrap_or(&self.0)
     }

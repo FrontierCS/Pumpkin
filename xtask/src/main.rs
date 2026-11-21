@@ -26,6 +26,7 @@ mod figure;
 mod live;
 mod op_stats;
 mod page;
+mod release;
 mod settings;
 mod star;
 mod tidy;
@@ -108,17 +109,25 @@ mod flags {
             /// ec2-boot that the EC2 provider's image of it holds too, and prints sandboxd's path.
             cmd sandboxd {}
 
-            /// Builds `pumpkin`, the static sandboxd and ec2-boot, and installs them side by side
-            /// in `<root>/bin`, with the Modal provider's helper and its lock, where `pumpkin`
-            /// finds that sandboxd by default, and that helper, and with the pinned buildifier,
-            /// which `pumpkin fmt` and `pumpkin check` run; prints each path. It runs on Linux
-            /// on x86-64 alone, the platform the tools are pinned for.
-            cmd install {
+            /// Builds `pumpkin`, the static sandboxd and ec2-boot, and puts them in `<root>/bin`
+            /// with the pinned buildifier, the Modal helper and its lock. Prints each file's path.
+            /// The pinned tools require Linux on x86-64.
+            cmd build {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
                 /// The target for `pumpkin`, as in cargo's `--target`. The default is
                 /// `x86_64-unknown-linux-musl`, built static with Zig as its C compiler.
                 optional --target triple: String
+            }
+
+            /// Builds and checks the Linux x86-64 archive, launcher and pin from this checkout
+            /// in `target/release-assets/<tag>/`.
+            cmd release {
+                /// The tag to put in the archive's name.
+                required tag: String
+                /// Publishes the existing files as the latest GitHub release for the tag.
+                /// The default is to build them locally.
+                optional --publish
             }
 
             /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
@@ -166,7 +175,8 @@ mod flags {
         Live(Live),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
-        Install(Install),
+        Build(Build),
+        Release(Release),
         Mutants(Mutants),
         Refill(Refill),
         InstallTools(InstallTools),
@@ -202,9 +212,16 @@ mod flags {
     pub struct Sandboxd;
 
     #[derive(Debug)]
-    pub struct Install {
+    pub struct Build {
         pub root: Option<PathBuf>,
         pub target: Option<String>,
+    }
+
+    #[derive(Debug)]
+    pub struct Release {
+        pub tag: String,
+
+        pub publish: bool,
     }
 
     #[derive(Debug)]
@@ -299,8 +316,11 @@ fn try_main() -> Result<()> {
             println!("{}", sandboxd(&cargo)?.display());
             Ok(())
         }
-        flags::XtaskCmd::Install(flags::Install { root, target }) => {
-            install(&cargo, root, target.as_deref().unwrap_or(MUSL))
+        flags::XtaskCmd::Build(flags::Build { root, target }) => {
+            build(&cargo, root, target.as_deref().unwrap_or(MUSL))
+        }
+        flags::XtaskCmd::Release(flags::Release { tag, publish }) => {
+            release::run(&cargo, &tag, publish)
         }
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
             mutants(&cargo, &paths, in_diff.as_deref())
@@ -559,14 +579,14 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
 /// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
 /// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
 fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    release(cargo, "ec2-boot", MUSL)?;
-    release(cargo, "sandboxd", MUSL)
+    release_binary(cargo, "ec2-boot", MUSL)?;
+    release_binary(cargo, "sandboxd", MUSL)
 }
 
 /// Builds the release binary of `package`, which has its name, for `target`,
 /// and returns the path cargo reports for it, so that the path is right wherever cargo's
 /// configuration puts the target directory.
-fn release(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
+fn release_binary(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
     let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
     let build = build.args(["--target", target]);
     let build = if package == "pumpkin" && target == MUSL {
@@ -613,7 +633,7 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
 /// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
 /// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
 /// `root`, says if `<root>/bin` is not on `PATH`.
-fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
+fn build(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -623,7 +643,7 @@ fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
     let mut built = vec![
-        ("pumpkin", release(cargo, "pumpkin", target)?, 0o755),
+        ("pumpkin", release_binary(cargo, "pumpkin", target)?, 0o755),
         ("buildifier", star::buildifier(cargo)?, 0o755),
     ];
     let sandboxd = sandboxd(cargo)?;
@@ -643,7 +663,7 @@ fn install(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
         let to = bin.join(name);
         // Copied beside it, then renamed over it: a copy over a `pumpkin` that runs would fail,
         // as Linux refuses to write a file that a process executes.
-        let copy = bin.join(format!(".{name}.xtask-install"));
+        let copy = bin.join(format!(".{name}.xtask-build"));
         // Each sandbox's processes run as its role's user, who must execute `sandboxd`.
         let installed = (fs::copy(from, &copy))
             .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(mode)))

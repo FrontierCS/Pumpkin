@@ -13,6 +13,21 @@ use super::{
 };
 
 #[test]
+fn launcher_workspace() {
+    let scratch = Scratch::new();
+    let id = "20261107-120000-1b8a6389";
+    write_record(&scratch, id, true, Some(returned(7.0)));
+    let workspace = scratch.0.join("consumer/.pumpkin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::rename(scratch.0.join("runs"), workspace.join("runs")).unwrap();
+    let mut command = scratch.program(super::PUMPKIN, &["ls"]);
+    command.env("PUMPKIN_WORKSPACE", &workspace);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8(output.stdout).unwrap().contains(id));
+}
+
+#[test]
 fn lists() {
     let scratch = Scratch::new();
     let task = |id: &str, name: &str| {

@@ -1,0 +1,27 @@
+name: release
+
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.created && !github.event.deleted
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and check the release
+        run: cargo xtask release "$TAG"
+
+      - name: Publish the launcher, pin and archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release "$TAG" --publish

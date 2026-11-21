@@ -179,7 +179,7 @@ fn usage() {
               Options:
                     --runs <dir>
                         The directory of the runs to publish.
-                        Default: runs/ in the .pumpkin directory that this pumpkin is in
+                        Default: runs/ in the repository's .pumpkin directory
 
                     --bucket <name>
                         The S3 bucket to upload to.

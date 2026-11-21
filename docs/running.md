@@ -1,36 +1,29 @@
 # Running workflows
 
 This page is for the operator: whoever runs workflows with `pumpkin` and holds the machine's
-configuration and keys. It goes through what the operator does, in order: install Pumpkin in a
-repository of tasks, configure the machine, check a task, run it, and follow, list, stop and
-clean up its runs. Each command's `--help` holds its every argument, output and exit status; this
-page says what each is for and how they fit.
+configuration and keys. It goes through how to configure the machine, check a task, run it,
+and follow, list, stop and clean up its runs. Each command's `--help` lists its arguments, output
+and exit status. This page says what each command is for and how they fit together.
 
 ## Installing
 
-A repository of tasks runs Pumpkin through `./pumpkin`, a copy of `deploy/pumpkin`, beside a
-`.pumpkinversion` file of one line: the Pumpkin tag to run, then the full commit that the tag must
-name.
+The task maintainer follows the README's
+[install or upgrade instructions](../README.md#installing-or-upgrading-a-task-repository).
+Each release provides `pumpkin`, the launcher, and `pumpkinversion`, which the repository keeps as
+`.pumpkinversion`. Its one line pins the tag, full commit and SHA-256 of the release archive.
 
-```console
-$ cp ../Pumpkin/deploy/pumpkin ./pumpkin
-$ echo "<tag> <commit>" > .pumpkinversion
-$ ./pumpkin --version
-```
+The first run downloads the archive, verifies its checksum and unpacks the release under
+`${XDG_CACHE_HOME:-$HOME/.cache}/pumpkin/`. Every repository that pins the same release runs it
+from that cache. Installing an uncached release on Linux x86-64 needs curl or wget, `sha256sum`,
+tar, xz, `flock` from util-linux and TLS certificates.
 
-The first run fetches the tag and checks that it names that commit, downloads Rust's installer and the Zig
-C compiler, checks their SHA-256 pins, builds a static Pumpkin and runs it. Later runs start the
-built one at once. It needs Linux on x86-64, git, curl, `sha256sum`, tar, xz, a C linker and TLS
-certificates, and names the packages to install if one is missing. `./pumpkin
---pumpkin-repository=<url> …`, as its first argument, fetches from another repository, such as a
-local clone.
+To build a checkout for development, run `cargo xtask build` from it and use its
+`.pumpkin/bin/pumpkin`.
 
-What Pumpkin writes for a repository is below `.pumpkin/` beside `./pumpkin`: the build, the
-runs' records in `.pumpkin/runs/`, and what builds and providers keep. It ignores itself in git,
-and deleting it loses only the records and the build. Outside it are only the Docker engine's
-images, the records of a run whose `--runs` names another directory, the files that `fmt` and
-`lock` rewrite, and the ssh key that a machine keeps for its controller, in
-`~/.config/pumpkin/ssh/`.
+The repository's `.pumpkin/` beside `./pumpkin` holds its runs in `.pumpkin/runs/` and the state
+its builds and providers keep. The directory ignores itself in Git. The shared release cache,
+Docker engine's images, records written to an explicit `--runs` directory, files `fmt` and
+`lock` rewrite, and the controller's client SSH keys in `~/.config/pumpkin/ssh/` live elsewhere.
 
 ## The machine's configuration
 

@@ -57,9 +57,8 @@ On boot, systemd runs these entries so each build reaps the records it wrote.
 name `sandboxctl`, it is the shim through which code in the sandbox makes ops. `ec2-boot`
 (`providers/ec2/boot`) boots each instance of the EC2 provider.
 
-`cargo xtask` (`xtask`) holds the contributor tasks, which `cargo xtask --help` lists. A repository
-that uses Pumpkin copies in `deploy/pumpkin` as `./pumpkin`, which builds the Pumpkin it pins and
-runs it.
+`cargo xtask` (`xtask`) holds the contributor tasks, which `cargo xtask --help` lists. A task
+repository runs the release its `.pumpkinversion` pins through `./pumpkin`, the released launcher.
 
 The key types are `ir::Workflow`, a workflow as written; `workflow::Workflow`, parsed, and
 `Placed`, its roles placed in the classes of sandbox that providers offer; `Core`, a run's
@@ -486,18 +485,19 @@ model provider's HTTP server. A helper that one crate's tests use stays in that 
 The contributor tasks, which `cargo xtask --help` says. `ci` runs the checks every change passes,
 among them the checks of Rust files, of documents and their figures (`tidy`), of `.star` files
 (`star`), of the figure of the crates (`figure`) and of the types of the page that `view` serves
-(`page`); `live` runs those that reach a real environment; `install` installs `pumpkin` and what it
-needs beside it; `tools` pins the contributor tools.
+(`page`). `live` runs those that reach a real environment. `build` builds `pumpkin` and lays out the
+files it needs beside it. `release` packages and checks that build and publishes its archive,
+launcher and pin on GitHub. `tools` pins the contributor tools.
 
 ### `deploy/pumpkin`
 
-The consumer entry, a POSIX shell script that a repository copies in as `./pumpkin`. It fetches
-the commit that the repository's `.pumpkinversion` names, and a pinned toolchain, as its header
-says, then runs `cargo xtask install --root` into the repository's `.pumpkin`, and the `pumpkin`
-it installed. A controller job runs the same install, uploaded by the client.
+The consumer entry, a POSIX shell script that a release ships as `pumpkin`. It verifies
+the release archive pinned by `.pumpkinversion` and unpacks it into a per-user cache keyed by
+checksum. It gives the binary the repository's `.pumpkin` as its workspace. A controller job
+runs the same install, uploaded by the client.
 
-**Architecture Invariant:** building the binaries and laying out `bin` stay in `xtask`, so a
-consumer builds what a checkout builds.
+**Architecture Invariant:** `xtask` builds the binaries and lays out `bin` for releases and
+developer installs.
 
 ### `deploy/aws`
 

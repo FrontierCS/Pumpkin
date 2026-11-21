@@ -37,22 +37,11 @@ We built Pumpkin to provide clean abstractions so people can easily do error han
 
 ## Quickstart
 
-This repository is the source of the runner. A workflow lives in a repository of tasks, and that
-repository is where a run starts. Install Pumpkin there as `./pumpkin`, a copy of
-[`deploy/pumpkin`](deploy/pumpkin), beside a `.pumpkinversion` of one line: the tag to build, then
-the full commit that tag must name.
-
-```console
-$ cp /path/to/Pumpkin/deploy/pumpkin ./pumpkin
-$ echo "<tag> <commit>" > .pumpkinversion
-```
-
-The first `./pumpkin` clones the commit `.pumpkinversion` names and compiles it into `.pumpkin/`
-beside the script. Later runs start that binary. `--pumpkin-repository=<url>`, as the script's
-first argument, builds from another repository, such as this checkout. The script needs Linux on
-x86-64, git, curl, `sha256sum`, tar, xz, a C linker and TLS certificates, and names the packages
-to install if one is missing.
-Docker runs the sandboxes.
+On Linux x86-64, run `./pumpkin` from the root of the task repository. The `.pumpkinversion` file
+beside the launcher selects the release. If that release is missing from your cache, the launcher
+downloads it, verifies it and unpacks it there. Every repository that pins the release uses that
+install and keeps its own run state in `.pumpkin/`. Docker runs the sandboxes.
+For a new task repository, [install the launcher and pin](#installing-or-upgrading-a-task-repository).
 
 One file configures the machine for every task: `~/.config/pumpkin/pumpkin.toml`. A machine whose
 runs stay on its own Docker engine needs only this:
@@ -84,6 +73,33 @@ browser. The record is `.pumpkin/runs/<id>/`.
 
 [Run it](#run-it) shows these commands with their output.
 [docs/running.md](docs/running.md) goes through installing, configuring and each command.
+
+### Installing or upgrading a task repository
+
+For a first install or an upgrade, the task maintainer chooses a tag from the
+[published Pumpkin releases](https://github.com/FrontierCS/Pumpkin/releases).
+Replace `<tag>` below with your chosen tag and run the commands from the task repository root on
+Linux x86-64. Staging the files is optional. This recipe creates and removes its own temporary
+directory (`install_dir`) so a failed download or version check leaves the working pair in place.
+
+```sh
+(
+    set -o errexit
+    tag='<tag>'
+    url="https://github.com/FrontierCS/Pumpkin/releases/download/$tag"
+    install_dir=$(mktemp --directory "$PWD/.pumpkin-install.XXXXXXXX")
+    trap 'rm --recursive --force "$install_dir"' EXIT
+    cd "$install_dir"
+    curl --fail --location --proto '=https' --output pumpkin "$url/pumpkin"
+    curl --fail --location --proto '=https' --output .pumpkinversion "$url/pumpkinversion"
+    chmod +x pumpkin
+    ./pumpkin --version
+    mv --target-directory .. pumpkin .pumpkinversion
+)
+```
+
+Commit `pumpkin` and `.pumpkinversion` together, along with any workflow changes the release
+requires.
 
 ## Workflow in Pumpkin
 
@@ -291,10 +307,9 @@ answers; [docs/language.md](docs/language.md) holds the language.
 
 ## Run it
 
-The operator, who runs `pumpkin` and holds the machine's configuration and keys, installs it in a
-repository of tasks as `./pumpkin`, a copy of [`deploy/pumpkin`](deploy/pumpkin) beside a
-`.pumpkinversion` that names the tag and the commit to build, on Linux x86-64. A machine whose
-runs stay on its own Docker engine needs only this `~/.config/pumpkin/pumpkin.toml`:
+The operator runs the task repository's `./pumpkin` and holds the machine's configuration and
+keys. A machine whose runs stay on its own Docker engine needs only this
+`~/.config/pumpkin/pumpkin.toml`:
 
 ```toml
 [docker]
@@ -392,3 +407,9 @@ the connection and use the same commands to follow, list, stop, reap or view tho
 - Models: [routes, budgets and prices](docs/models.md).
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
   [`docs/dev/`](docs/dev/), the rules for changing it.
+- On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
+  the current checkout. The archive, launcher and pin are in `target/release-assets/preview/`.
+  Pushing a new tag builds its assets and runs `cargo xtask release <tag> --publish` to attach
+  them to a GitHub draft and publish it as the latest release. If the workflow leaves a draft,
+  verify its assets against the local files for the tag, attach any missing file, and publish
+  the draft as the latest release.

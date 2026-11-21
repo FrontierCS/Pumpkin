@@ -39,9 +39,8 @@ use crate::star::Entry;
     name = "pumpkin",
     about = "\
 Run workflows: in each run, an agent works in a sandbox, and a final call judges
-what it submits. It keeps what it writes in the .pumpkin directory that it is in,
-where a repository's ./pumpkin builds it: the runs' records, but where --runs
-names another directory, and what its builds and providers keep.",
+what it submits. The repository's .pumpkin directory holds build and provider
+state and the runs' records, unless --runs names another directory.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -205,7 +204,7 @@ says (`pumpkin help config`).";
 pub(crate) struct Publish {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to publish.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "name", help = "The S3 bucket to upload to.")]
     #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
@@ -398,7 +397,7 @@ pub(crate) struct Run {
     pub(crate) args: TaskArgs,
     #[arg(long, value_name = "dir", value_parser = utf8(RECORDED), help = "\
 The directory runs are recorded in, each in <dir>/<id>.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = "\
 The machine's configuration; see `pumpkin help config`.
@@ -408,7 +407,7 @@ Default: $HOME/.config/pumpkin/pumpkin.toml")]
 The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
 builds it, with the static ec2-boot beside it, which an ec2 provider's
 instances boot with.
-Default: the one beside this pumpkin, where `cargo xtask install` puts
+Default: the one beside this pumpkin, where `cargo xtask build` puts
 both")]
     pub(crate) sandboxd: Option<String>,
     #[command(flatten)]
@@ -442,7 +441,7 @@ has a `/`.";
 
 const RUNS_HELP: &str = "\
 The directory that <run> is looked up in.
-Default: runs/ in the .pumpkin directory that this pumpkin is in";
+Default: runs/ in the repository's .pumpkin directory";
 
 /// Its paths are UTF-8, as those of `ls`, `cancel` and `reap` are, so that a command that names
 /// them names the same files.
@@ -461,7 +460,7 @@ pub(crate) struct Wait {
 pub(crate) struct View {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to serve.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(
         long,
@@ -497,7 +496,7 @@ Default: serve the runs"
 pub(crate) struct Ls {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to list.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     /// The prefixes of the ids of the runs to list, or none for every run.
     #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
@@ -531,7 +530,7 @@ ended, which `pumpkin reap` removes."
 pub(crate) struct Reap {
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
 The directory of the runs to reap.
-Default: runs/ in the .pumpkin directory that this pumpkin is in")]
+Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
