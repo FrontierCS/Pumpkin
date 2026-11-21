@@ -745,7 +745,6 @@ fn usage() {
               The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
                 name          The `name` that deploy/aws was applied with.
                 region        The region it was applied in.
-                address       `private` (the default) uses the instance's private address.
 
               [controller.modal], the Modal provider that the controller's runs may place
               roles on, if any: the settings of a provider of kind modal, but `images`, which

@@ -130,7 +130,6 @@ impl Reached {
         let config::Controller {
             name,
             region,
-            address: config::Address::Private,
             modal: _,
         } = settings;
         let alias = format!("{name}.{}", region.as_str());

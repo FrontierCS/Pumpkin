@@ -29,7 +29,7 @@ OE4X9vsjYwIhAIo0jOTuyYjUKYSbNmkQdlSGe+918YSmcv9xEWpYHiuE
 ";
 
 /// The stand-in's certificate, for [`NAME`], issued from its root, in PEM.
-pub const CERTIFICATE: &str = "\
+const CERTIFICATE: &str = "\
 -----BEGIN CERTIFICATE-----
 MIIBxTCCAWqgAwIBAgIUCn71eAhIceONCe/g/Ogz1uWYpWgwCgYIKoZIzj0EAwIw
 HzEdMBsGA1UEAwwUUHVtcGtpbiB0ZXN0IGVkZ2UgQ0EwIBcNMjYxMTA4MTQyNDMx
@@ -45,7 +45,7 @@ tQQk6V12GUkvWwBzpgli2xXKzh8+xHEaRQ==
 ";
 
 /// The private key of [`CERTIFICATE`], in PEM.
-pub const KEY: &str = "\
+const KEY: &str = "\
 -----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgaWvrzts8xoMjdTYz
 cjGZ6zMabaAQ02wWedXBfp8F+tuhRANCAARFS56UUnCQXpSjfKVG/PnTwa/l2ZPf
