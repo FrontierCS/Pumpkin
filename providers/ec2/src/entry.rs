@@ -93,6 +93,7 @@ fn commands(start: &Start, region: &str) -> Value {
         ["test", "-r", START_FILE],
         bounded,
         ["bounded", "starting Docker", "systemctl", "start", "docker"],
+        "# shellcheck disable=SC2016 # The inner bash expands its positional arguments.",
         login,
         create,
         extract,
@@ -105,7 +106,7 @@ fn commands(start: &Start, region: &str) -> Value {
         ],
         ["cd", "/"],
         "step='running ec2-boot'",
-        // Open the private file as stdin, then unlink it before handing off to the image's boot.
+        "# shellcheck disable=SC2094 # The shell opens stdin before rm unlinks the file.",
         format!("(rm -- {START_FILE} && exec {binary} start) <{START_FILE} >/dev/console")
     ])
 }
