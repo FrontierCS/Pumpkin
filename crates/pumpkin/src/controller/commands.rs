@@ -15,7 +15,7 @@ use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
-use crate::job::KEPT_DAYS;
+use crate::job::{KEPT, KEPT_DAYS};
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, JobKind, Jobs, JobsRequest, Owner, ReapRequest,
     Unanswered,
@@ -157,19 +157,29 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
     Ok((build, id.to_owned()))
 }
 
-/// `error`, which says that `run` names none of the jobs `ids` or several, and if none, where the
-/// run's record may be instead.
+/// `error`, which says that `run` names none of the jobs `ids` or several, and if it names a run
+/// that may have been removed, where its record may be instead.
 fn unnamed(ids: &[String], run: &str, error: String) -> String {
-    // A run whose record the controller removed has no job there either.
-    let none = !run.is_empty()
-        && (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());
-    if !none {
+    // A run whose record the controller removed has no job there either, and is as old.
+    let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
+    let old = runtime::minted(run).is_some_and(|minted| minted < cutoff);
+    let none = (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());
+    if !old || !none {
         return error;
     }
-    format!(
-        "{error}; the controller removes a run's record {KEPT_DAYS} days after a machine copied \
-         it: read the copy on that machine"
-    )
+    let removed = format!(
+        "{error}; the controller removes a run's record {KEPT_DAYS} days after its member copied it"
+    );
+    let copy = crate::default_runs().ok().and_then(|runs| {
+        let runs = PathBuf::from(runs);
+        let names = runtime::Record::names(&runs).ok()?;
+        let id = runtime::named(&names, run, "").ok()?;
+        Some(runs.join(id))
+    });
+    match copy {
+        Some(copy) => format!("{removed}: read that copy, here at {}", copy.display()),
+        None => format!("{removed}: read that copy"),
+    }
 }
 
 fn follow(

@@ -742,7 +742,7 @@ fn job_admission() {
             exit status: Some(1)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again; the records of 1 ended run that no machine has copied take 0.0 GB, and stay until one copies them; to copy the oldest: pumpkin wait <uncopied>
+            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again; the records of 1 ended run that their members haven't copied take 0.0 GB, and each lasts until its member copies it, then 14 days; to copy the oldest: pumpkin wait <uncopied>
                 5 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: built/task.star: the task has 1 problem
@@ -2889,6 +2889,12 @@ fn prune_waits_for_the_boot() {
     let idle = key(&client_bin(&scratch));
     let install = scratch.0.join(format!("home/.pumpkin/{idle}"));
     days_ago(&install, 15);
+    let copied = id_ago(20, "0e000011");
+    ended_job(&scratch, &copied, "");
+    let record = scratch.0.join(format!("home/.pumpkin/runs/{copied}"));
+    days_ago(&record.join("outcome.json"), 16);
+    scratch.write(&format!("home/jobs/{copied}/copied"), "");
+    days_ago(&scratch.0.join(format!("home/jobs/{copied}/copied")), 15);
     let built = job_of(&scratch, &id, &last_tree(&scratch));
     assert!(built.status.success(), "{built:?}");
     let said = String::from_utf8(built.stderr).unwrap();
@@ -2897,49 +2903,81 @@ fn prune_waits_for_the_boot() {
         .map(str::to_owned)
         .collect();
     lines.push(format!("the idle install is kept: {}", install.exists()));
+    lines.push(format!("the copied record is kept: {}", record.exists()));
     check(
         &scratch,
         &lines.join("\n"),
         &[],
-        &expect!["the idle install is kept: true"],
+        &expect![[r#"
+            the idle install is kept: true
+            the copied record is kept: true"#]],
     );
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of it is the records and the snapshot"
+)]
 fn record_collection() {
     let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
+    scratch.write("bin/boot", BOOT_ENDED);
     let (id, ran) = start(&scratch, &client);
     assert!(ran.contains("exit status: Some(0)"), "{ran}");
-    let runs = ["0e000001", "0e000002", "0e000003", "0e000004"].map(|random| id_ago(20, random));
+    let randoms = ["0e000001", "0e000002", "0e000003", "0e000004"];
+    let runs = randoms.map(|random| id_ago(20, random));
     let [old, uncopied, fresh, held] = &runs;
-    for run in &runs {
+    let [theirs, reaped, stuck] =
+        ["0e000005", "0e000006", "0e000007"].map(|random| id_ago(20, random));
+    for run in runs.iter().chain([&theirs, &reaped, &stuck]) {
         ended_job(&scratch, run, "");
     }
-    for run in [old, fresh, held] {
+    scratch.write(&format!("home/jobs/{theirs}/member"), "bob\n");
+    for run in [old, fresh, held, &theirs, &reaped] {
         let waited = on_client(&scratch, &client, &["wait", run])
             .output()
             .unwrap();
         assert!(waited.status.success(), "{waited:?}");
     }
-    for run in [old, held] {
+    let mut lines = vec![format!(
+        "bob's run copied by alice is noted: {}",
+        scratch
+            .0
+            .join(format!("home/jobs/{theirs}/copied"))
+            .exists()
+    )];
+    // One that can't be removed whole, which leaves the others to go.
+    scratch.write(&format!("home/jobs/{stuck}/copied"), "");
+    let locked = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{stuck}/model/locked"));
+    scratch.write(&format!("home/.pumpkin/runs/{stuck}/model/locked/file"), "");
+    fs::set_permissions(&locked, Permissions::from_mode(0o000)).unwrap();
+    for run in [old, held, &reaped, &stuck] {
+        days_ago(
+            &scratch
+                .0
+                .join(format!("home/.pumpkin/runs/{run}/outcome.json")),
+            16,
+        );
         days_ago(&scratch.0.join(format!("home/jobs/{run}/copied")), 15);
     }
+    // A reap since the copy wrote what the copy lacks.
+    scratch.write(&format!("home/.pumpkin/runs/{reaped}/reaps.jsonl"), "{}\n");
     // As a copy under way holds it.
-    let pid = scratch
-        .0
-        .join(format!("home/.pumpkin/runs/{held}/driver.pid"));
-    let copying = File::open(pid).unwrap();
+    let copying = File::open(scratch.0.join(format!("home/.pumpkin/runs/{held}"))).unwrap();
     copying.lock_shared().unwrap();
     let built = job_of(&scratch, &id, &last_tree(&scratch));
     assert!(built.status.success(), "{built:?}");
     let said = String::from_utf8(built.stderr).unwrap();
-    let mut lines: Vec<String> = (said.lines())
-        .filter(|line| line.contains("the prune"))
-        .map(str::to_owned)
-        .collect();
+    lines.extend(
+        (said.lines())
+            .filter(|line| line.contains("the prune") || line.contains("removing"))
+            .map(str::to_owned),
+    );
     for dir in ["home/.pumpkin/runs", "home/jobs"] {
         let mut names: Vec<String> = fs::read_dir(scratch.0.join(dir))
             .unwrap()
@@ -2948,12 +2986,24 @@ fn record_collection() {
         names.sort();
         lines.push(format!("{dir}: {}", names.join(", ")));
     }
+    let aside = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/.{stuck}.removed/model/locked"));
+    fs::set_permissions(aside, Permissions::from_mode(0o755)).unwrap();
     lines.push(ls_ran(&scratch, &client, &[old]));
+    let cancelled = on_client(&scratch, &client, &["cancel", old])
+        .output()
+        .unwrap();
+    let invoked = format!("$ pumpkin cancel {old}");
+    lines.push(report(invoked, &cancelled, &scratch.0, false));
     let shown = [
         (old.as_str(), "<old>"),
         (uncopied.as_str(), "<uncopied>"),
         (fresh.as_str(), "<fresh>"),
         (held.as_str(), "<held>"),
+        (theirs.as_str(), "<theirs>"),
+        (reaped.as_str(), "<reaped>"),
+        (stuck.as_str(), "<stuck>"),
         (id.as_str(), "<id>"),
     ];
     check(
@@ -2961,15 +3011,20 @@ fn record_collection() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-        pumpkin: the prune removed the records of 1 run copied over 14 days ago, 0.0 GB: <old>
-        home/.pumpkin/runs: <uncopied>, <fresh>, <held>
-        home/jobs: <uncopied>, <fresh>, <held>, <id>
-        $ pumpkin ls <old>
-        exit status: Some(0)
-        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-        printed:
-          <old> finished          -  -               -  -: score=1 metrics={"solved":3}
-          1 run: 1 finished"#]],
+            bob's run copied by alice is noted: false
+            pumpkin: removing run <stuck>'s record: <scratch>/home/.pumpkin/runs/.<stuck>.removed: Permission denied (os error 13)
+            pumpkin: the prune removed the records of 1 run copied over 14 days ago, 0.0 GB: <old>
+            home/.pumpkin/runs: .<stuck>.removed, <uncopied>, <fresh>, <held>, <theirs>, <reaped>
+            home/jobs: <uncopied>, <fresh>, <held>, <theirs>, <reaped>, <id>
+            $ pumpkin ls <old>
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              <old> finished          -  -               -  -: score=1 metrics={"solved":3}
+              1 run: 1 finished
+            $ pumpkin cancel <old>
+            exit status: Some(1)
+            pumpkin: no run on controller `alice` matches `<old>`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after its member copied it: read that copy, here at <scratch>/repo/.pumpkin/runs/<old>"#]],
     );
 }
 
@@ -4120,7 +4175,7 @@ fn wait_names_its_run_there() {
               20261107-130000-2c9b0002
             $ pumpkin wait 9f
             exit status: Some(1)
-            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine
+            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
             the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
@@ -5329,6 +5384,6 @@ fn view_cancels_on_the_controller() {
         &expect![[r#"
             POST /api/runs/<live>/cancel
             HTTP/1.1 202 Accepted
-            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine"#]],
+            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path"#]],
     );
 }

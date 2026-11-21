@@ -300,7 +300,7 @@ pub struct Record {
 /// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": "removed"}`: at `t` nanoseconds since
 /// the Unix epoch, a decimal string, as the run log gives times, the reap deleted sandbox `i` of
 /// provider `p`, as `p` listed it or the record held it undeleted.
-const REAPS: &str = "reaps.jsonl";
+pub(crate) const REAPS: &str = "reaps.jsonl";
 
 /// What [`Record::reap`] deleted.
 #[derive(Debug)]

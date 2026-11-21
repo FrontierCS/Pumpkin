@@ -99,7 +99,7 @@ fn requests(
         let written = match ask {
             Ask::Copy(request) => copy::answer(output, home, request, &body),
             Ask::Copied(request) => link::answer(output, request, |CopiedRequest { id }| {
-                crate::job::mark_copied(home, &RunTag::try_from(id)?)
+                crate::job::mark_copied(home, &RunTag::try_from(id)?, member)
             }),
             Ask::Lacks(request) => {
                 link::answer(output, request, |request| missing(home, &request, &body))
