@@ -40,6 +40,12 @@ const METADATA: &str = "http://169.254.169.254/latest";
 // that follow.
 const TOKEN_TTL_SECONDS: u32 = 60;
 
+// How long each request to the metadata service may take, in seconds, so that one that hangs fails
+// the boot at once rather than at the start's deadline: the service is on the instance's own
+// link, and botocore gives a request to it 1 s, which this leaves room past:
+// https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/utils.py#L100
+const METADATA_TIMEOUT_SECONDS: u32 = 10;
+
 // Where the instance keeps `sandboxd`, copied out of its image, to be mounted read-only.
 const HOST_DIR: &str = "opt/pumpkin";
 
@@ -218,9 +224,17 @@ fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
 // The instance's identity document and its signature, as its metadata serves them, by IMDSv2, the
 // only version that the envelope's templates serve.
 fn identity(by: Deadline) -> Result<Identity, String> {
+    let max_time = METADATA_TIMEOUT_SECONDS.to_string();
     let curl = |args: &[&str]| {
         let mut curl = command("curl", Environment::Inherited);
-        curl.args(["--fail", "--silent", "--show-error"]).args(args);
+        let options = [
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            &max_time,
+        ];
+        curl.args(options).args(args);
         // As it was served, byte for byte, which the signature signs.
         let output = process::run(&mut curl, silently(by).named("curl"));
         let output = output.map_err(|failure| failure.to_string())?;
@@ -234,16 +248,19 @@ fn identity(by: Deadline) -> Result<Identity, String> {
         "--header",
         &ttl,
         &format!("{METADATA}/api/token"),
-    ])?;
+    ]);
+    let token = token.context("getting the instance metadata's token failed")?;
     let header = format!("X-aws-ec2-metadata-token: {token}");
-    let read = |name: &str| {
+    let read = |name: &str, what: &str| {
         let url = format!("{METADATA}/dynamic/instance-identity/{name}");
-        curl(&["--header", &header, &url])
-            .map_err(|error| format!("reading the identity document's {name} failed: {error}"))
+        let read = curl(&["--header", &header, &url]);
+        read.context(format_args!(
+            "reading the instance's identity {what} failed"
+        ))
     };
     let identity = Identity {
-        document: read("document")?,
-        signature: read("signature")?,
+        document: read("document", "document")?,
+        signature: read("signature", "document's signature")?,
     };
     say("read the instance's identity document");
     Ok(identity)

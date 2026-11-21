@@ -637,7 +637,10 @@ impl Creator<PrivateDial, (Created, Admits)> for Sim {
         let attestation = format!("the simulated sandbox {}", create.name).into_bytes();
         let ours = attestation.clone();
         let admits: Admits = Box::new(move |presented, peer| {
-            presented.bytes() == ours.as_slice() && peer.is_loopback()
+            let admitted = presented.bytes() == ours.as_slice() && peer.is_loopback();
+            admitted
+                .then_some(())
+                .ok_or_else(|| "it attests another sandbox".to_owned())
         });
         let created = self.made(create, (Gateway::Tcp(gateway), attestation, None))?;
         Ok((created, admits))

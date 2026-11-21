@@ -51,8 +51,14 @@ const REDIAL_MOST: Duration = Duration::from_secs(15);
 // Bounds the threads that connections hold before they have said who they are: the listener's
 // address is open to whatever can reach it, and each connection holds a thread until its hello is
 // read and admitted or refused, or its time is up. Each of a run's sandboxes dials once, and says
-// hello as it connects, so a run needs far fewer.
+// hello as it connects, so a run needs far fewer. A hello that no check admits keeps its thread
+// while a registration issued before it awaits its check, until that registration's deadline, so
+// hellos that no sandbox says may hold every thread for as long as a create.
 const MAX_HELLOS: usize = 100;
+
+// Bounds the reasons that a refusal of a hello that no check admits gives, of as many as the
+// registrations that await one: checks that refuse alike give one reason, so a few show why.
+const MAX_REASONS: usize = 4;
 
 /// Gives each sandbox a socket of its own below one directory, which dropping removes.
 #[derive(Debug)]
@@ -165,9 +171,11 @@ struct Awaited {
     // Until when a hello that no check admits waits for this registration's check.
     by: Deadline,
     presented: Option<Met>,
+    // Why its check refused the last hello that no check admitted, for its accept to tell.
+    refused: Option<String>,
 }
 
-type Admits = dyn Fn(&Attestation, IpAddr) -> bool + Send;
+type Admits = dyn Fn(&Attestation, IpAddr) -> Result<(), String> + Send;
 
 struct Check(Box<Admits>);
 
@@ -224,6 +232,7 @@ impl Listener {
             check: None,
             by,
             presented: None,
+            refused: None,
         };
         registry.awaited.insert(number, awaited);
         let awaiting = Awaiting {
@@ -260,11 +269,15 @@ pub struct Unattested {
 
 impl Unattested {
     /// Registers `check`, which says whether a hello's attestation, from the address given, is
-    /// this sandbox's. It is asked once of each hello that no registration has taken, under the
-    /// listener's lock, so it must return at once, as a check of a signature does.
+    /// this sandbox's, or why not. It is asked once of each hello that no registration has taken,
+    /// under the listener's lock, so it must return at once, as a check of a signature does.
+    ///
+    /// Its reason is told to the hello's sender, and to this registration's accept, if no check
+    /// admits the hello; so that the checks that refuse one hello give few reasons, its reason
+    /// names nothing of its own sandbox's that the hello doesn't.
     pub fn admitting(
         self,
-        check: impl Fn(&Attestation, IpAddr) -> bool + Send + 'static,
+        check: impl Fn(&Attestation, IpAddr) -> Result<(), String> + Send + 'static,
     ) -> Registration {
         let Self { awaiting } = self;
         let mut registry = lock(&awaiting.registry);
@@ -289,7 +302,7 @@ fn listen(listener: &TcpListener, registry: &Arc<Mutex<Registry>>, hello_timeout
             Ok((stream, peer)) => {
                 // As an IPv4 address, where a socket of both families gives it mapped to IPv6.
                 let peer = peer.ip().to_canonical();
-                admit(registry, stream, peer, Deadline::after(hello_timeout));
+                admit(registry, stream, peer, hello_timeout);
             }
             // None waits, or one was reset before it was taken, or the process has no file
             // descriptor to spare: each passes, and the kernel keeps the rest waiting.
@@ -298,7 +311,7 @@ fn listen(listener: &TcpListener, registry: &Arc<Mutex<Registry>>, hello_timeout
     }
 }
 
-fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, by: Deadline) {
+fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, timeout: Duration) {
     let mut locked = lock(registry);
     // Past the bound the connection closes unread and untold: the peer may dial again.
     if locked.hellos >= MAX_HELLOS {
@@ -309,14 +322,15 @@ fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, by: D
     let reader = Arc::clone(registry);
     let spawned = thread::Builder::new()
         .name("hello".to_owned())
-        .spawn(move || register(&reader, stream, peer, by));
+        .spawn(move || register(&reader, stream, peer, timeout));
     // A thread that doesn't start drops its closure, which closes the connection.
     if spawned.is_err() {
         lock(registry).hellos -= 1;
     }
 }
 
-fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, by: Deadline) {
+fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout: Duration) {
+    let by = Deadline::after(timeout);
     let set = stdx::net::set_options(&stream)
         .map_err(|error| context("the connection's TCP options can't be set", &error));
     let connection = Connection::Tcp(stream);
@@ -327,12 +341,36 @@ fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, by: Dea
         }
         Err(error) => Some((connection, error)),
     };
-    // No accept waits on a connection that opens no session, so its error goes no further.
+    // No accept waits on a connection that opens no session, so its error goes no further. The
+    // refusal gets a time of its own, as the hello may have waited past its own for a check.
     if let Some((connection, error)) = unopened {
-        refuse(&connection, by, error);
+        refuse(&connection, Deadline::after(timeout), error);
     }
     // Freed last, so that the threads reading hellos, or refusing them, stay within bounds.
     lock(registry).hellos -= 1;
+}
+
+/// Why a hello that no check admits is refused, from the distinct `reasons` of the checks.
+fn said_no(reasons: &BTreeSet<String>) -> String {
+    let expected = "expected the attestation of a sandbox whose start waits, presented once";
+    let mut said: Vec<&str> = reasons
+        .iter()
+        .take(MAX_REASONS)
+        .map(String::as_str)
+        .collect();
+    let more = format!("{} more", reasons.len().saturating_sub(MAX_REASONS));
+    if reasons.len() > MAX_REASONS {
+        said.push(&more);
+    }
+    if said.is_empty() {
+        return format!(
+            "the attestation opens no session, as no sandbox's start waits: {expected}"
+        );
+    }
+    format!(
+        "the attestation opens no session: {}: {expected}",
+        said.join("; ")
+    )
 }
 
 fn present(
@@ -347,8 +385,8 @@ fn present(
                        that several sandboxes share";
         return Err((met.connection, refused(message.to_owned())));
     };
-    // Each registration's check is asked once, as what it answers never changes.
-    let mut asked = BTreeSet::new();
+    // Each registration's check is asked once, as what it answers never changes: why each refused.
+    let mut reasons = BTreeMap::new();
     // The hello waits only for the checks of registrations issued before it was read, as a
     // sandbox's registration is issued before its create, so that later ones keep no hello.
     let issued = lock(registry).next;
@@ -363,9 +401,17 @@ fn present(
                 unchecked |= number < issued && awaited.by.remaining().is_some();
                 continue;
             };
-            if asked.insert(number) && check(&attestation, peer) {
-                admitting = Some(number);
-                break;
+            if reasons.contains_key(&number) {
+                continue;
+            }
+            match check(&attestation, peer) {
+                Ok(()) => {
+                    admitting = Some(number);
+                    break;
+                }
+                Err(reason) => {
+                    reasons.insert(number, reason);
+                }
             }
         }
         // The listener's drop ends the wait for a check.
@@ -391,10 +437,16 @@ fn present(
                 thread::sleep(POLL);
                 continue;
             }
-            None => format!(
-                "the attestation, from {peer}, opens no session: expected that of a sandbox whose \
-                 start waits, from the sandbox's own address, presented once"
-            ),
+            None => {
+                let mut distinct = BTreeSet::new();
+                for (number, reason) in reasons {
+                    distinct.insert(reason.clone());
+                    if let Some(awaited) = locked.awaited.get_mut(&number) {
+                        awaited.refused = Some(reason);
+                    }
+                }
+                said_no(&distinct)
+            }
         };
         return Err((met.connection, refused(message)));
     }
@@ -758,14 +810,22 @@ impl Awaiting {
                 registry.awaited.remove(&self.number);
                 return Ok(met);
             }
-            drop(registry);
             if by.remaining().is_none() {
+                let last = match &awaited.refused {
+                    Some(reason) => {
+                        format!(", and it refused the last hello that none admitted: {reason}")
+                    }
+                    None => String::new(),
+                };
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "no hello that the sandbox's check admits came by the deadline: expected the \
-                     sandbox to say it while the deadline lasts",
+                    format!(
+                        "no hello that the sandbox's check admits came by the deadline{last}: \
+                         expected the sandbox to say it while the deadline lasts"
+                    ),
                 ));
             }
+            drop(registry);
             // Nothing wakes the wait on a presentation or a stop, so it looks again.
             thread::sleep(POLL);
         }

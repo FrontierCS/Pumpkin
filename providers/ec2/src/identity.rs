@@ -22,14 +22,19 @@ use std::net::IpAddr;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-pub use certificates::IDENTITY_CERTIFICATES;
+pub(crate) use certificates::IDENTITY_CERTIFICATES;
 use provider::Admits;
 use ring::signature::{RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY, UnparsedPublicKey};
 use schema::ec2_boot::Identity;
 use schema::sandbox::Attestation;
 use serde::Deserialize;
 
+// By its path, which holds also where a test binary compiles this module.
+#[path = "identity/certificates.rs"]
 mod certificates;
+
+// The sizes of key that `ring`'s check of this signature takes, in bits of the modulus.
+const KEY_BITS: std::ops::RangeInclusive<usize> = 1024..=8192;
 
 /// The identity documents of an envelope's instances: those that its region's key signs, which
 /// name its account and region.
@@ -52,6 +57,21 @@ struct Document {
 }
 
 impl Documents {
+    /// The documents that AWS's key for `region` signs ([`IDENTITY_CERTIFICATES`]), of `account`.
+    pub(crate) fn of_region(region: &str, account: String) -> Result<Self, String> {
+        let certificate = (IDENTITY_CERTIFICATES.iter())
+            .find(|(named, _)| *named == region)
+            .map(|(_, certificate)| *certificate);
+        let Some(certificate) = certificate else {
+            return Err(format!(
+                "the provider holds no AWS certificate for region `{region}`, whose key signs \
+                 the identity documents of its instances: add it to `IDENTITY_CERTIFICATES`, \
+                 from https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html"
+            ));
+        };
+        Self::of(certificate, account, region.to_owned())
+    }
+
     /// The documents that `certificate`'s key signs, of `account` and `region`.
     pub(crate) fn of(certificate: &str, account: String, region: String) -> Result<Self, String> {
         let key = rsa_key(certificate).map_err(|why| {
@@ -69,40 +89,81 @@ impl Documents {
 
     /// The check that admits only the sandbox of instance `instance_id`: a hello whose attestation
     /// is that instance's [`Identity`], its document signed by the key, and that comes from the
-    /// document's `privateIp`.
+    /// document's `privateIp`. Why it refuses one names nothing of `instance_id`'s.
     pub(crate) fn admits(self, instance_id: String) -> Admits {
         Box::new(move |attestation: &Attestation, peer: IpAddr| {
             self.is_of(attestation, &instance_id, peer)
         })
     }
 
-    fn is_of(&self, attestation: &Attestation, instance_id: &str, peer: IpAddr) -> bool {
+    fn is_of(
+        &self,
+        attestation: &Attestation,
+        instance_id: &str,
+        peer: IpAddr,
+    ) -> Result<(), String> {
+        let region = &self.region;
         let Ok(Identity {
             document,
             signature,
         }) = serde_json::from_slice(attestation.bytes())
         else {
-            return false;
+            return Err(
+                "the attestation isn't an EC2 instance's identity document and its \
+                        signature, as JSON: expected them as `ec2-boot` reads them"
+                    .to_owned(),
+            );
         };
         // Base64 in lines, as the instance's metadata serves it.
         let signature: String = signature.split_ascii_whitespace().collect();
-        let Ok(signature) = STANDARD.decode(signature) else {
-            return false;
-        };
+        let signature = (STANDARD.decode(signature))
+            .map_err(|error| format!("the document's signature isn't base64: {error}"))?;
         let key =
             UnparsedPublicKey::new(&RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY, &self.key);
         // The signature is checked first, so that nothing else of the document is read unless
         // AWS signed it.
         if key.verify(document.as_bytes(), &signature).is_err() {
-            return false;
+            return Err(format!(
+                "the identity document's signature doesn't verify with the key of AWS's \
+                 certificate for {region}: expected a document that AWS signed, of an instance \
+                 there, by the key of the certificate that the provider holds"
+            ));
         }
-        let Ok(document) = serde_json::from_str::<Document>(&document) else {
-            return false;
-        };
-        document.account_id == self.account
-            && document.region == self.region
-            && document.instance_id == instance_id
-            && document.private_ip == peer
+        let document = serde_json::from_str::<Document>(&document).map_err(|error| {
+            format!(
+                "the signed identity document can't be read: {error}: expected its \
+                 `accountId`, `region`, `instanceId` and `privateIp`"
+            )
+        })?;
+        if document.account_id != self.account {
+            return Err(
+                "the identity document names an account other than the envelope's: \
+                        expected an instance of the envelope's account"
+                    .to_owned(),
+            );
+        }
+        if document.region != self.region {
+            return Err(format!(
+                "the identity document names region `{}`: expected {region}, the envelope's",
+                document.region
+            ));
+        }
+        if document.instance_id != instance_id {
+            return Err(
+                "the identity document names an instance that no start awaits: \
+                        expected that of an instance launched for a sandbox"
+                    .to_owned(),
+            );
+        }
+        if document.private_ip != peer {
+            return Err(format!(
+                "the hello comes from {peer}, not {}, the private address that its identity \
+                 document names: expected it from its instance's own address, with no network \
+                 address translation between",
+                document.private_ip
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -136,10 +197,25 @@ fn rsa_key(certificate: &str) -> Result<Vec<u8>, String> {
     }
     let (bits, _) = rest.take(BIT_STRING)?;
     // A key's bit string has no unused bits.
-    match bits.0 {
-        [0, key @ ..] => Ok(key.to_vec()),
-        _ => Err("its key's bits don't fill whole bytes".to_owned()),
+    let [0, key @ ..] = bits.0 else {
+        return Err("its key's bits don't fill whole bytes".to_owned());
+    };
+    // RFC 8017, appendix A.1.1: `RSAPublicKey`, the modulus, then the public exponent.
+    let (fields, _) = Der(key).take(SEQUENCE)?;
+    let (modulus, _) = fields.take(INTEGER)?;
+    let significant = (modulus.0.iter()).position(|&byte| byte != 0);
+    let bits = significant.map_or(0, |at| {
+        let leading = modulus.0[at].leading_zeros() as usize;
+        (modulus.0.len() - at) * 8 - leading
+    });
+    if !KEY_BITS.contains(&bits) {
+        return Err(format!(
+            "its key's modulus is {bits} bits: expected {} to {}",
+            KEY_BITS.start(),
+            KEY_BITS.end()
+        ));
     }
+    Ok(key.to_vec())
 }
 
 const INTEGER: u8 = 0x02;

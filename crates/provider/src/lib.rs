@@ -93,8 +93,9 @@ pub enum Meeting<'p> {
 /// made.
 ///
 /// It is asked of the hello's attestation and the address that the hello comes from, admits that
-/// sandbox's alone, and answers at once, the same each time it is asked.
-pub type Admits = Box<dyn Fn(&Attestation, IpAddr) -> bool + Send>;
+/// sandbox's alone, and answers at once, the same each time it is asked. Why it refuses a hello is
+/// told to the hello's sender, so it names nothing of its sandbox's that the hello doesn't.
+pub type Admits = Box<dyn Fn(&Attestation, IpAddr) -> Result<(), String> + Send>;
 
 /// The create of a provider's sandboxes that are given `D` to meet the gateway by, which returns
 /// `C`.

@@ -227,7 +227,9 @@ the same sessions. It depends on `schema`, `stdx` and `tls` alone.
 
 **Architecture Invariant:** a `Listener`, whose address all of a run's sandboxes on a private
 network share, opens a session only for a hello that the check of a registration it issued admits
-(`Unattested::admitting`), the first such hello alone, and never for one that presents nothing.
+(`Unattested::admitting`), the first such hello alone, and never for one that presents nothing. A
+hello that no check admits holds one of its bounded threads while a registration issued before it
+awaits its check, until that registration's deadline.
 
 ### `crates/sandboxd`
 
@@ -560,8 +562,11 @@ A sandbox proves which it is by how it meets the gateway. On the host, it dials 
 own, which only it can reach. On a private network, as an EC2 sandbox does, its hello presents an
 attestation (`Attestation`) that its provider checks: an EC2 sandbox's is its instance's identity
 document, which AWS signs and the instance's metadata serves, and the provider admits it once, for
-the instance that it launched, from the address that the document names, as SPIRE's `aws_iid`
-node attestor does. Across the Internet, the gateway dials the sandbox at the endpoint its create
+the instance that it launched, as SPIRE's `aws_iid` node attestor does, and from the address that
+the document names, as Vault's `token_bound_cidrs` binds a login. Several regions share a key, so
+it is the document's account and instance that pin the sandbox, and the address binding rests on
+the VPC's dropping a packet whose source address isn't its sender's, as EC2's source and
+destination check does. Across the Internet, the gateway dials the sandbox at the endpoint its create
 gives, and the gateway's answer to the hello presents a grant (`RegistrationGrant`) that only that
 `sandboxd` is given, before anything else runs in the sandbox. A session over the Internet runs
 over TLS, whose client trusts the provider's edge only by its certificate.
@@ -569,8 +574,9 @@ over TLS, whose client trusts the provider's edge only by its certificate.
 What an EC2 sandbox's attestation leaves open is what
 [SPIRE says of `aws_iid`](https://github.com/spiffe/spire/blob/a676d95d6e6992ce73715f01c17525e60b50b5e8/doc/plugin_server_nodeattestor_aws_iid.md#L86-L91):
 the document is served to every process on the instance, so whatever runs there before `sandboxd`
-says its hello could say one first, and take the sandbox's session. Only the boot runs there
-before it, and the container never reaches the metadata. AWS signs this form of the document with
+says its hello could say one first, and take the sandbox's session. Only the image's own root
+services, as cloud-init and systemd's units, and the boot run there before it, and the container
+never reaches the metadata. AWS signs this form of the document with
 an RSA key of 1024 bits for each region, fewer than today's minimum for a new key, and states no
 schedule for changing it: the provider checks a signature by the key in the certificate that it
 holds for the region, whatever the certificate's dates, so a key that AWS changes refuses every
@@ -728,4 +734,5 @@ so the core, the gateway, the route and the runtime are tested with Pumpkin's ow
 loopback sockets and a simulated host and provider. No test runs against an invented model of a
 cloud. The conformance suite runs on the runtime's simulated provider in `ci` and on the Docker
 provider in `live docker`; the EC2 and Modal providers have no test of their own but the smoke
-run, and the EC2 provider's tests, which pin the certificates of AWS's keys that it holds.
+run, and the EC2 provider's tests of how it decides whether an identity document admits a hello,
+and of the certificates of AWS's keys that it holds.

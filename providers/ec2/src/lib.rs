@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 use aws::{Bound, Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
 use identity::Documents;
-pub use identity::IDENTITY_CERTIFICATES;
 use provider::{
     Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
     Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
@@ -203,7 +202,7 @@ impl<'e> Ec2<'e> {
     /// the repositories. It writes in `dir`,
     /// made once a launch needs it, each launch's user data, while `aws` reads it. It fails if AWS
     /// describes no repository that the settings name, or the region is one that the provider
-    /// holds no key of AWS's for ([`IDENTITY_CERTIFICATES`]).
+    /// holds no key of AWS's for.
     pub fn connect(settings: &Settings, pusher: Pusher<'e>, dir: &Path) -> Result<Self, String> {
         let Settings {
             region,
@@ -211,21 +210,10 @@ impl<'e> Ec2<'e> {
             repositories,
             timer,
         } = settings;
-        let certificate = (IDENTITY_CERTIFICATES.iter())
-            .find(|(named, _)| *named == region.as_str())
-            .map(|(_, certificate)| *certificate);
-        let Some(certificate) = certificate else {
-            return Err(format!(
-                "the provider holds no AWS certificate for region `{}`, whose key signs the \
-                 identity documents of its instances: add it to `IDENTITY_CERTIFICATES`, from \
-                 https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/regions-certs.html",
-                region.as_str()
-            ));
-        };
         let cli = Cli::connect(region.clone())?;
         let Identity { account, arn } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
         // The instances are launched in the caller's account, which their documents name.
-        let documents = Documents::of(certificate, account.clone(), region.as_str().to_owned())?;
+        let documents = Documents::of_region(region.as_str(), account.clone())?;
         let repositories = described_repositories(&cli, repositories)?;
         let Timer { group, role_arn } = timer.clone();
         let report = json!({

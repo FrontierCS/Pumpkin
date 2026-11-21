@@ -112,8 +112,8 @@ def forged(sandbox, words):
         line(sandbox, check, True, "no address that several sandboxes share to say it at")
     else:
         host, _, port = words[0].rpartition(":")
-        # An instance's identity document that AWS never signed, as no instance's is.
-        document = json.dumps({"instanceId": "i-0123456789abcdef0", "privateIp": host})
+        # An identity document that AWS never signed.
+        document = json.dumps({"instanceId": "i-0123456789abcdef0"})
         attestation = json.dumps({"document": document, "signature": "AAAA"}).encode()
         answered = answer((host, int(port)), attestation)
         # Refused for its attestation, not for its version or its form, which would leave the
@@ -123,7 +123,9 @@ def forged(sandbox, words):
             and answered.get("type") == "refused"
             and "attestation" in answered.get("message", "")
         )
-        line(sandbox, check, refused, f"{words[0]} answered {answered}")
+        # The refusal's reason alone, which names no address of the instance's.
+        seen = answered.get("message") if isinstance(answered, dict) else answered
+        line(sandbox, check, refused, f"the gateway answered: {seen}")
 
 
 def main():

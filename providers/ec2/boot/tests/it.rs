@@ -179,9 +179,9 @@ fn boots() {
               pumpkin-ec2: sandboxd: a line on standard error
             calls:
               nft --file -
-              curl --fail --silent --show-error --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-              curl --fail --silent --show-error --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/document
-              curl --fail --silent --show-error --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/signature
+              curl --fail --silent --show-error --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+              curl --fail --silent --show-error --max-time 10 --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/document
+              curl --fail --silent --show-error --max-time 10 --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/signature
               docker info --format {{.MemoryLimit}} {{.SwapLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}
               docker version --format {{.Server.Version}}
               docker pull --quiet 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa

@@ -109,7 +109,9 @@ impl Sandbox {
                 let listener = Listener::bind(&address, HELLO_TIMEOUT).unwrap();
                 let (PrivateDial { gateway }, unattested) = listener.issue(hung());
                 let registration = unattested.admitting(|attestation, peer| {
-                    attestation.bytes() == ATTESTATION.as_bytes() && peer.is_loopback()
+                    let ours = attestation.bytes() == ATTESTATION.as_bytes() && peer.is_loopback();
+                    ours.then_some(())
+                        .ok_or_else(|| "it isn't the sandbox's".to_owned())
                 });
                 sandboxd
                     .arg(gateway.to_string())
@@ -917,8 +919,8 @@ fn over_tcp() {
             ]
         },
         &expect![[r#"
-            an attestation that no check admits: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once
-            the sandbox's attestation, again: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once
+            an attestation that no check admits: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation opens no session, as no sandbox's start waits: expected the attestation of a sandbox whose start waits, presented once
+            the sandbox's attestation, again: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation opens no session, as no sandbox's start waits: expected the attestation of a sandbox whose start waits, presented once
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],

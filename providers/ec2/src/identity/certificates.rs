@@ -7,7 +7,7 @@
 /// AWS's certificate of the key that signs the `signature` of the identity documents of each
 /// region's instances, as PEM, by region, in the regions' order: one for each region on AWS's page
 /// of them.
-pub const IDENTITY_CERTIFICATES: [(&str, &str); 39] = [
+pub(crate) const IDENTITY_CERTIFICATES: [(&str, &str); 39] = [
     (
         "af-south-1",
         "-----BEGIN CERTIFICATE-----

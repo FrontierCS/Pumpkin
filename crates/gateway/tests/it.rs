@@ -1438,10 +1438,17 @@ fn issue(listener: &Listener, address: SocketAddr, by: Deadline) -> Unattested {
     unattested
 }
 
-/// The registration whose check admits `attestation` from `from` alone.
+/// The registration whose check admits `attestation` from `from` alone, and says which it
+/// refuses for: another attestation, or another address.
 fn admitting(unattested: Unattested, attestation: &'static str, from: Ipv4Addr) -> Registration {
     unattested.admitting(move |presented, peer| {
-        presented.bytes() == attestation.as_bytes() && peer == IpAddr::V4(from)
+        if presented.bytes() != attestation.as_bytes() {
+            return Err("it attests another sandbox".to_owned());
+        }
+        if peer != IpAddr::V4(from) {
+            return Err(format!("it comes from {peer}, where its sandbox isn't"));
+        }
+        Ok(())
     })
 }
 
@@ -1508,6 +1515,7 @@ fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
     drop(admitted(listener, address, "dropped"));
     let unspent = issue(listener, address, hung());
     let elsewhere = admitting(unspent, "elsewhere", Ipv4Addr::new(192, 0, 2, 1));
+
     // Its check never comes, and no hello waits for it, as its deadline has passed.
     let _expired = issue(listener, address, Deadline::after(Duration::ZERO));
     let version = |version| json!({ "version": version });
@@ -1533,8 +1541,11 @@ fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
     let mut lines: Vec<String> = (hellos.iter())
         .map(|(name, hello)| format!("{name}: {}", present(address, hello)))
         .collect();
+    // Its accept tells why its check refused the last hello that no check admitted.
+    let elsewhere = accept_and_freeze(elsewhere, Deadline::after(Duration::ZERO));
     lines.extend([
         format!("an accept by a passed deadline: {waited}"),
+        format!("  of another, once its check refused a hello: {elsewhere}"),
         format!(
             "  its attestation: {}",
             present(address, &attesting("late"))
@@ -1544,7 +1555,6 @@ fn refusals(listener: &Listener, address: SocketAddr) -> Vec<String> {
             present(address, &attesting("dropped"))
         ),
     ]);
-    drop(elsewhere);
     lines
 }
 
@@ -1599,8 +1609,8 @@ fn unchecked(listener: &Listener, address: SocketAddr) -> Vec<String> {
         sandbox(address, attesting(name), Duration::ZERO, named, said)
     });
     // The hellos wait for the checks, which come once they have been read, as a create's do, or
-    // never: no outcome rests on which comes first.
-    thread::sleep(PAUSE);
+    // never, and past the time a hello gets: no outcome rests on which comes first.
+    thread::sleep(HELLO_BOUND + PAUSE);
     let registration = admitting(checked, "checked", Ipv4Addr::LOCALHOST);
     drop(withdrawn);
     let accepted = accept_and_freeze(registration, hung());
@@ -1732,23 +1742,24 @@ fn registrations() {
             no attestation: {"message":"the hello presents no attestation: expected the sandbox's, at an address that several sandboxes share","type":"refused"}
             a later version: {"message":"sandboxd speaks sandbox protocol 4: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does","type":"refused"}
             a field this version lacks: {"message":"the hello isn't of sandbox protocol 3's form: unknown field `later`, expected `version` or `gpus`","type":"refused"}
-            an attestation that no check admits: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
-            an attestation from where its check admits none: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            an attestation that no check admits: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
+            an attestation from where its check admits none: {"message":"the attestation opens no session: it attests another sandbox; it comes from 127.0.0.1, where its sandbox isn't: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             an accept by a passed deadline: TimedOut: no hello that the sandbox's check admits came by the deadline: expected the sandbox to say it while the deadline lasts
-              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
-            an attestation whose registration dropped: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+              of another, once its check refused a hello: TimedOut: no hello that the sandbox's check admits came by the deadline, and it refused the last hello that none admitted: it comes from 127.0.0.1, where its sandbox isn't: expected the sandbox to say it while the deadline lasts
+              its attestation: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
+            an attestation whose registration dropped: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             awaited: {"type":"accepted"}; freeze: ok
               its op: Ops
-              its attestation, again: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+              its attestation, again: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             presented early: a: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}; b: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}
               b accepted, then a freeze: Other: I am b
               a accepted, then a freeze: Other: I am a
-            presented before the checks: checked: {"type":"accepted"}; withdrawn: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+            presented before the checks: checked: {"type":"accepted"}; withdrawn: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
               checked accepted, then a freeze: Other: I am checked
             a registration dropped once presented: c: {"message":"the attestation was presented already, on another connection: expected it once, as it opens one session","type":"refused"}; then c: none
-              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+              its attestation: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             an accept stopped as it waits returned before its deadline: Other: the accept was stopped before the sandbox's hello was admitted: expected the sandbox to say it before the stop
-              its attestation: {"message":"the attestation, from 127.0.0.1, opens no session: expected that of a sandbox whose start waits, from the sandbox's own address, presented once","type":"refused"}
+              its attestation: {"message":"the attestation opens no session: it attests another sandbox: expected the attestation of a sandbox whose start waits, presented once","type":"refused"}
             the accept waiting meanwhile: meanwhile: {"type":"accepted"}; then a freeze: Other: I am meanwhile
             the peer silent from the first: heard none
             a dial once the listener dropped: Err(ConnectionRefused)
