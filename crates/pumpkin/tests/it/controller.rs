@@ -2739,6 +2739,97 @@ fn store_collection() {
     );
 }
 
+#[test]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn install_collection() {
+    let scratch = Scratch::new();
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let client = set_up_client(&scratch);
+    let (id, ran) = start(&scratch, &client);
+    assert!(ran.contains("exit status: Some(0)"), "{ran}");
+    let workspace = scratch.0.join("home/.pumpkin");
+    // The client's install, of links into the store, which its start made, and its manifest, each
+    // older than what the prune keeps.
+    let idle = key(&client_bin(&scratch));
+    days_ago(&workspace.join(&idle), 15);
+    days_ago(&scratch.0.join(format!("home/store/manifests/{idle}")), 2);
+    // Each as old, but run by a build's job that runs, though it started long ago, or by a run's
+    // job that started yesterday.
+    let running = id_ago(15, "0c0000aa");
+    let recent = id_ago(1, "0c0000ac");
+    for (digit, job) in [
+        ('a', format!("builds/{running}")),
+        ('c', format!("jobs/{recent}")),
+    ] {
+        let hex = digit.to_string().repeat(64);
+        let pumpkin = install(&scratch, &format!("home/.pumpkin/{hex}/bin"));
+        days_ago(&workspace.join(&hex), 15);
+        let own = scratch.0.join(format!("home/{job}/pumpkin"));
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        symlink(pumpkin, own).unwrap();
+    }
+    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{running}"))).unwrap();
+    let fresh = "b".repeat(64);
+    install(&scratch, &format!("home/.pumpkin/{fresh}/bin"));
+    days_ago(&workspace.join(&fresh), 13);
+    let ended = id_ago(15, "0c0000ab");
+    scratch.write(&format!("home/builds/{ended}/log"), "");
+    let tree = last_tree(&scratch);
+    let built = job_of(&scratch, &id, &tree);
+    assert!(built.status.success(), "{built:?}");
+    let said = String::from_utf8(built.stderr).unwrap();
+    let mut lines: Vec<String> = (said.lines())
+        .filter(|line| line.contains("the prune"))
+        .map(str::to_owned)
+        .collect();
+    let listed = |dir: &str| {
+        let mut names: Vec<String> = fs::read_dir(scratch.0.join(dir))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.len() == 64 || dir != "home/.pumpkin")
+            .collect();
+        names.sort();
+        if names.is_empty() {
+            names.push("none".to_owned());
+        }
+        format!("{dir}: {}", names.join(", "))
+    };
+    lines.extend(["home/.pumpkin", "home/.pumpkin/tmp", "home/builds"].map(listed));
+    let named = [(tree, "the tree that the job ran")];
+    lines.extend(stored(&scratch, &holders(&scratch, &named)));
+    let shown = [
+        (idle.as_str(), "<idle>"),
+        (&idle[..12], "<idle>"),
+        (&"a".repeat(64), "<running's>"),
+        (&"c".repeat(64), "<recent's>"),
+        (fresh.as_str(), "<fresh>"),
+        (id.as_str(), "<id>"),
+        (running.as_str(), "<running>"),
+        (ended.as_str(), "<ended>"),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &shown,
+        &expect![[r#"
+            pumpkin: the prune removed the installs of 1 build that no job used for 14 days: <idle>
+            home/.pumpkin: <running's>, <fresh>, <recent's>
+            home/.pumpkin/tmp: none
+            home/builds: <running>, <id>
+            the store:
+              PUMPKIN.star: 444, 2 links
+              lib/train.star: 444, 2 links
+              stand-in/Dockerfile: 444, 2 links
+              stand-in/final.star: 444, 2 links
+              stand-in/submit.star: 444, 2 links
+              stand-in/task.star: 444, 2 links
+              a manifest: a tree of no files
+              a manifest: the tree that the job ran
+              incoming/: none"#]],
+    );
+}
+
 fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
