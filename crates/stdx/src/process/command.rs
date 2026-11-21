@@ -66,7 +66,7 @@ pub fn cargo_package_vars() -> Vec<OsString> {
 /// A word that isn't UTF-8 is shown lossily. The line never shows the environment, which may hold
 /// a secret, nor the working directory.
 pub fn shown(command: &Command) -> String {
-    joined(iter::once(command.get_program()).chain(command.get_args()))
+    joined(command.get_program(), command.get_args())
 }
 
 /// The name that a failure gives `command`: its program and the words after it, up to two, before
@@ -74,21 +74,59 @@ pub fn shown(command: &Command) -> String {
 pub(super) fn name(command: &Command) -> String {
     let args =
         (command.get_args().take(2)).take_while(|arg| !arg.as_encoded_bytes().starts_with(b"-"));
-    joined(iter::once(command.get_program()).chain(args))
+    joined(command.get_program(), args)
 }
 
-fn joined<'a>(words: impl Iterator<Item = &'a OsStr>) -> String {
-    words.map(quoted).collect::<Vec<_>>().join(" ")
+fn joined<'a>(program: &OsStr, args: impl Iterator<Item = &'a OsStr>) -> String {
+    let program = quoted(program, Place::Program);
+    let args = args.map(|arg| quoted(arg, Place::Argument));
+    iter::once(program)
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// `word` as `sh` reads it: as it is if `sh` takes each of its characters literally, and else in
-/// single quotes.
+#[derive(Clone, Copy)]
+enum Place {
+    Program,
+    Argument,
+}
+
+// The words that `sh` reads as reserved where a command's first word stands: POSIX's, and those
+// that it lets a shell reserve too, as Bash and ksh do. The rest hold characters quoted anyway.
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_04
+const RESERVED: [&str; 17] = [
+    "case",
+    "do",
+    "done",
+    "elif",
+    "else",
+    "esac",
+    "fi",
+    "for",
+    "if",
+    "in",
+    "then",
+    "until",
+    "while",
+    "function",
+    "namespace",
+    "select",
+    "time",
+];
+
+/// `word`, at `place`, as `sh` reads it: as it is if `sh` takes it literally, and else in single
+/// quotes. A program is quoted, too, where `sh` would read it as an assignment or a reserved word.
 // As Python's `shlex.quote` quotes it, with the same characters taken literally:
 // https://github.com/python/cpython/blob/0fb18b02c8ad56299d6a2910be0bab8ad601ef24/Lib/shlex.py#L321-L332
-fn quoted(word: &OsStr) -> Cow<'_, str> {
+fn quoted(word: &OsStr, place: Place) -> Cow<'_, str> {
     let word = word.to_string_lossy();
     let literal = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
-    if !word.is_empty() && word.chars().all(literal) {
+    let read_otherwise = match place {
+        Place::Program => word.contains('=') || RESERVED.contains(&&*word),
+        Place::Argument => false,
+    };
+    if !word.is_empty() && word.chars().all(literal) && !read_otherwise {
         return word;
     }
     // A single quote ends the quoted part, stands in double quotes, and starts another.

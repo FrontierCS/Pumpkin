@@ -82,9 +82,11 @@ a lock on a file (`slots`), signals noted rather than acted on (`signal`), and a
 the whole process (`abort_on_panic`).
 
 **Architecture Invariant:** every `process::run` states its `Bound`, which has no unbounded case
-and no default, and its command leads a process group of its own, which is killed whole at the
-bound, or once a captured stream passes 128 MiB. A child that is to run longer starts by
-`process::spawn`, and its caller follows it to its end.
+and no default, and its command is killed at the bound, or once a captured stream passes 128 MiB.
+A run whose streams are all captured or discarded leads a process group of its own, which is
+killed whole as the run ends, so what its command started ends with it, but for a process that
+leaves the group. A run that inherits a stream stays in its caller's group, so that the terminal's
+Ctrl-C reaches it, and its command alone is killed at the bound.
 
 **Architecture Invariant:** it knows nothing of Pumpkin. Its manifest names no Pumpkin crate.
 
