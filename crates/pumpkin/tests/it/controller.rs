@@ -6,6 +6,7 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use expect_test::{Expect, expect};
@@ -1851,6 +1852,24 @@ fn sha256(bytes: &[u8]) -> String {
     Sha256Digest::from(digest).hex().to_owned()
 }
 
+fn file_sha256(path: &Path) -> (String, u64) {
+    use sha2::Digest as _;
+    let mut file = File::open(path).unwrap();
+    let mut sha256 = sha2::Sha256::new();
+    let mut buffer = vec![0; 1 << 16];
+    let mut size_bytes = 0;
+    loop {
+        let read = file.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        sha256.update(&buffer[..read]);
+        size_bytes += read as u64;
+    }
+    let digest = <[u8; 32]>::from(sha256.finalize());
+    (Sha256Digest::from(digest).hex().to_owned(), size_bytes)
+}
+
 fn walked(dir: &Path, skipped: &[&str]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut dirs = vec![PathBuf::new()];
@@ -1880,10 +1899,8 @@ fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)>
     let bin = client_bin(scratch);
     holders.push((key(&bin), "the install".to_owned()));
     for name in BUILT {
-        holders.push((
-            sha256(&fs::read(bin.join(name)).unwrap()),
-            format!("the installed {name}"),
-        ));
+        let (hex, _) = built_sha256(&bin.join(name));
+        holders.push((hex, format!("the installed {name}")));
     }
     for path in walked(&repo, &[".git", ".pumpkin"]) {
         let at = repo.join(&path);
@@ -1922,7 +1939,7 @@ fn stored(scratch: &Scratch, holders: &[(String, String)]) -> Vec<String> {
             Some(hex) => (hex, ", to run"),
             None => (name, ""),
         };
-        assert_eq!(sha256(&fs::read(store.join(&path)).unwrap()), hex, "{name}");
+        assert_eq!(file_sha256(&store.join(&path)).0, hex, "{name}");
         let metadata = fs::metadata(store.join(&path)).unwrap();
         let mode = metadata.permissions().mode() & 0o7777;
         let linked = match metadata.nlink() {
@@ -3437,10 +3454,23 @@ fn install_manifest(bin: &Path) -> String {
     names.sort_unstable();
     let mut text = "pumpkin-tree/1\n".to_owned();
     for name in names {
-        let bytes = fs::read(bin.join(name)).unwrap();
-        let _ = writeln!(text, "x {} {} {name}", sha256(&bytes), bytes.len());
+        let (hex, size_bytes) = built_sha256(&bin.join(name));
+        let _ = writeln!(text, "x {hex} {size_bytes} {name}");
     }
     text
+}
+
+// The SHA-256 and length of the file of `BUILT` at `path`. Each install's `pumpkin` is a link of
+// the one under test, which is large, so that one is hashed once per test process.
+fn built_sha256(path: &Path) -> (String, u64) {
+    static PUMPKIN_SHA256: LazyLock<(String, u64)> =
+        LazyLock::new(|| file_sha256(Path::new(PUMPKIN)));
+    let (file, pumpkin) = (fs::metadata(path).unwrap(), fs::metadata(PUMPKIN).unwrap());
+    if (file.dev(), file.ino()) == (pumpkin.dev(), pumpkin.ino()) {
+        PUMPKIN_SHA256.clone()
+    } else {
+        file_sha256(path)
+    }
 }
 
 fn key(bin: &Path) -> String {
