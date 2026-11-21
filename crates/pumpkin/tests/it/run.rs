@@ -137,11 +137,12 @@ fn usage() {
                         Print this help.
 
               Rarely needed:
-                build   Build a task's images, and print its workflow's IR
-                reap    Remove what the runs that have ended left
+                build       Build a task's images, and print its workflow's IR
+                reap        Remove what the runs that have ended left
+                controller  The controller's own side of the controller target
 
               Topics:
-                config  The machine's configuration, pumpkin.toml
+                config      The machine's configuration, pumpkin.toml
 
               `pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
               does, and `pumpkin help <topic>` a topic.
@@ -797,11 +798,12 @@ fn usage() {
               -h, --help     Print this help.
 
             Rarely needed:
-              build   Build a task's images, and print its workflow's IR
-              reap    Remove what the runs that have ended left
+              build       Build a task's images, and print its workflow's IR
+              reap        Remove what the runs that have ended left
+              controller  The controller's own side of the controller target
 
             Topics:
-              config  The machine's configuration, pumpkin.toml
+              config      The machine's configuration, pumpkin.toml
 
             `pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
             does, and `pumpkin help <topic>` a topic.
@@ -902,16 +904,42 @@ fn usage() {
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin help bogus
             exit status: Some(2)
-            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`) or a topic (`config`)
+            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`, `controller`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help
             $ pumpkin help controller
-            exit status: Some(2)
-            error: there is no help for `controller`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`) or a topic (`config`)
+            exit status: Some(0)
+            printed:
+              On the controller: `job` runs a job of the controller target, which `pumpkin
+              run` and `pumpkin build` start there in a unit of its own; `boot` reaps what
+              lost runs left, at the controller's boot; `cancel` cancels a run for `pumpkin
+              cancel`, on a client, which says the run's ending from its copy of the record;
+              `serve` answers, on its standard input and output, the client that follows a
+              job, lists the runs or views them; and `publish` uploads the runs to the bucket
+              of the public page.
 
-            Usage: pumpkin help [topic]
-            pumpkin: to read how to use it: pumpkin help help"#]],
+              Usage: pumpkin controller <action>
+
+              Actions:
+                job      Run a job of the controller target
+                boot     Reap what lost runs left, at the controller's boot
+                cancel   Cancel a run for a client, which says its ending
+                serve    Answer a client's link, on the standard input and output
+                publish  Upload the runs to the bucket of the public page
+
+              Options:
+                -h, --help
+                        Print this help.
+
+              Examples:
+                cd ~/trees/tasks/20261108-000905-126a21e9 && pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 --parameter /pumpkin-alice/settings --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 -- run tasks/bench/task.star --arg model=model-a
+                pumpkin controller boot
+
+              Exit status:
+                0  The job's command, or the boot, has ended as it should.
+                1  An error, which a `pumpkin:` line on the standard error says.
+                2  A usage error."#]],
     );
 }
 
