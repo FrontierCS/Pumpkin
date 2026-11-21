@@ -4,12 +4,13 @@
 
 use std::collections::BTreeMap;
 
+use recipe::fetch::Pins;
 use schema::ir::Sha256Digest;
 use sha2::{Digest as _, Sha256};
 
 use super::Container;
 
-pub(super) fn resolve(container: &Container<'_>, packages: &[String]) -> Result<String, String> {
+pub(super) fn resolve(container: &Container<'_>, packages: &[String]) -> Result<Pins, String> {
     container.exec("apt-get", ["update", "--quiet=2", "--error-on=any"])?;
     let targets = container.apt_get([
         "indextargets",
@@ -18,7 +19,7 @@ pub(super) fn resolve(container: &Container<'_>, packages: &[String]) -> Result<
         "$(REPO_URI) $(BASE_URI) $(METAKEY) $(COMPRESSIONTYPES)",
     ])?;
     let archive = Archive::read(&targets)?;
-    let mut pins = Vec::new();
+    let mut pins = Pins::default();
     let install = [
         "install",
         "--yes",
@@ -45,11 +46,10 @@ pub(super) fn resolve(container: &Container<'_>, packages: &[String]) -> Result<
             .replace("%2B", "+")
             .replace("%7e", "~")
             .replace("%7E", "~");
-        let path = archive.path(&url)?;
-        pins.push(format!("{hash} {url} {path}"));
+        pins.insert(archive.path(&url)?.to_owned(), url, hash)?;
     }
     archive.index_pins(container, &mut pins)?;
-    Ok(pins.join("\n"))
+    Ok(pins)
 }
 
 struct Archive<'a> {
@@ -71,7 +71,10 @@ impl<'a> Archive<'a> {
         }
         let mut suites = BTreeMap::<_, Vec<_>>::new();
         for line in targets.lines() {
-            let [repo, base, key, types] = line.splitn(4, ' ').collect::<Vec<_>>()[..] else {
+            let mut fields = line.splitn(4, ' ');
+            let (Some(repo), Some(base), Some(key), Some(types)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
                 return Err(format!(
                     "apt-get printed an incomplete index target: {line}"
                 ));
@@ -95,11 +98,7 @@ impl<'a> Archive<'a> {
         })
     }
 
-    fn index_pins(
-        mut self,
-        container: &Container<'_>,
-        pins: &mut Vec<String>,
-    ) -> Result<(), String> {
+    fn index_pins(mut self, container: &Container<'_>, pins: &mut Pins) -> Result<(), String> {
         // Ask apt for the cache filenames: its URL escaping differs from the archive's. A
         // --print-uris update lists possible indexes too, including ones the archive lacks.
         let update = container.apt_get(["update", "--print-uris"])?;
@@ -118,24 +117,33 @@ impl<'a> Archive<'a> {
             let cached = format!("/var/lib/apt/lists/{filename}");
             let bytes = container.exec("cat", ["--", &cached])?;
             let hash = Sha256Digest::from(<[u8; 32]>::from(Sha256::digest(&bytes)));
-            pins.push(format!("{} {url} {}", hash.hex(), self.path(url)?));
+            pins.insert(self.path(url)?.to_owned(), url.to_owned(), hash.hex())?;
             let release = String::from_utf8_lossy(&bytes);
             let hashes = index_hashes(&release, url)?;
+            // An archive advertises the by-hash locations in its Release; its canonical index
+            // names work without them.
+            // https://wiki.debian.org/DebianRepository/Format#Acquire-By-Hash
+            let by_hash = release.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("Acquire-By-Hash")
+                        && value.trim().eq_ignore_ascii_case("yes")
+                })
+            });
+            let path = self.path(base)?;
             for (key, types) in indexes {
-                for kind in types.split_ascii_whitespace() {
-                    let file = if kind == "uncompressed" {
-                        key.to_owned()
-                    } else {
-                        format!("{key}.{kind}")
-                    };
-                    if let Some(hash) = hashes.get(file.as_str()) {
+                let compressed = |kind| match kind {
+                    "uncompressed" => hashes.get_key_value(key),
+                    _ => hashes.get_key_value(format!("{key}.{kind}").as_str()),
+                };
+                // An optional index may be absent from this suite's signed release.
+                if let Some((file, hash)) = types.split_ascii_whitespace().find_map(compressed) {
+                    let url = if by_hash {
                         let dir = key.rfind('/').map_or("", |end| &key[..=end]);
-                        let path = self.path(base)?;
-                        pins.push(format!(
-                            "{hash} {base}{dir}by-hash/SHA256/{hash} {path}{file}"
-                        ));
-                        break;
-                    }
+                        format!("{base}{dir}by-hash/SHA256/{hash}")
+                    } else {
+                        format!("{base}{file}")
+                    };
+                    pins.insert(format!("{path}{file}"), url, hash)?;
                 }
             }
         }
@@ -153,7 +161,10 @@ fn index_hashes<'a>(release: &'a str, url: &str) -> Result<BTreeMap<&'a str, &'a
     }
     let mut hashes = BTreeMap::new();
     for line in lines.take_while(|line| line.starts_with(' ')) {
-        let [hash, _size, path] = line.split_ascii_whitespace().collect::<Vec<_>>()[..] else {
+        let mut fields = line.split_ascii_whitespace();
+        let (Some(hash), Some(_size), Some(path), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             return Err(format!("{url} has a malformed SHA256 entry: {line}"));
         };
         hashes.insert(path, hash);

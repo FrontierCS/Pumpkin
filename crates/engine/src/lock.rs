@@ -23,10 +23,9 @@ const REPOSITORY: &str = "pumpkin/lock";
 const LOCK_TIMEOUT: Duration = Duration::from_mins(30);
 
 impl Engine {
-    /// The recipe of `stage`, with the stage's body written afresh from what its resolver
-    /// prints, as [`FetchStage`] says, in the image of the recipe up to the step that
-    /// reads the stage, built with `context` and `given`'s args and named contexts, as the
-    /// recipe's own build is given them.
+    /// The recipe of `stage`, with its body written afresh from the files its resolver finds.
+    /// It resolves in the image of the recipe up to the step that reads the stage, built with
+    /// `context` and `given`'s args and named contexts as the recipe's own build is.
     pub fn lock(
         &self,
         stage: &FetchStage,

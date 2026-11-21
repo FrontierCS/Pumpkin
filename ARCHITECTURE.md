@@ -150,7 +150,8 @@ all providers at run end. An allocation can become visible only on a later sweep
 
 Image recipes, Dockerfiles. `check` refuses a recipe that may have Docker fetch what no digest
 pins, and `fetch` reads and writes a recipe's fetch stages (`FetchStage`), which pin each file
-that a step would fetch.
+that a step would fetch. The engine supplies `Pins`, the resolved files keyed by their paths in
+the fetch stage.
 
 **Architecture Invariant:** it does no I/O and knows no Pumpkin crate, so the language, `pumpkin`'s
 check of a task and the engine's build share one check without depending on each other. It is

@@ -4,7 +4,7 @@
 
 use expect_test::{Expect, expect};
 use recipe::Stage;
-use recipe::fetch::FetchStage;
+use recipe::fetch::{FetchStage, Pins};
 
 /// A recipe with the fetch stage `apt`, read by one step, as a task's verifier has it.
 const VERIFIER: &str = "# The packages, pinned.\n\
@@ -121,21 +121,31 @@ fn written() {
     let text = VERIFIER.replace("<sha256>", &sha256);
     let stage = Stage::try_from("apt".to_owned()).unwrap();
     let stage = FetchStage::read("verifier", text.as_bytes(), &stage).unwrap();
-    let pins = [
-        format!("{sha256} https://example.com/b b\n{sha256} https://example.com/a dir/a"),
-        format!("{sha256} https://example.com/a a\n{sha256} https://example.com/b a"),
-        format!("{sha256} https://example.com/a a\n{sha256} https://example.com/a a"),
-        String::new(),
-        format!("{sha256} https://example.com/a"),
-        "0123 https://example.com/a a".to_owned(),
-        format!("{sha256} http://example.com/a a"),
-        format!("{sha256} https://example.com/a.git a"),
-        format!("{sha256} https://example.com/a ../a"),
+    let a = "https://example.com/a";
+    let b = "https://example.com/b";
+    let hash = sha256.as_str();
+    let cases: &[&[(&str, &str, &str)]] = &[
+        &[("dir/a", a, hash), ("b", b, hash)],
+        &[("a", a, hash), ("a", b, hash)],
+        &[("a", a, hash), ("a", a, &"0".repeat(64))],
+        &[("a", a, hash), ("a", a, hash)],
+        &[],
+        &[("a", a, "0123")],
+        &[("a", "http://example.com/a", hash)],
+        &[("a", "https://example.com/a.git", hash)],
+        &[("../a", a, hash)],
+        &[("dir/with space", a, hash)],
     ];
-    let written = pins.iter().map(|pins| match stage.written(pins) {
-        Ok(recipe) => recipe,
-        Err(error) => error,
-    });
+    let write = |entries: &[(&str, &str, &str)]| {
+        let mut pins = Pins::default();
+        for &(path, url, hash) in entries {
+            pins.insert(path.to_owned(), url.to_owned(), hash)?;
+        }
+        stage.written(&pins)
+    };
+    let written = cases
+        .iter()
+        .map(|entries| write(entries).unwrap_or_else(|error| error));
     expect![[r#"
         # The packages, pinned.
         # pumpkin lock: apt build-essential libglpk-dev/noble python3=3.12.3-0ubuntu2
@@ -151,6 +161,8 @@ fn written() {
         ---
         `a` is pinned twice, to different files: pin each path once
         ---
+        `a` is pinned twice, to different files: pin each path once
+        ---
         # The packages, pinned.
         # pumpkin lock: apt build-essential libglpk-dev/noble python3=3.12.3-0ubuntu2
         FROM scratch AS apt
@@ -162,15 +174,15 @@ fn written() {
             sh /context/apt_mirror.sh /fetch/apt install --yes build-essential
 
         ---
-        the resolver printed no pin: it should print a line for each file
+        the resolver found no files to pin
         ---
-        the pin `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef https://example.com/a`: it is no pin: print `<sha256> <url> <path>`
+        `0123` isn't a SHA-256: use 64 lowercase hexadecimal digits
         ---
-        the pin `0123 https://example.com/a a`: `0123` isn't a SHA-256: print 64 lowercase hexadecimal digits
+        `http://example.com/a` isn't an `https://` URL: fetch each file by one
         ---
-        the pin `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef http://example.com/a a`: `http://example.com/a` isn't an `https://` URL: fetch each file by one
+        Docker may take `https://example.com/a.git` for a Git repository's URL, which some of its versions clone without checking a checksum: name no `ADD` source that ends in `.git`, in any case
         ---
-        the pin `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef https://example.com/a.git a`: Docker may take `https://example.com/a.git` for a Git repository's URL, which some of its versions clone without checking a checksum: name no `ADD` source that ends in `.git`, in any case
+        `../a` isn't a relative path with no empty, `.` or `..` component: name one
         ---
-        the pin `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef https://example.com/a ../a`: `../a` isn't a relative path with no empty, `.` or `..` component: print one"#]].assert_eq(&written.collect::<Vec<_>>().join("\n---\n"));
+        `dir/with space` holds ` `, which Docker may split, unquote or unescape: write it in printable ASCII, with no quote or `\`"#]].assert_eq(&written.collect::<Vec<_>>().join("\n---\n"));
 }

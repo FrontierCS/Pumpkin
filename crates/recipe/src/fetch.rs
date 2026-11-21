@@ -12,19 +12,21 @@
 //!
 //! One later step reads it, a `RUN` that bind-mounts it (`--mount=type=bind,from=<name>,…`), so
 //! no layer of the image holds the files. Its comment holds its lock line, `# pumpkin lock:
-//! <resolver> <argument>…`, from which the body is written afresh, with what the resolver
-//! prints, run online in the image that the recipe builds up to that step
+//! <resolver> <argument>…`, from which the body is written afresh with the files the
+//! resolver finds online in the image that the recipe builds up to that step
 //! ([`FetchStage::prefix`]). Its resolvers are a [`Resolver`]'s.
 //!
 //! A lock goes stale safely: a step that asks for a file the stage lacks fails, offline.
 
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
+use alloc::collections::btree_map::Entry;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
-use crate::{Line, Stage, at_line, bound_from, check_source, digest, lines, name};
+use crate::{Line, Stage, at_line, bound_from, check_source, lines, name, sha256_hex};
 
 /// What starts a fetch stage's lock line, after its `#`.
 const LOCK: &str = "pumpkin lock:";
@@ -98,18 +100,28 @@ impl FetchStage {
         &self.resolver
     }
 
-    /// The recipe, with the stage's body written afresh from `pins`, the lines the resolver
-    /// printed, `<sha256> <url> <path>` each.
+    /// The recipe with the stage's body replaced by one checksum-pinned `ADD` for each file
+    /// in `pins`, sorted by path.
     ///
     /// # Errors
     ///
-    /// Fails if a line is no pin: a SHA-256, in hexadecimal digits; a plain `https://` URL
-    /// ([`check_source`]); and a relative path; or if two pin one path to different files.
-    pub fn written(&self, pins: &str) -> Result<String, String> {
-        let mut written = self.lines[..=self.from_index].to_vec();
-        written.extend(adds(pins)?);
-        written.extend_from_slice(&self.lines[self.end_index..]);
-        Ok(written.join("\n"))
+    /// Fails if the resolver found no files.
+    pub fn written(&self, pins: &Pins) -> Result<String, String> {
+        if pins.by_path.is_empty() {
+            return Err("the resolver found no files to pin".to_owned());
+        }
+        let mut written = self.lines[..=self.from_index].join("\n");
+        for (path, (sha256, url)) in &pins.by_path {
+            let _ = write!(
+                written,
+                "\nADD --link --chmod=0644 --checksum=sha256:{sha256} {url} /{path}"
+            );
+        }
+        for line in &self.lines[self.end_index..] {
+            written.push('\n');
+            written.push_str(line);
+        }
+        Ok(written)
     }
 }
 
@@ -257,53 +269,55 @@ impl Resolver {
     }
 }
 
-/// The body of a fetch stage of `pins`, a resolver's lines, `<sha256> <url> <path>` each.
-fn adds(pins: &str) -> Result<Vec<String>, String> {
-    let mut by_path = BTreeMap::new();
-    for line in pins.lines() {
-        let (path, sha256, url) =
-            pin(line).map_err(|error| format!("the pin `{line}`: {error}"))?;
-        if let Some(earlier) = by_path.insert(path, (sha256, url))
-            && earlier != (sha256, url)
-        {
-            return Err(format!(
-                "`{path}` is pinned twice, to different files: pin each path once"
-            ));
-        }
-    }
-    if by_path.is_empty() {
-        return Err("the resolver printed no pin: it should print a line for each file".to_owned());
-    }
-    let add = |(path, (sha256, url)): (&str, (&str, &str))| {
-        format!("ADD --link --chmod=0644 --checksum=sha256:{sha256} {url} /{path}")
-    };
-    Ok(by_path.into_iter().map(add).collect())
+/// The files a resolver found for one fetch stage, keyed by their paths below its root.
+#[derive(Default)]
+pub struct Pins {
+    by_path: BTreeMap<String, (String, String)>,
 }
 
-/// The path, the SHA-256 and the URL of `line`, a pin, `<sha256> <url> <path>`: a SHA-256, in
-/// lowercase hexadecimal digits; a plain `https://` URL ([`check_source`]); and a relative path
-/// with no empty, `.` or `..` component; each as the recipe check takes a name.
-fn pin(line: &str) -> Result<(&str, &str, &str), String> {
-    let [sha256, url, path] = line.split(' ').collect::<Vec<_>>()[..] else {
-        return Err("it is no pin: print `<sha256> <url> <path>`".to_owned());
-    };
-    if !digest(&format!("sha256:{sha256}")) {
-        return Err(format!(
-            "`{sha256}` isn't a SHA-256: print 64 lowercase hexadecimal digits"
-        ));
+impl Pins {
+    /// Pins the file at `path` to the bytes with SHA-256 `sha256` at `url`. Pinning the same
+    /// file twice leaves one entry.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless `path` is relative with no empty, `.` or `..` component, `url` is a plain
+    /// HTTPS `ADD` source, and `sha256` is 64 lowercase hexadecimal digits. A second URL or
+    /// digest for a path fails and leaves its original pin in place.
+    pub fn insert(&mut self, path: String, url: String, sha256: &str) -> Result<(), String> {
+        if !sha256_hex(sha256) {
+            return Err(format!(
+                "`{}` isn't a SHA-256: use 64 lowercase hexadecimal digits",
+                sha256.escape_debug()
+            ));
+        }
+        name(&url)?;
+        check_source(&url)?;
+        if !url.starts_with("https://") {
+            return Err(format!(
+                "`{url}` isn't an `https://` URL: fetch each file by one"
+            ));
+        }
+        name(&path)?;
+        if path.split('/').any(|part| matches!(part, "" | "." | "..")) {
+            return Err(format!(
+                "`{path}` isn't a relative path with no empty, `.` or `..` component: name one"
+            ));
+        }
+        match self.by_path.entry(path) {
+            Entry::Vacant(entry) => {
+                entry.insert((sha256.to_owned(), url));
+            }
+            Entry::Occupied(entry) => {
+                let (old_hash, old_url) = entry.get();
+                if old_hash != sha256 || *old_url != url {
+                    return Err(format!(
+                        "`{}` is pinned twice, to different files: pin each path once",
+                        entry.key()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
-    name(url)?;
-    check_source(url)?;
-    if !url.starts_with("https://") {
-        return Err(format!(
-            "`{url}` isn't an `https://` URL: fetch each file by one"
-        ));
-    }
-    name(path)?;
-    if (path.split('/')).any(|component| matches!(component, "" | "." | "..")) {
-        return Err(format!(
-            "`{path}` isn't a relative path with no empty, `.` or `..` component: print one"
-        ));
-    }
-    Ok((path, sha256, url))
 }

@@ -1,6 +1,6 @@
 //! `lock`: a task checked as `check` checks it, and its recipe's fetch stage read, before the
-//! configuration and the engine are reached; then the stage written afresh, in place, from what
-//! its resolver prints, run online on the engine in the image of the recipe up to the step that
+//! configuration and the engine are reached; then the stage written afresh, in place, from the files
+//! its resolver finds online on the engine in the image of the recipe up to the step that
 //! reads it, built with the inputs that the task's images give the recipe.
 
 use std::fs;
@@ -128,7 +128,7 @@ fn refusals() {
               Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
               lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
               above its line `FROM scratch AS <stage>`, up to the blank line that ends it: an
-              `ADD` for each file that the resolver prints, pinned by its SHA-256. The
+              `ADD` for each file the resolver finds, pinned by its SHA-256. The
               resolver runs online, in the image of the recipe up to the one later `RUN` that
               mounts the stage, built on the machine's Docker engine with the inputs that the
               task's images give the recipe: its context, mounts, args and named contexts,
