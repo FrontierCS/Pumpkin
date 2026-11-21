@@ -38,6 +38,9 @@ use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::iam::{CALLS, ECR};
+
+pub mod iam;
 mod identity;
 mod launch;
 mod user_data;
@@ -212,7 +215,7 @@ impl<'e> Ec2<'e> {
             timer,
         } = settings;
         let cli = Cli::connect(region.clone())?;
-        let Identity { account, arn } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let Identity { account, arn } = cli.json(&CALLS.identity, &[], Bound::Call)?;
         // The instances are launched in the caller's account, which their documents name.
         let documents = Documents::of_region(region.as_str(), account.clone())?;
         let repositories = described_repositories(&cli, repositories)?;
@@ -245,7 +248,7 @@ impl Ec2<'_> {
     /// the settings' region, as [`connect`](Self::connect) has it answer.
     pub fn reach(settings: &Settings) -> Result<Reached, String> {
         let cli = Cli::connect(settings.region.clone())?;
-        let Identity { .. } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        let Identity { .. } = cli.json(&CALLS.identity, &[], Bound::Call)?;
         let group = settings.timer.group.clone();
         Ok(Reached { cli, group })
     }
@@ -365,7 +368,7 @@ fn described_repositories(
     repositories: &Repositories<RepositoryName>,
 ) -> Result<Repositories<Repository>, String> {
     let Repositories { roles, sandboxd } = repositories;
-    let [roles, sandboxd] = cli.repositories([roles, sandboxd])?;
+    let [roles, sandboxd] = cli.repositories(&ECR, [roles, sandboxd])?;
     Ok(Repositories {
         roles: roles?,
         sandboxd: sandboxd?,

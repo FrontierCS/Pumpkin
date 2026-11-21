@@ -337,7 +337,14 @@ unless a stage that pins each download by its checksum, with `ADD --checksum`, s
 
 AWS's command line as Pumpkin runs it, `Cli`, in one region, with ECR's repositories on it, a push
 from the operator's engine named by its digest (`Cli::publish`), and the IAM roles that settings
-name (`RoleArn`).
+name (`RoleArn`). `iam` is what IAM must allow of each call (`Call`), ECR's among them (`Ecr`),
+and a principal's policy from what its calls need (`iam::policy`).
+
+**Architecture Invariant:** a principal's policy is what the calls of the shipped binaries
+state. `Cli` runs only a `Call`, which names what IAM must allow of it, its actions, resources and
+conditions, as AWS's Service Authorization Reference gives them. Each crate that makes calls
+declares them in its `iam` module, which lists each in the policy of the principal that makes it.
+`xtask`'s own `aws` commands are a contributor's, and in no policy.
 
 **Architecture Invariant:** every call that `Cli` makes is in its region, with no variable of this
 process's environment but those that find `aws`'s own configuration, so nothing steers it to
@@ -450,8 +457,8 @@ follows a job, and its `commands` stop and reap runs. `link` is the protocol of 
 `serve`, the controller's end. `serve` starts and cancels jobs and answers `ls` and `view`. It lists
 the jobs, each with its member (`member`), for `wait` and `cancel` to find a run among. It streams a
 job's log and its milestones. It is of the client's own build, which the client installs there
-whole: its executable and the files beside it, by their SHA-256. `manifest` describes the task tree
-and the client install that `send` transfers by content. Its `store` admits complete uploads by
+whole: its executable and the files beside it, by their SHA-256. `iam` states its own calls on
+AWS. `manifest` describes the task tree and the client install that `send` transfers by content. Its `store` admits complete uploads by
 their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
 and keeps the install that its unit runs. Its `settings` checks the envelope that made the
 controller's settings and refuses a job while they drain. `job` also holds the prune and the

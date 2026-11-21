@@ -29,6 +29,7 @@ mod config;
 mod controller;
 mod driver;
 mod ending;
+mod iam;
 mod job;
 mod link;
 mod manifest;
