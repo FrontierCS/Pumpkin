@@ -544,7 +544,9 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         }
     }
     // Before the store's, which then removes the blobs that only an install removed linked.
-    installs::collect(home, jobs)?;
+    if let Err(error) = installs::collect(home, jobs) {
+        say(format_args!("pruning the installs failed: {error}"));
+    }
     collect_store(&home.join(STORE))?;
     let runs = PathBuf::from(crate::default_runs()?);
     for id in ids(&home.join(JOBS))?.into_iter().filter(old) {

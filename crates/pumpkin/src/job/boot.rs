@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use stdx::Deadline;
 use stdx::process::Environment;
+use stdx::{Context as _, Deadline};
 
 use crate::cli;
 use crate::link::Boot;
@@ -35,34 +35,65 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
 
 /// The state of the controller's boot unit, and of its last run if it failed.
 pub(crate) fn state(home: &Path) -> Boot {
-    let mut systemctl = stdx::process::command("systemctl", Environment::Only(&["PATH"]));
-    systemctl.args([
-        "show",
-        "--property=ActiveState",
-        "--property=ExecMainStatus",
-    ]);
-    systemctl.args(["--property=ExecMainExitTimestamp", BOOT_UNIT]);
-    // A `systemctl` that doesn't run, or fails, says no state.
-    let printed = match stdx::process::output(&mut systemctl, Deadline::after(SYSTEMCTL_TIMEOUT)) {
-        Ok(Some(output)) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Ok(None) | Err(_) => String::new(),
-    };
-    let property =
-        |name: &str| (printed.lines()).find_map(|line| line.strip_prefix(name)?.strip_prefix('='));
-    match property("ActiveState") {
+    let shown = Shown::of(&["ActiveState", "ExecMainStatus", "ExecMainExitTimestamp"]);
+    match shown.get("ActiveState") {
         None | Some("") => Boot::Unknown,
         Some("activating") => Boot::Running,
-        Some("failed") => match property("ExecMainStatus").map(str::parse) {
+        Some("failed") => match shown.get("ExecMainStatus").map(str::parse) {
             Some(Ok(status)) => Boot::Failed {
                 status,
                 log: boot_log(&home.join("boot.log")).unwrap_or_else(|error| error.to_string()),
-                at: property("ExecMainExitTimestamp")
+                at: shown
+                    .get("ExecMainExitTimestamp")
                     .filter(|at| !at.is_empty())
                     .map(str::to_owned),
             },
             Some(Err(_)) | None => Boot::Unknown,
         },
         Some(_) => Boot::Done,
+    }
+}
+
+/// The jobs' directory `jobs`, locked as a prune that removes what no job holds locks it
+/// (`super::open_jobs`), once the boot unit has ended since the machine booted, run to its end or
+/// skipped by its condition, with no job of it queued; `None` until then, or while `systemctl`
+/// can't say, as the boot's reap of an old build may need what such a prune would remove.
+pub(super) fn after(jobs: &Path) -> Result<Option<File>, String> {
+    let locked = super::open_jobs(jobs)?;
+    locked.lock().context(super::jobs_named(jobs))?;
+    let shown = Shown::of(&[
+        "ActiveState",
+        "Job",
+        "ExecMainExitTimestamp",
+        "ConditionResult",
+        "ConditionTimestamp",
+    ]);
+    let set = |name: &str| shown.get(name).is_some_and(|value| !value.is_empty());
+    // systemd keeps a unit's times for the boot alone, so an exit time is of this boot's run.
+    let ended = set("ExecMainExitTimestamp")
+        || shown.get("ConditionResult") == Some("no") && set("ConditionTimestamp");
+    let idle = shown.get("Job") == Some("") && shown.get("ActiveState") != Some("activating");
+    Ok((ended && idle).then_some(locked))
+}
+
+/// The properties of the boot unit that `systemctl show` gives, none if it doesn't run or fails.
+struct Shown(String);
+
+impl Shown {
+    fn of(properties: &[&str]) -> Self {
+        let mut systemctl = stdx::process::command("systemctl", Environment::Only(&["PATH"]));
+        systemctl.arg("show");
+        systemctl.args(properties.iter().map(|name| format!("--property={name}")));
+        systemctl.arg(BOOT_UNIT);
+        let deadline = Deadline::after(SYSTEMCTL_TIMEOUT);
+        match stdx::process::output(&mut systemctl, deadline) {
+            Ok(Some(output)) => Self(String::from_utf8_lossy(&output.stdout).into_owned()),
+            Ok(None) | Err(_) => Self(String::new()),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        (self.0.lines()).find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
     }
 }
 

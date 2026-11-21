@@ -1219,7 +1219,15 @@ if [ -f "$dir/link-pid" ]; then echo $$ > "$dir/link-pid"; fi
 exec /bin/sh -c "$command" "$@"
 "#;
 
-const SYSTEMCTL: &str = "#!/bin/sh\n";
+// Answers `show` with what `boot` holds, as `systemctl` gives the boot unit's properties, a line
+// each, and nothing without it.
+const SYSTEMCTL: &str =
+    "#!/bin/sh\n[ \"$1\" != show ] || cat \"${0%/*}/boot\" 2>/dev/null\nexit 0\n";
+
+// The boot unit, as `systemctl show` gives it once its run of this boot has ended.
+const BOOT_ENDED: &str = "ActiveState=inactive\nJob=\nExecMainExitTimestamp=Sat 2026-11-21 \
+                          08:00:00 UTC\nConditionResult=yes\nConditionTimestamp=Sat 2026-11-21 \
+                          07:59:58 UTC\n";
 
 const SYSTEMD_RUN: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/argv\"\n";
 
@@ -2746,8 +2754,15 @@ fn install_collection() {
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
     let client = set_up_client(&scratch);
+    scratch.write("bin/boot", BOOT_ENDED);
     let (id, ran) = start(&scratch, &client);
     assert!(ran.contains("exit status: Some(0)"), "{ran}");
+    // As the run's unit makes it, which the stand-in `systemd-run` starts none of.
+    symlink(
+        controllers(&scratch),
+        scratch.0.join(format!("home/jobs/{id}/pumpkin")),
+    )
+    .unwrap();
     let workspace = scratch.0.join("home/.pumpkin");
     // The client's install, of links into the store, which its start made, and its manifest, each
     // older than what the prune keeps.
@@ -2773,6 +2788,12 @@ fn install_collection() {
     let fresh = "b".repeat(64);
     install(&scratch, &format!("home/.pumpkin/{fresh}/bin"));
     days_ago(&workspace.join(&fresh), 13);
+    // An old one that can't be removed whole, which leaves the others to go.
+    let stuck = "d".repeat(64);
+    scratch.write(&format!("home/.pumpkin/{stuck}/bin/locked/file"), "");
+    let locked = workspace.join(format!("{stuck}/bin/locked"));
+    fs::set_permissions(&locked, Permissions::from_mode(0o000)).unwrap();
+    days_ago(&workspace.join(&stuck), 15);
     let ended = id_ago(15, "0c0000ab");
     scratch.write(&format!("home/builds/{ended}/log"), "");
     let tree = last_tree(&scratch);
@@ -2780,7 +2801,7 @@ fn install_collection() {
     assert!(built.status.success(), "{built:?}");
     let said = String::from_utf8(built.stderr).unwrap();
     let mut lines: Vec<String> = (said.lines())
-        .filter(|line| line.contains("the prune"))
+        .filter(|line| line.contains("the prune") || line.contains("removing"))
         .map(str::to_owned)
         .collect();
     let listed = |dir: &str| {
@@ -2798,7 +2819,14 @@ fn install_collection() {
     lines.extend(["home/.pumpkin", "home/.pumpkin/tmp", "home/builds"].map(listed));
     let named = [(tree, "the tree that the job ran")];
     lines.extend(stored(&scratch, &holders(&scratch, &named)));
+    let aside = fs::read_dir(workspace.join("tmp")).unwrap().next().unwrap();
+    let aside = aside.unwrap().file_name().into_string().unwrap();
+    let locked = workspace.join(format!("tmp/{aside}/{stuck}/bin/locked"));
+    fs::set_permissions(locked, Permissions::from_mode(0o755)).unwrap();
     let shown = [
+        (aside.as_str(), "install.<random>"),
+        (stuck.as_str(), "<stuck>"),
+        (&stuck[..12], "<stuck>"),
         (idle.as_str(), "<idle>"),
         (&idle[..12], "<idle>"),
         (&"a".repeat(64), "<running's>"),
@@ -2813,9 +2841,10 @@ fn install_collection() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
+            pumpkin: removing the install <stuck>: <scratch>/home/.pumpkin/tmp/install.<random>/<stuck>: Permission denied (os error 13) at path "<scratch>/home/.pumpkin/tmp/install.<random>"
             pumpkin: the prune removed the installs of 1 build that no job used for 14 days: <idle>
             home/.pumpkin: <running's>, <fresh>, <recent's>
-            home/.pumpkin/tmp: none
+            home/.pumpkin/tmp: install.<random>
             home/builds: <running>, <id>
             the store:
               PUMPKIN.star: 444, 2 links
@@ -2827,6 +2856,39 @@ fn install_collection() {
               a manifest: a tree of no files
               a manifest: the tree that the job ran
               incoming/: none"#]],
+    );
+}
+
+#[test]
+fn prune_waits_for_the_boot() {
+    let scratch = Scratch::new();
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let client = set_up_client(&scratch);
+    scratch.write(
+        "bin/boot",
+        "ActiveState=activating\nJob=123\nExecMainExitTimestamp=\n",
+    );
+    let (id, ran) = start(&scratch, &client);
+    assert!(ran.contains("exit status: Some(0)"), "{ran}");
+    let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
+    symlink(controllers(&scratch), own).unwrap();
+    let idle = key(&client_bin(&scratch));
+    let install = scratch.0.join(format!("home/.pumpkin/{idle}"));
+    days_ago(&install, 15);
+    let built = job_of(&scratch, &id, &last_tree(&scratch));
+    assert!(built.status.success(), "{built:?}");
+    let said = String::from_utf8(built.stderr).unwrap();
+    let mut lines: Vec<String> = (said.lines())
+        .filter(|line| line.contains("prune"))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("the idle install is kept: {}", install.exists()));
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect!["the idle install is kept: true"],
     );
 }
 
