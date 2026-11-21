@@ -16,7 +16,7 @@ use stdx::Context as _;
 
 use super::{JOBS, KEPT, KEPT_DAYS, ids};
 use crate::member::Member;
-use crate::{counted, next, say};
+use crate::{counted, next, say, size};
 
 // The file in a run's job's directory that says that the run's member holds a whole copy of its
 // record, by being there, and when they last copied it, by its time.
@@ -71,7 +71,7 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
         say(format_args!(
             "the prune removed the records of {} copied over {KEPT_DAYS} days ago, {}: {}",
             counted(removed.len(), "run"),
-            gigabytes(removed_bytes),
+            size(removed_bytes),
             removed.join(", ")
         ));
     }
@@ -128,7 +128,7 @@ fn uncopied_in(home: &Path, jobs: &Path) -> Result<Option<String>, String> {
         "the records of {} that their members haven't copied take {}, and each lasts until its \
          member copies it, then {KEPT_DAYS} days; to copy the oldest: {}",
         counted(uncopied.len(), "ended run"),
-        gigabytes(uncopied_bytes),
+        size(uncopied_bytes),
         next::of_run("wait", None, oldest)
     )))
 }
@@ -168,10 +168,4 @@ fn size_bytes(dir: &Path) -> u64 {
         }
     }
     size_bytes
-}
-
-/// `bytes` in gigabytes of 10^9 bytes, to a tenth.
-fn gigabytes(bytes: u64) -> String {
-    let tenths = bytes / 100_000_000;
-    format!("{}.{} GB", tenths / 10, tenths % 10)
 }

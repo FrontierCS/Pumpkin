@@ -274,7 +274,10 @@ fn holds(
             if install { "the build's" } else { "the task's" }
         )
     };
-    format!("controller `{name}` lacks {which}: sending {}", size(bytes))
+    format!(
+        "controller `{name}` lacks {which}: sending {}",
+        crate::size(bytes)
+    )
 }
 
 fn counting(name: &Name, bytes: u64) -> impl FnMut(u64) + '_ {
@@ -297,17 +300,8 @@ fn progress(name: &Name, sent_bytes: u64, size_bytes: u64, elapsed: Duration) ->
     let rate = u128::from(sent_bytes) * 1000 / elapsed.as_millis().max(1);
     format!(
         "sent {} of {} to controller `{name}`, at {}/s",
-        size(sent_bytes),
-        size(size_bytes),
-        size(u64::try_from(rate).unwrap_or(u64::MAX))
+        crate::size(sent_bytes),
+        crate::size(size_bytes),
+        crate::size(u64::try_from(rate).unwrap_or(u64::MAX))
     )
-}
-
-fn size(bytes: u64) -> String {
-    let units = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
-    let Some((unit, name)) = units.into_iter().find(|(unit, _)| bytes >= *unit) else {
-        return crate::counted(bytes, "byte");
-    };
-    let tenths = bytes * 10 / unit;
-    format!("{}.{} {name}", tenths / 10, tenths % 10)
 }

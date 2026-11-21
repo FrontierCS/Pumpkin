@@ -742,7 +742,7 @@ fn job_admission() {
             exit status: Some(1)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again; the records of 1 ended run that their members haven't copied take 0.0 GB, and each lasts until its member copies it, then 14 days; to copy the oldest: pumpkin wait <uncopied>
+            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again; the records of 1 ended run that their members haven't copied take 12.0 KiB, and each lasts until its member copies it, then 14 days; to copy the oldest: pumpkin wait <uncopied>
                 5 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: built/task.star: the task has 1 problem
@@ -3013,7 +3013,7 @@ fn record_collection() {
         &expect![[r#"
             bob's run copied by alice is noted: false
             pumpkin: removing run <stuck>'s record: <scratch>/home/.pumpkin/runs/.<stuck>.removed: Permission denied (os error 13)
-            pumpkin: the prune removed the records of 1 run copied over 14 days ago, 0.0 GB: <old>
+            pumpkin: the prune removed the records of 1 run copied over 14 days ago, 12.0 KiB: <old>
             home/.pumpkin/runs: .<stuck>.removed, <uncopied>, <fresh>, <held>, <theirs>, <reaped>
             home/jobs: <uncopied>, <fresh>, <held>, <theirs>, <reaped>, <id>
             $ pumpkin ls <old>
