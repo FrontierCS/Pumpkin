@@ -14,7 +14,7 @@ use std::{fs, io};
 use schema::ir::Sha256Digest;
 use stdx::Context as _;
 
-use super::{BUILDS, JOBS, KEPT, OWN};
+use super::{BUILDS, JOBS, KEPT, KEPT_DAYS, OWN};
 use crate::workspace::{self, Workspace};
 use crate::{manifest, say};
 
@@ -63,10 +63,9 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
         }
     }
     if !removed.is_empty() {
-        let days = KEPT.as_secs() / (24 * 60 * 60);
         let named: Vec<&str> = removed.iter().map(|digest| &digest.hex()[..12]).collect();
         say(format_args!(
-            "the prune removed the installs of {} that no job used for {days} days: {}",
+            "the prune removed the installs of {} that no job used for {KEPT_DAYS} days: {}",
             crate::counted(removed.len(), "build"),
             named.join(", ")
         ));

@@ -41,6 +41,7 @@ mod price;
 mod read_error;
 mod record;
 mod relay;
+mod removal;
 mod routes;
 mod sandbox;
 mod scoped;

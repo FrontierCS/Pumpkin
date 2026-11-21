@@ -694,6 +694,8 @@ fn job_admission() {
     }
     fs::remove_file(scratch.0.join("tagged")).unwrap();
     scratch.write("bin/disk", "1000 100\n");
+    let uncopied = id_ago(1, "0ad0000f");
+    ended_job(&scratch, &uncopied, "");
     let refused = on_one_cpu(&scratch, &third);
     lines.push(format!("the third:\n{}", job_ended_whole(refused)));
     lines.extend(
@@ -713,6 +715,7 @@ fn job_admission() {
             (first.as_str(), "<first>"),
             (second.as_str(), "<second>"),
             (third.as_str(), "<third>"),
+            (uncopied.as_str(), "<uncopied>"),
             (tag.strip_prefix("pumpkin/built:").unwrap(), "<hex>"),
         ],
         &expect![[r#"
@@ -739,7 +742,7 @@ fn job_admission() {
             exit status: Some(1)
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
+            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again; the records of 1 ended run that no machine has copied take 0.0 GB, and stay until one copies them; to copy the oldest: pumpkin wait <uncopied>
                 5 | IMAGE = image("Dockerfile")
                   |         ^^^^^^^^^^^^^^^^^^^
             pumpkin: built/task.star: the task has 1 problem
@@ -915,6 +918,10 @@ fn job_publish_fails() {
     scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
     let run = id_ago(0, "0ad00021");
     send(&scratch, &run, UPSTREAMS, false);
+    let copied = id_ago(20, "0ad00022");
+    ended_job(&scratch, &copied, "");
+    scratch.write(&format!("home/jobs/{copied}/copied"), "");
+    days_ago(&scratch.0.join(format!("home/jobs/{copied}/copied")), 15);
     let mut job = on_controller(
         &scratch,
         &[
@@ -964,33 +971,39 @@ fn job_publish_fails() {
     let record = scratch.0.join(format!("home/.pumpkin/runs/{run}"));
     let ended = record.join("outcome.json").exists();
     lines.push(format!("the run ended: {ended}"));
+    let kept = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{copied}"))
+        .exists();
+    lines.push(format!("the record copied 15 days ago is kept: {kept}"));
     check(
         &scratch,
         &lines.join("\n"),
         &[(run.as_str(), "<run>")],
         &expect![[r#"
-        the run's job: exit status Some(0)
-        pumpkin: building an image in pumpkin/built
-        pumpkin: built an image in pumpkin/built
-        pumpkin: run <run> started
-        pumpkin: to stop it: pumpkin cancel <run>
-        pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
-        pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports; the next publish uploads what this one didn't
-        aws --version
-        aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
-        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-        aws --version
-        aws --no-cli-pager --output json --region us-west-1 s3 sync <scratch>/home/.pumpkin/public/…
-        the run ended: true"#]],
+            the run's job: exit status Some(0)
+            pumpkin: building an image in pumpkin/built
+            pumpkin: built an image in pumpkin/built
+            pumpkin: run <run> started
+            pumpkin: to stop it: pumpkin cancel <run>
+            pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
+            pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports; the next publish uploads what this one didn't
+            aws --version
+            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+            curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
+            df --block-size=1 --output=size,avail -- /
+            df --block-size=1 --output=size,avail -- /
+            df --block-size=1 --output=size,avail -- /
+            df --block-size=1 --output=size,avail -- /
+            curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
+            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
+            aws --version
+            aws --no-cli-pager --output json --region us-west-1 s3 sync <scratch>/home/.pumpkin/public/…
+            the run ended: true
+            the record copied 15 days ago is kept: true"#]],
     );
 }
 
@@ -2892,6 +2905,74 @@ fn prune_waits_for_the_boot() {
     );
 }
 
+#[test]
+fn record_collection() {
+    let scratch = Scratch::new();
+    let _stand_in = StandIn::new(&scratch);
+    set_up(&scratch);
+    let client = set_up_client(&scratch);
+    let (id, ran) = start(&scratch, &client);
+    assert!(ran.contains("exit status: Some(0)"), "{ran}");
+    let runs = ["0e000001", "0e000002", "0e000003", "0e000004"].map(|random| id_ago(20, random));
+    let [old, uncopied, fresh, held] = &runs;
+    for run in &runs {
+        ended_job(&scratch, run, "");
+    }
+    for run in [old, fresh, held] {
+        let waited = on_client(&scratch, &client, &["wait", run])
+            .output()
+            .unwrap();
+        assert!(waited.status.success(), "{waited:?}");
+    }
+    for run in [old, held] {
+        days_ago(&scratch.0.join(format!("home/jobs/{run}/copied")), 15);
+    }
+    // As a copy under way holds it.
+    let pid = scratch
+        .0
+        .join(format!("home/.pumpkin/runs/{held}/driver.pid"));
+    let copying = File::open(pid).unwrap();
+    copying.lock_shared().unwrap();
+    let built = job_of(&scratch, &id, &last_tree(&scratch));
+    assert!(built.status.success(), "{built:?}");
+    let said = String::from_utf8(built.stderr).unwrap();
+    let mut lines: Vec<String> = (said.lines())
+        .filter(|line| line.contains("the prune"))
+        .map(str::to_owned)
+        .collect();
+    for dir in ["home/.pumpkin/runs", "home/jobs"] {
+        let mut names: Vec<String> = fs::read_dir(scratch.0.join(dir))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        lines.push(format!("{dir}: {}", names.join(", ")));
+    }
+    lines.push(ls_ran(&scratch, &client, &[old]));
+    let shown = [
+        (old.as_str(), "<old>"),
+        (uncopied.as_str(), "<uncopied>"),
+        (fresh.as_str(), "<fresh>"),
+        (held.as_str(), "<held>"),
+        (id.as_str(), "<id>"),
+    ];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &shown,
+        &expect![[r#"
+        pumpkin: the prune removed the records of 1 run copied over 14 days ago, 0.0 GB: <old>
+        home/.pumpkin/runs: <uncopied>, <fresh>, <held>
+        home/jobs: <uncopied>, <fresh>, <held>, <id>
+        $ pumpkin ls <old>
+        exit status: Some(0)
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        printed:
+          <old> finished          -  -               -  -: score=1 metrics={"solved":3}
+          1 run: 1 finished"#]],
+    );
+}
+
 fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
@@ -4039,7 +4120,7 @@ fn wait_names_its_run_there() {
               20261107-130000-2c9b0002
             $ pumpkin wait 9f
             exit status: Some(1)
-            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
+            pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine
             the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
     );
 }
@@ -4507,7 +4588,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `absent_request`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put`, `puts` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `absent_request`, expected one of `copy`, `copied`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put`, `puts` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
@@ -4661,6 +4742,8 @@ fn record_copy() {
             "wait"
         };
         lines.extend(copied_record(&scratch, &client, &[command, &id], &copy));
+        let copied = scratch.0.join(format!("home/jobs/{id}/copied"));
+        lines.push(format!("  noted as copied: {}", copied.exists()));
         if step == "whole" {
             let marked = fs::metadata(copy.join("model/marked")).unwrap().mode();
             lines.push(format!("  model/marked: {:o}", marked & 0o7777));
@@ -4733,10 +4816,12 @@ fn record_copy() {
               pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/jobs/0/secret: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
+              noted as copied: false
             whole:
             wait: exit status: 0
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: jobs/0/secret, record.json
+              noted as copied: true
               model/marked: 755
               jobs: 0, 2
             unchanged:
@@ -4744,11 +4829,13 @@ fn record_copy() {
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: 
+              noted as copied: true
             changed:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: log.jsonl, model/added
+              noted as copied: true
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1
@@ -5242,6 +5329,6 @@ fn view_cancels_on_the_controller() {
         &expect![[r#"
             POST /api/runs/<live>/cancel
             HTTP/1.1 202 Accepted
-            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path"#]],
+            pumpkin: no run on controller `alice` matches `<live>`: name an id, a unique prefix of an id or of its random digits, or a record's path; the controller removes a run's record 14 days after a machine copied it: read the copy on that machine"#]],
     );
 }

@@ -46,10 +46,12 @@ use crate::{cli, config, publish, say, star};
 mod boot;
 mod installs;
 mod member;
+mod records;
 mod start;
 
 pub(crate) use boot::{boot, state as boot_state};
 pub(crate) use member::{member, write_member};
+pub(crate) use records::mark_copied;
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
@@ -89,10 +91,13 @@ const BUILDING: &str = "building";
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
 
-// How long a job's tree and directory last, by the time in its id, and an install after a start
-// last handed it out. A run's record names its entry in its tree, to run it again, and a tree is
-// links into the store, so it holds no bytes of its own.
-const KEPT: Duration = Duration::from_hours(14 * 24);
+// How long a job's tree and directory last, by the time in its id, an install after a start last
+// handed it out, and a run's record after a machine last copied it. A run's record names its entry
+// in its tree, to run it again, and a tree is links into the store, so it holds no bytes of its
+// own.
+pub(crate) const KEPT_DAYS: u64 = 14;
+
+const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
 
 // How long a manifest or a partial blob lasts in the store, and so what no tree links of the
 // files a manifest names. A day is long enough that a send cut off, or a start that failed,
@@ -152,11 +157,12 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             path.display()
         ));
     };
+    let publishing = crate::config::read(&path)?.publish;
     // Before the build, so that it has room.
-    if let Err(error) = prune(&home, &path, &jobs) {
+    if let Err(error) = prune(&home, &path, &jobs, publishing.is_some()) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
-    build_first(&id, &home, &path, &jobs, entry, args)?;
+    build_first(&id, &home, &path, &jobs, entry, args, publishing.is_some())?;
     let exit = match command {
         cli::JobCommand::Run(run) => {
             let run = cli::Run {
@@ -171,7 +177,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             if exit == ExitCode::SUCCESS {
                 let runs = crate::default_runs()?;
                 let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
-                match crate::config::read(&path)?.publish {
+                match publishing {
                     Some(settings) => publish::until_ended(&record, settings, &runs, region)?,
                     None => drop(record.wait(|| {})?),
                 }
@@ -526,14 +532,20 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// Prunes what the jobs keep on the controller's volume: removes each tree in `home` older than
-/// `KEPT`, then each install that no job in `jobs` runs nor a start handed out for as long
+/// Prunes what the jobs keep on the controller's volume: removes each record that a machine
+/// copied more than `KEPT` ago, unless `publishing` (`records::collect`), each tree in `home` older
+/// than `KEPT`, then each install that no job in `jobs` runs nor a start handed out for as long
 /// (`installs::collect`), then what of its store no tree or install links nor needs
 /// (`collect_store`), and the directory of each run's job as old whose run has no record, which
 /// `ls` lists until then, and of each build's job as old that no longer runs; then, once the volume
 /// is full, the images and the build cache of the engine of the configuration at `config`
 /// (`collect`), sparing what the jobs in `jobs` hold.
-fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
+fn prune(home: &Path, config: &Path, jobs: &Path, publishing: bool) -> Result<(), String> {
+    let runs = PathBuf::from(crate::default_runs()?);
+    // First, so that the directory of a run's job whose record it removes goes too.
+    if !publishing {
+        records::collect(home, &runs, jobs)?;
+    }
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
     for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
@@ -548,7 +560,6 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         say(format_args!("pruning the installs failed: {error}"));
     }
     collect_store(&home.join(STORE))?;
-    let runs = PathBuf::from(crate::default_runs()?);
     for id in ids(&home.join(JOBS))?.into_iter().filter(old) {
         // A run's record names its job's configuration, to run it again.
         let record = runs.join(&id);
@@ -722,7 +733,7 @@ fn jobs_named(jobs: &Path) -> String {
 /// of the configuration at `config`, each build as the job's `Admission` admits it, so that the
 /// job's command finds each by its tag; then, if it built one, lets go of the build slot that the
 /// admission took, and prunes. What the job holds, it holds until it ends. Gives the task's
-/// problems, or each build that failed, said.
+/// problems, or each build that failed, said, as `publishing` or not.
 fn build_first(
     id: &RunTag,
     home: &Path,
@@ -730,6 +741,7 @@ fn build_first(
     jobs: &Path,
     entry: &star::Entry,
     args: &lang::Args,
+    publishing: bool,
 ) -> Result<(), String> {
     let mut admission = Admission {
         id,
@@ -737,6 +749,7 @@ fn build_first(
         jobs,
         slots: Workspace::find()?.slots(),
         slot: None,
+        publishing,
     };
     let built = star::checked(entry, args, |task| {
         let engine = engine(config)?;
@@ -763,13 +776,16 @@ fn build_first(
 /// and once its builds have ended, each image they found or built, by its ID; takes one of the
 /// controller's build slots (`take_slot`) as the first build starts, and keeps it until its holder
 /// lets go; and prunes (`collect`) as each build starts and as each ends while others run, then
-/// refuses to start one while more than `REFUSED_PERCENT` of the volume is used.
+/// refuses to start one while more than `REFUSED_PERCENT` of the volume is used, naming the
+/// records that no machine has copied, which no prune removes, unless `publishing`, which keeps
+/// them all.
 struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
     jobs: &'j Path,
     slots: PathBuf,
     slot: Option<Slot>,
+    publishing: bool,
 }
 
 impl Admission<'_> {
@@ -828,10 +844,12 @@ impl engine::Admit for Admission<'_> {
             let used = (used_bytes.saturating_mul(100))
                 .checked_div(disk.size_bytes)
                 .unwrap_or(100);
+            let uncopied = (!self.publishing).then(|| records::uncopied(self.home, self.jobs));
             return Err(format!(
                 "the controller's volume is {used}% used, past the {REFUSED_PERCENT}% at which a \
                  build is refused, though the prune has removed what no job holds: free space \
-                 there, or let the jobs that run end, then run the task again"
+                 there, or let the jobs that run end, then run the task again{}",
+                uncopied.unwrap_or_default()
             ));
         }
         Ok(())
