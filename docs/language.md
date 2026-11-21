@@ -129,8 +129,9 @@ Every file can use these, besides Starlark's:
 `image()`'s recipe is a file of its context, the entry file's directory by default; `mount` adds
 directories of the repository at paths in the context, `target` picks a stage, and `args` and
 `contexts` give build arguments and named contexts. A recipe must pin what it fetches: an image by
-its digest, a file by its checksum, a Git repository by its full commit; `pumpkin lock` writes the
-fetch stage that pins a step's downloads.
+its digest, a file by its checksum, a Git repository by its full commit. A step that downloads
+files pins them in a stage of its own, `FROM scratch AS <name>` with an `ADD --checksum` for each
+file, which the step reads with `RUN --mount=type=bind,from=<name>` or `COPY --from=<name>`.
 
 ## Handles
 

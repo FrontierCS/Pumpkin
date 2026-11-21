@@ -1,18 +1,11 @@
 //! The recipe check: the recipes it reads as Docker does and passes, and those it refuses, for
 //! what they may have Docker fetch or for what it can't read as Docker would, with what their
-//! builds are given. Also a recipe's fetch stages (`fetch`).
-
-#![expect(
-    clippy::unwrap_used,
-    reason = "a test helper fails the test that calls it"
-)]
+//! builds are given.
 
 use std::collections::BTreeMap;
 
 use expect_test::{Expect, expect};
 use recipe::{Given, Stage};
-
-mod fetch;
 
 /// Checks each of `recipes`, a name and a text in which `<sha256>` stands for a digest, as the
 /// recipe of that name of a build given `given`, in whose args `<sha256>` stands for it too, and
@@ -359,6 +352,15 @@ fn steps() {
              --mount=from=Tools,target=/tools --mount=from=docker.io/library/ubuntu@<sha256>,ro \
              true\n",
             ),
+            // A stage that pins what it fetches by checksum, and the steps that read it.
+            (
+                "pinned-stage",
+                "FROM scratch AS apt\n\
+                 ADD --link --chmod=0644 --checksum=<sha256> https://example.com/a /a\n\
+                 FROM docker.io/library/ubuntu@<sha256>\n\
+                 COPY --from=apt /a /a\n\
+                 RUN --mount=type=bind,from=apt,target=/fetch/apt true\n",
+            ),
             // Docker takes a stage's index here for an image's name.
             (
                 "mount-index",
@@ -414,6 +416,7 @@ fn steps() {
             run-flag:2: `RUN --frontend-flag` is no flag the check passes: give a `RUN` no flag but `--mount`
             mount:2: `ubuntu:24.04` isn't pinned by digest: name it as `<image>@sha256:<64 hexadecimal digits>`, `scratch`, an earlier stage or a named context the build is given
             mount-bind: passes
+            pinned-stage: passes
             mount-index:3: a `RUN --mount`'s `from=0` names the image `docker.io/library/0`, as Docker reads a number there, not a stage's index: name the stage by its `AS` name
             mount-cache:2: `RUN --mount=type=cache` mounts what the host keeps, which the build's inputs don't name: mount the build's context, an earlier stage, a named context or an image pinned by digest with `type=bind`, or copy what the step needs with `COPY`
             mount-secret:2: `RUN --mount=type=secret` mounts what the host keeps, which the build's inputs don't name: mount the build's context, an earlier stage, a named context or an image pinned by digest with `type=bind`, or copy what the step needs with `COPY`

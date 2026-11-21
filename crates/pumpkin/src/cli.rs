@@ -22,12 +22,11 @@ use clap::{
     Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser, Subcommand,
 };
 use provider::RunTag;
-use recipe::Stage;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
     BUILD_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
-    LOCK_NOTES, LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
 use crate::publish::{Bucket, Since};
@@ -96,9 +95,6 @@ it is stopped, and print the address to open: a page that lists the runs as
 talks to whom, and its log, which it follows while the run is live.")]
     #[command(after_help = VIEW_NOTES)]
     View(View),
-    #[command(about = "Write a recipe's fetch stage, which pins what a step fetches")]
-    #[command(long_about = LOCK_ABOUT, after_help = LOCK_NOTES)]
-    Lock(Lock),
     #[command(about = "Print the help of a command or a topic")]
     #[command(long_about = "\
 Print the help of a command or a topic, or `pumpkin --help` without one.")]
@@ -240,7 +236,6 @@ pub(crate) enum Command {
     Check(Check),
     Fmt(Fmt),
     Build(Build),
-    Lock(Lock),
     View(View),
     Job(Job),
     Boot,
@@ -587,24 +582,6 @@ pub(crate) struct Build {
     pub(crate) config: Option<String>,
 }
 
-#[derive(Args)]
-pub(crate) struct Lock {
-    #[arg(value_name = "entry", value_parser = entry())]
-    #[arg(help = "The task's entry file, as `pumpkin check` takes it.")]
-    pub(crate) entry: Entry,
-    #[arg(value_name = "recipe", value_parser = utf8(": name one that is"), help = "\
-The recipe, a file that an image() call of the task builds, by its path;
-the lock rewrites it in place.")]
-    pub(crate) recipe: String,
-    #[arg(value_name = "stage", help = "The fetch stage's name.")]
-    #[arg(value_parser = utf8(": name one that is").try_map(Stage::try_from))]
-    pub(crate) stage: Stage,
-    #[command(flatten)]
-    pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = BUILD_CONFIG)]
-    pub(crate) config: Option<String>,
-}
-
 pub(crate) struct Job {
     pub(crate) id: RunTag,
     pub(crate) region: Region,
@@ -644,18 +621,6 @@ fn run_name() -> impl TypedValueParser<Value = RunName> {
         })
     })
 }
-
-const LOCK_ABOUT: &str = "\
-Write the fetch stage <stage> of the recipe <recipe> of a task afresh, from its
-lock line, `# pumpkin lock: <resolver> <argument>...`, in the comment right
-above its line `FROM scratch AS <stage>`, up to the blank line that ends it: an
-`ADD` for each file that the resolver prints, pinned by its SHA-256. The
-resolver runs online, in the image of the recipe up to the one later `RUN` that
-mounts the stage, built on the machine's Docker engine with the inputs that the
-task's images give the recipe: its context, mounts, args and named contexts,
-which are built first. `apt <package>...` pins what apt fetches to install the
-packages, and the archive's indexes that apt reads, so that the stage is a
-mirror of that part of the archive.";
 
 /// A command line that clap refuses.
 pub(crate) struct Refusal {
@@ -728,7 +693,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
         Parsed::Check(check) => Command::Check(check),
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
         Parsed::Build(build) => Command::Build(build),
-        Parsed::Lock(lock) => Command::Lock(lock),
         Parsed::View(view) => Command::View(view),
         Parsed::Controller {
             action: Action::Boot,
@@ -773,7 +737,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Reap(_)
         | Command::Check(_)
         | Command::Fmt(_)
-        | Command::Lock(_)
         | Command::View(_)
         | Command::Job(_)
         | Command::Boot

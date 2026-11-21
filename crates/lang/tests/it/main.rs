@@ -15,7 +15,6 @@ mod conformance;
 mod fixtures;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::{fs, thread};
@@ -3443,52 +3442,6 @@ def f() - > int:
                 1 | def f() - > int:
                   |         ^"#]],
     );
-}
-
-#[test]
-fn picks() {
-    // The agent's image alone is picked, and is given once the images it is built on are built.
-    let files = files();
-    let shown = on_stack(|| {
-        let (_, case) = Case::parse(IMAGES, &files, Bounds::WORKFLOW);
-        let mut sources = Sources {
-            held: &case.held,
-            files: case.files,
-        };
-        let entry = Label::parse(&format!("//{}", case.entry)).unwrap();
-        let args = Args::parse([]).unwrap();
-        let plan = lang::evaluate(&entry, &mut sources, &args, Bounds::WORKFLOW).unwrap();
-        let mut built = Vec::new();
-        let mut started = 0;
-        let step = |ready: Vec<(usize, Declared<'_, Built>)>| {
-            let ready = ready.into_iter().map(|(index, declared)| {
-                started += 1;
-                (index, stand_in(declared, started, &mut built))
-            });
-            ready.collect()
-        };
-        let picked = plan.build_for(
-            JOBS,
-            |recipe| recipe.recipe.as_str() == "agent/Dockerfile",
-            step,
-            |picked| {
-                let picked = picked.iter().map(|Declared { recipe, contexts }| {
-                    let mut line = format!("picked: {}'s {}", recipe.context, recipe.recipe);
-                    for (name, built) in contexts {
-                        let _ = write!(line, ", with image {} as {name}", built.number);
-                    }
-                    line
-                });
-                picked.collect::<Vec<_>>()
-            },
-        );
-        built.extend(picked.unwrap());
-        built.join("\n")
-    });
-    expect![[r#"
-        image 1: //tasks/images's tools/Dockerfile, with BASE="docker.io/example/base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", in pumpkin/tasks/images/tools
-        image 2: //tasks/images's toolchain/Dockerfile, its stage go, in pumpkin/tasks/images/toolchain
-        picked: //tasks/images's agent/Dockerfile, with image 1 as build-tools, with image 2 as toolchain"#]].assert_eq(&shown);
 }
 
 #[test]
