@@ -77,8 +77,14 @@ something deliberately absent, and each says what holds it.
 
 What `std` lacks and several crates share: errors with context (`Context`), deadlines
 (`Deadline`), commands that get only the environment their caller states (`process::command`),
-slots held by a lock on a file (`slots`), signals noted rather than acted on (`signal`), and a
-panic that aborts the whole process (`abort_on_panic`).
+run to their end within a bound (`process::run`) or on their own (`process::spawn`), slots held by
+a lock on a file (`slots`), signals noted rather than acted on (`signal`), and a panic that aborts
+the whole process (`abort_on_panic`).
+
+**Architecture Invariant:** every `process::run` states its `Bound`, which has no unbounded case
+and no default, and its command leads a process group of its own, which is killed whole at the
+bound, or once a captured stream passes 128 MiB. A child that is to run longer starts by
+`process::spawn`, and its caller follows it to its end.
 
 **Architecture Invariant:** it knows nothing of Pumpkin. Its manifest names no Pumpkin crate.
 
