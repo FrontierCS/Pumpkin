@@ -12,6 +12,10 @@ use stdx::process::Environment;
 use crate::settings::{Provider, Settings};
 use crate::{Cargo, Result, install_file, root, sandboxd, star, tools, wait};
 
+mod examples;
+
+pub(crate) use examples::examples;
+
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 5;
 
@@ -95,17 +99,7 @@ pub(crate) fn smoke(
         Provider::Ec2 => "cargo xtask live ec2",
         Provider::Modal => "cargo xtask live modal",
     };
-    let home =
-        env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
-    let config = Path::new(&home).join(".config/pumpkin/pumpkin.toml");
-    let text = fs::read_to_string(&config).map_err(|error| {
-        format!(
-            "{} can't be read ({error}): write the configuration that names the controller \
-             there, as the README says",
-            config.display()
-        )
-    })?;
-    let settings = Settings::parse(&text, &config, provider, gpu_model)?;
+    let settings = settings(None, Some(provider), gpu_model)?;
     reached(cargo, &settings)?;
     let (branch, commit) = head(cargo)?;
     let repo = task_repository(cargo)?;
@@ -114,8 +108,8 @@ pub(crate) fn smoke(
     }
     let mut run = pumpkin(&repo);
     run.args(["run", "--wait"]);
-    if let Some(modal) = &settings.modal {
-        run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
+    if let Some(gpu_model) = &settings.gpu_model {
+        run.args(["--arg", &format!("gpu_model={gpu_model}")]);
     }
     run.arg("smoke/task.star");
     eprintln!("xtask: running examples/smoke at {commit} ({branch}) through the controller");
@@ -127,7 +121,7 @@ pub(crate) fn smoke(
         ));
     }
     let record = repo.join(".pumpkin/runs").join(&id);
-    failed.extend(checked(&record, settings.modal.is_some()));
+    failed.extend(checked(&record, settings.gpu_model.is_some()));
     let left = left(cargo, &settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
@@ -152,6 +146,31 @@ pub(crate) fn smoke(
     Err(format!("{}: fix it, and run `{again}` again", failed.join("; ")).into())
 }
 
+/// The settings of live runs on `provider`, or on any of the controller's, that the configuration
+/// at `config`, or else `~/.config/pumpkin/pumpkin.toml`, gives, as [`Settings::parse`] reads
+/// them.
+fn settings(
+    config: Option<&Path>,
+    provider: Option<Provider>,
+    gpu_model: Option<&str>,
+) -> Result<Settings> {
+    let config = if let Some(config) = config {
+        config.to_owned()
+    } else {
+        let home =
+            env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
+        Path::new(&home).join(".config/pumpkin/pumpkin.toml")
+    };
+    let text = fs::read_to_string(&config).map_err(|error| {
+        format!(
+            "{} can't be read ({error}): write the configuration that names the controller \
+             there, as the README says",
+            config.display()
+        )
+    })?;
+    Settings::parse(&text, &config, provider, gpu_model)
+}
+
 /// The longest a lost smoke run's sandboxes may take to end by themselves, from when its job is
 /// killed, after the run's start.
 // The run's hard end is at most 94 minutes after its start: three of an EC2 sandbox's startups (29
@@ -171,10 +190,7 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
     };
     // The agent holds a lease of each grant, so that the run is lost with its sandboxes in use.
     let mut args = vec!["run", "--arg", "hold=true", "--arg", "deadline_seconds=120"];
-    let gpu = settings
-        .modal
-        .as_ref()
-        .map(|modal| format!("gpu_model={}", modal.gpu_model));
+    let gpu = (settings.gpu_model.as_ref()).map(|gpu_model| format!("gpu_model={gpu_model}"));
     if let Some(gpu) = &gpu {
         args.extend(["--arg", gpu]);
     }
@@ -399,17 +415,8 @@ fn head(cargo: &Cargo) -> Result<(String, String)> {
 /// keeps its `.git` and `.pumpkin` from one live run to the next. The executable is installed
 /// from this checkout so an unpublished change can be exercised.
 fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
-    let metadata = cargo
-        .cmd(&["metadata", "--format-version=1", "--no-deps"])
-        .read()?;
-    let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
-    let Some(target) = metadata["target_directory"].as_str() else {
-        return Err("`cargo metadata` named no target directory: expected one".into());
-    };
-    let repo = Path::new(target).join("live/repo");
-    let made =
-        |path: &Path, error: std::io::Error| format!("writing {} failed: {error}", path.display());
-    fs::create_dir_all(&repo).map_err(|error| made(&repo, error))?;
+    let repo = target_directory(cargo)?.join("live/repo");
+    fs::create_dir_all(&repo).map_err(|error| made(&repo, &error))?;
     if !repo.join(".git").exists() {
         cargo
             .sh
@@ -434,14 +441,37 @@ fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
         removed.map_err(|error| format!("removing {} failed: {error}", path.display()))?;
     }
     copy_tree(&root().join("examples"), &repo)?;
+    install(cargo, &repo)?;
+    Ok(repo)
+}
+
+/// Cargo's target directory, wherever its configuration puts it.
+fn target_directory(cargo: &Cargo) -> Result<PathBuf> {
+    let metadata = cargo
+        .cmd(&["metadata", "--format-version=1", "--no-deps"])
+        .read()?;
+    let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
+    let Some(target) = metadata["target_directory"].as_str() else {
+        return Err("`cargo metadata` named no target directory: expected one".into());
+    };
+    Ok(PathBuf::from(target))
+}
+
+/// Installs `pumpkin`, built from this checkout, in the task repository `repo`, as its
+/// `.pumpkin`, which Git ignores, and `./pumpkin`, which [`pumpkin`] runs.
+fn install(cargo: &Cargo, repo: &Path) -> Result<()> {
     let workspace = repo.join(".pumpkin");
     crate::build(cargo, Some(workspace.clone()), crate::MUSL)?;
     let ignore = workspace.join(".gitignore");
-    fs::write(&ignore, "*\n").map_err(|error| made(&ignore, error))?;
+    fs::write(&ignore, "*\n").map_err(|error| made(&ignore, &error))?;
     let entry = repo.join("pumpkin");
     std::os::unix::fs::symlink(".pumpkin/bin/pumpkin", &entry)
-        .map_err(|error| made(&entry, error))?;
-    Ok(repo)
+        .map_err(|error| made(&entry, &error))?;
+    Ok(())
+}
+
+fn made(path: &Path, error: &std::io::Error) -> String {
+    format!("writing {} failed: {error}", path.display())
 }
 
 fn pumpkin(repo: &Path) -> Command {
@@ -486,8 +516,7 @@ fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
             line.map_err(|error| format!("reading what `./pumpkin` said failed: {error}"))?;
         eprintln!("{line}");
         if id.is_none()
-            && let Some(rest) = line.strip_prefix("pumpkin: run ")
-            && let Some((run, _)) = rest.split_once(" goes to controller ")
+            && let Some(run) = wait::run_started(&line)
         {
             id = Some(run.to_owned());
         }
@@ -509,6 +538,14 @@ fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
 /// failed or is missing, and a sandbox that isn't deleted. `gpu` is whether the run has a GPU
 /// runner.
 fn checked(record: &Path, gpu: bool) -> Vec<String> {
+    let (outcome, mut failed) = ended(record);
+    failed.extend(probes(&outcome, gpu));
+    failed
+}
+
+/// The `outcome.json` of the run at `record`, null if it can't be read, and what is wrong in the
+/// record: a run that didn't finish, and a sandbox that isn't deleted.
+fn ended(record: &Path) -> (serde_json::Value, Vec<String>) {
     let read = |path: &Path| -> std::result::Result<serde_json::Value, String> {
         let text = fs::read_to_string(path)
             .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
@@ -524,6 +561,37 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     if outcome["state"] != "finished" {
         failed.push(format!("the run didn't finish: {}", outcome["state"]));
     }
+    // Each sandbox's directory, as the record lays them out.
+    let mut dirs = Vec::new();
+    for kind in ["agents", "shared", "jobs", "leases"] {
+        if let Ok(entries) = fs::read_dir(record.join(kind)) {
+            dirs.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    dirs.sort();
+    for dir in dirs {
+        let sandbox = match read(&dir.join("sandbox.json")) {
+            Ok(sandbox) => sandbox,
+            Err(error) => {
+                failed.push(error);
+                continue;
+            }
+        };
+        let deleted = sandbox["delete"]["state"].as_str().unwrap_or("not deleted");
+        if deleted != "deleted" {
+            failed.push(format!(
+                "sandbox {} on {} is {deleted}",
+                sandbox["id"], sandbox["provider"]
+            ));
+        }
+    }
+    (outcome, failed)
+}
+
+/// What is wrong in the probes that `outcome`, a smoke run's, returned: a probe that failed or is
+/// missing. `gpu` is whether the run has a GPU runner.
+fn probes(outcome: &serde_json::Value, gpu: bool) -> Vec<String> {
+    let mut failed = Vec::new();
     let values = outcome["verdict"]["result"]["values"].as_array();
     let detail = (values.into_iter().flatten())
         .find(|value| value["name"] == "detail")
@@ -544,29 +612,6 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
             detail.len(),
             sandboxes * CHECKS_PER_SANDBOX
         ));
-    }
-    let mut dirs = vec![record.join("agents/agent")];
-    for kind in ["jobs", "leases"] {
-        if let Ok(entries) = fs::read_dir(record.join(kind)) {
-            dirs.extend(entries.flatten().map(|entry| entry.path()));
-        }
-    }
-    for dir in dirs {
-        let sandbox = match read(&dir.join("sandbox.json")) {
-            Ok(sandbox) => sandbox,
-            Err(error) => {
-                failed.push(error);
-                continue;
-            }
-        };
-        let deleted = sandbox["delete"]["state"].as_str().unwrap_or("not deleted");
-        println!(
-            "sandbox {} on {}: {deleted}",
-            sandbox["id"], sandbox["provider"]
-        );
-        if deleted != "deleted" {
-            failed.push(format!("sandbox {} is {deleted}", sandbox["id"]));
-        }
     }
     failed
 }
@@ -597,10 +642,6 @@ fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
             .unwrap_or_default()
     }) {
         let state = instance["State"]["Name"].as_str().unwrap_or_default();
-        println!(
-            "EC2 instance {} of the run: {state}",
-            instance["InstanceId"]
-        );
         if state != "terminated" {
             left.push(format!("EC2 instance {} ({state})", instance["InstanceId"]));
         }
