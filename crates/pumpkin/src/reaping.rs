@@ -64,12 +64,7 @@ pub(crate) struct Cancelled {
 
 /// Signals the run's driver, if it has one, and waits for the run to end before reaping it.
 pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled, String> {
-    let cli::Cancel {
-        run,
-        runs,
-        force,
-        modal_config,
-    } = flags;
+    let cli::Cancel { run, runs, force } = flags;
     let (record, named) = found(run, runs)?;
     let (id, dir) = (record.id(), record.dir().display());
     if let Some(pid) = record.driver()? {
@@ -105,7 +100,7 @@ pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled,
     // Its provider is known for certain only once it has ended: a driver yet to start the run
     // has yet to say which it is.
     record.wait(|| {})?;
-    let reaping = &mut Reaching::new(modal_config);
+    let reaping = &mut Reaching::new();
     let reached = reaped(&record, reaping, named.as_deref(), Reaper::Command)
         .map(|Swept { left: _, reached }| reached);
     Ok(Cancelled {
@@ -136,9 +131,8 @@ pub(crate) enum Reaper {
     /// A client's request: the ended or lost runs this build wrote.
     Controller,
     /// The controller's boot: runs this build wrote that may have left something, not one that
-    /// ended clean ([`Record::ended_clean`]); a provider that it can't reach, as Modal, whose
-    /// credentials reach the controller only with a job, it says leaves what the run left
-    /// there to end by the run's hard end, and goes on.
+    /// ended clean ([`Record::ended_clean`]); a provider that it can't reach it says leaves what
+    /// the run left there to end by the run's hard end, and goes on.
     Boot,
 }
 
@@ -147,7 +141,7 @@ pub(crate) enum Reaper {
 /// something; leaves each live run to its driver. The exit status is `reap`'s, but 0 for
 /// [`Reaper::Boot`] though a provider can't be reached.
 pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String> {
-    let cli::Reap { runs, modal_config } = flags;
+    let cli::Reap { runs } = flags;
     if reaper == Reaper::Command
         && runs.is_none()
         && let Some(client) = config::client(None)?
@@ -156,7 +150,7 @@ pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String>
     }
     let (runs, named) = runs_dir(runs)?;
     let named = named.as_deref();
-    let report = sweep(Path::new(&runs), modal_config, named, reaper)?;
+    let report = sweep(Path::new(&runs), named, reaper)?;
     report.report(named, reaper)
 }
 
@@ -170,11 +164,10 @@ pub(crate) struct ReapedRuns {
 
 pub(crate) fn sweep(
     runs: &Path,
-    modal_config: Option<PathBuf>,
     named: Option<&str>,
     reaper: Reaper,
 ) -> Result<ReapedRuns, String> {
-    let mut reaching = Reaching::new(modal_config);
+    let mut reaching = Reaching::new();
     let mut report = ReapedRuns::default();
     if reaper != Reaper::Command && !runs.try_exists().context(runs.display())? {
         return Ok(report);
@@ -277,9 +270,6 @@ impl ReapedRuns {
 struct Reaching {
     reached: BTreeMap<Reachable, Result<Box<dyn Sweep>, String>>,
     configurations: BTreeMap<PathBuf, Result<config::Providers<config::Kind>, String>>,
-    /// Modal's configuration file for every provider of kind `modal`, in place of the one that
-    /// a run's configuration names, as `--modal-config` gives it.
-    modal_config: Option<PathBuf>,
 }
 
 /// How a reap reaches a provider of a run's: by a Docker context's name, or by the path of the
@@ -291,11 +281,10 @@ enum Reachable {
 }
 
 impl Reaching {
-    fn new(modal_config: Option<PathBuf>) -> Self {
+    fn new() -> Self {
         Self {
             reached: BTreeMap::new(),
             configurations: BTreeMap::new(),
-            modal_config,
         }
     }
 
@@ -367,10 +356,7 @@ impl Reaching {
                 Ec2::reach(settings).map(|reached| Box::new(reached) as _)
             }
             Some(config::Kind::Modal(settings)) => (modal_helper())
-                .and_then(|helper| {
-                    let config = self.modal_config.as_deref();
-                    Modal::reach(settings, config, &helper, &Workspace::find()?.modal())
-                })
+                .and_then(|helper| Modal::reach(settings, &helper, &Workspace::find()?.modal()))
                 .map(|reached| Box::new(reached) as _),
         };
         self.reached.insert(reachable.clone(), reached);

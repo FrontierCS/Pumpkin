@@ -95,8 +95,6 @@ impl Ask {
         let bytes = match self {
             Self::Copy(copy) => copy.held_bytes,
             Self::Start(start) => start.body_bytes,
-            Self::Cancel(request) => request.modal_bytes.unwrap_or(0),
-            Self::Reap(request) => request.modal_bytes.unwrap_or(0),
             Self::Lacks(request) => request.body_bytes,
             _ => 0,
         };
@@ -339,8 +337,8 @@ pub(crate) enum JobKind {
     Build,
 }
 
-/// The body holds one key per upstream, in name order, the optional Modal file, then the job's
-/// JSON. A repeat of the same id leaves the first job alone.
+/// The body holds one key per upstream, in name order, then the job's JSON. A repeat of the same
+/// id leaves the first job alone.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct StartRequest {
     body_bytes: usize,
@@ -359,7 +357,6 @@ pub(crate) struct JobStart {
     pub(crate) parameter: String,
     pub(crate) sent: config::Sent,
     pub(crate) key_bytes: Vec<usize>,
-    pub(crate) modal_bytes: Option<usize>,
 }
 
 impl StartRequest {
@@ -379,12 +376,7 @@ impl StartRequest {
             .ok_or("the job's credentials exceed its request body")?;
         let start: JobStart = serde_json::from_slice(job)
             .map_err(|error| format!("reading the job's start: {error}"))?;
-        let bytes = start
-            .key_bytes
-            .iter()
-            .try_fold(start.modal_bytes.unwrap_or(0), |sum, key| {
-                sum.checked_add(*key)
-            });
+        let bytes = (start.key_bytes.iter()).try_fold(0, |sum: usize, key| sum.checked_add(*key));
         if bytes != Some(credentials.len()) {
             return Err("the job gives a different length for its credentials".to_owned());
         }
@@ -433,14 +425,13 @@ impl Request for StartRequest {
     }
 }
 
-/// Stops a job, with the optional Modal credentials needed to reap its run. Unless
-/// `any_member`, a job of another member than the one `serve` acts for is refused.
+/// Stops a job, and reaps its run. Unless `any_member`, a job of another member than the one
+/// `serve` acts for is refused.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CancelRequest {
     pub(crate) id: String,
     pub(crate) force: bool,
     pub(crate) any_member: bool,
-    pub(crate) modal_bytes: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -471,9 +462,7 @@ impl Request for CancelRequest {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
-pub(crate) struct ReapRequest {
-    pub(crate) modal_bytes: Option<usize>,
-}
+pub(crate) struct ReapRequest {}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

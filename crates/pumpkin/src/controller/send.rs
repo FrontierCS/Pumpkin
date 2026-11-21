@@ -168,8 +168,8 @@ fn needed(
     Ok(files)
 }
 
-/// Sends the task's `tree` and the client's configuration, keys and Modal configuration to the
-/// controller, and starts the job `id` of `kind` there, which runs the task with `args`.
+/// Sends the task's `tree` and the client's configuration and keys to the controller, and starts
+/// the job `id` of `kind` there, which runs the task with `args`.
 /// The keys go on the connection's standard input, to the job's directory in tmpfs, and are not
 /// stored.
 pub(super) fn send(
@@ -194,11 +194,6 @@ pub(super) fn send(
         key_bytes.push(read.len());
         body.extend(read);
     }
-    let modal = client.modal_file()?;
-    let modal_bytes = modal.as_ref().map(Vec::len);
-    if let Some(modal) = modal {
-        body.extend(modal);
-    }
     let start = JobStart {
         id: id.as_str().to_owned(),
         kind,
@@ -212,7 +207,6 @@ pub(super) fn send(
         parameter: parameter(&client.controller.name),
         sent,
         key_bytes,
-        modal_bytes,
     };
     let request = StartRequest::encode(&start, &mut body)?;
     let (mut install_left, mut tree_left) = (None, None);

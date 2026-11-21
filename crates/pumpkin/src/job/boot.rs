@@ -26,10 +26,7 @@ pub(crate) fn boot() -> Result<ExitCode, String> {
     // system's, can't see that it runs, as systemd names the user's runtime directory, which
     // holds each job's directory, to the user's own units alone. A prune here would remove the
     // images that the job has built, which no IR that the boot reads names yet.
-    let reap = cli::Reap {
-        runs: None,
-        modal_config: None,
-    };
+    let reap = cli::Reap { runs: None };
     crate::reap(reap, crate::Reaper::Boot)
 }
 

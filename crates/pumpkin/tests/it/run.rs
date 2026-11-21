@@ -404,8 +404,7 @@ fn usage() {
 
               With [controller] in the configuration, and no --runs, `cancel` stops the job
               of a run that is yet to start on the controller, and cancels one that has
-              started there, sending this machine's Modal configuration file for the reap,
-              then copies its record here, as `pumpkin wait` does.
+              started there, then copies its record here, as `pumpkin wait` does.
             $ pumpkin view --help
             exit status: Some(0)
             printed:
@@ -534,9 +533,8 @@ fn usage() {
 
               With [controller] in the configuration, and no --runs, `reap` reaps the
               controller's runs made by this build and names the runs left to their own
-              builds. It uses this machine's Modal configuration file, which the boot lacks.
-              If the reply is cut, it reaps again. The printed ids may omit runs already
-              cleaned before the cut.
+              builds. If the reply is cut, it reaps again. The printed ids may omit runs
+              already cleaned before the cut.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -615,20 +613,10 @@ fn usage() {
                 upstream_name = "provider/model-a"
                 usd_per_mtok = { input = 1.25, cached = 0.125, output = 10 }
 
-              Example, of a machine whose runs go to the person's controller, and Modal:
+              Example, of a machine whose runs go to the person's controller:
                 [controller]
                 name = "alice"
                 region = "us-west-1"
-
-                [controller.modal]
-                profile = "pumpkin"
-
-                [controller.modal.classes.a100]
-                gpu = "A100-80GB"
-                gpu_model = "NVIDIA A100-SXM4-80GB"
-                cpu_millis = 8000
-                memory_bytes = 68719476736
-                startup_seconds = 1800
 
               [docker], the machine's Docker engine:
                 context       The context that reaches it, as `docker context ls` lists it.
@@ -731,13 +719,13 @@ fn usage() {
               every model it allows.
 
               On a controller, each job reads its configuration from the controller's
-              settings, which deploy/aws writes, but [gateway], which the job sets, and
-              [upstreams] and [controller.modal], which the client sends. Before any table,
-              the settings name `envelope`, the version "M.m" of the envelope that wrote
-              them; absent, "1.0". A job refuses an envelope whose major isn't 1, and each
-              key that it doesn't know, unless the envelope is a later minor than 1.0, which
-              this release knows; then it ignores the key, naming it in its log. A minor adds
-              only keys that an older release may safely ignore.
+              settings, which deploy/aws writes, but [gateway] and each modal provider's
+              `dials_from`, which the job sets, and [upstreams], which the client sends.
+              Before any table, the settings name `envelope`, the version "M.m" of the
+              envelope that wrote them; absent, "1.0". A job refuses an envelope whose major
+              isn't 2, and each key that it doesn't know, unless the envelope is a later minor
+              than 2.0, which this release knows; then it ignores the key, naming it in its
+              log. A minor adds only keys that an older release may safely ignore.
               With `draining = true`, which the admin sets for a cutover, the settings refuse
               each job as it starts, and leave the jobs that run to end.
 
@@ -753,26 +741,18 @@ fn usage() {
 
               [controller], the person's controller, which deploy/aws makes, and to which
               `run`, `wait`, `ls`, `cancel`, `build` and `reap` go, as each one's help says.
-              Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
-              and Modal's configuration file, into a directory of its own in the
-              controller's tmpfs, which its end removes. The client uses AWS CLI v2, ssh,
-              ssh-keygen and git from PATH. It sends the task's files and starts its job
-              over SSH to the controller's private address, using up to four connections
-              for large task uploads. The machine must have a route there and deploy/aws's
-              `ssh_from` must admit it. The job runs the client's install with the module's
-              settings and [controller.modal].
+              Each run is sent the [upstreams.<name>] tables and their keys, into a directory
+              of its own in the controller's tmpfs, which its end removes. The client uses
+              AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the task's files and
+              starts its job over SSH to the controller's private address, using up to four
+              connections for large task uploads. The machine must have a route there and
+              deploy/aws's `ssh_from` must admit it. The job runs the client's install with
+              the module's settings, whose providers, Modal's among them, are the
+              controller's.
               The first command creates a key and enrols it through EC2 Instance Connect.
               The client keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
                 name          The `name` that deploy/aws was applied with.
                 region        The region it was applied in.
-
-              [controller.modal], the Modal provider that the controller's runs may place
-              roles on, if any: the settings of a provider of kind modal, but `images`, which
-              the module's settings give, and `dials_from`, which each run sets:
-                profile       As modal's.
-                config        Modal's configuration file, below this file's directory unless
-                              absolute; absent, ~/.modal.toml, if it is there.
-                classes       As modal's.
             $ pumpkin --version
             exit status: Some(0)
             printed:

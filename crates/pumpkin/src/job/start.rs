@@ -11,7 +11,7 @@ use schema::ir::Sha256Digest;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-use super::{BUILDS, JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
+use super::{BUILDS, JOBS, OWN, SENT_CONFIG, TREES};
 use crate::link::{JobKind, JobStart, StartAnswer};
 use crate::member::Member;
 use crate::{manifest, workspace};
@@ -240,9 +240,6 @@ fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> 
         let (key, left) = rest.split_at(*len);
         write(&name, key)?;
         rest = left;
-    }
-    if start.modal_bytes.is_some() {
-        write(SENT_MODAL, rest)?;
     }
     Ok(())
 }

@@ -86,9 +86,12 @@ mod flags {
             cmd live {
                 /// `docker`, `ec2` or `modal`.
                 required target: String
-                /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
-                /// the smoke's GPU runner needs.
+                /// With `modal`, the model of the GPU, of a class of the controller's
+                /// `modal_classes`, that the smoke's GPU runner needs.
                 optional --gpu-model model: String
+                /// With `modal`, the profile of Modal's configuration, `~/.modal.toml`, that
+                /// reaches the controller's workspace, which lists the run's sandboxes there.
+                optional --modal-profile profile: String
                 /// With `ec2` or `modal`, loses the run once the agent holds a lease of each
                 /// grant, by killing its job on the controller, and checks that each sandbox ends
                 /// by itself by the run's hard end, about 95 minutes after its start, and that
@@ -198,6 +201,7 @@ mod flags {
         pub target: String,
 
         pub gpu_model: Option<String>,
+        pub modal_profile: Option<String>,
         pub lost: bool,
     }
 
@@ -289,6 +293,7 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Live(flags::Live {
             target,
             gpu_model,
+            modal_profile,
             lost,
         }) => {
             let provider = match target.as_str() {
@@ -296,8 +301,15 @@ fn try_main() -> Result<()> {
                     return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
                 }
                 "docker" => return live::docker(&cargo),
+                "ec2" if gpu_model.is_some() || modal_profile.is_some() => {
+                    return Err("`--gpu-model` and `--modal-profile` are for \
+                                `cargo xtask live modal` alone: leave them out"
+                        .into());
+                }
                 "ec2" => settings::Provider::Ec2,
-                "modal" => settings::Provider::Modal,
+                "modal" => {
+                    settings::Provider::Modal(settings::Modal::new(gpu_model, modal_profile)?)
+                }
                 _ => {
                     return Err(format!(
                         "`{target}` is no live target: give `docker`, `ec2` or `modal`"
@@ -305,12 +317,7 @@ fn try_main() -> Result<()> {
                     .into());
                 }
             };
-            if gpu_model.is_some() && provider != settings::Provider::Modal {
-                return Err(
-                    "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
-                );
-            }
-            live::smoke(&cargo, provider, gpu_model.as_deref(), lost)
+            live::smoke(&cargo, provider, lost)
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())

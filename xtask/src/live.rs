@@ -33,6 +33,16 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
     print(sandbox.object_id)
 "#;
 
+/// Prints the name of the workspace that the profile reaches, as the provider's helper reports it
+/// in its run's `provider.json`.
+const MODAL_WORKSPACE: &str = r#"
+import modal
+
+workspace = modal.Workspace.from_context()
+workspace.hydrate()
+print(workspace.name)
+"#;
+
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
@@ -85,15 +95,10 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. With
 /// `lost`, it loses the run instead, and checks that its sandboxes end by themselves and that a
 /// reap removes the rest. `again` names the command that repeats it.
-pub(crate) fn smoke(
-    cargo: &Cargo,
-    provider: Provider,
-    gpu_model: Option<&str>,
-    lost: bool,
-) -> Result<()> {
+pub(crate) fn smoke(cargo: &Cargo, provider: Provider, lost: bool) -> Result<()> {
     let again = match provider {
         Provider::Ec2 => "cargo xtask live ec2",
-        Provider::Modal => "cargo xtask live modal",
+        Provider::Modal(_) => "cargo xtask live modal",
     };
     let home =
         env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
@@ -105,7 +110,7 @@ pub(crate) fn smoke(
             config.display()
         )
     })?;
-    let settings = Settings::parse(&text, &config, provider, gpu_model)?;
+    let settings = Settings::parse(&text, &config, provider)?;
     reached(cargo, &settings)?;
     let (branch, commit) = head(cargo)?;
     let repo = task_repository(cargo)?;
@@ -128,6 +133,9 @@ pub(crate) fn smoke(
     }
     let record = repo.join(".pumpkin/runs").join(&id);
     failed.extend(checked(&record, settings.modal.is_some()));
+    if let Some(modal) = &settings.modal {
+        failed.extend(other_workspace(cargo, modal, &record)?);
+    }
     let left = left(cargo, &settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
@@ -635,6 +643,37 @@ fn schedules(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>
     Ok(named.collect())
 }
 
+/// Why the check of what the run of `record` left on Modal, made with `modal`'s profile, can't
+/// be trusted, if it can't: the profile reaches a workspace other than the one the run's Modal
+/// provider reported in its `provider.json`, which the check would find nothing of the run in.
+fn other_workspace(
+    cargo: &Cargo,
+    modal: &crate::settings::Modal,
+    record: &Path,
+) -> Result<Option<String>> {
+    let path = record.join("provider.json");
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
+    let provided: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{} isn't JSON: {error}", path.display()))?;
+    let providers = provided["providers"].as_object().into_iter().flatten();
+    let reported: Vec<&str> =
+        (providers.filter_map(|(_, declared)| declared["report"]["workspace"].as_str())).collect();
+    let reached = modal_python(cargo, modal, MODAL_WORKSPACE, &[])?;
+    let reached = reached.trim();
+    if reported.iter().all(|workspace| *workspace == reached) && !reported.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Modal's profile `{}` reaches workspace `{reached}`, but the run's Modal provider reported \
+         {:?} in {}, so the check of what it left there can't be trusted: give the profile of \
+         the controller's workspace with `--modal-profile`",
+        modal.profile,
+        reported,
+        path.display()
+    )))
+}
+
 /// The output of `script` run with `args` in a Python that has the Modal SDK, under the profile
 /// of `modal`.
 fn modal_python(
@@ -648,10 +687,5 @@ fn modal_python(
         .cmd("uv")
         .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK]);
     let python = python.args(["python", "-I", "-c", script]).args(args);
-    let python = python.env("MODAL_PROFILE", &modal.profile);
-    let python = match &modal.config {
-        Some(config) => python.env("MODAL_CONFIG_PATH", config),
-        None => python,
-    };
-    Ok(python.quiet().read()?)
+    Ok(python.env("MODAL_PROFILE", &modal.profile).quiet().read()?)
 }

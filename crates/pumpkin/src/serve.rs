@@ -36,7 +36,7 @@ use crate::job::{JOBS, WAITING};
 use crate::link::copy::CopiedRequest;
 use crate::link::{
     self, Ask, Health, HealthRequest, Hello, Job, Jobs, JobsRequest, ListRequest, Listed, Owner,
-    ViewRequest,
+    ReapRequest, ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
 use crate::member::Member;
@@ -123,11 +123,11 @@ fn requests(
                 let (start, credentials) = request.decode(&body)?;
                 crate::job::start(home, start, credentials, member)
             }),
-            Ask::Reap(request) => link::answer(output, request, |request| {
-                reaping::reap(home, request, &body)
-            }),
+            Ask::Reap(request) => {
+                link::answer(output, request, |ReapRequest {}| reaping::reap(home))
+            }
             Ask::Cancel(request) => link::answer(output, request, |request| {
-                reaping::cancel(home, request, &body, member)
+                reaping::cancel(home, request, member)
             }),
             Ask::Follow {
                 id,

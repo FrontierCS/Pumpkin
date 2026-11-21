@@ -47,7 +47,9 @@ imports from the envelope's ECR repositories with a role that it assumes by its 
 no AWS credential of the operator's reaches Modal. A sandbox opens no connection but DNS to
 Modal's resolver; the driver dials it through Modal's TLS tunnel, which takes connections only
 from the configuration's `dials_from` address. A class names its GPU as Modal does, such as `A100-80GB`, and Modal ends each sandbox at
-its run's hard end.
+its run's hard end. A machine reaches the workspace with a profile of Modal's own configuration; a
+controller reaches the team's with a service user's token, which its settings name, and its
+members configure nothing of Modal's.
 
 ## The controller
 

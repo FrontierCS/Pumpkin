@@ -18,7 +18,8 @@ bucket of the account, so no laptop can lose it.
 | the controller's role and instance profile: access to its jobs' settings parameter and the EC2 provider's resources | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that runs each registered build's reap at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
-| the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
+| the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the envelope, the Docker engine, the EC2 provider `aws`, and, with `modal_classes`, the Modal provider `modal` | each job's settings, which an apply changes for the next job |
+| the controller role's read of `/pumpkin-<name>/modal-token`, a SecureString that the admin writes, not the module | the team's Modal token, which each job's Modal provider reads, and no state, file or client holds |
 | with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
 
 `ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
@@ -56,6 +57,52 @@ ssh_from        = ["10.0.1.23/32"] # the person's machine's private address
 `pumpkin` reaches the controller at its private address, so the person's machine is in the
 controller's VPC, or routed to it, and `ssh_from` admits it.
 
+For runs on Modal, the team's runs share one workspace, `modal_workspace`, which the controller
+reaches with a service user's token, as GitHub's and Buildkite's runners get their credentials
+from the control plane, not from each member. With the workspace's owner or a manager, and the
+CLI at the helper's version, `uvx --from modal==1.6.3 modal`:
+
+1. Make a service user, with its token in a file that only you can read, so that no terminal or
+   shell history shows it, and give it Contributor in the environment `main`, as Modal's
+   [service users](https://modal.com/docs/guide/service-users) guide says:
+
+   ```sh
+   (umask 077 && modal workspace service-users create pumpkin-<name>-1 --json > modal-token.json)
+   modal workspace service-users set-role pumpkin-<name>-1 main contributor
+   ```
+
+2. Write the token into the parameter that the controller reads, under SSM's own key, `aws/ssm`,
+   which the controller's role decrypts through SSM with no grant of its own (so name no
+   `--key-id`), then remove the file:
+
+   ```sh
+   aws ssm put-parameter --region <region> --name /pumpkin-<name>/modal-token \
+       --type SecureString --overwrite --value file://modal-token.json
+   rm modal-token.json
+   ```
+
+3. Name the classes in `modal_classes`, in `terraform.tfvars`, and apply; `variables.tf` says each
+   key:
+
+   ```hcl
+   modal_classes = {
+     a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
+   }
+   ```
+
+With a class in `modal_classes`, every run on the controller reaches the workspace as it starts,
+an EC2 run's too, so a run fails while the parameter holds no token that Modal takes.
+
+Modal makes no new token for a service user, so a rotation is a new service user. Every member's
+build runs as the controller's role, which reads the token, so rotate it when a member leaves:
+
+1. Make `pumpkin-<name>-2` and write its token, as in steps 1 and 2. Each run that starts from then
+   on reaches the workspace with it.
+2. Delete `pumpkin-<name>-1` with `modal workspace service-users delete` once the runs that
+   started before it have ended, by draining as below: a run reads the token once, so one that
+   still runs with the old token can no longer delete its sandboxes, which then end at its hard
+   end, and `pumpkin reap` removes what is left.
+
 Then:
 
 ```sh
@@ -71,8 +118,7 @@ concurrent `plan` or `apply` of the same state waits on its lock.
 ## What the outputs feed
 
 - `terraform output -raw client_config` is the `[controller]` table of the person's
-  `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]` and, for runs on Modal,
-  `[controller.modal]`, the Modal provider's profile and classes, and nothing else; `pumpkin help
+  `~/.config/pumpkin/pumpkin.toml`, beside its `[upstreams]`, and nothing else; `pumpkin help
   config` says what each does, with an example, and which programs the person's machine, Linux on
   x86-64, needs.
 - `terraform output -raw client_policy_arn` is the managed IAM policy that the person's machine
@@ -85,7 +131,8 @@ concurrent `plan` or `apply` of the same state waits on its lock.
   template at the version its creates launch. The controller's settings hold it already; a machine
   that runs Pumpkin itself in the controller's security group takes it from here.
 - `terraform output -raw modal_images` is the `images` key of the Modal provider's table, which
-  the controller's settings hold already.
+  the controller's settings hold already, and `modal_token_parameter` the parameter that holds
+  the token.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
   on the controller: the groups admit only the ephemeral ports, 32768-60999, where the kernel's
   pick for port 0 falls.
@@ -93,8 +140,8 @@ concurrent `plan` or `apply` of the same state waits on its lock.
 ## Changes
 
 An apply that changes a class or the AMI makes a new version of its templates, which the
-controller's settings name from its next job on, as the `ec2` output does. A Modal class or
-profile needs no apply: it is the client's `[controller.modal]`, which each job takes.
+controller's settings name from its next job on, as the `ec2` output does, and so does a change
+of `modal_classes`. A new Modal token needs no apply.
 
 With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
 us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at
@@ -113,7 +160,7 @@ subsequent jobs. Sandboxes that remain unreachable expire at the run's hard end.
 ## Versions
 
 The controller's settings are of a version of the envelope, `M.m`, which each job reads from
-their `envelope` key as it starts; settings without one, as this module writes, are of 1.0.
+their `envelope` key as it starts; this module writes 2.0, and settings without one are of 1.0.
 
 - A minor adds only what a release of an older minor may safely ignore: a key of the settings, a
   package of the AMI, an IAM action, software on the controller's host. A key that every release
@@ -123,9 +170,7 @@ their `envelope` key as it starts; settings without one, as this module writes, 
 - A major removes or changes what a release relies on. A job refuses settings of a major other
   than its release's, and says what to do.
 - A new provider kind, such as `[providers.<name>.gce]`, or a new key beside a provider's kind in
-  `[providers.<name>]`, is refused by every older release, so either is a major. A job keeps only
-  `images` of the Modal provider's table in the settings, as the client sends the rest, so any
-  other key there is dropped, with no word in the log.
+  `[providers.<name>]`, is refused by every older release, so either is a major.
 - An upgrade changes the envelope first, then the releases, and removes what an older release
   relied on only once no pinned release does, as Kubernetes upgrades its API server before its
   kubelets
@@ -134,7 +179,10 @@ their `envelope` key as it starts; settings without one, as this module writes, 
   compatible with at least one prior version
   ([compatibility](https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/consul/v1.22.x/content/docs/upgrade/compatibility.mdx#L22-L33)).
 - A release that reads no `envelope` refuses settings that hold a key it doesn't know, `envelope`
-  among them, so the module writes the key only once no pinned release is that old.
+  among them.
+- In envelope 2.x, the Modal provider is the settings', with its token and classes, and a
+  client's `[controller.modal]` is refused. A release of 1.x refuses 2.x's settings, and one of
+  2.x refuses 1.x's.
 - Each job's directory on the controller, `~pumpkin/jobs/<id>/` or `~pumpkin/builds/<id>/`, names
   the release that runs it in `release`, as `pumpkin --version` does, and the envelopes it takes
   in `envelope`, such as `^1.0`, Cargo's caret requirement: 1.0 or a later 1.x. Step 2 of a cutover,
@@ -155,6 +203,14 @@ controller, drains the controller first, as Nomad drains a node, letting its bat
 4. Apply the change, or replace the controller.
 5. Set `draining = false` and apply.
 6. Each member raises `.pumpkinversion` if the envelope's major changed.
+
+Step 1 applies from the module's revision that the controller has, so that the drain's message
+reaches releases that know it. A run that a release of an older major made is reaped only by a
+client of that release; one that it lost ends by its hard end.
+
+From 1.x to 2.x, at step 4 the admin writes the Modal token and names `modal_classes`, as above,
+from the classes of the admin's own `[controller.modal]`; at step 6 each member removes
+`[controller.modal]` from `pumpkin.toml`.
 
 ## The public page
 

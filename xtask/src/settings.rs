@@ -1,14 +1,15 @@
 //! What `cargo xtask live` reads of a configuration that sends runs to the person's controller,
 //! `pumpkin`'s, for a smoke run on one of its providers: the controller's region, and, for Modal,
-//! the profile and configuration file that reach the workspace and the GPU of a class there.
+//! the profile that reaches the controller's workspace and the GPU of a class there, which its
+//! flags give.
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Provider {
     Ec2,
-    Modal,
+    Modal(Modal),
 }
 
 /// The settings of a smoke run on `Provider`, as the configuration gives them.
@@ -17,28 +18,45 @@ pub(crate) struct Settings {
     pub(crate) name: String,
     /// The controller's region, which its EC2 sandboxes and their timers are in.
     pub(crate) region: String,
-    /// For a run on Modal, the workspace's profile, the configuration file that holds it, if the
-    /// configuration names one, and the model of the GPU that the smoke's GPU runner needs.
     pub(crate) modal: Option<Modal>,
 }
 
-/// What reaches the Modal workspace of the controller's runs, and the GPU the smoke needs.
+/// For a run on Modal, the profile of Modal's own configuration that reaches the workspace of the
+/// controller's runs, which the check that a run left no sandbox there lists it with, and the
+/// model of the GPU that the smoke's GPU runner needs.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Modal {
     pub(crate) profile: String,
-    pub(crate) config: Option<PathBuf>,
     pub(crate) gpu_model: String,
 }
 
+impl Modal {
+    /// The settings of a run on Modal, as `--gpu-model` and `--modal-profile` give them.
+    pub(crate) fn new(
+        gpu_model: Option<String>,
+        profile: Option<String>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let gpu_model = gpu_model.ok_or(
+            "a live run on Modal needs the model of a GPU that a class of the controller's \
+             `modal_classes` has, the cheapest best: give it with `--gpu-model`",
+        )?;
+        // A profile of another workspace would list none of the run's sandboxes, so the check
+        // would pass whatever the run left.
+        let profile = profile.ok_or(
+            "a live run on Modal needs the profile of Modal's configuration that reaches the \
+             controller's workspace, `modal_workspace`, to check that the run left no sandbox \
+             there: give it with `--modal-profile`",
+        )?;
+        Ok(Self { profile, gpu_model })
+    }
+}
+
 impl Settings {
-    /// Reads `text`, the configuration at `path`, for a smoke run on `provider`, whose GPU
-    /// runner, on Modal, needs `gpu_model`, which must be the model of one of the classes of
-    /// `[controller.modal]`.
+    /// Reads `text`, the configuration at `path`, for a smoke run on `provider`.
     pub(crate) fn parse(
         text: &str,
         path: &Path,
         provider: Provider,
-        gpu_model: Option<&str>,
     ) -> Result<Self, Box<dyn Error>> {
         let shown = path.display();
         let table: toml::Table = toml::from_str(text)
@@ -50,19 +68,18 @@ impl Settings {
             )
             .into());
         };
-        let text = |table: &toml::Table, key: &str| {
-            table
-                .get(key)
+        let text = |key: &str| {
+            (controller.get(key))
                 .and_then(toml::Value::as_str)
                 .map(str::to_owned)
         };
-        let name = text(controller, "name")
+        let name = text("name")
             .ok_or_else(|| format!("{shown}'s `[controller]` names no `name`: name it"))?;
-        let region = text(controller, "region")
+        let region = text("region")
             .ok_or_else(|| format!("{shown}'s `[controller]` names no `region`: name it"))?;
         let modal = match provider {
             Provider::Ec2 => None,
-            Provider::Modal => Some(Modal::parse(controller, path, gpu_model)?),
+            Provider::Modal(modal) => Some(modal),
         };
         Ok(Self {
             name,
@@ -70,63 +87,4 @@ impl Settings {
             modal,
         })
     }
-}
-
-impl Modal {
-    /// Reads `controller`, the `[controller]` table of the configuration at `path`, for a smoke
-    /// run on Modal whose GPU runner needs `gpu_model`.
-    fn parse(
-        controller: &toml::Table,
-        path: &Path,
-        gpu_model: Option<&str>,
-    ) -> Result<Self, Box<dyn Error>> {
-        let shown = path.display();
-        let Some(modal) = controller.get("modal").and_then(toml::Value::as_table) else {
-            return Err(format!(
-                "{shown} names no `[controller.modal]`, which a live run on Modal needs: name the \
-                 workspace's profile and classes there, as the README says"
-            )
-            .into());
-        };
-        let profile = text(modal, "profile")
-            .ok_or_else(|| format!("{shown}'s `[controller.modal]` names no `profile`: name it"))?;
-        let config = text(modal, "config").map(|config| {
-            let dir = path.parent().unwrap_or(Path::new(""));
-            dir.join(config)
-        });
-        let classes = modal.get("classes").and_then(toml::Value::as_table);
-        let mut models: Vec<String> = (classes.into_iter().flatten())
-            .filter_map(|(_, class)| class.as_table().and_then(|class| text(class, "gpu_model")))
-            .collect();
-        models.sort();
-        models.dedup();
-        let offered = models.join("`, `");
-        let Some(gpu_model) = gpu_model else {
-            return Err(format!(
-                "a live run on Modal needs the model of a GPU that a class of \
-                 `[controller.modal]` has, the cheapest best: give one of `{offered}` with \
-                 `--gpu-model`"
-            )
-            .into());
-        };
-        if !models.iter().any(|model| model == gpu_model) {
-            return Err(format!(
-                "no class of {shown}'s `[controller.modal]` has the GPU `{gpu_model}`: give one \
-                 of `{offered}`"
-            )
-            .into());
-        }
-        Ok(Self {
-            profile,
-            config,
-            gpu_model: gpu_model.to_owned(),
-        })
-    }
-}
-
-fn text(table: &toml::Table, key: &str) -> Option<String> {
-    table
-        .get(key)
-        .and_then(toml::Value::as_str)
-        .map(str::to_owned)
 }

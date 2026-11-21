@@ -1,7 +1,7 @@
-//! Stops jobs by their systemd unit and reaps runs of this build using the client's credentials.
+//! Stops jobs by their systemd unit and reaps runs of this build.
 
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -9,7 +9,6 @@ use provider::RunTag;
 use runtime::Writer;
 use stdx::Context as _;
 use stdx::process::Environment;
-use tempfile::NamedTempFile;
 
 use crate::link::{CancelAnswer, CancelRequest};
 use crate::member::Member;
@@ -20,7 +19,6 @@ use crate::{cli, job, next};
 pub(super) fn cancel(
     home: &Path,
     request: CancelRequest,
-    body: &[u8],
     member: Option<&Member>,
 ) -> Result<CancelAnswer, String> {
     let tag = RunTag::try_from(request.id)?;
@@ -73,12 +71,10 @@ pub(super) fn cancel(
             return Ok(CancelAnswer::Stopped { writer });
         }
     }
-    let modal = modal(request.modal_bytes.map(|_| body))?;
     let cancel = cli::Cancel {
         run: cli::RunName::Prefix(id.to_owned()),
         runs: None,
         force: request.force,
-        modal_config: modal.as_ref().map(|file| file.path().to_owned()),
     };
     let cancelled = crate::cancelled(cancel, crate::Reader::Follower)?;
     Ok(match cancelled.reached {
@@ -126,29 +122,6 @@ fn stop(id: &RunTag, held: &Path, force: bool) -> Result<(), String> {
     }
 }
 
-/// A Modal configuration kept in tmpfs for the duration of this request.
-fn modal(body: Option<&[u8]>) -> Result<Option<NamedTempFile>, String> {
-    let Some(body) = body else { return Ok(None) };
-    let runtime = job::runtime_dir()?;
-    let mut file = tempfile::Builder::new()
-        .prefix("pumpkin-modal.")
-        .tempfile_in(&runtime)
-        .context(runtime.display())?;
-    file.write_all(body).context(file.path().display())?;
-    Ok(Some(file))
-}
-
-pub(super) fn reap(
-    home: &Path,
-    request: crate::link::ReapRequest,
-    body: &[u8],
-) -> Result<crate::reaping::ReapedRuns, String> {
-    let modal = modal(request.modal_bytes.map(|_| body))?;
-    let config = modal.as_ref().map(|file| file.path().to_owned());
-    crate::reaping::sweep(
-        &home.join(job::runs()),
-        config,
-        None,
-        crate::Reaper::Controller,
-    )
+pub(super) fn reap(home: &Path) -> Result<crate::reaping::ReapedRuns, String> {
+    crate::reaping::sweep(&home.join(job::runs()), None, crate::Reaper::Controller)
 }

@@ -22,20 +22,21 @@ use super::{
 };
 
 fn parameter() -> String {
-    let images = MODAL
-        .lines()
-        .find(|line| line.starts_with("images"))
-        .unwrap();
     format!(
-        "{}\n{EC2}\n[providers.gpus.modal]\n{images}\n",
-        docker_table("default")
+        "envelope = \"2.0\"\n{}\n{EC2}\n{}",
+        docker_table("default"),
+        modal_settings()
     )
 }
 
-const SENT_MODAL: &str = r#"[modal]
-profile = "alice"
-classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
-"#;
+// The Modal provider of the controller's settings, which name its token, and no `dials_from`.
+fn modal_settings() -> String {
+    let token = "token = { region = \"us-west-1\", parameter = \"/pumpkin-alice/modal-token\" }\n";
+    MODAL.replace(
+        "profile = \"pumpkin\"\ndials_from = \"203.0.113.7\"\n",
+        token,
+    )
+}
 
 // Notes each call in `calls`, and answers only `--version` and `ssm get-parameter`.
 const AWS: &str = r#"#!/bin/sh
@@ -114,16 +115,10 @@ fn on_controller(scratch: &Scratch, args: &[&str]) -> Command {
     command
 }
 
-fn send(scratch: &Scratch, id: &str, config: &str, modal: bool) {
+fn send(scratch: &Scratch, id: &str, config: &str) {
     let sent = format!("run/pumpkin/{id}");
     scratch.write(&format!("{sent}/config.toml"), config);
     scratch.write(&format!("{sent}/gateway.key"), "sk-stand-in\n");
-    if modal {
-        scratch.write(
-            &format!("{sent}/modal.toml"),
-            "[pumpkin]\ntoken_id = \"ak-x\"\n",
-        );
-    }
     fs::set_permissions(scratch.0.join(sent), Permissions::from_mode(0o700)).unwrap();
 }
 
@@ -180,17 +175,17 @@ fn job() {
     let scratch = Scratch::new();
     let _stand_in = StandIn::new(&scratch);
     set_up(&scratch);
-    let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
     // Of a later minor, with keys that this build doesn't know, which the job leaves out.
     let parameter = format!(
-        "envelope = \"1.3\"\nlater = 1\n{}\n{EC2}\n{modal}\n[providers.aws.ec2.later]\nkey = 1\n",
-        docker_table("default")
+        "envelope = \"2.3\"\nlater = 1\n{}\n{EC2}\n{}\n[providers.aws.ec2.later]\nkey = 1\n",
+        docker_table("default"),
+        modal_settings()
     );
     write_parameter(&scratch, &parameter);
     let id = id_ago(0, "0b000001");
     let (recent, old) = (id_ago(3, "0b000002"), id_ago(30, "0b000003"));
     let (built, failed) = (id_ago(1, "0b000007"), id_ago(2, "0b000008"));
-    send(&scratch, &id, &format!("{UPSTREAMS}\n{SENT_MODAL}"), true);
+    send(&scratch, &id, UPSTREAMS);
     let ir = |digits: &str| {
         let roles = digits.chars().map(|digit| json!({ "image": image(digit) }));
         json!({ "roles": roles.collect::<Vec<_>>() })
@@ -255,7 +250,7 @@ fn job() {
     lines.push(format!("trees: {}", names("home/trees/tasks")));
     lines.push(format!("jobs: {}", names("home/jobs")));
     // Another job is running, its run started, and the volume is full.
-    send(&scratch, &recent, UPSTREAMS, false);
+    send(&scratch, &recent, UPSTREAMS);
     let log = format!("home/.pumpkin/runs/{recent}/log.jsonl");
     scratch.write(&log, "");
     scratch.write("bin/disk", "1000 0\n");
@@ -264,7 +259,7 @@ fn job() {
             fs::remove_file(scratch.0.join(&log)).unwrap();
             scratch.write(&format!("run/pumpkin/{recent}/held"), &format!("{held}\n"));
         }
-        send(&scratch, &id, UPSTREAMS, false);
+        send(&scratch, &id, UPSTREAMS);
         let mut again = on_controller(
             &scratch,
             &[
@@ -295,7 +290,7 @@ fn job() {
     // Full as the prune begins, and no longer once it has the lock.
     scratch.write("bin/disk", "1000 0\n");
     scratch.write("bin/disk.next", "1000 500\n");
-    send(&scratch, &id, UPSTREAMS, false);
+    send(&scratch, &id, UPSTREAMS);
     let mut freed = on_controller(
         &scratch,
         &[
@@ -342,7 +337,7 @@ fn job() {
         &expect![[r#"
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.3, a later minor than this release knows, 2.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 2.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             out names the image: true
             pumpkin.toml:
@@ -376,21 +371,23 @@ fn job() {
             role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer"
 
             [providers.gpus.modal]
-            config = "<scratch>/run/pumpkin/<id>/modal.toml"
             dials_from = "198.51.100.9"
-            profile = "alice"
 
-            [providers.gpus.modal.classes.a100]
-            cpu_millis = 8000
-            gpu = "A100-80GB"
-            gpu_model = "NVIDIA A100-SXM4-80GB"
-            memory_bytes = 68719476736
+            [providers.gpus.modal.classes.h100]
+            cpu_millis = 4000
+            gpu = "H100!"
+            gpu_model = "NVIDIA H100 80GB HBM3"
+            memory_bytes = 17179869184
             startup_seconds = 1800
 
             [providers.gpus.modal.images]
             region = "us-west-1"
             repository = "pumpkin/roles"
             role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
+
+            [providers.gpus.modal.token]
+            parameter = "/pumpkin-alice/modal-token"
+            region = "us-west-1"
 
             [upstreams.gateway]
             key_file = "<scratch>/run/pumpkin/<id>/gateway.key"
@@ -401,7 +398,7 @@ fn job() {
             upstream_name = "provider/model-a"
 
             aws --version
-            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --with-decryption --name /pumpkin-alice/settings
             curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
@@ -416,7 +413,7 @@ fn job() {
             another job's run started: true
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.3, a later minor than this release knows, 2.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 2.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
             docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -425,7 +422,7 @@ fn job() {
             another job's run started: false
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.3, a later minor than this release knows, 2.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 2.3
             pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
             docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
             docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -434,10 +431,10 @@ fn job() {
             freed while the prune waited for the lock:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(0)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.3, a later minor than this release knows, 1.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 1.3
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.3, a later minor than this release knows, 2.0, and hold `later`, `providers.aws.ec2.later`, which it ignores: to take them, raise `.pumpkinversion` to a release that knows 2.3
             df --block-size=1 --output=size,avail -- /
             df --block-size=1 --output=size,avail -- /
-            the providers: ["aws"]"#]],
+            the providers: ["aws", "gpus"]"#]],
     );
 }
 
@@ -478,27 +475,32 @@ fn job_refusals() {
             UPSTREAMS.to_owned(),
         ),
         (
-            "a parameter with no Modal provider",
-            format!("{}\n{EC2}", docker_table("default")),
-            format!("{UPSTREAMS}\n{SENT_MODAL}"),
-        ),
-        (
-            "a parameter of a later envelope major",
-            format!("envelope = \"2.0\"\n{}", parameter()),
+            "a parameter whose Modal provider names `dials_from`",
+            parameter().replace("token =", "dials_from = \"203.0.113.7\"\ntoken ="),
             UPSTREAMS.to_owned(),
         ),
         (
-            "a parameter of an earlier envelope major",
-            format!("envelope = \"0.9\"\n{}", parameter()),
+            "a parameter whose Modal provider names a profile beside its token",
+            parameter().replace("token =", "profile = \"alice\"\ntoken ="),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter of a later envelope major",
+            parameter().replace("\"2.0\"", "\"3.0\""),
+            UPSTREAMS.to_owned(),
+        ),
+        (
+            "a parameter that names no envelope, so of 1.0",
+            parameter().replace("envelope = \"2.0\"\n", ""),
             UPSTREAMS.to_owned(),
         ),
         (
             "a parameter of no envelope version",
-            format!("envelope = 1.5\n{}", parameter()),
+            parameter().replace("\"2.0\"", "2.5"),
             UPSTREAMS.to_owned(),
         ),
         (
-            "a parameter of envelope 1.0 with a key that no table takes",
+            "a parameter of envelope 2.0 with a key that no table takes",
             format!("drainig = true\n{}", parameter()),
             UPSTREAMS.to_owned(),
         ),
@@ -520,7 +522,7 @@ fn job_refusals() {
     ];
     for (case, parameter, sent) in cases {
         write_parameter(&scratch, &parameter);
-        send(&scratch, &id, &sent, false);
+        send(&scratch, &id, &sent);
         let mut job = job(&scratch, EMPTY_TREE);
         lines.push(format!("{case}:"));
         let invoked = invocation(&job);
@@ -565,26 +567,30 @@ fn job_refusals() {
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `[gateway]`, which each job sets: remove it from them
-            a parameter with no Modal provider:
+            a parameter whose Modal provider names `dials_from`:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, name no Modal provider, whose `images` the client's `[controller.modal]` needs: apply `deploy/aws`, whose settings name one
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `providers.gpus.modal.dials_from`, which each job sets: remove it from them
+            a parameter whose Modal provider names a profile beside its token:
+            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            exit status: Some(1)
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are refused: the Modal provider names both `profile` and `token`: keep the one that reaches the workspace in `providers.gpus`
             a parameter of a later envelope major:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 2.0, a major that this release, of envelope 1.x from 1.0, doesn't know: run a release that takes 2.x, raising `.pumpkinversion` as the controller's admin says
-            a parameter of an earlier envelope major:
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 3.0, a major that this release, of envelope 2.x from 2.0, doesn't know: run a release that takes 3.x, raising `.pumpkinversion` as the controller's admin says
+            a parameter that names no envelope, so of 1.0:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 0.9, older than this release takes, 1.x from 1.0: ask the controller's admin to apply an envelope that it takes
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, are of envelope 1.0, older than this release takes, 2.x from 2.0: ask the controller's admin to apply an envelope that it takes
             a parameter of no envelope version:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `envelope = 1.5`, which is no envelope's version: expected one as "M.m", such as "1.0"
-            a parameter of envelope 1.0 with a key that no table takes:
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `envelope = 2.5`, which is no envelope's version: expected one as "M.m", such as "2.0"
+            a parameter of envelope 2.0 with a key that no table takes:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `drainig`, which no table of envelope 1.0's settings takes: correct or remove each
+            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `drainig`, which no table of envelope 2.0's settings takes: correct or remove each
             a parameter with a value of the wrong type:
             $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
@@ -600,7 +606,7 @@ fn job_refusals() {
               |
             6 | [docker]
               |  ^^^^^^
-            unknown field `docker`, expected `upstreams` or `modal`
+            unknown field `docker`, expected `upstreams`
             $ PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
@@ -688,7 +694,7 @@ fn job_admission() {
     let [first, second, third] =
         ["0ad00001", "0ad00002", "0ad00003"].map(|random| id_ago(0, random));
     for id in [&first, &second, &third] {
-        send(&scratch, id, UPSTREAMS, false);
+        send(&scratch, id, UPSTREAMS);
     }
     let mut lines = Vec::new();
     let marks = |id: &str| {
@@ -831,14 +837,17 @@ fn job_publish_wait() {
     set_up(&scratch);
     write_parameter(
         &scratch,
-        &format!("{}\n[providers.local.docker]\n", docker_table("default")),
+        &format!(
+            "envelope = \"2.0\"\n{}\n[providers.local.docker]\n",
+            docker_table("default")
+        ),
     );
     scratch.write_sandboxd(&format!("home/.pumpkin/{PINNED}/bin/sandboxd"));
     scratch.write_task("built", &workflow(&image('0'), &["true"]));
     scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
     let [run, other] = ["0ad00011", "0ad00012"].map(|random| id_ago(0, random));
     for id in [&run, &other] {
-        send(&scratch, id, UPSTREAMS, false);
+        send(&scratch, id, UPSTREAMS);
     }
     // Each of the engine's 4 publish slots held, as by other runs that publish.
     let slots = scratch.0.join("home/.pumpkin/docker/publish-slots");
@@ -971,7 +980,7 @@ fn job_publish_fails() {
     write_parameter(
         &scratch,
         &format!(
-            "{}\n[providers.local.docker]\n{publish}",
+            "envelope = \"2.0\"\n{}\n[providers.local.docker]\n{publish}",
             docker_table("default")
         ),
     );
@@ -979,7 +988,7 @@ fn job_publish_fails() {
     scratch.write_task("built", &workflow(&image('0'), &["true"]));
     scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
     let run = id_ago(0, "0ad00021");
-    send(&scratch, &run, UPSTREAMS, false);
+    send(&scratch, &run, UPSTREAMS);
     let copied = id_ago(20, "0ad00022");
     ended_job(&scratch, &copied, "");
     scratch.write(&format!("home/jobs/{copied}/copied"), "");
@@ -1051,7 +1060,7 @@ fn job_publish_fails() {
             pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
             pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what `aws` reports; the next publish uploads what this one didn't
             aws --version
-            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --name /pumpkin-alice/settings
+            aws --no-cli-pager --output json --region us-west-1 ssm get-parameter --with-decryption --name /pumpkin-alice/settings
             curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
             curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
@@ -1139,7 +1148,7 @@ fn boot() {
     );
     // The image of a job that a client started as the controller came up, which no IR names yet.
     scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
-    send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
+    send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS);
     let mut boot = on_controller(&scratch, &["controller", "boot"]);
     // As its unit has it: systemd's `/run/user/%U` names root's, the system manager's user's.
     boot.env("XDG_RUNTIME_DIR", scratch.0.join("root-run"));
@@ -1606,13 +1615,16 @@ fn start_head(body_bytes: usize, credential_bytes: usize) -> serde_json::Value {
     json!({ "type": "start", "body_bytes": body_bytes, "credential_bytes": credential_bytes })
 }
 
-fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
+// The body's credentials are the key of the one upstream, `gateway`.
+fn start_job(id: &str, key_bytes: usize) -> serde_json::Value {
+    let upstream =
+        json!({ "url": "https://gateway.example/v1", "key_file": "gateway.key", "models": [] });
     json!({
         "id": id, "kind": "build", "repo": "tasks",
         "tree": format!("sha256:{EMPTY_TREE}"), "install": format!("sha256:{EMPTY_TREE}"),
         "words": ["--", "task.star"],
         "region": "us-west-1", "parameter": "/pumpkin-alice/settings",
-        "sent": {}, "key_bytes": [], "modal_bytes": modal_bytes,
+        "sent": { "upstreams": { "gateway": upstream } }, "key_bytes": [key_bytes],
     })
 }
 
@@ -1699,10 +1711,10 @@ fn retry_start() {
     ] {
         assert!(!path.exists(), "{}", path.display());
     }
-    let modal = vec![b'm'; schema::frame::MAX_BODY_BYTES + 1];
-    assert_eq!(ask(&modal)["type"], "started");
+    let upstream_key = vec![b'k'; schema::frame::MAX_BODY_BYTES + 1];
+    assert_eq!(ask(&upstream_key)["type"], "started");
     assert_eq!(ask(b"repeated")["type"], "already_started");
-    assert_eq!(fs::read(tmpfs.join("modal.toml")).unwrap(), modal);
+    assert_eq!(fs::read(tmpfs.join("gateway.key")).unwrap(), upstream_key);
     let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
     assert_eq!(
         argv.lines()
@@ -1742,7 +1754,7 @@ fn interrupted_launch_keeps_the_job() {
     scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
     assert_eq!(ask(b"second")["type"], "unconfirmed");
     assert_eq!(
-        fs::read(scratch.0.join(format!("run/pumpkin/{id}/modal.toml"))).unwrap(),
+        fs::read(scratch.0.join(format!("run/pumpkin/{id}/gateway.key"))).unwrap(),
         b"first"
     );
     // A reboot loses the tmpfs even when the server died before submitting the unit.
@@ -1843,15 +1855,14 @@ fn target_refusals() {
         fs::read_to_string(&config).unwrap()
     );
     scratch.write("both.toml", &both);
-    // A class that Modal's settings refuse, so that it is refused before anything is sent.
-    let misnamed = SENT_MODAL.replace("[modal]", "[controller.modal]");
-    let misnamed = format!(
-        "{}\n{}",
-        fs::read_to_string(&config).unwrap(),
-        misnamed.replace("cpu_millis", "cpus_millis")
+    // The Modal provider of a member's own, which the controller's settings now give, refused
+    // before anything is sent.
+    let modal = format!(
+        "{}\n[controller.modal]\nprofile = \"alice\"\n",
+        fs::read_to_string(&config).unwrap()
     );
-    scratch.write("misnamed.toml", &misnamed);
-    for named in ["../both.toml", "../misnamed.toml"] {
+    scratch.write("modal.toml", &modal);
+    for named in ["../both.toml", "../modal.toml"] {
         let mut refused = on_client(
             &scratch,
             &client,
@@ -1911,13 +1922,9 @@ fn target_refusals() {
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../both.toml
             exit status: Some(1)
             pumpkin: ../both.toml: it names `[controller]` beside `[providers]`: a machine's runs go either to its controller or to its own providers, so keep `[controller]`, beside `[upstreams]`, or remove it
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../misnamed.toml
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --config ../modal.toml
             exit status: Some(1)
-            pumpkin: ../misnamed.toml: TOML parse error at line 12, column 78
-               |
-            12 | classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpus_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
-               |                                                                              ^^^^^^^^^^^
-            unknown field `cpus_millis`, expected one of `gpu`, `gpu_model`, `cpu_millis`, `memory_bytes`, `startup_seconds`, `usd_per_hour`
+            pumpkin: ../modal.toml: it names `[controller.modal]`, but the controller's Modal provider is its settings', with the admin's token and classes: remove it
             $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star --runs runs
             exit status: Some(1)
             pumpkin: `--runs` names this machine's, but its configuration sends runs to controller `alice`: leave it out
@@ -3112,14 +3119,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
     let pumpkin = install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
     let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
     symlink(pumpkin, &own).unwrap();
-    let args = [
-        "controller",
-        "cancel",
-        "--force",
-        "--modal-config",
-        "modal.toml",
-        &id,
-    ];
+    let args = ["controller", "cancel", "--force", &id];
     let mut cancel = scratch.program(own, &args);
     let invoked = invocation(&cancel);
     let output = cancel.output().unwrap();
@@ -3128,7 +3128,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
         &report(invoked, &output, &scratch.0, false),
         &[(&id, "<id>")],
         &expect![[r#"
-            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --force --modal-config modal.toml <id>
+            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --force <id>
             exit status: Some(102)"#]],
     );
 }
@@ -4294,7 +4294,7 @@ fn members_attributed() {
         &expect![[r#"
             the job's member: "alice\n"
             the job's release is the build's: true
-            the envelopes it takes: "^1.0\n"
+            the envelopes it takes: "^2.0\n"
             systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree> -- run -- stand-in/task.star
             $ pumpkin ls
             exit status: Some(0)
@@ -4388,7 +4388,7 @@ fn cancel_full_id_refused() {
     let args = ["cancel", &id];
     let by_bob = ran_by(&scratch, on_repo(&scratch, "repo-bob", &bob, &args), &args);
     // As a build of Bob's that skips its own check asks it.
-    let cancel = json!({ "type": "cancel", "id": id, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel = json!({ "type": "cancel", "id": id, "force": false, "any_member": false });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     let served = serve_fed_for(&scratch, &["--member", "bob"], &asked);
@@ -4524,7 +4524,7 @@ fn member_unread() {
         on_repo(&scratch, "repo-bob", &bob, &args),
         &args,
     ));
-    let cancel = json!({ "type": "cancel", "id": unread, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel = json!({ "type": "cancel", "id": unread, "force": false, "any_member": false });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     lines.push(serve_fed_for(&scratch, &["--member", "bob"], &asked));
@@ -4692,7 +4692,7 @@ fn serve_refusals() {
         steps.push(serve_fed(&scratch, &head));
     }
     let mut job = start_job("once", 1);
-    job["key_bytes"] = json!([usize::MAX]);
+    job["key_bytes"] = json!([usize::MAX, 1]);
     let body = serde_json::to_vec(&job).unwrap();
     let mut bad_lengths = Vec::new();
     schema::frame::write(&mut bad_lengths, &start_head(body.len(), 0), &[]).unwrap();

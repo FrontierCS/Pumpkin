@@ -389,7 +389,7 @@ provider that offers what it needs, such as its CPUs, its memory or its GPU.
 | --- | --- | --- |
 | `docker` | a container on the machine's own Docker engine, on cores of its run's own | the engine |
 | `ec2` | a container on an EC2 instance of its own | the envelope that `deploy/aws` makes |
-| `modal` | a sandbox in a Modal workspace, under gVisor | a Modal profile, and the envelope's images |
+| `modal` | a sandbox in a Modal workspace, under gVisor | a Modal profile, or on a controller the team's token, and the envelope's images |
 
 The controller is the same `pumpkin`, on an EC2 instance of the operator's own, which
 [`deploy/aws`](deploy/aws/README.md) makes. A machine whose configuration names `[controller]`

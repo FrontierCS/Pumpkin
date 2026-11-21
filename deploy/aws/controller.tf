@@ -77,32 +77,37 @@ resource "aws_iam_instance_profile" "controller" {
 }
 
 # Each job's settings, which `pumpkin controller job` reads as it starts, so an apply that
-# changes them takes effect at the next job: the controller's Docker engine, the EC2 provider
-# `aws`, and the `images` of the Modal provider `modal`, which a job drops if its client sends no
-# `[controller.modal]`; with `publish_from_jobs`, where each job publishes the public page
-# (public.tf); and, with `draining`, that each job is refused as it starts. Nothing else is here:
-# the rest is each job's own or its client's. The advanced tier holds 8 KB.
+# changes them takes effect at the next job: the envelope they are of, the controller's Docker
+# engine, the EC2 provider `aws`, and, with `modal_classes`, the Modal provider `modal`, which
+# reaches the workspace with the token of `modal_token`; with `publish_from_jobs`, where each
+# job publishes the public page (public.tf); and, with `draining`, that each job is refused as it
+# starts. Nothing else is here: the rest is each job's own or its client's. The advanced tier
+# holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
   tier = "Advanced"
   value = join("\n", concat(
-    # A key of the top, before any table.
-    var.draining ? ["draining = true", ""] : [],
-    ["[docker]", "context = \"default\"", "", "[providers.aws.ec2]"],
+    # Keys of the top, before any table.
+    ["envelope = \"2.0\""],
+    var.draining ? ["draining = true"] : [],
+    ["", "[docker]", "context = \"default\"", "", "[providers.aws.ec2]"],
     local.ec2_settings,
-    ["", "[providers.modal.modal]", local.modal_images],
+    length(var.modal_classes) == 0 ? [] : concat(["", "[providers.modal.modal]"], local.modal_settings),
     local.publish_settings,
     [""],
   ))
 }
 
+# The settings, and the Modal token, which a job's Modal provider reads as it reaches the
+# workspace. The token's key is AWS's own for SSM, `aws/ssm`, whose use through SSM needs no grant
+# of the role's.
 resource "aws_iam_role_policy" "controller_settings" {
   name = "settings"
   role = aws_iam_role.controller.id
   policy = jsonencode({
     Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = aws_ssm_parameter.settings.arn }]
+    Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = [aws_ssm_parameter.settings.arn, local.modal_token_arn] }]
   })
 }
 

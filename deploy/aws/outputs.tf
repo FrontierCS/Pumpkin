@@ -3,6 +3,24 @@
 locals {
   modal_images   = "images = { region = ${jsonencode(var.region)}, repository = ${jsonencode(aws_ecr_repository.images["roles"].name)}, role_arn = ${jsonencode(aws_iam_role.modal_pull.arn)} }"
   controller_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
+  # Written by the admin, not by the module, so that no state holds the token (README.md).
+  modal_token     = "/${local.prefix}/modal-token"
+  modal_token_arn = "${local.arn}:ssm:${var.region}:${local.account}:parameter${local.modal_token}"
+  modal_settings = concat(
+    [
+      "token = { region = ${jsonencode(var.region)}, parameter = ${jsonencode(local.modal_token)} }",
+      local.modal_images,
+    ],
+    [for class, modal in var.modal_classes : join("", [
+      "classes.${class} = { cpu_millis = ${jsonencode(modal.cpu_millis)}",
+      ", memory_bytes = ${jsonencode(modal.memory_bytes)}",
+      ", startup_seconds = ${jsonencode(modal.startup_seconds)}",
+      modal.gpu == null ? "" : ", gpu = ${jsonencode(modal.gpu)}",
+      modal.gpu_model == null ? "" : ", gpu_model = ${jsonencode(modal.gpu_model)}",
+      modal.usd_per_hour == null ? "" : ", usd_per_hour = ${jsonencode(modal.usd_per_hour)}",
+      " }",
+    ])],
+  )
   ec2_settings = concat(
     [
       "region = ${jsonencode(var.region)}",
@@ -30,6 +48,11 @@ output "ec2" {
 output "modal_images" {
   description = "Where the Modal provider imports images from, its settings' `images` key."
   value       = local.modal_images
+}
+
+output "modal_token_parameter" {
+  description = "The SSM parameter, a SecureString that the admin writes, whose Modal token the controller's jobs reach the workspace with."
+  value       = local.modal_token
 }
 
 output "client_config" {

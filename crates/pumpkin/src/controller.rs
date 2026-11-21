@@ -127,11 +127,7 @@ pub(crate) struct Reached {
 
 impl Reached {
     pub(crate) fn reach(settings: &config::Controller) -> Result<Self, String> {
-        let config::Controller {
-            name,
-            region,
-            modal: _,
-        } = settings;
+        let config::Controller { name, region, .. } = settings;
         let alias = format!("{name}.{}", region.as_str());
         let location = Location::new(Workspace::find()?.controller().join(&alias))?;
         let kept = kept()?;

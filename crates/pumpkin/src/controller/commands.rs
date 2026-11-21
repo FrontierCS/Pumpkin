@@ -309,20 +309,14 @@ pub(crate) fn cancel(
     let mut reached = Reached::reach(&client.controller)?;
     let among = if any_member { Among::Every } else { Among::Own };
     let (build, id) = job_id(&mut reached, run, among)?;
-    let modal = client.modal_file()?;
     let request = CancelRequest {
         id: id.clone(),
         force,
         any_member,
-        modal_bytes: modal.as_ref().map(Vec::len),
     };
     let name = &client.controller.name;
     let answer = reached.asked(&build, "cancelling the run", |reached, linked| {
-        linked.ask_with_body(
-            reached,
-            request.clone(),
-            modal.as_deref().unwrap_or_default(),
-        )
+        linked.ask(reached, request.clone())
     })??;
     match answer {
         CancelAnswer::Unstarted => say(format_args!(
@@ -364,13 +358,10 @@ pub(crate) fn cancel(
 pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
-    let modal = client.modal_file()?;
-    let request = Ask::Reap(ReapRequest {
-        modal_bytes: modal.as_ref().map(Vec::len),
-    });
+    let request = Ask::Reap(ReapRequest {});
     let report = reached.asked(&build, "reaping the runs", |reached, linked| {
         linked.stream(reached, |link| {
-            link.send(&request, modal.as_deref().unwrap_or_default())?;
+            link.send(&request, &[])?;
             link.answer::<ReapRequest>().inspect_err(|error| {
                 if matches!(error, Unanswered::Unreached(_)) {
                     say(

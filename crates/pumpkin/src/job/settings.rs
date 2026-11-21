@@ -1,7 +1,7 @@
 //! What a job takes of a controller's settings across the envelopes that make them: the version
 //! of the envelope that made them, their `envelope = "M.m"`, the keys that this build doesn't
-//! know, and whether the controller drains, their `draining = true` of envelope 1.0, which refuses
-//! each job that starts while it does.
+//! know, and whether the controller drains, their `draining = true`, which refuses each job that
+//! starts while it does.
 //!
 //! A minor adds only keys that a release of an older minor may safely ignore; a key that every
 //! release must honour, or any removal or change of what a release relies on, needs a major. A
@@ -34,10 +34,10 @@ impl fmt::Display for Version {
 }
 
 /// The oldest envelope that this build takes; it takes any later minor of its major too.
-pub(super) const OLDEST: Version = Version { major: 1, minor: 0 };
+pub(super) const OLDEST: Version = Version { major: 2, minor: 0 };
 
 // The newest envelope whose keys this build knows.
-const NEWEST: Version = Version { major: 1, minor: 0 };
+const NEWEST: Version = Version { major: 2, minor: 0 };
 
 const _: () = assert!(OLDEST.major == NEWEST.major && !OLDEST.later(NEWEST));
 

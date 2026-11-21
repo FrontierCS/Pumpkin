@@ -542,8 +542,6 @@ driver had given up on may still make a sandbox after `cancel` has
 ended, which `pumpkin reap` removes."
     )]
     pub(crate) force: bool,
-    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
-    pub(crate) modal_config: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -552,15 +550,7 @@ pub(crate) struct Reap {
 The directory of the runs to reap.
 Default: runs/ in the repository's .pumpkin directory")]
     pub(crate) runs: Option<String>,
-    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
-    pub(crate) modal_config: Option<PathBuf>,
 }
-
-// Hidden: only the controller target gives `--modal-config`, as a job's Modal configuration
-// file goes with the job, and the client sends it again.
-const MODAL_CONFIG_HELP: &str = "\
-Modal's configuration file, read for each provider of kind modal in place of
-the one that the configuration of the run names.";
 
 #[derive(Args)]
 pub(crate) struct Check {

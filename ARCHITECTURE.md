@@ -682,8 +682,7 @@ every one that the record holds undeleted, listed or not, as one that has ended 
 what only its delete frees; it records each in `reaps.jsonl`, and a lost run as failed.
 `pumpkin reap` reaps ended or lost runs. On a controller each build reaps its own runs and names
 those left to other builds. The boot unit runs the registered builds and leaves to the hard end
-what it cannot reach, such as Modal's sandboxes, whose credentials reach the controller
-only with a job.
+what it cannot reach.
 
 ### Determinism and pinning
 

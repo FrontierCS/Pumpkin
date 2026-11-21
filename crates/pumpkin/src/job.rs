@@ -9,7 +9,7 @@
 //! `.pumpkin` links to, which keeps the installed builds, the runs' records, the build
 //! slots and `serve`'s installs.
 //!
-//! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
+//! What the client sent with a job (`SENT_CONFIG` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
 //! as it ends, so a job that still runs is one whose directory is there, as is what images the
 //! job holds (`HELD`): what a job holds goes with it, however it ends. Which of these a prune may
@@ -28,13 +28,12 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, thread};
 
-use aws::{Bound, Cli};
+use aws::Cli;
 use engine::Engine;
 use engine::prune::{Disk, HIGH_PERCENT, Held, REFUSED_PERCENT};
 use provider::RunTag;
 use runtime::Record;
 use schema::ir::{Image, Sha256Digest};
-use serde::Deserialize;
 use stdx::Context as _;
 use stdx::process::Environment;
 
@@ -79,8 +78,6 @@ pub(crate) fn unit_name(id: &RunTag) -> String {
 pub(crate) const OWN: &str = "pumpkin";
 
 pub(crate) const SENT_CONFIG: &str = "config.toml";
-
-pub(crate) const SENT_MODAL: &str = "modal.toml";
 
 // The file of a job's tmpfs directory that names the images and tags it holds, a line each, which
 // no prune removes while the job runs.
@@ -357,30 +354,17 @@ fn point(link: &Path, staged: &Path) -> Result<(), String> {
     fs::rename(staged, link).context(link.display())
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct GotParameter {
-    parameter: Parameter,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Parameter {
-    value: String,
-}
-
 /// A job's configuration, as TOML: the controller's settings, which `cli` reads from the SSM
 /// parameter `parameter`, with `[gateway] private` at the controller's private IPv4 address, port
-/// 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from` at the
-/// controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any; and
-/// the client's `[upstreams]`, each `key_file` its file in `sent`.
+/// 0, and each Modal provider's `dials_from` at its public IPv4 address; and the client's
+/// `[upstreams]`, each `key_file` its file in `sent`.
 ///
-/// Fails if the settings set `gateway` or `upstreams`, which each job sets.
+/// Fails if the settings set `gateway`, `upstreams` or a Modal provider's `dials_from`, which
+/// each job sets.
 fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
-    let got: GotParameter =
-        cli.json(&["ssm", "get-parameter", "--name", parameter], Bound::Call)?;
+    let value = cli.parameter(parameter)?;
     let named = format!("the controller's settings, SSM parameter `{parameter}`,");
-    let mut tables: toml::Table = toml::from_str(&got.parameter.value)
+    let mut tables: toml::Table = toml::from_str(&value)
         .map_err(|error| format!("{named} aren't TOML: {}", error.to_string().trim_end()))?;
     let envelope = settings::take(&mut tables, &named)?;
     let (private, public) = addresses()?;
@@ -393,16 +377,14 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     }
     let gateway = toml::Table::from_iter([("private".to_owned(), format!("{private}:0").into())]);
     tables.insert("gateway".to_owned(), gateway.into());
+    dial_from(&mut tables, public, &named)?;
     let config = sent.join(SENT_CONFIG);
     let text = match fs::read_to_string(&config) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("{}: {error}", config.display())),
     };
-    let config::Sent {
-        mut upstreams,
-        modal,
-    } = toml::from_str(&text).map_err(|error| {
+    let config::Sent { mut upstreams } = toml::from_str(&text).map_err(|error| {
         let error = error.to_string();
         format!(
             "what the run sent, {SENT_CONFIG}, is refused: {}",
@@ -410,22 +392,6 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
         )
     })?;
     let written = |error: toml::ser::Error| format!("writing the job's configuration: {error}");
-    let mut modal = modal
-        .map(toml::Table::try_from)
-        .transpose()
-        .map_err(written)?;
-    let modal_config = sent.join(SENT_MODAL);
-    let modal_config = modal_config
-        .try_exists()
-        .context(modal_config.display())?
-        .then(|| modal_config.to_string_lossy().into_owned());
-    if let Some(modal) = &mut modal {
-        modal.insert("dials_from".to_owned(), public.to_string().into());
-        if let Some(config) = modal_config {
-            modal.insert("config".to_owned(), config.into());
-        }
-    }
-    take_modal(&mut tables, modal.as_ref(), &named)?;
     upstreams.keys_in(sent);
     let upstreams = toml::Value::try_from(upstreams).map_err(written)?;
     tables.insert("upstreams".to_owned(), upstreams);
@@ -433,42 +399,24 @@ fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
     toml::to_string(&tables).map_err(written)
 }
 
-/// Makes each Modal provider of the controller's settings, `tables`, the one that the client sent,
-/// `sent`, with the settings' `images`, or removes it if the client sent none. Fails, naming the
-/// settings as `named`, if the client sent one, but they name none.
-fn take_modal(
-    tables: &mut toml::Table,
-    sent: Option<&toml::Table>,
-    named: &str,
-) -> Result<(), String> {
-    // What a Modal workspace offers is the client's to say, so that the person changes it with no
-    // apply; the controller's settings give the provider only what the module made.
+/// Sets `dials_from` of each Modal provider of the controller's settings, `tables`, named as
+/// `named`, to `public`, the controller's public IPv4 address, which a sandbox's tunnel admits
+/// alone. Fails if one sets it already.
+fn dial_from(tables: &mut toml::Table, public: Ipv4Addr, named: &str) -> Result<(), String> {
     let providers = tables
         .get_mut("providers")
         .and_then(toml::Value::as_table_mut);
-    let Some(sent) = sent else {
-        if let Some(providers) = providers {
-            providers
-                .retain(|_, kinds| kinds.get("modal").and_then(toml::Value::as_table).is_none());
+    for (name, kinds) in providers.into_iter().flatten() {
+        let Some(modal) = kinds.get_mut("modal").and_then(toml::Value::as_table_mut) else {
+            continue;
+        };
+        if modal.contains_key("dials_from") {
+            return Err(format!(
+                "{named} hold `providers.{name}.modal.dials_from`, which each job sets: remove \
+                 it from them"
+            ));
         }
-        return Ok(());
-    };
-    let modal: Vec<&mut toml::Table> = (providers.into_iter())
-        .flat_map(|providers| providers.iter_mut().map(|(_, kinds)| kinds))
-        .filter_map(|kinds| kinds.get_mut("modal")?.as_table_mut())
-        .collect();
-    if modal.is_empty() {
-        return Err(format!(
-            "{named} name no Modal provider, whose `images` the client's `[controller.modal]` \
-             needs: apply `deploy/aws`, whose settings name one"
-        ));
-    }
-    for settings in modal {
-        let images = settings.remove("images");
-        *settings = sent.clone();
-        if let Some(images) = images {
-            settings.insert("images".to_owned(), images);
-        }
+        modal.insert("dials_from".to_owned(), public.to_string().into());
     }
     Ok(())
 }

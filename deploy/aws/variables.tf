@@ -33,6 +33,27 @@ variable "modal_workspace" {
   }
 }
 
+# The classes of Modal sandbox, as `pumpkin help config` says of a Modal provider's `classes`:
+# each one's GPU, if any, as Modal names it and as `nvidia-smi` names its model, the CPU and memory
+# Modal gives each sandbox, how long a start may take, and, if given, what a sandbox costs an hour.
+variable "modal_classes" {
+  description = "The classes of Modal sandbox, by name; with none, the settings name no Modal provider, and no job reads the Modal token."
+  type = map(object({
+    gpu             = optional(string)
+    gpu_model       = optional(string)
+    cpu_millis      = number
+    memory_bytes    = number
+    startup_seconds = number
+    usd_per_hour    = optional(number)
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for name, class in var.modal_classes : can(regex("^[a-z][a-z0-9_-]{0,63}$", name)) && (class.gpu == null) == (class.gpu_model == null)])
+    error_message = "A Modal class's name is not 1 to 64 of a-z, 0-9, `_` and `-`, starting with a letter, or the class names one of `gpu` and `gpu_model`: name both, or neither, as `a100 = { gpu = \"A100-80GB\", gpu_model = \"NVIDIA A100-SXM4-80GB\", … }`."
+  }
+}
+
 # The classes of sandbox: the instance type of each, and the CPU flags and model it offers a role,
 # as `/proc/cpuinfo` names them. The flags are the x86-64 levels the instance's CPU meets (v2:
 # cx16 to ssse3, v3: abm to xsave, v4: the avx512 ones), which the tasks' needs name. A class's

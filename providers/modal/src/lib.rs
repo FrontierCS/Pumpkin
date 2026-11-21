@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
 
-use crate::credentials::{ConfigFile, Credentials, Profile, ProfileName, Reaching, TokenParameter};
+use crate::credentials::{ConfigFile, Credentials, Profile, ProfileName, TokenParameter};
 use crate::helper::{ASK_TIMEOUT, Helper, IMPORT_TIMEOUT, Request};
 
 mod credentials;
@@ -155,7 +155,7 @@ struct Images {
 /// "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 8589934592,
 /// startup_seconds = 1800 }`; without `gpu` and `gpu_model`, it has none. With `usd_per_hour`,
 /// such as `3.95`, it has the price that the operator says a sandbox costs.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassTable {
     gpu: Option<Gpu>,
@@ -166,11 +166,11 @@ struct ClassTable {
     usd_per_hour: Option<UsdPerHour>,
 }
 
-/// A class of sandbox: what a run may rely on of it, and its GPU, if any. It reads and writes as
-/// a table of the provider's settings' `classes`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(try_from = "ClassTable", into = "ClassTable")]
-pub struct SandboxClass {
+/// A class of sandbox: what a run may rely on of it, and its GPU, if any. It reads as a table of
+/// the provider's settings' `classes`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "ClassTable")]
+struct SandboxClass {
     class: Class,
     gpu: Option<Gpu>,
 }
@@ -253,33 +253,6 @@ impl TryFrom<ClassTable> for SandboxClass {
     }
 }
 
-impl From<SandboxClass> for ClassTable {
-    fn from(sandbox: SandboxClass) -> Self {
-        let SandboxClass { class, gpu } = sandbox;
-        let Class {
-            offers,
-            startup_seconds,
-            usd_per_hour,
-        } = class;
-        // Its GPU's count is `gpu`'s, and a class of the settings names no CPU's flags or model.
-        let Offers {
-            cpu_millis,
-            memory_bytes,
-            gpu: offered,
-            cpu_features: _,
-            cpu_model: _,
-        } = offers;
-        Self {
-            gpu,
-            gpu_model: offered.map(|offered| offered.model),
-            cpu_millis,
-            memory_bytes,
-            startup_seconds,
-            usd_per_hour,
-        }
-    }
-}
-
 /// The Modal workspace, reached, which every sandbox of the provider's runs in, the repository
 /// it imports images from, and the operator's Docker engine, which holds them until they are
 /// pushed there.
@@ -356,28 +329,12 @@ impl<'e> Modal<'e> {
         })
     }
 
-    /// Reaches the workspace that `settings` reach, a profile in Modal's configuration file
-    /// `config` if given, through the helper at `script`, writing in `dir` as
-    /// [`connect`](Self::connect) does, for a sweep of a run's sandboxes alone: nothing else of
-    /// the settings is reached, and nothing is reported. It fails if `config` is relative, the
-    /// configuration lacks the profile, or the token's parameter holds no token.
-    pub fn reach(
-        settings: &Settings,
-        config: Option<&Path>,
-        script: &Path,
-        dir: &Path,
-    ) -> Result<Reached, String> {
-        let reaching = match (config, &settings.credentials) {
-            (Some(config), Credentials::Profile(Profile { name, config: _ })) => {
-                Reaching::Profile(Profile {
-                    name: name.clone(),
-                    config: Some(ConfigFile::try_from(config.to_owned())?),
-                })
-            }
-            // A token is the settings' own, which no file of Modal's configuration replaces.
-            (Some(_), Credentials::Token(_)) | (None, _) => settings.credentials.read()?,
-        };
-        let helper = Helper::new(script, dir, reaching);
+    /// Reaches the workspace that `settings` reach, through the helper at `script`, writing in
+    /// `dir` as [`connect`](Self::connect) does, for a sweep of a run's sandboxes alone: nothing
+    /// else of the settings is reached, and nothing is reported. It fails if the configuration
+    /// lacks the profile, or the token's parameter holds no token.
+    pub fn reach(settings: &Settings, script: &Path, dir: &Path) -> Result<Reached, String> {
+        let helper = Helper::new(script, dir, settings.credentials.read()?);
         let Described { .. } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         Ok(Reached { helper })
     }
