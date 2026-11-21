@@ -3,7 +3,7 @@
 //!
 //! Once more than [`HIGH_PERCENT`] of the disk is used, the least recently used images that live
 //! runs and builds don't hold ([`Held`]), until their sizes bring the use down to
-//! [`LOW_PERCENT`] ([`evicted`]). The build cache is then pruned to the same mark
+//! `LOW_PERCENT` ([`evicted`]). The build cache is then pruned to the same mark
 //! ([`Engine::prune_build_cache`](crate::Engine::prune_build_cache)), which also frees the
 //! layers that it shared with the images removed. Past [`REFUSED_PERCENT`], as once a prune has
 //! left the disk there, a build is refused ([`Disk::refused`]).
@@ -19,7 +19,7 @@ pub const HIGH_PERCENT: u64 = 80;
 
 /// The share of the disk used, in percent, down to which a prune removes images.
 // Low enough to leave room for the builds of several tasks, as of jobs that build at once.
-pub const LOW_PERCENT: u64 = 60;
+pub(crate) const LOW_PERCENT: u64 = 60;
 
 /// The share of the disk used, in percent, past which a build is refused.
 // The kubelet's default hard eviction threshold for the disk that holds its images,
@@ -48,7 +48,7 @@ impl Disk {
         self.used_bytes() > self.size_bytes / 100 * REFUSED_PERCENT
     }
 
-    /// What is free of the disk once [`LOW_PERCENT`] of it is used, in bytes.
+    /// What is free of the disk once `LOW_PERCENT` of it is used, in bytes.
     pub fn low_free_bytes(self) -> u64 {
         self.size_bytes - self.size_bytes / 100 * LOW_PERCENT
     }
@@ -95,7 +95,7 @@ impl Held {
 /// newest job that named it, or never. None unless the disk is [full](Disk::full); else, of those
 /// that `held` doesn't hold, least recently used first, those never used, then the rest by their
 /// last use, each tie by its ID, until their sizes add up to what brings the disk's use down to
-/// [`LOW_PERCENT`], or all.
+/// `LOW_PERCENT`, or all.
 pub fn evicted<U: Ord>(
     disk: Disk,
     cached: Vec<Cached>,

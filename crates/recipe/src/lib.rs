@@ -11,7 +11,7 @@
 //! - a frontend, which a parser directive (`# <name>=…` before the first instruction) or a
 //!   `BUILDKIT_` build argument can name;
 //! - a URL, any `ADD` source with a `:`, but the one `https://` source that `--checksum` pins;
-//! - a Git repository: any `ADD` source that [`check_source`] refuses, but the one source
+//! - a Git repository: any `ADD` source that `check_source` refuses, but the one source
 //!   `https://<host>/<path>.git#<commit>`, whose full commit pins it;
 //! - the host's network, a device or a privilege, which a `RUN` flag but `--mount` may give.
 //!
@@ -92,7 +92,7 @@ pub fn check<B>(name: &str, text: &[u8], given: &Given<B>) -> Result<(), String>
 
 /// Fails unless `source`, an `ADD` source, is plain: it holds no `%`, `?` or `#`, and doesn't end
 /// in `.git`, in any case, so no Docker from 25.0 on takes it for a Git repository's URL.
-pub fn check_source(source: &str) -> Result<(), String> {
+fn check_source(source: &str) -> Result<(), String> {
     if git_like(source) {
         return Err(format!(
             "Docker may take `{}` for a Git repository's URL, which some of its versions clone \

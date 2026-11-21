@@ -48,7 +48,7 @@ impl CallResult {
     }
 
     /// The fields the caller's reply returns, by name.
-    pub fn returned(&self) -> Returned {
+    pub(crate) fn returned(&self) -> Returned {
         let fields = self.values.iter();
         let fields = fields.map(|(name, value)| (name.as_str().to_owned(), value.clone()));
         fields.collect()

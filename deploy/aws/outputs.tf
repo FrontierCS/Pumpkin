@@ -34,7 +34,7 @@ output "modal_images" {
 
 output "client_config" {
   description = "The `[controller]` table of the person's machine's `pumpkin.toml`, beside its `[upstreams]`."
-  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\naddress = \"private\"\n"
+  value       = "[controller]\nname = ${jsonencode(var.name)}\nregion = ${jsonencode(var.region)}\n"
 }
 
 # What the person's machine needs to reach the controller: find it by its tag, start it, and push

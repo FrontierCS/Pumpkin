@@ -54,7 +54,7 @@ use budget::Budget;
 pub use budget::{Budgets, budgets};
 use child::{Message, Report};
 use host::deadline;
-pub use host::{Clock, Durable, Host, Inbox, System, SystemClock, SystemInbox};
+pub use host::{Clock, Durable, Host, Inbox, System};
 pub use interruption::{Signal, Stopped};
 pub use log::{
     AgentEnd, AgentSpan, CallEnd, CallOf, CallSpan, CallStart, CallerName, Closed, Cost, Direction,
