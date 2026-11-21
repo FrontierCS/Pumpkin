@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
 use runtime::{BUILD, Ending, Record};
@@ -53,9 +54,38 @@ pub(crate) fn follow(
     end(record, &ending, printed, runs, record.args())
 }
 
-// A milestone said within a second is timely, and each poll reads only what the log gained, and
-// each sandbox's `sandbox.json`.
-pub(crate) const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+// The first pause is short, to see soon what has just happened, the run's end most of all, and it
+// bounds how often a run whose log keeps growing is polled. Each after is twice the last, up to a
+// second, which bounds what a long quiet run's follow costs. Go's `http.Server.Shutdown` doubles
+// its pauses so while it polls for idle connections, from 1 ms up to 500 ms:
+// https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/net/http/server.go#L3388-L3395
+// https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/net/http/server.go#L3431-L3454
+const FIRST_FOLLOW_POLL: Duration = Duration::from_millis(10);
+const LAST_FOLLOW_POLL: Duration = Duration::from_secs(1);
+
+/// The pauses between a follower's polls.
+pub(crate) struct Polls(Duration);
+
+impl Polls {
+    pub(crate) const fn new() -> Self {
+        Self(FIRST_FOLLOW_POLL)
+    }
+
+    /// The pause before the next poll: 10 ms at first and after a restart, then twice the last,
+    /// up to a second.
+    pub(crate) fn pause(&mut self) -> Duration {
+        let pause = self.0;
+        self.0 = (pause * 2).min(LAST_FOLLOW_POLL);
+        pause
+    }
+
+    /// Makes the next pause the first again, as more is likely soon after something new.
+    // As gRPC resets its connection backoff once a connection has worked:
+    // https://github.com/grpc/grpc/blob/785ff9afd6410c535a44690e7cca1f81228d8851/doc/connection-backoff.md#L49-L55
+    pub(crate) const fn restart(&mut self) {
+        self.0 = FIRST_FOLLOW_POLL;
+    }
+}
 
 /// Waits until the run of `record`, which was live, has ended, or been lost, and returns how;
 /// says each of its milestones meanwhile, once, and the parts of its log that can't be read, if
@@ -67,8 +97,8 @@ pub(crate) fn followed(record: &Record) -> Result<Ending, String> {
             say(message);
             Ok(())
         },
-        || {
-            std::thread::sleep(FOLLOW_POLL);
+        |pause| {
+            std::thread::sleep(pause);
             Ok(())
         },
     )
@@ -77,33 +107,45 @@ pub(crate) fn followed(record: &Record) -> Result<Ending, String> {
 pub(crate) fn milestones(
     record: &Record,
     mut tell_reader: impl FnMut(&dyn fmt::Display) -> Result<(), String>,
-    mut wait: impl FnMut() -> Result<(), String>,
+    mut wait: impl FnMut(Duration) -> Result<(), String>,
 ) -> Result<Ending, String> {
     let mut said = std::collections::BTreeSet::new();
     let mut said_unread = false;
     let mut log = record.fold();
+    let mut polls = Polls::new();
+    let mut read_out: Option<Instant> = None;
     loop {
         // How it ended first, so that the log read after holds every milestone before the end.
         let ending = record.ending()?;
-        if let Some(started_over) = log.take()? {
+        let taken = log.taken();
+        let started_over = log.take()?;
+        if started_over.is_some() || log.taken() != taken {
+            polls.restart();
+        }
+        if let Some(started_over) = started_over {
             tell_reader(&format_args!("run {}: {started_over}", record.id()))?;
         }
-        let runtime::Readout { progress, unread } = log.readout()?;
-        if !said_unread && let Some(unread) = progress::unread(&unread) {
-            tell_reader(&format_args!("run {}: {unread}", record.id()))?;
-            said_unread = true;
-        }
-        if let Some(progress) = progress {
-            for milestone in progress::milestones(&progress) {
-                if said.insert(milestone.clone()) {
-                    tell_reader(&milestone)?;
+        // A readout reads each sandbox's `sandbox.json`, and so costs what the run has done so far:
+        // it comes once a second, as a milestone said within is timely, and at the end.
+        if ending.is_some() || read_out.is_none_or(|at| at.elapsed() >= LAST_FOLLOW_POLL) {
+            read_out = Some(Instant::now());
+            let runtime::Readout { progress, unread } = log.readout()?;
+            if !said_unread && let Some(unread) = progress::unread(&unread) {
+                tell_reader(&format_args!("run {}: {unread}", record.id()))?;
+                said_unread = true;
+            }
+            if let Some(progress) = progress {
+                for milestone in progress::milestones(&progress) {
+                    if said.insert(milestone.clone()) {
+                        tell_reader(&milestone)?;
+                    }
                 }
             }
         }
         if let Some(ending) = ending {
             return Ok(ending);
         }
-        wait()?;
+        wait(polls.pause())?;
     }
 }
 
