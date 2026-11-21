@@ -1,7 +1,7 @@
 //! What the EC2 provider and `ec2-boot`, the boot of each of its sandboxes' instances, share.
 //!
-//! The provider writes a [`Start`] into an instance's user data, which `ec2-boot start` reads on
-//! its standard input.
+//! The provider's user data writes a [`Start`] to [`START_FILE`], which `ec2-boot start` reads
+//! and removes.
 
 use std::net::SocketAddrV4;
 
@@ -16,9 +16,12 @@ pub const SANDBOXD_IN_IMAGE: &str = "/sandboxd";
 /// Where `ec2-boot` is in that image.
 pub const BOOT_IN_IMAGE: &str = "/ec2-boot";
 
-/// The directory, in memory and root's alone, that the user data makes on an instance's first
-/// boot, and in which `ec2-boot` keeps the grant's file.
+/// The directory, in memory and root's alone once `ec2-boot` starts, that the user data makes on
+/// an instance's first boot, and that holds [`START_FILE`] and the grant's file.
 pub const GRANT_DIR: &str = "/run/pumpkin";
+
+/// The file in [`GRANT_DIR`] that holds the [`Start`] as JSON until `ec2-boot` reads it.
+pub const START_FILE: &str = "/run/pumpkin/start.json";
 
 /// The start of each line that an instance's boot writes to its serial console.
 pub const CONSOLE_PREFIX: &str = "pumpkin-ec2:";
@@ -28,15 +31,14 @@ pub const CONSOLE_PREFIX: &str = "pumpkin-ec2:";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
-    /// The run's hard end, in whole seconds since the Unix epoch, rounded down: what the boot's
-    /// commands are killed at, at the latest.
+    /// The run's hard end, in whole seconds since the Unix epoch, rounded down. Once the
+    /// container has started, the instance powers off then, and the boot's wait for the
+    /// container ends by then.
     pub hard_end_unix_seconds: u64,
-    /// When each of the boot's commands before the container's start, the pull among them, is
-    /// killed, in whole seconds since the Unix epoch.
+    /// The create's deadline, in whole seconds since the Unix epoch, rounded down, at most the
+    /// hard end. Until the container has started, the instance powers off then, whatever hangs,
+    /// and each command of the boot's is killed by then.
     pub pulls_by_unix_seconds: u64,
-    /// The registry the images are in, which the user data has Docker log in to, and which the
-    /// boot logs out of once it has pulled the role's image.
-    pub registry: String,
     /// The role's image, by digest, which the boot pulls.
     pub role_image: String,
     /// The image of `sandboxd`, by digest, which the user data has pulled.

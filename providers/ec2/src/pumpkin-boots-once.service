@@ -1,0 +1,13 @@
+[Unit]
+Description=Shut down a Pumpkin sandbox instance that boots again, which terminates it
+# The instance boots once. A later boot, as auto-recovery or a scheduled event gives, would have
+# lost the deadlines and start no container, so it shuts down. The directory is in memory, so only
+# the first boot has it.
+ConditionPathExists=!@GRANT_DIR@
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block poweroff
+
+[Install]
+WantedBy=multi-user.target

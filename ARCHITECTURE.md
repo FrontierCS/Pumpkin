@@ -338,8 +338,9 @@ envelope the operator made on AWS, which its `Settings` name. It pushes what its
 the envelope's repositories, and schedules each instance's termination at the run's hard end
 (`Timer`). `Ec2::reach` gives a `Reached` for a reap.
 
-**Architecture Invariant:** it reaches AWS only through `aws::Cli`. An instance's own boot logs in
-to the registry with the instance's role, and logs out once it has pulled.
+**Architecture Invariant:** it reaches AWS only through `aws::Cli`. An instance's Docker holds no
+registry login: ECR's credential helper gets a token with the instance's role for each pull, and
+keeps none, as the user data configures root's Docker.
 
 **Architecture Invariant:** a container reaches the gateway's address and port and nothing else,
 not its instance nor the instance's metadata. `ec2-boot` installs the firewall rules before the
@@ -347,10 +348,10 @@ container starts, and `cargo xtask live ec2` probes them.
 
 ### `providers/ec2/boot`
 
-`ec2-boot`, a static binary that the image of `sandboxd` holds beside it. The instance's user data
-runs it with the `Start` the provider wrote: it locks the instance's network down, checks its
-Docker, pulls the role's image, runs the role's container, and powers the instance off however it
-ends.
+`ec2-boot`, a static binary that the image of `sandboxd` holds beside it. A systemd unit that the
+instance's user data writes copies it out of that image and runs it with the `Start` the provider
+wrote: it locks the instance's network down, checks its Docker, pulls the role's image and runs the
+role's container, and the unit powers the instance off however it ends.
 
 **Architecture Invariant:** it depends on `schema` and `stdx` alone of Pumpkin's crates, so it is
 small and static, and the provider's values reach it only as a `Start`.
@@ -538,8 +539,8 @@ client trusts the provider's edge only by its certificate.
 
 No credential is reachable from a sandbox. The model provider's key stays in the host's
 `Upstream`, which adds it to each admitted request, and the harness reaches the model at the
-endpoint `sandboxd` serves, with no credential. An EC2 instance's Docker holds a registry login
-only while it pulls, and the container never gets the instance's role or its metadata. Images are
+endpoint `sandboxd` serves, with no credential. An EC2 instance's Docker holds no registry login,
+and the container never gets the instance's role or its metadata. Images are
 private, in the envelope's ECR repositories: an EC2 instance pulls with its instance profile, and
 Modal imports with a pull role that it assumes by its own identity, so no AWS credential of the
 operator's reaches Modal.
@@ -575,8 +576,8 @@ entries of a role's route are the one bound the core doesn't meter: the runtime 
 its entry's answers, at the machine's prices.
 
 Every sandbox ends by its run's hard end even if its driver dies: the EC2 provider schedules each
-instance's termination then, and `ec2-boot` kills its container; Modal ends each sandbox then; a
-Docker sandbox ends with its session. A sandbox that no start claims ends itself: a `sandboxd`
+instance's termination then, and the instance powers itself off then; Modal ends each sandbox
+then; a Docker sandbox ends with its session. A sandbox that no start claims ends itself: a `sandboxd`
 that dials finds its registration gone, and one that listens gives up soon after its start's
 deadline (`--by`).
 

@@ -1,0 +1,40 @@
+[Unit]
+Description=Boot this instance's Pumpkin sandbox, then power the instance off
+# However the boot ends, the instance powers off, which terminates it.
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+Type=exec
+# ec2-boot keeps its files at their paths below the directory it runs in.
+WorkingDirectory=/
+# The start's deadline, scheduled first, bounds the steps instead.
+TimeoutStartSec=infinity
+# So that ECR's credential helper keeps no token on the instance:
+# https://github.com/awslabs/amazon-ecr-credential-helper/blob/7ff7d6bd7a06408ddb9646c9ebccf97dbd190d55/README.md#L320-L324
+Environment=AWS_ECR_DISABLE_CACHE=true
+# Each line as written, which the console's reader finds by its prefix: journal+console would put
+# the process's name before it.
+StandardOutput=tty
+StandardError=journal
+ExecStartPre=/usr/bin/echo "@PREFIX@ the boot began"
+# The start's deadline, by logind, at an exact time, which fires at once if it has passed:
+# https://github.com/systemd/systemd-stable/blob/0f3ad617e60c1d037025ff29a45a6422630ad9e8/man/org.freedesktop.login1.xml#L632-L636
+ExecStartPre=/usr/bin/busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ScheduleShutdown st poweroff @PULLS_BY_MICROS@
+ExecStartPre=/usr/bin/systemctl enable --quiet --no-reload @BOOTS_ONCE@
+ExecStartPre=/usr/bin/echo "@PREFIX@ starting Docker"
+# Started here, behind the deadline, not by Requires= and After=: a unit whose required unit fails
+# is never started, so it neither fails nor powers off, and Docker's unit has no start timeout:
+# https://github.com/systemd/systemd-stable/blob/0f3ad617e60c1d037025ff29a45a6422630ad9e8/man/systemd.unit.xml#L655-L659
+# https://github.com/systemd/systemd-stable/blob/0f3ad617e60c1d037025ff29a45a6422630ad9e8/src/core/unit.c#L2747-L2753
+# https://github.com/moby/moby/blob/165516eb478021fdc99976e5aadc26bf73c1e51b/contrib/init/systemd/docker.service#L15-L17
+ExecStartPre=/usr/bin/systemctl start docker.service
+ExecStartPre=/usr/bin/echo "@PREFIX@ copying ec2-boot out of the image of sandboxd"
+ExecStartPre=/usr/bin/docker create --name=pumpkin-ec2-boot --entrypoint=/ @SANDBOXD_IMAGE@
+ExecStartPre=/usr/bin/docker cp pumpkin-ec2-boot:@BOOT_IN_IMAGE@ /usr/local/sbin/ec2-boot
+ExecStartPre=/usr/bin/docker rm pumpkin-ec2-boot
+ExecStart=/usr/local/sbin/ec2-boot start
+# Run however the unit ends, also when a step before ec2-boot fails, with systemd's result alone,
+# which holds nothing secret:
+# https://github.com/systemd/systemd-stable/blob/0f3ad617e60c1d037025ff29a45a6422630ad9e8/man/systemd.service.xml#L565-L571
+ExecStopPost=/usr/bin/echo "@PREFIX@ the boot's unit ended: ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}"
