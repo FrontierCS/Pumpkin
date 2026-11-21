@@ -368,12 +368,15 @@ small and static, and the provider's values reach it only as a `Start`.
 
 `Modal`, the provider whose sandboxes are sandboxes in a Modal workspace, in Pumpkin's one App,
 under gVisor, each with its `sandboxd` listening behind Modal's TLS tunnel. Modal imports a role's
-image from ECR with a role that it assumes by its own identity. `Modal::reach` gives a `Reached`
-for a reap.
+image from ECR with a role that it assumes by its own identity. It reaches the workspace with a
+profile of Modal's configuration file, or, on a controller, with the team's token, which it reads
+from the SSM SecureString parameter that the settings name each time it reaches the workspace.
+`Modal::reach` gives a `Reached` for a reap.
 
 **Architecture Invariant:** it reaches Modal only through its helper, `pumpkin-modal.py` (`Helper`),
-which gets of this process's environment only `HOME`, `PATH`, the profile and the configuration
-file; and AWS only through `aws::Cli`. No AWS credential of the operator's reaches Modal.
+which gets of this process's environment only `HOME`, `PATH`, and the profile and the
+configuration file or the token; and AWS only through `aws::Cli`. No AWS credential of the
+operator's reaches Modal, and the token is in no file, argv or log.
 
 **Architecture Invariant:** a sandbox opens no connection, but DNS to Modal's resolver, and its
 only way in is its tunnel, which takes connections from the settings' `dials_from` address alone.

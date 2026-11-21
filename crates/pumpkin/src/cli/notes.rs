@@ -467,9 +467,13 @@ settings:
                 `pumpkin`, with `uv` from PATH, and `aws`, AWS CLI v2, as ec2
                 does. Its settings:
     profile       The profile of Modal's configuration whose token reaches the
-                  workspace.
+                  workspace; or `token` in its place.
     config        The file of Modal's configuration that holds the profile, by
                   its absolute path; absent, ~/.modal.toml.
+    token         The SSM parameter that holds the token that reaches the
+                  workspace, which a run or a reap reads as it reaches it:
+                  `region`, and `parameter`, its name, a SecureString whose
+                  value is {\"token_id\": \"ak-…\", \"token_secret\": \"as-…\"}.
     dials_from    This machine's public IPv4 address, from which alone the
                   sandboxes' tunnels take connections.
     images        Where Modal imports images from: `region`, `repository`,

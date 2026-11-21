@@ -5,12 +5,14 @@
 //! tag that carries its run.
 //!
 //! The provider reaches Modal only through its helper (`helper`), a Python program on Modal's
-//! SDK, run once for each call, which reaches the workspace with the profile's token, from Modal's
-//! own configuration file.
+//! SDK, run once for each call, which reaches the workspace with a profile's token, from Modal's
+//! own configuration file, or with a token that an SSM parameter holds (`credentials`).
 //!
 //! # Settings
 //!
-//! Only deserialization makes [`Settings`], from a table such as this, in TOML:
+//! Only deserialization makes [`Settings`], from a table such as this, in TOML, which names
+//! either a `profile`, with Modal's configuration file `config` if not its default, or a `token`,
+//! such as `{ region = "us-west-1", parameter = "/pumpkin-alice/modal-token" }`:
 //!
 //! ```toml
 //! profile = "pumpkin"
@@ -39,8 +41,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stdx::Deadline;
 
-use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
+use crate::credentials::{ConfigFile, Credentials, Profile, ProfileName, Reaching, TokenParameter};
+use crate::helper::{ASK_TIMEOUT, Helper, IMPORT_TIMEOUT, Request};
 
+mod credentials;
 mod helper;
 mod sandboxes;
 
@@ -62,21 +66,77 @@ fn memory_mib(role: &Role) -> Result<u64, String> {
 
 /// The provider's settings, in a table such as [the crate's](crate#settings).
 ///
-/// They name the workspace's profile, and Modal's configuration file that holds it, the images'
-/// repository, the address the gateway dials from, and the classes of sandbox.
-// Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
-// version adds, and one that refuses such a key finds it through `serde_ignored`.
+/// They name what reaches the workspace, the images' repository, the address the gateway dials
+/// from, and the classes of sandbox.
 #[derive(Debug, Deserialize)]
+#[serde(try_from = "SettingsTable")]
 pub struct Settings {
-    profile: Profile,
-    /// Modal's configuration file that holds the profile, if not Modal's own default,
-    /// `~/.modal.toml`.
-    config: Option<ConfigFile>,
+    credentials: Credentials,
     images: Images,
     /// The public IPv4 address of this machine's that its connections to Modal come from, from
     /// which alone a sandbox's tunnel takes them.
     dials_from: Ipv4Addr,
     classes: BTreeMap<Name, SandboxClass>,
+}
+
+/// The settings as their table holds them, with either `profile`, and `config` if given, or
+/// `token`.
+// Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
+// version adds, and one that refuses such a key finds it through `serde_ignored`.
+#[derive(Deserialize)]
+struct SettingsTable {
+    profile: Option<ProfileName>,
+    config: Option<ConfigFile>,
+    token: Option<TokenParameter>,
+    images: Images,
+    dials_from: Ipv4Addr,
+    classes: BTreeMap<Name, SandboxClass>,
+}
+
+impl TryFrom<SettingsTable> for Settings {
+    type Error = String;
+
+    fn try_from(table: SettingsTable) -> Result<Self, Self::Error> {
+        let SettingsTable {
+            profile,
+            config,
+            token,
+            images,
+            dials_from,
+            classes,
+        } = table;
+        let credentials = match (profile, config, token) {
+            (Some(name), config, None) => Credentials::Profile(Profile { name, config }),
+            (None, None, Some(token)) => Credentials::Token(token),
+            (None, Some(_), Some(_)) => {
+                return Err(
+                    "the Modal provider names `config` beside `token`: `config` is the file of a \
+                     `profile`, so remove it"
+                        .to_owned(),
+                );
+            }
+            (Some(_), _, Some(_)) => {
+                return Err(
+                    "the Modal provider names both `profile` and `token`: keep the one that \
+                     reaches the workspace"
+                        .to_owned(),
+                );
+            }
+            (None, _, None) => {
+                return Err(
+                    "the Modal provider names neither `profile` nor `token`: name the one \
+                     that reaches the workspace"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(Self {
+            credentials,
+            images,
+            dials_from,
+            classes,
+        })
+    }
 }
 
 /// Where Modal imports the provider's images from: an ECR repository in `region`, which Modal
@@ -252,10 +312,10 @@ struct Described {
 }
 
 impl<'e> Modal<'e> {
-    /// Reaches the workspace that `settings`' profile reaches, through the helper at `script`,
-    /// whose lock is beside it, and the settings' repository, with `pusher`, the engine it
-    /// publishes from. It writes in `dir` what `uv` fetches. It fails if Modal's
-    /// configuration lacks the profile, or AWS describes no such repository.
+    /// Reaches the workspace that `settings` reach, through the helper at `script`, whose lock is
+    /// beside it, and the settings' repository, with `pusher`, the engine it publishes from. It
+    /// writes in `dir` what `uv` fetches. It fails if Modal's configuration lacks the profile,
+    /// the token's parameter holds no token, or AWS describes no such repository.
     pub fn connect(
         settings: &Settings,
         script: &Path,
@@ -263,27 +323,25 @@ impl<'e> Modal<'e> {
         pusher: Pusher<'e>,
     ) -> Result<Self, String> {
         let Settings {
-            profile,
-            config,
+            credentials,
             images,
             dials_from,
             classes,
         } = settings;
-        let helper = Helper::new(script, dir, profile.clone(), config.clone());
+        let helper = Helper::new(script, dir, credentials.read()?);
         let Described { workspace } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         let cli = Cli::connect(images.region.clone())?;
         let [repository] = cli.repositories([&images.repository])?;
         let repository = repository?;
         let declared =
             (classes.iter()).map(|(name, sandbox)| (name.clone(), sandbox.class.clone()));
+        let mut report = credentials.report();
+        report["workspace"] = json!(workspace);
+        report["images"] = json!({ "role_arn": images.role_arn });
+        report["repository"] = json!(repository.uri());
+        report["dials_from"] = json!(dials_from);
         let ready = Ready {
-            report: json!({
-                "profile": profile,
-                "workspace": workspace,
-                "images": { "role_arn": images.role_arn },
-                "repository": repository.uri(),
-                "dials_from": dials_from,
-            }),
+            report,
             classes: declared.collect(),
         };
         Ok(Self {
@@ -298,22 +356,28 @@ impl<'e> Modal<'e> {
         })
     }
 
-    /// Reaches the workspace that `settings`' profile reaches, in Modal's configuration file
-    /// `config` if given, else theirs, through the helper at `script`, writing in `dir` as
+    /// Reaches the workspace that `settings` reach, a profile in Modal's configuration file
+    /// `config` if given, through the helper at `script`, writing in `dir` as
     /// [`connect`](Self::connect) does, for a sweep of a run's sandboxes alone: nothing else of
-    /// the settings is reached, and nothing is reported. It fails if `config` is relative, or the
-    /// configuration lacks the profile.
+    /// the settings is reached, and nothing is reported. It fails if `config` is relative, the
+    /// configuration lacks the profile, or the token's parameter holds no token.
     pub fn reach(
         settings: &Settings,
         config: Option<&Path>,
         script: &Path,
         dir: &Path,
     ) -> Result<Reached, String> {
-        let config = match config {
-            Some(config) => Some(ConfigFile::try_from(config.to_owned())?),
-            None => settings.config.clone(),
+        let reaching = match (config, &settings.credentials) {
+            (Some(config), Credentials::Profile(Profile { name, config: _ })) => {
+                Reaching::Profile(Profile {
+                    name: name.clone(),
+                    config: Some(ConfigFile::try_from(config.to_owned())?),
+                })
+            }
+            // A token is the settings' own, which no file of Modal's configuration replaces.
+            (Some(_), Credentials::Token(_)) | (None, _) => settings.credentials.read()?,
         };
-        let helper = Helper::new(script, dir, settings.profile.clone(), config);
+        let helper = Helper::new(script, dir, reaching);
         let Described { .. } = helper.call(&Request::Ready, Deadline::after(ASK_TIMEOUT))?;
         Ok(Reached { helper })
     }
@@ -329,7 +393,7 @@ impl Sweep for Modal<'_> {
     }
 }
 
-/// A workspace that a profile reaches, reached for a sweep of a run's sandboxes alone
+/// A workspace that the settings reach, reached for a sweep of a run's sandboxes alone
 /// ([`Modal::reach`]): it lists and deletes them as [`Modal`] does, and bounds its calls alike.
 #[derive(Debug)]
 pub struct Reached {

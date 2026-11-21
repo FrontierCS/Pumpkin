@@ -18,10 +18,11 @@ use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
 use crate::Gpu;
+use crate::credentials::Reaching;
 
 // `HOME` is where Modal's own configuration lies, and `PATH` where `uv` is. No variable of Modal's
-// or of `uv`'s, such as `MODAL_TOKEN_ID` or `UV_INDEX`, steers the helper to another workspace or
-// to other packages.
+// or of `uv`'s but those the call sets, such as `MODAL_TOKEN_ID` or `UV_INDEX`, steers the helper
+// to another workspace or to other packages.
 const CALL_ENVIRONMENT: Environment = Environment::Only(&["HOME", "PATH"]);
 
 // A call that `uv` runs from its cache starts in about a second, and Modal answers it at once;
@@ -37,30 +38,6 @@ pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_mins(45);
 // How much of the end of a failed helper's standard error its error carries: the end, where a
 // Python traceback says what failed.
 const REPORTED_BYTES: usize = 4096;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-// The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
-pub(crate) struct Profile(String);
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "PathBuf")]
-pub(crate) struct ConfigFile(PathBuf);
-
-impl TryFrom<PathBuf> for ConfigFile {
-    type Error = String;
-
-    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        // Modal's SDK reads it from wherever the helper runs, so a relative path would name
-        // another file there.
-        if !path.is_absolute() {
-            return Err(format!(
-                "`{}` is not an absolute path: name Modal's configuration file by one",
-                path.display()
-            ));
-        }
-        Ok(Self(path))
-    }
-}
 
 /// A call of the helper, which it reads on its standard input as JSON, `call` naming it.
 #[derive(Serialize)]
@@ -118,29 +95,22 @@ enum Answer<T> {
     Error(String),
 }
 
-/// The helper at `script`, with its lock beside it, run with a profile, of a configuration file if
-/// not Modal's default. What `uv` fetches, its cache and the Pythons it downloads, and the
-/// temporary files of `uv` and the helper, go under `dir`.
+/// The helper at `script`, with its lock beside it, run with what reaches the workspace. What `uv`
+/// fetches, its cache and the Pythons it downloads, and the temporary files of `uv` and the helper,
+/// go under `dir`.
 #[derive(Debug)]
 pub(crate) struct Helper {
     script: PathBuf,
     dir: PathBuf,
-    profile: Profile,
-    config: Option<ConfigFile>,
+    reaching: Reaching,
 }
 
 impl Helper {
-    pub(crate) fn new(
-        script: &Path,
-        dir: &Path,
-        profile: Profile,
-        config: Option<ConfigFile>,
-    ) -> Self {
+    pub(crate) fn new(script: &Path, dir: &Path, reaching: Reaching) -> Self {
         Self {
             script: script.to_owned(),
             dir: dir.to_owned(),
-            profile,
-            config,
+            reaching,
         }
     }
 
@@ -162,10 +132,7 @@ impl Helper {
         uv.env("UV_CACHE_DIR", self.dir.join("uv"))
             .env("UV_PYTHON_INSTALL_DIR", self.dir.join("python"))
             .env("TMPDIR", temp);
-        uv.env("MODAL_PROFILE", &self.profile.0);
-        if let Some(ConfigFile(config)) = &self.config {
-            uv.env("MODAL_CONFIG_PATH", config);
-        }
+        self.reaching.set_env(&mut uv);
         // Runs the lock file beside the script as it is, and reads no `uv` configuration.
         uv.args(["run", "--frozen", "--quiet", "--no-config", "--script"]);
         uv.arg(&self.script);

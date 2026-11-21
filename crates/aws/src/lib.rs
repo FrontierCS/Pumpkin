@@ -177,6 +177,19 @@ pub struct Cli {
     version: String,
 }
 
+/// What `aws ssm get-parameter` prints.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Got {
+    parameter: Parameter,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Parameter {
+    value: String,
+}
+
 /// What `aws ecr describe-repositories` prints.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -263,6 +276,14 @@ impl Cli {
             return Ok(None);
         }
         succeeded(output, &shown).map(Some)
+    }
+
+    /// The value of the SSM parameter `name`, a `SecureString`'s decrypted.
+    pub fn parameter(&self, name: &str) -> Result<String, String> {
+        // `--with-decryption` is ignored for a parameter of another type.
+        let args = ["ssm", "get-parameter", "--with-decryption", "--name", name];
+        let Got { parameter } = self.json(&args, Bound::Call)?;
+        Ok(parameter.value)
     }
 
     /// The repositories that `names` name, in their order, each described by one call, or why
