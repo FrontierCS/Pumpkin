@@ -76,8 +76,8 @@ $ ./pumpkin run tasks/bench/task.star --arg model=model-a
 $ ./pumpkin run tasks/bench/task.star --arg model=model-a --wait
 ```
 
-The blocks below show a real run of Pumpkin's own `examples/hello`, which needs no model,
-with the machine's home written as `/home/alice`. `run` says each step on its standard error, such
+The blocks below show what to expect from Pumpkin's own `examples/hello`, which needs no model,
+on a machine whose task repository is `/home/alice/tasks`. `run` says each step on its standard error, such
 as `pumpkin: building an image in pumpkin/hello` when the engine lacks an image, and prints the
 run's id on its standard output:
 
@@ -112,20 +112,20 @@ are, or that it ran no command.
 ```console
 $ ./pumpkin wait 234cd166
 pumpkin: following run 20261116-195228-234cd166, recorded in /home/alice/tasks/.pumpkin/runs/20261116-195228-234cd166: ending `pumpkin wait` does not stop it
-pumpkin:    0:00 the agent started on local/container
-pumpkin:    0:00 count job 0 asked on local/container
-pumpkin:    0:00 count job 0 started
-pumpkin:    0:01 count job 0 ended: lines=1 bytes=6
+pumpkin:    0:00 agent started on local/container
+pumpkin:    0:00 count job 0 of agent 0 asked on local/container
+pumpkin:    0:00 count job 0 of agent 0 started
+pumpkin:    0:01 count job 0 of agent 0 ended: lines=1 bytes=6
 pumpkin:    0:01 the work phase ended
 pumpkin:    0:01 final call job 1 asked on local/container
 pumpkin:    0:01 final call job 1 started
 pumpkin:    0:02 final call job 1 ended: score=6 lines=1
 pumpkin: run 20261116-195228-234cd166 started 1s after it was asked for, and ran 2s:
-     0:00 agent on local/container, started at 0:00, exited 0 at 0:01; the work phase ended at 0:01
-     0:00 count job 0 on local/container, started after 0s, ran 0s: lines=1 bytes=6
+     0:00 agent on local/container, started at 0:00, exited 0 at 0:01; its work ended at 0:01
+     0:00 count job 0 of agent 0 on local/container, started after 0s, ran 0s: lines=1 bytes=6
      0:01 final call job 1 on local/container, started after 0s, ran 0s: score=6 lines=1
   sandboxes: 3 on local/container, 3s in all, 3 created, all deleted
-pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1), after the work phase ended when the agent exited with status 0; its record is /home/alice/tasks/.pumpkin/runs/20261116-195228-234cd166
+pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1); its record is /home/alice/tasks/.pumpkin/runs/20261116-195228-234cd166
 pumpkin: to run it again: pumpkin run /home/alice/tasks/examples/hello/task.star
 ```
 

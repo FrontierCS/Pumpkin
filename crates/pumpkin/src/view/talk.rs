@@ -96,12 +96,13 @@ impl Talk {
                 grants.push(json!({ "from": role.name, "to": target, "kind": kind }));
             }
         }
-        // The agent makes the final call.
-        let agent = roles
-            .iter()
-            .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)));
-        if let Some(agent) = agent {
-            grants.push(json!({ "from": agent.name, "to": final_target, "kind": "final" }));
+        let mut agents = BTreeMap::new();
+        for (index, role) in roles.iter().enumerate() {
+            if matches!(role.runtime, ir::Runtime::Agent(_)) {
+                let caller = CallerName::Agent(index);
+                agents.insert(caller, role.name.to_string());
+                grants.push(json!({ "from": role.name, "to": final_target, "kind": "final" }));
+            }
         }
         let routes = |role: &ir::Role| {
             routes.map(|routes| {
@@ -121,13 +122,11 @@ impl Talk {
             answered: BTreeMap::new(),
             failed: BTreeMap::new(),
             reading: Reading {
-                agent: (roles.iter())
-                    .find(|role| matches!(role.runtime, ir::Runtime::Agent(_)))
-                    .map(|role| role.name.to_string())
-                    .unwrap_or_default(),
+                agents,
                 final_target: final_target.to_owned(),
                 granted,
                 jobs: BTreeMap::new(),
+                callers: BTreeMap::new(),
                 holders: BTreeMap::new(),
                 directions: BTreeMap::new(),
             },
@@ -144,25 +143,41 @@ impl Talk {
         self.event(at, &record["event"]);
     }
 
-    fn role(&self, caller: CallerName) -> Option<String> {
+    /// The role of `caller`, for an agent of the IR or a job whose call has started.
+    pub(super) fn role(&self, caller: CallerName) -> Option<String> {
         match caller {
-            CallerName::Agent => Some(self.reading.agent.clone()),
+            CallerName::Agent(_) => self.reading.agents.get(&caller).cloned(),
             CallerName::Job(job) => self.reading.jobs.get(&job).cloned(),
         }
     }
 
-    fn ends(&self, lease: u64) -> Option<(String, String)> {
+    /// The roles of `lease`'s holder and of its runner.
+    pub(super) fn ends(&self, lease: u64) -> Option<(String, String)> {
         let holder = self.reading.holders.get(&lease)?.clone();
         Some((holder, self.runners.get(&lease)?.clone()))
+    }
+
+    /// The roles of the caller and of the target of `job`'s call, for a call of a job function.
+    pub(super) fn call_ends(&self, job: u64) -> Option<(String, String)> {
+        let caller = self.reading.callers.get(&job)?.clone();
+        Some((caller, self.reading.jobs.get(&job)?.clone()))
+    }
+
+    /// The name of the role that the IR declares at `index`.
+    pub(super) fn role_at(&self, index: u64) -> Option<String> {
+        let role = self.roles.get(usize::try_from(index).ok()?)?;
+        role["name"].as_str().map(str::to_owned)
     }
 }
 
 struct Reading {
-    agent: String,
+    agents: BTreeMap<CallerName, String>,
     final_target: String,
     /// Each grant's role, by its holder and name, and how the page names a call of it.
     granted: BTreeMap<(String, String), (String, &'static str)>,
     jobs: BTreeMap<u64, String>,
+    /// The role that called each job of a job function.
+    callers: BTreeMap<u64, String>,
     holders: BTreeMap<u64, String>,
     directions: BTreeMap<(u64, u64), String>,
 }
@@ -170,7 +185,7 @@ struct Reading {
 impl Talk {
     fn action(&mut self, at: f64, action: &Value, request: &Value) {
         if let Some(start) = CallStart::read(action) {
-            self.call_started(start);
+            self.call_started(start, action);
             return;
         }
         let lease = action["lease"].as_u64();
@@ -214,22 +229,41 @@ impl Talk {
         }
     }
 
-    fn call_started(&mut self, start: CallStart) {
+    fn call_started(&mut self, start: CallStart, action: &Value) {
         let CallStart {
             job,
             of,
+            caller,
             payload_bytes,
         } = start;
-        let called = match of {
+        let role = match of {
             CallOf::Function(grant) => {
-                let grant = (self.reading.agent.clone(), grant);
-                self.reading.granted.get(&grant).cloned()
+                let Some(from) = caller.and_then(|caller| self.role(caller)) else {
+                    return;
+                };
+                let Some((to, kind)) = self.reading.granted.get(&(from.clone(), grant)).cloned()
+                else {
+                    return;
+                };
+                self.edge(&from, &to, kind).add(Some(payload_bytes), None);
+                self.reading.callers.insert(job, from);
+                to
             }
-            CallOf::Final => Some((self.reading.final_target.clone(), "final call")),
+            CallOf::Final => {
+                let to = self.reading.final_target.clone();
+                if let Some(members) = action["selections"].as_array() {
+                    for member in members {
+                        if let (Some(from), Some(bytes)) = (
+                            member["role"].as_str(),
+                            member["selection"]["size"].as_u64(),
+                        ) {
+                            self.edge(from, &to, "final call").add(Some(bytes), None);
+                        }
+                    }
+                }
+                to
+            }
         };
-        let Some((role, kind)) = called else { return };
-        self.edge(&self.reading.agent.clone(), &role, kind)
-            .add(Some(payload_bytes), None);
         self.reading.jobs.insert(job, role);
     }
 
@@ -345,10 +379,14 @@ fn role_json(
     routes: Option<&[RouteEntry]>,
 ) -> Value {
     let name = role.name.as_str();
-    let (kind, has_route) = match &role.runtime {
-        ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some()),
-        ir::Runtime::Target(target) => ("target", target.egress.model.is_some()),
-        ir::Runtime::Runner(_) => ("runner", false),
+    let (kind, has_route, lifetime) = match &role.runtime {
+        ir::Runtime::Agent(agent) => ("agent", agent.egress.model.is_some(), None),
+        ir::Runtime::Target(target) => (
+            "target",
+            target.egress.model.is_some(),
+            Some(target.lifetime.unwrap_or(ir::TargetLifetime::Call)),
+        ),
+        ir::Runtime::Runner(_) => ("runner", false, None),
     };
     let place = (places.get(name)).map(|Place { provider, class }| format!("{provider}/{class}"));
     let routes = routes.map_or(json!("unknown"), |entries| {
@@ -362,12 +400,16 @@ fn role_json(
         });
         Value::Array(entries.collect())
     });
-    json!({
+    let mut role = json!({
         "name": name,
         "kind": kind,
         "final_target": name == target,
         "routed": has_route,
         "place": place,
         "routes": routes,
-    })
+    });
+    if let Some(lifetime) = lifetime {
+        role["lifetime"] = json!(lifetime);
+    }
+    role
 }

@@ -35,11 +35,12 @@ use std::{fmt, fs};
 
 pub use meeting::{Dialer, GatewayAddress, GrantListener, Registration, Sockets, Unreached};
 pub use op::Op;
+pub use process::Process;
 use schema::ir::{AbsolutePath, GpuModel, Mode};
 use schema::sandbox::op::{OpCall, OpReply};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
-    Entry, ExitStatus, FromSandbox, Launch, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
+    Entry, ExitStatus, FromSandbox, MAX_MODEL_REQUEST_BYTES, MAX_MODEL_REQUESTS_IN_FLIGHT,
     MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, pumpkin_dir,
     pumpkin_subdirs,
 };
@@ -47,6 +48,7 @@ use stdx::Deadline;
 
 mod meeting;
 mod op;
+mod process;
 mod trees;
 
 // Tells one session's handles from another's: `kill`, `reply` and `refuse` check it. Every
@@ -144,34 +146,6 @@ pub enum Put<'a> {
 #[derive(Debug)]
 pub struct Trees {
     shared: Arc<Shared>,
-}
-
-impl Trees {
-    /// As [`Session::put`], with `root` saying how `dir` is made: [`Root::New`] fails if it exists.
-    pub fn put<'a>(
-        &self,
-        dir: &AbsolutePath,
-        root: Root,
-        entries: impl IntoIterator<Item = Put<'a>>,
-        by: Deadline,
-    ) -> io::Result<()> {
-        self.shared.put(dir, root, entries, by)
-    }
-
-    /// Collects as [`Session::collect`] does, cut short with [`io::ErrorKind::Interrupted`], the
-    /// session still open, once `stopped`, which it asks before each part of the tree, says yes.
-    /// Returns the tree's entries, each with its mode as the sandbox sent it, which the host's
-    /// umask may have narrowed in `into`.
-    pub fn collect(
-        &self,
-        path: &AbsolutePath,
-        into: &Path,
-        limits: Limits,
-        by: Deadline,
-        stopped: &mut dyn FnMut() -> bool,
-    ) -> io::Result<Vec<Entry>> {
-        self.shared.collect(path, into, limits, by, stopped)
-    }
 }
 
 #[derive(Debug)]
@@ -281,13 +255,6 @@ struct Responder {
     shared: Arc<Shared>,
 }
 
-/// A command started on a session, which names it on that session alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Process {
-    session: u64,
-    stream: u32,
-}
-
 impl Session {
     fn new(
         stream: Connection,
@@ -328,6 +295,12 @@ impl Session {
         })
     }
 
+    /// Why the session has closed, including a failure already seen by a request whose
+    /// [`Arrival::Ended`] is still on its way to the owner.
+    pub fn ended(&self) -> Option<&str> {
+        self.shared.ended.get().map(String::as_str)
+    }
+
     /// The GPUs that the sandbox's `sandboxd` saw as it started, each by its model as `nvidia-smi`
     /// names it, if it could tell ([`Hello::gpus`](schema::sandbox::Hello::gpus)).
     pub fn gpus(&self) -> Option<&[GpuModel]> {
@@ -364,48 +337,6 @@ impl Session {
         by: Deadline,
     ) -> io::Result<()> {
         self.shared.put(dir, Root::Kept, entries, by)
-    }
-
-    /// Starts a command, whose exit arrives as an [`Arrival::Exited`] naming the [`Process`] this
-    /// returns.
-    pub fn start(&mut self, launch: Launch, by: Deadline) -> io::Result<Process> {
-        let (stream, replies) = self.shared.open(Route::Start, by)?;
-        let started = (self.shared)
-            .send(&ToSandbox::Start { stream, launch }, &[], by)
-            .and_then(|()| self.shared.done(&replies, by));
-        match started {
-            // The reader removes the command's route at its exit, which outlives this call.
-            Ok(()) => Ok(Process {
-                session: self.id,
-                stream,
-            }),
-            Err(error) => {
-                self.shared.close(stream);
-                Err(error)
-            }
-        }
-    }
-
-    /// Kills `process`'s group ([`ToSandbox::Kill`]), whose exit then arrives as any other's.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `process` was started on another session.
-    pub fn kill(&mut self, process: Process, by: Deadline) -> io::Result<()> {
-        let Process { session, stream } = process;
-        if session != self.id {
-            unreachable!(
-                "the command on stream {stream} was killed on a session other than the one it was \
-                 started on, though `kill`'s contract requires that one"
-            )
-        }
-        self.shared.request(
-            |request| ToSandbox::Kill {
-                stream: request,
-                command: stream,
-            },
-            by,
-        )
     }
 
     /// Kills the sandbox's processes that [`ToSandbox::Freeze`] names, so that nothing collected
@@ -454,7 +385,7 @@ impl Session {
         match self.answer(number, reply, by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
                 let message = format!("the reply was too long to send: {error}");
-                self.answer(number, OpReply::Refused { message }, by)?;
+                self.answer(number, OpReply::refused(message), by)?;
                 Err(error)
             }
             answered => answered,
@@ -480,7 +411,7 @@ impl Session {
             payload_limit: _,
         } = refused;
         self.clear_flight(session, number);
-        match self.answer(number, OpReply::Refused { message }, by) {
+        match self.answer(number, OpReply::refused(message), by) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => unreachable!(
                 "the refusal of op {number} is too long, though its message is \
                  `RefusedOp::message`, which names only the payload's size, a `u64`, and the \

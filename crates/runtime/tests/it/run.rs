@@ -155,7 +155,7 @@ fn agent_servings(
     url: &str,
     models: Option<&[&str]>,
 ) -> ByRole<Vec<Serving>> {
-    let agent = workflow.agent().role;
+    let agent = workflow.agents().next().unwrap().id.role();
     let servings = workflow.by_role(|(role, _)| {
         let served = models.filter(|_| role == agent).into_iter();
         Ok::<_, Infallible>(served.map(|models| serving(dir, url, models)).collect())
@@ -253,7 +253,7 @@ fn prepare() {
             driver.pid holds this process's id: true
             20240229-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
-            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v1"}
             refused: `agent` has a model route, but no upstream serves its `responses` entry: give one, or remove the `egress.model` of `agent`'s runtime to run without one; runs directory made: false
             refused: `agent`'s model route allows `gpt-6-astra`, which its upstream doesn't serve: give an upstream that serves every model the route allows; runs directory made: false
             prepared, named by its id: true
@@ -261,15 +261,40 @@ fn prepare() {
             driver.pid holds this process's id: true
             20251231-235959-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
-            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v1"}
             prepared, named by its id: true
             driver.pid is locked: true
             driver.pid holds this process's id: true
             21000301-000000-hhhhhhhh: driver.log, driver.pid, ir.json, record.json, sources/task/task.star
             ir.json is the IR: true
-            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v0"}
+            record.json: {"args":["--config","/pumpkin.toml"],"pumpkin":"<this build>","record_version":"pumpkin.record/v1"}
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
             refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"#]],
+    );
+}
+
+#[test]
+fn reserves_the_leases_of_every_concurrent_target_instance() {
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    ir["deadline_seconds"] = 30.into();
+    let roles = ir["roles"].as_array_mut().unwrap();
+    let agent = roles[0]["runtime"]["agent"].as_object_mut().unwrap();
+    agent.remove("egress");
+    let mut peer = roles[0].clone();
+    peer["name"] = "peer".into();
+    let mut runner = roles[1].clone();
+    runner["name"] = "box".into();
+    runner["runtime"] = serde_json::json!({"runner":{"cwd":"/work"}});
+    let mut session = lease("box");
+    session["session"]["instances"] = 64.into();
+    roles[1]["runtime"]["target"]["sessions"] = serde_json::json!([session]);
+    roles.extend([peer, runner]);
+
+    check(
+        [(0, ir, None)],
+        &expect![
+            "refused: reserving on provider `simulated`: the run needs 1056 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"
+        ],
     );
 }
 
@@ -362,7 +387,7 @@ fn reads_model_answers() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let answers = [
         r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":200}"#,
@@ -382,7 +407,7 @@ fn reads_model_answers() {
     for (seq, answer) in (1_u64..).zip(answers) {
         let mut event: Value = serde_json::from_str(answer).unwrap();
         event["kind"] = "model_answered".into();
-        event["caller"] = "agent".into();
+        event["caller"] = "agent-0".into();
         event["request"] = (seq - 1).into();
         let at = (seq * 1_000_000_000).to_string();
         let answered =
@@ -473,7 +498,7 @@ fn rebuilds_requests_kept_before_whole_fields() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir_all(record.join("model/items")).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let hex = "1a00".repeat(16);
     let item = r#"{"content":"hi","role":"user","type":"message"}"#;
@@ -492,11 +517,11 @@ fn rebuilds_requests_kept_before_whole_fields() {
     let log = [
         r#"{"seq":0,"at_ns":"0","observed_ns":"0","actions":[],"event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"}}"#.to_owned(),
         format!(
-            r#"{{"seq":1,"at_ns":"1","actions":[],"event":{{"kind":"model_answered","caller":"agent","request":0,"answer":{{"kind":"forwarded"}},"upstream_status":200,"kept":{{"request":{}}}}}}}"#,
+            r#"{{"seq":1,"at_ns":"1","actions":[],"event":{{"kind":"model_answered","caller":"agent-0","request":0,"answer":{{"kind":"forwarded"}},"upstream_status":200,"kept":{{"request":{}}}}}}}"#,
             request("0", items)
         ),
         format!(
-            r#"{{"seq":2,"at_ns":"2","actions":[],"event":{{"kind":"model_answered","caller":"agent","request":1,"answer":{{"kind":"barred","status":400,"message":"m"}},"upstream_status":null,"kept":{{"request":{}}}}}}}"#,
+            r#"{{"seq":2,"at_ns":"2","actions":[],"event":{{"kind":"model_answered","caller":"agent-0","request":1,"answer":{{"kind":"barred","status":400,"message":"m"}},"upstream_status":null,"kept":{{"request":{}}}}}}}"#,
             request("1", "")
         ),
     ];
@@ -515,7 +540,7 @@ fn reads_unended_commands() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let ir = solver(serde_json::json!([lease("stopped"), lease("expired")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
@@ -532,7 +557,7 @@ fn reads_unended_commands() {
         |sandbox: &str| serde_json::json!({ "kind": "sandbox_deleted", "sandbox": sandbox });
     let start = |grant: &str, lease: u64| {
         serde_json::json!({
-            "kind": "start_lease", "grant": grant, "holder": "agent", "lease": lease,
+            "kind": "start_lease", "grant": grant, "holder": "agent-0", "lease": lease,
         })
     };
     let lease_run = |lease: u64| serde_json::json!({ "kind": "op_arrived", "request": { "kind": "lease_run", "lease": lease, "argv": [] } });
@@ -554,7 +579,7 @@ fn reads_unended_commands() {
         (6, deleted("lease-1"), vec![]),
         (7, event("lease_ended", 1), vec![]),
         (12, deleted("lease-0"), vec![]),
-        (20, deleted("agent"), vec![]),
+        (20, deleted("agent-0"), vec![]),
     ];
     let mut log = String::new();
     for (seq, (seconds, event, actions)) in (0_u64..).zip(records) {
@@ -587,16 +612,16 @@ fn reads_other_builds_lines() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let later = r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"later","job":0},"actions":[{"kind":"later"}]}"#;
     let unnumbered =
         r#"{"seq":2,"at_ns":"2000000000","event":{"kind":"call_started"},"actions":[]}"#;
     let killed = r#"{"seq":3,"at_ns":"3000000000","event":{"kind":"command_ended","lease":0,"end":"killed"},"actions":[]}"#;
-    let ungranted = r#"{"seq":4,"at_ns":"4000000000","event":{"kind":"agent_started"},"actions":[{"kind":"start_lease","lease":0},{"kind":"finish"}]}"#;
+    let ungranted = r#"{"seq":4,"at_ns":"4000000000","event":{"kind":"agent_started","caller":"agent-0"},"actions":[{"kind":"start_lease","lease":0},{"kind":"finish"}]}"#;
     let leased = r#"{"seq":5,"at_ns":"5000000000","event":{"kind":"model_answered","caller":"lease-1","upstream_status":200,"answer":{"kind":"forwarded"}},"actions":[]}"#;
-    let unbounded = r#"{"seq":0,"at_ns":"0","event":{"kind":"run_started","unix_ns":"0"},"actions":[{"kind":"start_agent"}]}"#;
+    let unbounded = r#"{"seq":0,"at_ns":"0","event":{"kind":"run_started","unix_ns":"0"},"actions":[{"kind":"start_agents"}]}"#;
     let untimed =
         r#"{"seq":0,"at_ns":"0","event":{"kind":"run_started","hard_end_ns":"0"},"actions":[]}"#;
     let mut read = Vec::new();
@@ -612,41 +637,49 @@ fn reads_other_builds_lines() {
         log.push('\n');
         fs::write(record.join("log.jsonl"), log).unwrap();
         let readout = Record::open(&record).unwrap().progress().unwrap();
-        let progress = (readout.progress)
-            .map(|progress| (progress.last, progress.agent.sandbox.started, progress.end));
+        let progress = (readout.progress).map(|progress| {
+            (
+                progress.last,
+                progress
+                    .agents
+                    .get(&runtime::CallerName::Agent(0))
+                    .and_then(|agent| agent.sandbox.started),
+                progress.end,
+            )
+        });
         read.push(format!("{progress:?} {:?}", readout.unread));
     }
     expect![[r#"
         Some((1s, None, None)) []
         None []
         Some((3s, None, None)) [Unread { line: 2, part: Event, reason: "missing field `job`" }, Unread { line: 3, part: Line, reason: "EOF while parsing a value, at column 7" }, Unread { line: 4, part: Event, reason: "unknown variant `killed`, expected one of `exited`, `timed_out`, `unstarted`" }]
-        Some((5s, Some(4s), Some(4s))) [Unread { line: 2, part: Action(0), reason: "missing field `grant`" }, Unread { line: 3, part: Event, reason: "lease-1 is no caller: expected `agent` or `job-<n>`" }]
+        Some((5s, Some(4s), Some(4s))) [Unread { line: 2, part: Action(0), reason: "missing field `holder`" }, Unread { line: 3, part: Event, reason: "lease-1 is no caller: expected `agent-<n>` or `job-<n>`" }]
         None [Unread { line: 1, part: Event, reason: "missing field `unix_ns`" }]"#]].assert_eq(&read.join("\n"));
 }
 
-// The agent's sandbox is gone once collected, as `agent_collected` says, or an older build's note,
-// and else once deleted.
 #[test]
 fn reads_agent_end() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
-    let noted = r#"{"seq":1,"at_ns":"30000000000","note":"collected from the agent's sandbox: out, nothing; log, nothing"}"#;
-    let reworded = r#"{"seq":1,"at_ns":"30000000000","note":"the agent's sandbox left nothing"}"#;
-    let collected =
-        r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected"},"actions":[]}"#;
-    let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent"},"actions":[]}"#;
+    let collected = r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected","caller":"agent-0"},"actions":[]}"#;
+    let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent-0"},"actions":[]}"#;
+    let failed = r#"{"seq":1,"at_ns":"10000000000","event":{"kind":"agent_failed","caller":"agent-0","reason":"session ended"},"actions":[]}"#;
+    let torn_down = r#"{"seq":4,"at_ns":"42000000000","event":{"kind":"agent_torn_down","caller":"agent-0"},"actions":[]}"#;
     let logs = [
-        ("this build's", &[started, noted, collected, deleted][..]),
+        ("failed before deletion", &[started, failed][..]),
         (
-            "with its note worded otherwise",
-            &[started, reworded, collected, deleted],
+            "collected then deleted",
+            &[started, failed, collected, deleted, torn_down],
         ),
-        ("an older build's", &[started, noted, deleted]),
-        ("never collected", &[started, deleted]),
+        (
+            "deleted without collection",
+            &[started, failed, deleted, torn_down],
+        ),
+        ("never created", &[started, failed, torn_down]),
     ];
     let mut read = Vec::new();
     for (name, lines) in logs {
@@ -654,14 +687,16 @@ fn reads_agent_end() {
         log.push('\n');
         fs::write(record.join("log.jsonl"), log).unwrap();
         let progress = Record::open(&record).unwrap().progress().unwrap().progress;
-        let gone = progress.unwrap().agent.sandbox.gone;
+        let gone = progress.unwrap().agents[&runtime::CallerName::Agent(0)]
+            .sandbox
+            .gone;
         read.push(format!("{name}: gone {gone:?}"));
     }
     expect![[r#"
-        this build's: gone Some(31s)
-        with its note worded otherwise: gone Some(31s)
-        an older build's: gone Some(30s)
-        never collected: gone Some(40s)"#]]
+        failed before deletion: gone None
+        collected then deleted: gone Some(40s)
+        deleted without collection: gone Some(40s)
+        never created: gone Some(42s)"#]]
     .assert_eq(&read.join("\n"));
 }
 
@@ -687,7 +722,7 @@ fn reads_core_times() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let workflow: Value = serde_json::from_str(WORKFLOW).unwrap();
     let train = workflow["roles"][0]["runtime"]["agent"]["grants"][0].clone();
@@ -699,15 +734,15 @@ fn reads_core_times() {
     } });
     fs::write(record.join("provider.json"), provided.to_string()).unwrap();
     let log = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}
-{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","request":{"kind":"call","grant":"train"}},"actions":[{"kind":"start_call","job":0,"grant":"train","payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3},"timeout_ns":"60000000000"}]}
-{"seq":2,"at_ns":"3000000000","observed_ns":"1000000000","event":{"kind":"tick"},"actions":[{"kind":"start_lease","grant":"runner","holder":"agent","lease":0},{"kind":"start_lease","grant":"runner","holder":"agent","lease":1}]}
+{"seq":1,"at_ns":"2000000000","observed_ns":"1000000000","event":{"kind":"op_arrived","caller":"agent-0","request":{"kind":"call","grant":"train"}},"actions":[{"kind":"start_call","caller":"agent-0","job":0,"grant":"train","payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3},"timeout_ns":"60000000000"}]}
+{"seq":2,"at_ns":"3000000000","observed_ns":"1000000000","event":{"kind":"tick"},"actions":[{"kind":"start_lease","grant":"runner","holder":"agent-0","lease":0},{"kind":"start_lease","grant":"runner","holder":"agent-0","lease":1}]}
 {"seq":3,"at_ns":"5000000000","observed_ns":"2000000000","event":{"kind":"call_started","job":0},"actions":[]}
 {"seq":4,"at_ns":"8000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":0},"actions":[]}
 {"seq":5,"at_ns":"9000000000","observed_ns":"3000000000","event":{"kind":"lease_ready","lease":1},"actions":[]}
-{"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","request":{"kind":"lease_run","lease":0,"argv":[]}},"actions":[{"kind":"run_command","lease":0,"command":0}]}
-{"seq":7,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","request":{"kind":"lease_run","lease":1,"argv":[]}},"actions":[{"kind":"run_command","lease":1,"command":0}]}
+{"seq":6,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","caller":"agent-0","request":{"kind":"lease_run","lease":0,"argv":[]}},"actions":[{"kind":"run_command","lease":0,"command":0}]}
+{"seq":7,"at_ns":"10000000000","observed_ns":"4000000000","event":{"kind":"op_arrived","caller":"agent-0","request":{"kind":"lease_run","lease":1,"argv":[]}},"actions":[{"kind":"run_command","lease":1,"command":0}]}
 {"seq":8,"at_ns":"14000000000","observed_ns":"6000000000","event":{"kind":"command_ended","lease":0,"end":{"exited":{"code":0}}},"actions":[]}
-{"seq":9,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
+{"seq":9,"at_ns":"15000000000","observed_ns":"9000000000","event":{"kind":"op_arrived","caller":"agent-0","request":{"kind":"lease_close","lease":0}},"actions":[{"kind":"close_lease","lease":0}]}
 {"seq":10,"at_ns":"16000000000","observed_ns":"11000000000","event":{"kind":"lease_ended","lease":0},"actions":[]}
 {"seq":11,"at_ns":"20000000000","observed_ns":"14000000000","event":{"kind":"tick"},"actions":[]}
 {"seq":12,"at_ns":"21000000000","observed_ns":"15000000000","event":{"kind":"call_returned","job":0,"returned":[]},"actions":[]}
@@ -758,7 +793,7 @@ fn reads_a_growing_log() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
     fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v0","args":[]}"#;
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
     fs::write(record.join("record.json"), version).unwrap();
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let unnumbered =

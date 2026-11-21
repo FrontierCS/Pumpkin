@@ -11,7 +11,6 @@ AGENT = {
     "runtime": {"agent": {
         "command": {"argv": ["/usr/local/bin/agent"], "cwd": "/workspace"},
         "stdin": "Solve the task in /task/README.md.\n",
-        "deadline_seconds": 3600,
         "finalize_grace_seconds": 0,
         "grants": [{"name": "final", "now": {"body": submit, "payload_max_bytes": 64 * KiB}}],
     }},
@@ -30,9 +29,9 @@ FINAL_TARGET = {
     "runtime": {"target": {"cwd": "/pumpkin/home"}},
 }
 
-def final_call(target: Target, payload: Payload):
-    """Runs the judge on the selection, and shows the result it wrote."""
-    target.put("/pumpkin/in/payload", payload)
+def final_call(target: Target, submissions):
+    """Runs the judge on the submission, and shows the result it wrote."""
+    target.put("/pumpkin/in/payload", submissions["agent"])
     target.run(["/opt/judge/run"])
     return {"result": target.get("/pumpkin/out/result.json")}
 

@@ -3,9 +3,11 @@
 //! the same function, whatever changed on disk since.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use lang::{Args, Body, BodyKind, Bounds, Host, Label, Loader, Problems};
 use schema::ir::{self, AbsolutePath, Argv, Name};
+use schema::sandbox::op::RunnerOutput;
 use schema::workflow::Workflow;
 use serde_json::{Map, Value};
 
@@ -144,10 +146,11 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let body = self::body(&body.file, &body.def, keywords);
-        let host = Host::Final(&mut Driven(target));
+        let host = Host::Final(&mut Driven(target), submissions);
         let mut sources = self.sources;
         let bounds = Bounds::WORKFLOW;
         let arguments = BTreeMap::new();
@@ -175,8 +178,8 @@ impl runtime::Bodies for Bodies<'_> {
 struct Proposing<'r>(&'r mut dyn runtime::RunState);
 
 impl lang::Run for Proposing<'_> {
-    fn select(&mut self) {
-        self.0.select();
+    fn set_submission(&mut self) {
+        self.0.set_submission();
     }
 
     fn end_work(&mut self) {
@@ -188,12 +191,54 @@ impl lang::Run for Proposing<'_> {
 struct Driven<'t>(&'t mut dyn runtime::Target);
 
 impl lang::Target for Driven<'_> {
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
-        self.0.put(path)
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
+        self.0.runner_open(grant)
+    }
+    fn runner_put(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.runner_put(grant, lease, tree, to)
+    }
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.runner_get(grant, lease, from, to)
+    }
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String> {
+        self.0.runner_run(grant, lease, argv, timeout_seconds)
+    }
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
+        self.0.runner_close(grant, lease)
+    }
+
+    fn caller(&self) -> Option<&str> {
+        self.0.caller()
+    }
+
+    fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String> {
+        self.0.put(path, input)
     }
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {
         self.0.run(argv)
+    }
+
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
+        self.0.capture(argv, stdin)
     }
 
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String> {

@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::thread::{self, Scope};
 use std::time::Duration;
 
-use decision::{Caller, Core, Outcome};
+use decision::{Caller, Core, Outcome, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Bar};
 use schema::ir::{Api, Name};
-use schema::workflow::RoleId;
+use schema::workflow::{AgentId, RoleId};
 
 use crate::budget::Budget;
 use crate::host::deadline;
@@ -28,20 +28,20 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
     ) -> Result<(), String> {
         let number = self.next_model_request;
         self.next_model_request += 1;
-        // No type excludes a model request here, since one `Arrival` serves sessions with model
-        // requests and without.
-        let Some(served) = self.served.get(&caller).map(Arc::clone) else {
-            unreachable!(
-                "a model request arrived from {caller:?}, though a session takes them only if its \
-                 role has a route (`Sandboxes::start`), whose sandbox's start serves it, and one \
-                 breaks the protocol otherwise, which ends the session"
-            )
-        };
-        // `scope` is none once the run has ended, and no thread starts then.
+        // A call's start and request may both arrive after the run ends, with no route installed.
         let Some(scope) = scope else {
             drop(incoming);
             let note = format!("model request {number} wasn't answered: the run has ended");
             return self.log.note(&note);
+        };
+        // No type excludes a model request here, since one `Arrival` serves sessions with model
+        // requests and without.
+        let Some(served) = self.served.get(&caller).map(Arc::clone) else {
+            unreachable!(
+                "a model request arrived from {caller:?} with no route, though only a role with \
+                 a route takes model requests, the agent's is served before its sandbox starts, \
+                 and a call reports its start before relaying its first request"
+            )
         };
         let role = self.role(caller);
         let allowed = core.model_requests_allowed(caller, at);
@@ -55,7 +55,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         // needs, so it is due by then; the core's stop of its requests ends it before that
         // (`end_routes`).
         let by = match caller {
-            Caller::Agent => self.teardown_end(),
+            Caller::Agent(_) => self.teardown_end(),
             Caller::Job(job) => self.call(job).collect,
         };
         let by = deadline(&self.clock, by);
@@ -129,12 +129,13 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 
     fn role(&mut self, caller: Caller) -> RoleId {
         match caller {
-            Caller::Agent => self.workflow().agent().role,
-            Caller::Job(job) => self.call(job).role,
+            Caller::Agent(agent) => agent.role(),
+            Caller::Job(job) => self.call(job).target.role(),
         }
     }
 
-    pub(crate) fn serve(&mut self, caller: Caller, role: RoleId) {
+    pub(crate) fn serve(&mut self, caller: Caller) {
+        let role = self.role(caller);
         if let Some(served) = Served::new(self.routes.get(role)) {
             self.served.insert(caller, Arc::new(served));
         }
@@ -148,30 +149,54 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         }
     }
 
-    // Fails the run for a route whose upstream refused its key, unless the refusal came after the
-    // selection was locked on a route that served before it, and for a failure of the agent's last
-    // request.
-    pub(crate) fn routes_held(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
-        // A refusal heard after the lock can't change the result: the agent's or a call's whose
-        // answer the agent can't act on. The final call starts after the lock, so a
-        // refusal on its route always fails the run.
-        for (caller, served) in &self.served {
-            if let Some(name) = served.key_refused_by()
-                && !self.held_at_lock.contains(caller)
+    pub(crate) fn owner(&self, caller: Caller) -> Option<AgentId> {
+        match caller {
+            Caller::Agent(agent) => Some(agent),
+            Caller::Job(job) => self.jobs.get(&job).and_then(|call| call.owner),
+        }
+    }
+
+    // A work route's failure belongs to its agent. The final target's route belongs to the run.
+    pub(crate) fn routes_held(&self, outcome: &mut Result<Outcome, Stopped>) -> Result<(), String> {
+        for (&caller, served) in &self.served {
+            let Some(name) = served
+                .key_refused_by()
+                .filter(|_| !self.held_at_lock.contains(&caller))
+            else {
+                continue;
+            };
+            let route = match caller {
+                Caller::Agent(_) => "the agent's".to_owned(),
+                Caller::Job(job) => format!("job {}'s", job.0),
+            };
+            let reason = format!(
+                "the upstream `{name}` refused its key, with a 401, which ended {route} \
+                                  model route: give it a key that it takes, and run again"
+            );
+            let owner = self.owner(caller);
+            if let Ok(outcome) = outcome
+                && let Some(agent) = outcome
+                    .agents
+                    .iter_mut()
+                    .find(|agent| Some(agent.agent) == owner)
             {
-                let route = match caller {
-                    Caller::Agent => "the agent's".to_owned(),
-                    Caller::Job(job) => format!("job {}'s", job.0),
-                };
-                return Err(format!(
-                    "the upstream `{name}` refused its key, with a 401, which ended {route} \
-                     model route: give it a key that it takes, and run again"
-                ));
+                agent.route_failure.get_or_insert(reason);
+            } else {
+                return Err(reason);
             }
         }
-        match self.served.get(&Caller::Agent) {
-            Some(agent) => agent.failed_last(outcome),
-            None => Ok(()),
+        if let Ok(outcome) = outcome {
+            for agent in &mut outcome.agents {
+                let caller = Caller::Agent(agent.agent);
+                if agent.route_failure.is_none()
+                    && matches!(agent.work_end, WorkEnd::AgentExited(_))
+                    && !self.held_at_lock.contains(&caller)
+                    && let Some(route) = self.served.get(&caller)
+                {
+                    agent.route_failure = route.failed_last().err();
+                }
+            }
         }
+        Ok(())
     }
 }

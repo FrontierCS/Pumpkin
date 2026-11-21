@@ -149,32 +149,32 @@ fn refusals() {
         ],
         &["prompt"],
         &expect![[r#"
-            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
-                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/claude_code/claude_code.star:75:9: fail: `extreme` is not a reasoning effort: use one of low, medium, high, xhigh, max
+                75 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
-                77 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
+            @pumpkin//harness/claude_code/claude_code.star:75:9: fail: `High` is not a reasoning effort: use one of low, medium, high, xhigh, max
+                75 |         fail("`{}` is not a reasoning effort: use one of {}".format(effort, ", ".join(_EFFORTS)))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:85:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
-                85 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
+            @pumpkin//harness/claude_code/claude_code.star:83:13: `/pumpkin/home/.claude-code` is in `/pumpkin`, which holds Pumpkin's own files: name a path outside it
+                83 |     home = ("" if workspace == "/" else workspace) + "/.claude-code"
                    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/dirs/0/path
             task.star:7:13: `work` is not a normalized absolute path: start with `/`, and use no empty, `.` or `..` components and no NUL byte
                 7 | WORKSPACE = arg("workspace", str)
                   |             ^^^^^^^^^^^^^^^^^^^^^
                 the IR's /roles/0/runtime/agent/command/cwd
-            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
-                79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: Claude Code runs only on a prompt: give a string that is not empty
+                77 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:81:9: fail: `0` is not a number of tokens: give a positive int
-                81 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
+            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: `0` is not a number of tokens: give a positive int
+                79 |         fail("`{}` is not a number of tokens: give a positive int".format(max_output_tokens))
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9
-            @pumpkin//harness/claude_code/claude_code.star:79:9: fail: Claude Code runs only on a prompt: give a string that is not empty
-                79 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
+            @pumpkin//harness/claude_code/claude_code.star:77:9: fail: Claude Code runs only on a prompt: give a string that is not empty
+                77 |         fail("Claude Code runs only on a prompt: give a string that is not empty")
                    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `claude_code()`, called at task.star:15:9"#]],
     );

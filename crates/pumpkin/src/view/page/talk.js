@@ -2,6 +2,7 @@
 // what went along each.
 
 import { bytes, fill, h, plural, svg } from "./h.js";
+import { talkMark } from "./failure.js";
 
 /**
  * @typedef {import("./run.js").Run} Run
@@ -9,6 +10,7 @@ import { bytes, fill, h, plural, svg } from "./h.js";
  * @typedef {import("./run.js").Role} Role
  * @typedef {import("./run.js").Edge} Edge
  * @typedef {import("./run.js").Lit} Lit
+ * @typedef {import("./failure.js").Failure} Failure
  */
 
 // The widths of a character of the diagram's names and places, in its font, `--fs-diagram`.
@@ -19,7 +21,7 @@ const PLACE_CHAR_PX = 7.3;
 
 /** @param {Lane} lane @param {Run} data */
 export function laneRole(lane, data) {
-  if (lane.kind === "agent") {
+  if (lane.kind === "agent" && !lane.role) {
     const agent = data.talk && data.talk.roles.find((role) => role.kind === "agent");
     return agent ? agent.name : null;
   }
@@ -34,11 +36,12 @@ export function laneRole(lane, data) {
 // use of is dashed, as is a role with no sandbox yet. A role of more than one sandbox is drawn
 // as a stack, with how many it had and how many of them run now. Below, what went
 // between them. What a selection lights is lit, the rest dim; a role picked lights its lines,
-// and a click off every box puts the lighting down.
+// and a click off every box puts the lighting down. The failure `failed` is marked on the line
+// between its subject's two ends, if the diagram draws one, else on the box of its role.
 // The layering is Sugiyama's, as Graphviz's `dot` draws a graph (Gansner et al., "A Technique
 // for Drawing Directed Graphs", 1993), without its crossing reduction, for a handful of roles.
-/** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {(name: string | null) => void} pick */
-export function drawTalk(node, data, lit, picked, pick) {
+/** @param {HTMLElement} node @param {Run} data @param {Lit | null} lit @param {string | null} picked @param {Failure | null | undefined} failed @param {(name: string | null) => void} pick */
+export function drawTalk(node, data, lit, picked, failed, pick) {
   if (!data.talk) return fill(node, h("p", { class: "empty" }, "The record has no roles yet."));
   const { roles, edges } = data.talk;
   const grants = data.talk.grants || [];
@@ -100,7 +103,7 @@ export function drawTalk(node, data, lit, picked, pick) {
   const running = new Map();
   for (const lane of data.lanes || []) {
     const role = laneRole(lane, data);
-    if (!role) continue;
+    if (!role || lane.service) continue;
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
   }
@@ -157,15 +160,20 @@ export function drawTalk(node, data, lit, picked, pick) {
     ends.sort((p, q) => yOf(p) - yOf(q));
     return yOf(name) + (boxH * (ends.indexOf(other) + 1)) / (ends.length + 1);
   };
+  // The middle of each line drawn, by its two ends, either way round.
+  /** @type {Map<string, [number, number]>} */
+  const middles = new Map();
   const lines = [...links.values()].map(({ from, to }) => {
     const [a, b] = [nodes.get(from), nodes.get(to)];
     if (!a || !b) return null;
+    const middle = (/** @type {number} */ x, /** @type {number} */ y) => (middles.set(from + "\u0000" + to, [x, y]), middles.set(to + "\u0000" + from, [x, y]));
     const count = between(from, to).reduce((sum, edge) => sum + edge.count, 0);
     const look = count
       ? { "stroke-width": Math.min(6, 1 + Math.log2(count)), class: touches(from, to) ? "" : "dim" }
       : { "stroke-width": 1.25, class: "idle" + (touches(from, to) ? "" : " dim") };
     if (a.layer < b.layer) {
       const [x1, y1, x2, y2] = [a.x + a.w, portY(from, to, "from"), b.x, portY(to, from, "to")];
+      middle((x1 + x2) / 2, (y1 + y2) / 2);
       if (Math.abs(y1 - y2) < 0.5) return svg("line", { x1, y1, x2, y2, ...look });
       const mid = (x2 - x1) / 2;
       return svg("path", { d: "M" + x1 + " " + y1 + " C" + (x1 + mid) + " " + y1 + " " + (x2 - mid) + " " + y2 + " " + x2 + " " + y2, ...look });
@@ -173,14 +181,18 @@ export function drawTalk(node, data, lit, picked, pick) {
     if (a.layer > b.layer) {
       // A line back, of a cycle or to the model: from the left side to the right, level.
       const [x1, y1, x2, y2] = [a.x, a.y + boxH / 2, b.x + b.w, b.y + boxH / 2];
+      middle((x1 + x2) / 2, (y1 + y2) / 2);
       const mid = (x1 - x2) / 2;
       return svg("path", { d: "M" + x1 + " " + y1 + " C" + (x1 - mid) + " " + y1 + " " + (x2 + mid) + " " + y2 + " " + x2 + " " + y2, ...look });
     }
     const [top, bottom] = a.row < b.row ? [a, b] : [b, a];
     const cx = top.x + Math.min(top.w, bottom.w) / 2;
+    middle(cx, (top.y + boxH + bottom.y) / 2);
     if (bottom.row - top.row === 1) return svg("line", { x1: cx, y1: top.y + boxH, x2: cx, y2: bottom.y, ...look });
     const [side, outward] = a.layer === 0 ? [a.x, -bow] : [a.x + a.w, bow];
     const [y1, y2] = [top.y + boxH / 2, bottom.y + boxH / 2];
+    // The middle of the curve, which bows three quarters of the way to its control points.
+    middle(side + 0.75 * outward, (y1 + y2) / 2);
     return svg("path", { d: "M" + side + " " + y1 + " C" + (side + outward) + " " + y1 + " " + (side + outward) + " " + y2 + " " + side + " " + y2, ...look });
   });
   const boxes = [...nodes.values()].map((n) => {
@@ -202,6 +214,10 @@ export function drawTalk(node, data, lit, picked, pick) {
       chip ? svg("text", { class: "chip", x: n.w - chip.length * 3.25 - 10, y: 14.5, "text-anchor": "middle" }, chip) : null,
     );
   });
+  const on = failed && failed.mark.between ? middles.get(failed.mark.between.join("\u0000")) : undefined;
+  const box = failed && failed.mark.role ? nodes.get(failed.mark.role) : undefined;
+  // On a box, the mark sits on its top right corner, clear of its name.
+  const mark = failed && on ? talkMark(failed, on[0], on[1]) : failed && box ? talkMark(failed, box.x + box.w, box.y + 1) : null;
   const items = [...pairs.entries()]
     .filter(([key]) => touches(...(/** @type {[string, string]} */ (key.split("\u0000")))))
     .map(([key, list]) => {
@@ -229,6 +245,7 @@ export function drawTalk(node, data, lit, picked, pick) {
       },
       lines,
       boxes,
+      mark,
     ),
     items.length ? h("ul", {}, items) : h("p", { class: "empty" }, lit ? "No line joins the lit roles." : "The log shows no op or model request between roles yet."),
   );

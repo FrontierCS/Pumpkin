@@ -21,15 +21,17 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use schema::ir::{self, AbsolutePath, Argv};
+use schema::sandbox::op::RunnerOutput;
 
 use super::call::refusal_inside;
 use super::{Evaluation, Purpose};
-use crate::builtins::{Call, Takes, origin, positional, string};
+use crate::builtins::{Call, Takes, origin, place, positional, string};
 use crate::problem::{Fault, Problem, count, list};
 use crate::syntax::{Def, Misfit, Name, Type};
-use crate::value::{self, FileId, Function, Hosted, Key, Span, Text, Value};
+use crate::value::{self, Budget, FileId, Function, Hosted, Key, Span, Text, Value};
 use crate::{Label, Loader, json};
 
 /// A `def` of a loaded file, which a host calls by its file and name, and the keyword arguments
@@ -57,7 +59,8 @@ pub enum BodyKind {
 pub enum Host<'h> {
     Job(&'h mut dyn Target),
     Now(&'h mut dyn Run),
-    Final(&'h mut dyn Target),
+    /// Each agent in declaration order and the slot of its submitted payload, if any.
+    Final(&'h mut dyn Target, &'h [(ir::Name, Option<usize>)]),
 }
 
 impl Host<'_> {
@@ -65,7 +68,7 @@ impl Host<'_> {
         match self {
             Self::Job(_) => BodyKind::Job,
             Self::Now(_) => BodyKind::Now,
-            Self::Final(_) => BodyKind::Final,
+            Self::Final(..) => BodyKind::Final,
         }
     }
 }
@@ -73,11 +76,51 @@ impl Host<'_> {
 /// What a job's body drives through its `Target`: the call's target. A method's `Err` is why it
 /// failed, which ends the call with that message.
 pub trait Target {
-    /// Puts the call's payload at `path`, one file, its parents made.
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String>;
+    /// Waits for a fresh runner to be ready and returns a lease number unique within this call.
+    fn runner_open(&mut self, grant: &ir::Name) -> Result<u64, String>;
+
+    /// Copies the target's directory to a new directory on its runner.
+    fn runner_put(
+        &mut self,
+        grant: &ir::Name,
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
+    /// Copies the runner's file or tree into a new directory on the target.
+    fn runner_get(
+        &mut self,
+        grant: &ir::Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String>;
+
+    /// Waits for a started command's exit or timeout and both recorded output streams.
+    fn runner_run(
+        &mut self,
+        grant: &ir::Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String>;
+
+    /// Waits for deletion of the callback's runner.
+    fn runner_close(&mut self, grant: &ir::Name, lease: u64) -> Result<(), String>;
+
+    /// The issuing agent role for a job, or none for the final call.
+    fn caller(&self) -> Option<&str>;
+
+    /// Puts the payload in slot `input` at `path`, one file, its parents made.
+    fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String>;
 
     /// Runs `argv`, and waits for it to end, whatever its exit status.
     fn run(&mut self, argv: &Argv) -> Result<(), String>;
+
+    /// Runs `argv` with the optional payload slot as stdin. Returns its complete UTF-8 stdout
+    /// on success. The call charges the returned text to its evaluation budget.
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String>;
 
     /// The text of the file at `path`, all of it: the call charges it to the bytes of its
     /// [`Bounds`](crate::Bounds) once it is returned, so a text longer than they have left ends
@@ -87,10 +130,10 @@ pub trait Target {
 
 /// What a now function's body proposes effects on through its `Run`: the run's state.
 pub trait Run {
-    /// Proposes that the call's payload become the run's selection, replacing the last.
-    fn select(&mut self);
+    /// Proposes that the call's payload become the caller's submission, replacing the last.
+    fn set_submission(&mut self);
 
-    /// Proposes that the caller's work end, its selection locked.
+    /// Proposes locking the caller's submission and ending its work.
     fn end_work(&mut self);
 }
 
@@ -137,14 +180,53 @@ impl BodyKind {
         }
     }
 
+    fn input_error(self, name: &str, input: &crate::syntax::Param) -> Option<String> {
+        let annotation = input.annotation.as_ref()?;
+        let param = &input.name.text;
+        match self {
+            Self::Final => Some(format!(
+                "`{name}` takes the submissions by role: leave `{param}` unannotated"
+            )),
+            Self::Job | Self::Now if *annotation != Type::Hosted(Hosted::Payload(())) => {
+                Some(format!(
+                    "`{name}`'s second parameter is {}, and {} takes the payload second: annotate \
+                     `{param}` `Payload`",
+                    annotation.describe(),
+                    self.words(),
+                ))
+            }
+            Self::Job | Self::Now => None,
+        }
+    }
+
     // The handle that a body of this kind takes first, how an annotation writes its type, and the
     // name that a message gives its parameter.
-    fn handle(self) -> (Hosted, &'static str, &'static str) {
+    fn handle(self) -> (Hosted<usize, u64>, &'static str, &'static str) {
         match self {
             Self::Job | Self::Final => (Hosted::Target, "Target", "target"),
             Self::Now => (Hosted::Run, "Run", "run"),
         }
     }
+}
+
+fn submission_dict(
+    submissions: &[(ir::Name, Option<usize>)],
+    at: Span,
+    budget: &Budget,
+) -> Result<value::Dict, Fault> {
+    let mut entries = Vec::with_capacity(submissions.len());
+    for (role, slot) in submissions {
+        let key = Text::new(role.as_str(), at, budget)?;
+        let kind = slot.map_or(value::Kind::None, |slot| {
+            value::Kind::Hosted(Hosted::Payload(slot))
+        });
+        entries.push(value::Entry {
+            key: Key::Str(key),
+            key_span: at,
+            value: Value { kind, span: at },
+        });
+    }
+    value::Dict::new(entries, at, budget)
 }
 
 impl<L: Loader> Evaluation<'_, '_, L> {
@@ -180,12 +262,15 @@ impl<L: Loader> Evaluation<'_, '_, L> {
     ) -> Result<Vec<(ir::Name, serde_json::Value)>, Fault> {
         let (handle, _, _) = read.kind.handle();
         let at = read.function.def.name.span;
-        let positional = Vec::from([handle, Hosted::Payload]);
-        let positional = (positional.into_iter())
-            .map(|hosted| {
-                let kind = value::Kind::Hosted(hosted);
-                (at, Value { kind, span: at })
-            })
+        let input = match &self.purpose {
+            Purpose::Call(Host::Final(_, submissions)) => {
+                value::Kind::Dict(submission_dict(submissions, at, self.budget)?)
+            }
+            _ => value::Kind::Hosted(Hosted::Payload(0)),
+        };
+        let positional = [value::Kind::Hosted(handle), input]
+            .into_iter()
+            .map(|kind| (at, Value { kind, span: at }))
             .collect();
         let mut keywords: Vec<(&Name, Value)> = (read.keywords.iter())
             .map(|(name, value)| (name, value.clone()))
@@ -377,17 +462,11 @@ fn caller_arguments<'d>(
     at: Span,
     budget: &value::Budget,
 ) -> Result<Vec<(&'d Name, Value)>, Fault> {
-    let [_, _, caller @ ..] = &def.params[..def.positional] else {
-        unreachable!(
-            "`{}` takes fewer positional parameters than its handle and the payload, though \
-             reading a body refuses such a `def`",
-            def.name.text
-        )
-    };
+    let caller = def.params.iter().take(def.positional).skip(2);
     let mut bound = Vec::with_capacity(arguments.len());
     for (name, argument) in arguments {
         let Some(param) = caller
-            .iter()
+            .clone()
             .find(|param| *param.name.text == *name.as_str())
         else {
             let message = format!(
@@ -414,11 +493,15 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
     let name = &def.name.text;
     let (handle, written, handle_name) = kind.handle();
     let words = kind.words();
+    let (input, parameter) = match kind {
+        BodyKind::Job | BodyKind::Now => ("payload", "payload: Payload"),
+        BodyKind::Final => ("submissions", "submissions"),
+    };
     let positional = &def.params[..def.positional];
     let [first, second, caller @ ..] = positional else {
         let message = format!(
-            "`{name}` takes {}, and {words} takes its `{written}` and the payload first: write \
-             `def {name}({handle_name}: {written}, payload: Payload, …)`",
+            "`{name}` takes {}, and {words} takes its `{written}` and the {input} first: write \
+             `def {name}({handle_name}: {written}, {parameter}, …)`",
             count(positional.len(), "positional parameter"),
         );
         return Vec::from([Fault::new(def.name.span, message)]);
@@ -428,14 +511,14 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
         if let Some(default) = &param.default {
             let message = format!(
                 "`{name}`'s `{}` has a default, and {words} is always given its `{written}` and \
-                 the payload: drop the default",
+                 the {input}: drop the default",
                 param.name.text
             );
             faults.push(Fault::new(default.span, message));
         }
     }
     if let Some(annotation) = &first.annotation
-        && *annotation != Type::Hosted(handle)
+        && *annotation != Type::Hosted(handle.ty())
     {
         let message = format!(
             "`{name}`'s first parameter is {}, and {words} takes its `{written}`: write `def \
@@ -445,21 +528,13 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
         );
         faults.push(Fault::new(first.name.span, message));
     }
-    if let Some(annotation) = &second.annotation
-        && *annotation != Type::Hosted(Hosted::Payload)
-    {
-        let message = format!(
-            "`{name}`'s second parameter is {}, and {words} takes the payload second: annotate \
-             `{}` `Payload`",
-            annotation.describe(),
-            second.name.text
-        );
+    if let Some(message) = kind.input_error(name, second) {
         faults.push(Fault::new(second.name.span, message));
     }
     for param in caller {
         if let BodyKind::Final = kind {
             let message = format!(
-                "`{name}`'s `{}` follows the payload, and the final call has no caller to give \
+                "`{name}`'s `{}` follows the submissions, and the final call has no caller to give \
                  it: remove it",
                 param.name.text
             );
@@ -478,37 +553,60 @@ fn parameters(function: &Function, kind: BodyKind) -> Vec<Fault> {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Method {
+    WithRunner,
+    Runner(super::runner::RunnerMethod),
     Target(fn(&mut dyn Target, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
     Run(fn(&mut dyn Run, &Name, &Call<'_>) -> Result<value::Kind, Fault>),
 }
 
-impl Hosted {
+impl Hosted<usize, u64> {
     pub(crate) fn methods(self) -> Result<&'static [(&'static str, Method)], &'static str> {
         match self {
             Self::Target => Ok(&[
+                ("caller", Method::Target(caller)),
+                ("capture", Method::Target(capture)),
                 ("get", Method::Target(get)),
                 ("put", Method::Target(put)),
                 ("run", Method::Target(run)),
+                ("with_runner", Method::WithRunner),
+            ]),
+            Self::Runner(_) => Ok(&[
+                ("get", Method::Runner(super::runner::RunnerMethod::Get)),
+                ("put", Method::Runner(super::runner::RunnerMethod::Put)),
+                ("run", Method::Runner(super::runner::RunnerMethod::Run)),
             ]),
             Self::Run => Ok(&[
                 ("end_work", Method::Run(end_work)),
-                ("select", Method::Run(select)),
+                ("set_submission", Method::Run(set_submission)),
             ]),
-            Self::Payload => Err("pass it to a `Target`'s `put` or a `Run`'s `select`"),
+            Self::Payload(_) => {
+                Err("pass it to `target.put`, `target.capture` as stdin, or `run.set_submission`")
+            }
         }
     }
 }
 
 impl Method {
-    pub(crate) fn call(
+    pub(crate) fn call<L: Loader>(
         self,
-        purpose: &mut Purpose<'_>,
+        evaluation: &mut Evaluation<'_, '_, L>,
+        handle: Hosted<usize, u64>,
         name: &Name,
         call: &Call<'_>,
+        depth: usize,
     ) -> Result<Value, Fault> {
         let kind = match self {
+            Self::WithRunner => return evaluation.with_runner(call, depth),
+            Self::Runner(method) => {
+                let Hosted::Runner(lease) = handle else {
+                    unreachable!("only a Runner lists a runner method")
+                };
+                return evaluation.runner_method(lease, method, name, call);
+            }
             Self::Target(method) => {
-                let Purpose::Call(Host::Job(target) | Host::Final(target)) = purpose else {
+                let Purpose::Call(Host::Job(target) | Host::Final(target, _)) =
+                    &mut evaluation.purpose
+                else {
                     unreachable!(
                         "a `Target`'s method is called outside a call of a job's or the final \
                          call's body, though only such a call makes a `Target`, and the value it \
@@ -518,7 +616,7 @@ impl Method {
                 method(&mut **target, name, call)
             }
             Self::Run(method) => {
-                let Purpose::Call(Host::Now(run)) = purpose else {
+                let Purpose::Call(Host::Now(run)) = &mut evaluation.purpose else {
                     unreachable!(
                         "a `Run`'s method is called outside a call of a now function's body, \
                          though only that call makes a `Run`, and the value it is in lives no \
@@ -538,7 +636,7 @@ impl Method {
 fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [path, payload] = positional::<2>(&name.text, Takes::exactly(2), call)?;
     let path = absolute("`put`'s path", path)?;
-    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload)) {
+    let value::Kind::Hosted(Hosted::Payload(slot)) = payload.1.kind else {
         let message = format!(
             "`put` can't put {}: give it the payload",
             payload.1.kind.describe()
@@ -548,24 +646,58 @@ fn put(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
             "the argument",
             &payload.1,
         ));
-    }
+    };
     target
-        .put(&path)
+        .put(&path, slot)
         .map_err(|message| Fault::new(call.at, message))?;
     Ok(value::Kind::None)
 }
 
 fn run(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [argv] = positional::<1>(&name.text, Takes::exactly(1), call)?;
+    let argv = command_argv(name, argv.0, &argv.1)?;
+    target
+        .run(&argv)
+        .map_err(|message| Fault::new(call.at, message))?;
+    Ok(value::Kind::None)
+}
+
+fn capture(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+    let given = place(&name.text, &["argv", "stdin"], 1, call)?;
+    let argv = given[0]
+        .as_ref()
+        .ok_or_else(|| Fault::new(call.at, "`capture` needs argv: give it a list of strings"))?;
+    let argv = command_argv(name, argv.span, argv)?;
+    let stdin = match given[1].as_ref() {
+        None => None,
+        Some(value) => match value.kind {
+            value::Kind::None => None,
+            value::Kind::Hosted(Hosted::Payload(slot)) => Some(slot),
+            _ => {
+                return Err(Fault::new(
+                    value.span,
+                    "`capture` takes a payload or None as stdin",
+                ));
+            }
+        },
+    };
+    let text = target
+        .capture(&argv, stdin)
+        .map_err(|message| Fault::new(call.at, message))?;
+    Ok(value::Kind::Str(Text::new(&text, call.at, call.budget)?))
+}
+
+pub(super) fn command_argv(name: &Name, at: Span, argv: &Value) -> Result<Argv, Fault> {
     let refused = |what: &Value| {
         let message = format!(
-            "`run` can't run {}: give it a list of strings",
+            "`{}` can't run {}: give it a list of strings",
+            name.text,
             what.kind.describe()
         );
-        origin(Fault::new(argv.0, message), "the argument", what)
+        origin(Fault::new(at, message), "the argument", what)
     };
-    let value::Kind::List(items) = &argv.1.kind else {
-        return Err(refused(&argv.1));
+    let value::Kind::List(items) = &argv.kind else {
+        return Err(refused(argv));
     };
     let mut words = Vec::with_capacity(items.len());
     for item in items.iter() {
@@ -574,12 +706,15 @@ fn run(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
         };
         words.push(String::from(&**text));
     }
-    let argv = Argv::try_from(words)
-        .map_err(|problem| origin(Fault::new(argv.0, problem), "the argument", &argv.1))?;
-    target
-        .run(&argv)
-        .map_err(|message| Fault::new(call.at, message))?;
-    Ok(value::Kind::None)
+    Argv::try_from(words).map_err(|problem| origin(Fault::new(at, problem), "the argument", argv))
+}
+
+fn caller(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+    positional::<0>(&name.text, Takes::exactly(0), call)?;
+    let role = target
+        .caller()
+        .ok_or_else(|| Fault::new(call.at, "the final call has no agent caller"))?;
+    Ok(value::Kind::Str(Text::new(role, call.at, call.budget)?))
 }
 
 fn get(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
@@ -591,11 +726,11 @@ fn get(target: &mut dyn Target, name: &Name, call: &Call<'_>) -> Result<value::K
     Ok(value::Kind::Str(Text::new(&text, call.at, call.budget)?))
 }
 
-fn select(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
+fn set_submission(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind, Fault> {
     let [payload] = positional::<1>(&name.text, Takes::exactly(1), call)?;
-    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload)) {
+    if !matches!(payload.1.kind, value::Kind::Hosted(Hosted::Payload(_))) {
         let message = format!(
-            "`select` can't select {}: give it the payload",
+            "`set_submission` can't use {}: give it the payload",
             payload.1.kind.describe()
         );
         return Err(origin(
@@ -604,7 +739,7 @@ fn select(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Kind
             &payload.1,
         ));
     }
-    run.select();
+    run.set_submission();
     Ok(value::Kind::None)
 }
 
@@ -615,7 +750,7 @@ fn end_work(run: &mut dyn Run, name: &Name, call: &Call<'_>) -> Result<value::Ki
 }
 
 // The absolute path that `argument`, `what`, gives.
-fn absolute(what: &str, argument: &(Span, Value)) -> Result<AbsolutePath, Fault> {
+pub(super) fn absolute(what: &str, argument: &(Span, Value)) -> Result<AbsolutePath, Fault> {
     let path = string(what, argument.0, &argument.1)?;
     AbsolutePath::try_from(String::from(path))
         .map_err(|problem| origin(Fault::new(argument.0, problem), "the argument", &argument.1))

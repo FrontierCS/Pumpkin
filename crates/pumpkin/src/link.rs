@@ -4,8 +4,9 @@
 //!
 //! `serve` speaks first, a [`Hello`], whose form never changes. Then the client asks one
 //! [`Request`] at a time, and each gets its own [`Request::Answer`], whose body, if it has one,
-//! follows in frames of its own, or a refusal. A start names the job it starts, so a client whose
-//! link ends before an answer is whole may ask again over another.
+//! follows in frames of its own, or a refusal. A group of uploads gets its answers in order.
+//! A start names the job it starts, so a client whose link ends before an answer is whole may
+//! ask again over another.
 //!
 //! The `ssh` runs [`command`], which runs the `serve` installed below the controller user's home
 //! by the SHA-256 of the manifest of the client's executable and the files beside it, so that
@@ -82,6 +83,9 @@ pub(crate) enum Ask {
     Reap(ReapRequest),
     Lacks(store::Lacks),
     Put(store::Put),
+    Puts {
+        blobs: Vec<store::Put>,
+    },
 }
 
 impl Ask {

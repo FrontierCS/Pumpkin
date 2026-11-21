@@ -108,7 +108,7 @@ fn uploads_what_changed() {
             (&digest, "<digest>"),
         ],
         &expect![[r#"
-            pumpkin: published 1 run to s3://pumpkin-public, and left out 0: the export in <scratch>/.pumpkin/public wrote 98 files, and 7 `aws` commands uploaded what changed
+            pumpkin: published 1 run to s3://pumpkin-public, and left out 0: the export in <scratch>/.pumpkin/public wrote 99 files, and 7 `aws` commands uploaded what changed
 
             aws s3 sync <scratch>/.pumpkin/public/runs/<id> s3://pumpkin-public/runs/<id> --exclude * --include exchange/* --include diff/* --include kept/* --exclude *.part --cache-control public, max-age=31536000, immutable --content-encoding deflate --only-show-errors
             aws s3 sync <scratch>/.pumpkin/public/<digest> s3://pumpkin-public/<digest> --exclude *.part --cache-control public, max-age=31536000, immutable --only-show-errors

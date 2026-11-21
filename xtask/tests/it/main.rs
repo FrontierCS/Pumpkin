@@ -18,6 +18,7 @@ mod entry;
 #[path = "../../src/figure.rs"]
 mod figure;
 mod live;
+mod op_stats;
 #[path = "../../src/settings.rs"]
 mod settings;
 #[path = "../../src/tidy.rs"]

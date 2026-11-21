@@ -63,21 +63,37 @@ fn final_running(command: &str) -> String {
     format!(
         r#""""The final call of a task that a test writes."""
 
-def final_call(target: Target, payload: Payload):
+def final_call(target: Target, submissions):
     """Runs a command on the submission, and shows the score it wrote.
 
     Args:
       target: the call's target.
-      payload: the agent's submission.
+      submissions: each agent's submission.
 
     Returns:
       The score.
     """
+    payload = submissions.values()[0]
+    if payload == None:
+        return {{"score": 0}}
     target.put("/pumpkin/in/payload/raw", payload)
     target.run({run})
     return {{"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}}
 "#
     )
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let to = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), to).unwrap();
+        }
+    }
 }
 
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
@@ -90,7 +106,7 @@ struct Scratch(
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {}
@@ -174,8 +190,9 @@ impl Scratch {
         let task = format!(
             "{loads}load(\"//{name}/submit.star\", \"submit\")\nload(\"//{name}/final.star\", \
              \"final_call\")\n\n{images}\nworkflow(\n    name = {},\n    roles = {roles},\n    \
-             final = {final_call},\n)\n",
+             final = {final_call},\n    deadline_seconds = {},\n)\n",
             starlark(&ir["name"]),
+            ir["deadline_seconds"],
         );
         self.write(&at("task.star"), &task);
     }
@@ -523,7 +540,7 @@ fn recorded(record: &Path, stdout: &str) -> Vec<String> {
         }
     }
     for (whose, path) in [
-        ("the agent's", "agent/out/answer"),
+        ("the agent's", "agents/agent/out/answer"),
         ("the final call's", "jobs/0/out/answer"),
     ] {
         if let Ok(answer) = fs::read_to_string(record.join(path)) {
@@ -646,12 +663,12 @@ fn lease_task() -> Value {
     };
     let route = json!([{ "api": "responses", "models": ["model-a", "model-b"] }]);
     json!({
-        "ir_version": "pumpkin.ir/v0",
+        "ir_version": "pumpkin.ir/v1",
         "name": "example/lease",
+        "deadline_seconds": 1800,
         "roles": [
             role("solver", false, json!({ "agent": {
                 "command": command,
-                "deadline_seconds": 1800,
                 "finalize_grace_seconds": 0,
                 "egress": { "model": route },
                 "grants": [
@@ -736,18 +753,52 @@ fn logged(seconds: u64, event: Value, actions: Value) -> Value {
     record
 }
 
+fn started_work(seconds: u64) -> [Value; 2] {
+    [
+        logged(seconds, json!({ "kind": "work_started" }), json!([])),
+        logged(
+            seconds,
+            json!({ "kind": "agent_started", "caller": "agent-0" }),
+            json!([]),
+        ),
+    ]
+}
+
+fn agent_exited(seconds: u64) -> Value {
+    logged(
+        seconds,
+        json!({ "kind": "agent_exited", "caller": "agent-0", "status": { "code": 0 } }),
+        json!([{ "kind": "tear_down_agent", "caller": "agent-0" }]),
+    )
+}
+
 fn returned(score: f64) -> Value {
     let values = json!([
         { "name": "score", "value": score },
         { "name": "metrics", "value": { "solved": 3 } },
     ]);
-    let verdict =
-        json!({ "kind": "returned", "submission": submission(), "result": { "values": values } });
+    finished(
+        &json!({ "kind": "returned", "result": { "values": values } }),
+        &json!({ "kind": "agent_exited", "status": { "code": 0 } }),
+        &submission(),
+    )
+}
+
+fn finished(verdict: &Value, work_end: &Value, submission: &Value) -> Value {
     json!({
         "state": "finished",
         "verdict": verdict,
-        "work_end": { "kind": "agent_exited", "status": { "code": 0 } },
+        "agents": [{ "role": "solver", "work_end": work_end, "submission": submission }],
     })
+}
+
+fn unsubmitted() -> Value {
+    let failure = json!({ "kind": "error", "reason": "solver submitted nothing" });
+    finished(
+        &json!({ "kind": "no_result", "failure": failure }),
+        &json!({ "kind": "deadline" }),
+        &Value::Null,
+    )
 }
 
 /// A finished run's `outcome.json` as a build whose verdicts this one doesn't read wrote it.
@@ -771,10 +822,10 @@ fn payload() -> Value {
 fn whole_log() -> Vec<Value> {
     let none = || json!([]);
     let tick = || json!({ "kind": "tick" });
-    let started = |request: u64| json!({ "kind": "model_request_started", "caller": "agent", "request": request });
+    let started = |request: u64| json!({ "kind": "model_request_started", "caller": "agent-0", "request": request });
     let answered = |request: u64, usage: Value, first_token_ns: Option<&str>| {
         let mut answered = json!({
-            "kind": "model_answered", "caller": "agent", "request": request, "model": "model-a",
+            "kind": "model_answered", "caller": "agent-0", "request": request, "model": "model-a",
             "api": "responses", "answer": { "kind": "forwarded" }, "upstream_status": 200, "usage": usage,
         });
         if let Some(first_token_ns) = first_token_ns {
@@ -786,7 +837,7 @@ fn whole_log() -> Vec<Value> {
         let request = json!({ "kind": "call", "grant": "train" });
         let timeout = "600000000000";
         let start = json!({
-            "kind": "start_call", "job": job, "grant": "train", "payload": payload(),
+            "kind": "start_call", "caller": "agent-0", "job": job, "grant": "train", "payload": payload(),
             "timeout_ns": timeout,
         });
         (
@@ -799,7 +850,7 @@ fn whole_log() -> Vec<Value> {
     let open = |grant: &str, lease: u64| {
         let request = json!({ "kind": "lease_open", "grant": grant });
         let start =
-            json!({ "kind": "start_lease", "grant": grant, "holder": "agent", "lease": lease });
+            json!({ "kind": "start_lease", "grant": grant, "holder": "agent-0", "lease": lease });
         (
             json!({ "kind": "op_arrived", "request": request }),
             json!([start]),
@@ -851,14 +902,14 @@ fn whole_log() -> Vec<Value> {
                      ResourceExhaustedError: Insufficient capacity to create sandbox: fix what \
                      Modal reports";
     let final_call = json!([{
-        "kind": "start_final_call", "job": 4, "payload": payload(), "timeout_ns": "900000000000",
+        "kind": "start_final_call", "job": 4, "selections": [{"role":"solver","selection":payload()}], "timeout_ns": "900000000000",
     }]);
     let values = json!([
         { "name": "score", "value": 49.36 },
         { "name": "metrics", "value": { "solved": 3 } },
     ]);
     let finish = json!([{ "kind": "finish" }]);
-    let exit = json!({ "kind": "agent_exited", "status": { "code": 0 } });
+    let exit = json!({ "kind": "agent_exited", "caller":"agent-0", "status": { "code": 0 } });
     let final_asked = json!({ "kind": "model_request_started", "caller": "job-4", "request": 3 });
     let final_answered = json!({
         "kind": "model_answered", "caller": "job-4", "request": 3, "model": "model-b",
@@ -872,7 +923,12 @@ fn whole_log() -> Vec<Value> {
     let mut written = tokens(2000, 200, 1800);
     written["cache_write_tokens"] = json!(150);
     vec![
-        logged(5, json!({ "kind": "agent_started" }), none()),
+        logged(5, json!({"kind":"work_started"}), none()),
+        logged(
+            5,
+            json!({"kind":"agent_started","caller":"agent-0"}),
+            none(),
+        ),
         logged(8, started(0), none()),
         logged(10, answered(0, reasoned, Some("9250000000")), none()),
         logged(15, started(1), none()),
@@ -933,8 +989,16 @@ fn whole_log() -> Vec<Value> {
         logged(507, ended(3, exited()), none()),
         logged(565, tick(), json!([close(3)])),
         logged(570, of_lease("lease_ended", 3), none()),
-        logged(1000, exit, json!([{ "kind": "tear_down_agent" }, close(2)])),
-        json!({ "at_ns": "1002000000000", "note": "collected from the agent's sandbox: out, 1 file of 6 bytes" }),
+        logged(
+            1000,
+            exit,
+            json!([{ "kind": "tear_down_agent", "caller": "agent-0" }, close(2)]),
+        ),
+        logged(
+            1002,
+            json!({"kind":"agent_torn_down","caller":"agent-0"}),
+            none(),
+        ),
         logged(1005, of_lease("lease_ended", 2), none()),
         logged(1006, tick(), final_call),
         logged(1010, saw("job-4", sxm), none()),
@@ -974,7 +1038,7 @@ fn write_run(
     let unix_ns = started.as_nanos().to_string();
     let start =
         json!({ "kind": "run_started", "unix_ns": unix_ns, "hard_end_ns": "7200000000000" });
-    let start = logged(0, start, json!([{ "kind": "start_agent" }]));
+    let start = logged(0, start, json!([{ "kind": "start_agents" }]));
     let mut lines = String::new();
     for (seq, record) in (0_u64..).zip(iter::once(&start).chain(log)) {
         let mut record = record.clone();
@@ -983,7 +1047,7 @@ fn write_run(
         lines.push('\n');
         let event = &record["event"];
         let sandbox = match event["kind"].as_str() {
-            Some("agent_started") => Some("agent".to_owned()),
+            Some("agent_started") => Some("agents/solver".to_owned()),
             Some("call_started") => Some(format!("jobs/{}", event["job"])),
             Some("lease_ready") => Some(format!("leases/{}", event["lease"])),
             _ => None,
@@ -1010,7 +1074,7 @@ fn write_record(scratch: &Scratch, id: &str, pid: bool, outcome: Option<Value>) 
     ];
     scratch.write(
         &format!("runs/{id}/record.json"),
-        &json!({ "record_version": "pumpkin.record/v0", "pumpkin": this_build(), "args": args }),
+        &json!({ "record_version": "pumpkin.record/v1", "pumpkin": this_build(), "args": args }),
     );
     if pid {
         scratch.write(&format!("runs/{id}/driver.pid"), "4242\n");
@@ -1066,7 +1130,7 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     }
     // Far later than the agent's end, so that a slow engine makes a run wait longer, never end
     // differently.
-    ir["roles"][0]["runtime"]["agent"]["deadline_seconds"] = json!(300);
+    ir["deadline_seconds"] = json!(300);
     ir
 }
 

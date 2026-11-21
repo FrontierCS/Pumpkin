@@ -14,14 +14,16 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::{io, thread};
+use std::{env, io, thread};
 
-use schema::sandbox::{ExitStatus, FromSandbox, Launch, SANDBOXD_GRANT};
+use schema::ir::Env;
+use schema::sandbox::{ExitStatus, FromSandbox, Launch, SANDBOXCTL_PATH, SANDBOXD_GRANT};
 use stdx::process::Environment;
 use stdx::{Context, unpoisoned};
 
@@ -37,6 +39,7 @@ pub(crate) struct Commands {
     // Shared with the reaper thread, which reaps children while the session starts commands,
     // and with the threads that freeze them, which wait for the reaper to reap them.
     shared: Arc<Shared>,
+    serve_ops: bool,
 }
 
 struct Shared {
@@ -68,7 +71,7 @@ impl Shared {
 impl Commands {
     /// Starts the thread that reaps children and reports exits through `sender`. If a wait for
     /// a child fails, the thread kills the commands and ends `sandboxd`.
-    pub(crate) fn start_reaping(sender: Sender) -> io::Result<Self> {
+    pub(crate) fn start_reaping(sender: Sender, serve_ops: bool) -> io::Result<Self> {
         let state = State {
             running: BTreeMap::new(),
             frozen: false,
@@ -92,7 +95,7 @@ impl Commands {
                 process::exit(1);
             }
         })?;
-        Ok(Self { shared })
+        Ok(Self { shared, serve_ops })
     }
 
     /// Starts a command and replies on `stream`. The reply goes out before the command is
@@ -102,7 +105,7 @@ impl Commands {
         let started = if state.frozen {
             Err("the sandbox is frozen: start commands before freezing it".to_owned())
         } else {
-            spawn(launch).map(|pid| {
+            spawn(launch, self.serve_ops).map(|pid| {
                 state.running.insert(pid, stream);
                 self.shared.changed.notify_all();
             })
@@ -171,7 +174,7 @@ fn kill_everything(state: &State) -> io::Result<()> {
 }
 
 /// Starts a command in a process group of its own, which its process leads.
-fn spawn(launch: &Launch) -> Result<i32, String> {
+fn spawn(launch: &Launch, serve_ops: bool) -> Result<i32, String> {
     let Launch {
         argv,
         env,
@@ -192,10 +195,15 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     output.write(true).create(true).truncate(true);
     let stdout = sys::open_regular(Path::new(stdout.as_str()), &mut output)?;
     let stderr = sys::open_regular(Path::new(stderr.as_str()), &mut output)?;
-    let child = stdx::process::command(program, Environment::Inherited)
+    let mut command = stdx::process::command(program, Environment::Inherited);
+    command
         .args(argv.args())
         .env_remove(SANDBOXD_GRANT)
-        .envs(env.as_slice().iter().map(|var| (var.name(), var.value())))
+        .envs(env.as_slice().iter().map(|var| (var.name(), var.value())));
+    if serve_ops {
+        command.env("PATH", ops_path(env));
+    }
+    let child = command
         .current_dir(cwd.as_str())
         .stdin(stdin)
         .stdout(stdout)
@@ -206,6 +214,21 @@ fn spawn(launch: &Launch) -> Result<i32, String> {
     // The reaper waits for it, so its handle is dropped without waiting. The standard library
     // casts the child's pid_t to the u32 it returns, which `cast_signed` undoes.
     Ok(child.id().cast_signed())
+}
+
+fn ops_path(env: &Env) -> OsString {
+    let mut dir = PathBuf::from(SANDBOXCTL_PATH);
+    dir.pop();
+    let mut path = dir.into_os_string();
+    path.push(":");
+    let configured = env.as_slice().iter().find(|var| var.name() == "PATH");
+    let search = configured
+        .map(|var| OsString::from(var.value()))
+        .or_else(|| env::var_os("PATH"))
+        // musl's execvp searches these directories for an unset PATH and the cwd for an empty one.
+        .unwrap_or_else(|| "/usr/local/bin:/bin:/usr/bin".into());
+    path.push(search);
+    path
 }
 
 /// Reaps children forever, reporting the exits of started commands. With no children, it
@@ -221,17 +244,16 @@ fn reaper(shared: &Shared) -> Result<Infallible, String> {
     loop {
         let mut state = shared.lock();
         while !sys::has_children().context(HAS_CHILDREN_FAILED)? {
+            if !state.running.is_empty() {
+                return Err(
+                    "sandboxd has running commands but no child left to wait for".to_owned(),
+                );
+            }
             state = shared.wait(state);
         }
         // Commands may start while the reaper waits for a child.
         drop(state);
-        if !sys::wait_for_child().context("waiting for a child to exit failed")? {
-            unreachable!(
-                "the children found under the lock are gone, reaped by another, though nothing \
-                 else reaps them: starting a command reaps only a child that failed to start, \
-                 before it lets go of the lock"
-            )
-        }
+        sys::wait_for_child().context("waiting for a child to exit failed")?;
         let mut state = shared.lock();
         let Some((pid, raw)) = sys::reap().context("reaping a child failed")? else {
             continue;

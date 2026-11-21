@@ -143,7 +143,6 @@ def codex(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
         finalize_grace_seconds,
         tools):
     """An agent role's `image` and `runtime`, for Codex on `model` at `effort`.
@@ -157,8 +156,7 @@ def codex(
       model: as every harness; Codex's `model`.
       effort: as every harness; Codex's `model_reasoning_effort`: one of `_EFFORTS`.
       workspace: as every harness; it holds Codex's temporary directory too.
-      prompt: as every harness; what Codex reads on its standard input, which may be empty.
-      deadline_seconds: as every harness.
+      prompt: as every harness; the task on Codex's standard input, following its grant guide.
       finalize_grace_seconds: as every harness.
       tools: how Codex sends the model its tools: one of `_TOOLS`. `functions` needs `CATALOG` to
         carry the model's entry.
@@ -235,8 +233,8 @@ def codex(
             },
             "dirs": [{"path": home, "mode": "0700"}, {"path": tmp, "mode": "0700"}],
             "files": files,
+            "prepend_grant_help": True,
             "stdin": prompt,
-            "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
                 "api": "responses",

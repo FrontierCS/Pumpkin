@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use decision::{Outcome, Verdict, WorkEnd};
 use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Apart, Headers, Keep, Route, Serving, Upstream};
 use schema::ir::{Api, ApiRoute, ModelRoute, Name, Sha256Digest};
@@ -27,7 +26,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 use stdx::{Context as _, Deadline, unpoisoned};
 
-use crate::{Clock, Stopped};
+use crate::Clock;
 
 /// A role's route as served: each entry of it with the upstream that it reaches.
 pub(super) struct Served {
@@ -177,13 +176,11 @@ impl Served {
         refused.map(|entry| &self.names[entry].0)
     }
 
-    /// Checks that the sandbox's last request answered while the route was open got no failure from
-    /// the model provider, if the agent's exit ended the work phase of a run that ended with
-    /// `outcome` with no submission finalized. Fails, naming the upstream and the failure, if it
-    /// did: the failure is then the deployment's, not the agent's result.
-    pub(super) fn failed_last(&self, outcome: &Result<Outcome, Stopped>) -> Result<(), String> {
+    /// Fails with the upstream's reason if the last request it answered while this route was
+    /// open failed. The driver checks it when an agent exits without finalizing its submission.
+    pub(super) fn failed_last(&self) -> Result<(), String> {
         let failing = unpoisoned(self.failing.lock());
-        let failed = failing.as_ref().filter(|_| exited_unfinalized(outcome));
+        let failed = failing.as_ref();
         let Some(Failing { since, last }) = failed else {
             return Ok(());
         };
@@ -209,22 +206,6 @@ impl Served {
         self.entries
             .iter()
             .any(|(_, upstream)| upstream.was_shut_down())
-    }
-}
-
-fn exited_unfinalized(outcome: &Result<Outcome, Stopped>) -> bool {
-    let Ok(Outcome { work_end, verdict }) = outcome else {
-        return false;
-    };
-    let finalized = match verdict {
-        Verdict::NoSubmission => false,
-        Verdict::Returned { submission, .. } | Verdict::NoResult { submission, .. } => {
-            submission.finalized
-        }
-    };
-    match work_end {
-        WorkEnd::AgentExited(_) => !finalized,
-        WorkEnd::Deadline | WorkEnd::Finalized | WorkEnd::AgentFailed(_) => false,
     }
 }
 

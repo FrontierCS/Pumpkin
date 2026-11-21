@@ -15,11 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{
     AbsolutePath, Command, CpuFlag, CpuModel, Dir, Env, File, Gpu, Image, JsonPointer, ModelRoute,
-    Name, Needs, User, WorkflowName,
+    Name, Needs, TargetLifetime, User, WorkflowName,
 };
 use crate::sandbox::OpPayloadLimit;
 
 mod errors;
+mod ops;
 mod parse;
 mod place;
 
@@ -31,7 +32,7 @@ pub struct Workflow {
     ir: crate::ir::Workflow,
     /// Each role's sandbox, by its id.
     roles: Vec<Sandbox>,
-    agent: Agent,
+    agents: BTreeMap<AgentId, Agent>,
     targets: BTreeMap<RoleId, Target>,
     runners: BTreeMap<RoleId, Runner>,
     job_functions: Vec<JobFunction>,
@@ -49,13 +50,28 @@ impl Workflow {
         &self.ir.name
     }
 
-    /// The workflow's one agent.
-    pub fn agent(&self) -> &Agent {
-        &self.agent
+    /// Each agent in the IR's role order.
+    pub fn agents(&self) -> impl ExactSizeIterator<Item = &Agent> {
+        self.agents.values()
+    }
+
+    pub fn agent_by_id(&self, id: AgentId) -> &Agent {
+        &self.agents[&id]
+    }
+
+    pub fn work_deadline(&self) -> Duration {
+        Duration::from_secs(self.ir.deadline_seconds.get())
     }
 
     pub fn target(&self, id: TargetId) -> &Target {
         &self.targets[&id.0]
+    }
+
+    /// Targets whose sandbox spans the work phase, in declaration order.
+    pub fn work_targets(&self) -> impl Iterator<Item = TargetId> {
+        self.targets.iter().filter_map(|(role, target)| {
+            (target.lifetime == TargetLifetime::Work).then_some(TargetId(*role))
+        })
     }
 
     pub fn runner(&self, id: RunnerId) -> &Runner {
@@ -69,8 +85,8 @@ impl Workflow {
     /// The model route of `role`, the agent's or a target's, with the budgets of its entries, if
     /// it has one.
     pub fn model(&self, role: RoleId) -> Option<&ModelRoute> {
-        if role == self.agent.role {
-            return self.agent.model.as_ref();
+        if let Some(agent) = self.agents.get(&AgentId(role)) {
+            return agent.model.as_ref();
         }
         let target = self.targets.get(&role).map(|target| &target.model);
         target.and_then(Option::as_ref)
@@ -90,17 +106,25 @@ impl Workflow {
         self.roles().map(f).collect::<Result<_, _>>().map(ByRole)
     }
 
-    /// The agent's job functions, in the IR's order.
+    /// Each agent's job functions, in the IR's order.
     pub fn job_functions(&self) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
         let functions = self.job_functions.iter().enumerate();
         functions.map(|(index, function)| (JobFunctionId(index), function))
+    }
+
+    pub fn job_functions_of(
+        &self,
+        role: RoleId,
+    ) -> impl Iterator<Item = (JobFunctionId, &JobFunction)> {
+        self.job_functions()
+            .filter(move |(_, function)| function.holder.role() == role)
     }
 
     pub fn job_function(&self, id: JobFunctionId) -> &JobFunction {
         &self.job_functions[id.0]
     }
 
-    /// Every role's sessions: the agent's, then each target's, each in the IR's order.
+    /// Every role's sessions: each agent's, then each target's, each in the IR's order.
     pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> {
         (self.sessions.iter().enumerate()).map(|(index, grant)| (SessionId(index), grant))
     }
@@ -109,16 +133,24 @@ impl Workflow {
         &self.sessions[id.0]
     }
 
-    /// The agent's now functions, in the IR's order.
+    /// Each agent's now functions, in the IR's order.
     pub fn now_functions(&self) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
         (self.now_functions.iter().enumerate()).map(|(index, now)| (NowFunctionId(index), now))
+    }
+
+    pub fn now_functions_of(
+        &self,
+        role: RoleId,
+    ) -> impl Iterator<Item = (NowFunctionId, &NowFunction)> {
+        self.now_functions()
+            .filter(move |(_, function)| function.holder.role() == role)
     }
 
     pub fn now_function(&self, id: NowFunctionId) -> &NowFunction {
         &self.now_functions[id.0]
     }
 
-    /// How the selected submission is judged.
+    /// How submissions are judged.
     pub fn final_call(&self) -> &Final {
         &self.final_call
     }
@@ -263,6 +295,22 @@ impl<T> ByProvider<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RoleId(usize);
 
+impl RoleId {
+    /// The role's index in the workflow's IR declaration order.
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentId(RoleId);
+
+impl AgentId {
+    pub fn role(self) -> RoleId {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TargetId(RoleId);
 
@@ -324,14 +372,12 @@ pub struct Sandbox {
 /// and `files` keep.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
-    pub role: RoleId,
+    pub id: AgentId,
     pub command: Command,
     /// In order of their paths.
     pub dirs: Vec<Dir>,
     pub files: Vec<File>,
     pub stdin: Option<String>,
-    /// See [`ir::AgentRuntime::deadline_seconds`](crate::ir::AgentRuntime::deadline_seconds).
-    pub deadline: Duration,
     /// See
     /// [`ir::AgentRuntime::finalize_grace_seconds`](crate::ir::AgentRuntime::finalize_grace_seconds).
     pub finalize_grace: Duration,
@@ -342,6 +388,7 @@ pub struct Agent {
 /// A target role; see [`ir::TargetRuntime`](crate::ir::TargetRuntime).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    pub lifetime: TargetLifetime,
     pub cwd: AbsolutePath,
     pub env: Env,
     /// The target's model route, with the budgets of its entries, if it has one.
@@ -358,8 +405,10 @@ pub struct Runner {
 /// A job function of the agent's; see [`ir::JobFunction`](crate::ir::JobFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobFunction {
+    pub help: String,
+    pub holder: AgentId,
     pub name: Name,
-    /// The target that each call starts afresh, which no other job function names.
+    /// The target that each call starts afresh.
     pub target: TargetId,
     pub body: crate::ir::Body,
     pub keywords: serde_json::Map<String, serde_json::Value>,
@@ -397,10 +446,11 @@ impl JobFunction {
 /// A session; see [`ir::Session`](crate::ir::Session).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
+    pub help: String,
     pub name: Name,
     pub holder: Holder,
-    /// The runner, which no other session names, and whose image, if the agent holds the
-    /// session, is no target's ([`ir::Session::runner`](crate::ir::Session::runner)).
+    /// An agent's runner has an image no target has
+    /// ([`ir::Session::runner`](crate::ir::Session::runner)).
     pub runner: RunnerId,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -412,15 +462,14 @@ pub struct Session {
 /// The role that holds a [`Session`]: the agent, or a target, each of whose calls uses it afresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
-    Agent,
+    Agent(AgentId),
     Target(TargetId),
 }
 
 impl Holder {
-    /// The holder's role in `workflow`, the workflow that holds the session.
-    pub fn role(self, workflow: &Workflow) -> RoleId {
+    pub fn role(self) -> RoleId {
         match self {
-            Self::Agent => workflow.agent().role,
+            Self::Agent(agent) => agent.role(),
             Self::Target(target) => target.role(),
         }
     }
@@ -443,6 +492,8 @@ impl Session {
 /// One of the agent's now functions; see [`ir::NowFunction`](crate::ir::NowFunction).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NowFunction {
+    pub help: String,
+    pub holder: AgentId,
     pub name: Name,
     pub body: crate::ir::Body,
     pub payload_max_bytes: NonZeroU64,
@@ -456,7 +507,7 @@ impl NowFunction {
 }
 
 /// The parsed [`ir::Final`](crate::ir::Final): a body on a target that no job function names,
-/// whose `payload_max_bytes` caps every selection.
+/// whose `payload_max_bytes` caps every submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Final {
     pub target: TargetId,

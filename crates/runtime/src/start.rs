@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use decision::{Caller, Core, JobId, LeaseId, PayloadRef};
 use schema::ir::{ArgumentValue, Name};
-use schema::sandbox::op::OpReply;
-use schema::workflow::{JobFunctionId, RoleId, SessionId};
+use schema::workflow::{AgentId, JobFunctionId, SessionId};
 use stdx::Context;
 
 use crate::child::{Child, Deadlines, End, Message};
@@ -27,6 +26,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         (payload, arguments): (&PayloadRef, BTreeMap<Name, ArgumentValue>),
         timeout: Duration,
     ) -> Result<(), String> {
+        let instance = self.sandboxes.capacity.functions.get(&function).copied();
         let function = self.workflow().job_function(function);
         let role = function.target.role();
         // A call ends with the work phase, which ends by the core's next act of its own, and what
@@ -45,19 +45,22 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                 function,
                 arguments,
             },
-            payload: self.payloads.stored(payload),
+            inputs: vec![self.payloads.stored(payload)],
             timeout,
         };
-        self.start_body(scope, call, deadlines)
+        self.start_body(scope, call, deadlines, instance)
     }
 
     pub(crate) fn start_final_call<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         job: JobId,
-        payload: &PayloadRef,
+        selections: Vec<(AgentId, Option<PayloadRef>)>,
         timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::Stopped> {
+        let swept = self.sandboxes.finish_work();
+        crate::interruption::check()?;
+        swept.context("cleaning up work sandboxes before the final call")?;
         let final_call = self.workflow().final_call();
         let role = final_call.target.role();
         // The final call's body starts in time to run its whole timeout before the hard end, by
@@ -70,50 +73,76 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             startup,
             collect: self.hard_end(),
         };
+        let mut inputs = Vec::new();
+        let submissions = selections
+            .into_iter()
+            .map(|(agent, selected)| {
+                let role = self.workflow().sandbox(agent.role()).name.clone();
+                let slot = selected.map(|payload| {
+                    let slot = inputs.len();
+                    inputs.push(self.payloads.stored(&payload));
+                    slot
+                });
+                (role, slot)
+            })
+            .collect();
         let call = call::job::Call {
             job,
-            of: body::Of::Final(final_call),
-            payload: self.payloads.stored(payload),
+            of: body::Of::Final {
+                final_call,
+                submissions,
+            },
+            inputs,
             timeout,
         };
-        self.start_body(scope, call, deadlines)
+        Ok(self.start_body(scope, call, deadlines, Some(0))?)
     }
 
-    /// Starts `call` on a fresh sandbox of its target, on a thread of its own.
+    /// Runs a call on its reserved fresh instance or the work phase's shared instance.
     fn start_body<'s>(
         &mut self,
         scope: &'s Scope<'s, 'r>,
         call: call::job::Call<'r>,
         deadlines: Deadlines,
+        instance: Option<u32>,
     ) -> Result<(), String> {
         let (job, target) = (call.job, call.of.target());
-        let bodies = self.bodies;
-        let run = move |mut child: Child<'r, H, OpReply>| {
-            call::job::run(call, bodies, &mut child);
+        let owner = match &call.of {
+            body::Of::Function { function, .. } => Some(function.holder),
+            body::Of::Final { .. } => None,
         };
-        let stack = Some(bodies.stack_bytes());
-        let which = Which::Call(job, target);
-        let orders = self.start_child(scope, which, deadlines, stack, run)?;
-        self.called(job, orders, deadlines, target.role());
-        Ok(())
-    }
-
-    /// Keeps job `job`'s call, started on `role`'s sandbox with `orders` into its inbox.
-    fn called(
-        &mut self,
-        job: JobId,
-        orders: Sender<Message<OpReply>>,
-        deadlines: Deadlines,
-        role: RoleId,
-    ) {
+        let which = Which::Call(job, target, instance.unwrap_or(0));
+        let orders = if instance.is_some() {
+            let bodies = self.bodies;
+            self.start_child(
+                scope,
+                which,
+                deadlines,
+                Some(bodies.stack_bytes()),
+                move |mut child| {
+                    call::job::run(call, bodies, &mut child);
+                },
+            )?
+        } else {
+            let child = self.child(which, deadlines)?;
+            let orders = child.inbox.sender();
+            self.residents
+                .get_mut(&target)
+                .ok_or_else(|| "the shared role has no worker".to_owned())?
+                .call(call, child)?;
+            orders
+        };
         let called = Called {
             orders,
             collect: deadlines.collect,
             trees: None,
-            role,
+            target,
+            instance: instance.unwrap_or(0),
+            owner,
             model_requests_over_budget: 0,
         };
         self.jobs.insert(job, called);
+        Ok(())
     }
 
     pub(crate) fn start_lease<'s>(
@@ -123,13 +152,22 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         (lease, instance, start_by): (LeaseId, u32, Duration),
         (holder, grant): (Caller, SessionId),
     ) -> Result<(), String> {
-        let runner_id = self.workflow().session(grant).runner;
+        let session = self.workflow().session(grant);
+        let runner_id = session.runner;
+        let holder_instance = match holder {
+            Caller::Agent(_) => 0,
+            Caller::Job(job) => self.call(job).instance,
+        };
+        // Capacity reserved this complete range, including every slot of every holder instance.
+        let instance = self.sandboxes.capacity.sessions[&grant]
+            + holder_instance * session.instances.get()
+            + instance;
         let runner = self.workflow().runner(runner_id);
         let (start, collect) = match holder {
             // A lease of the agent's ends with the work phase, which ends by the core's next end of
             // a phase, and what it left is collected by the agent's teardown's end, as a call's
             // is.
-            Caller::Agent => (core.phase_due(), self.teardown_end()),
+            Caller::Agent(_) => (core.phase_due(), self.teardown_end()),
             // A call's ends with the call's body, and what it left is collected by when the
             // call's is.
             Caller::Job(job) => {
@@ -163,22 +201,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         stack_bytes: Option<usize>,
         run: impl FnOnce(Child<'r, H, O>) + Send + 's,
     ) -> Result<Sender<Message<O>>, String> {
-        let dir = self.dir.join(which.record_dir());
-        let parent = dir.parent().unwrap_or(self.dir);
-        fs::create_dir_all(parent).context(parent.display())?;
-        fs::create_dir(&dir).context(dir.display())?;
-        let inbox = self.clock.inbox();
-        let sender = inbox.sender();
-        let child = Child {
-            which,
-            deadlines,
-            hard_end: self.unix_hard_end,
-            dir,
-            sandboxes: self.sandboxes,
-            clock: self.clock.clone(),
-            inbox,
-            reports: self.inbox.sender(),
-        };
+        let child = self.child(which, deadlines)?;
+        let sender = child.inbox.sender();
         let mut builder = thread::Builder::new().name(which.name().to_string());
         if let Some(bytes) = stack_bytes {
             builder = builder.stack_size(bytes);
@@ -192,5 +216,27 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
             let _ = self.inbox.sender().send(Input::Child(failed));
         }
         Ok(sender)
+    }
+
+    fn child<O: Send + 'static>(
+        &self,
+        which: Which,
+        deadlines: Deadlines,
+    ) -> Result<Child<'r, H, O>, String> {
+        let dir = self.dir.join(which.record_dir(self.workflow()));
+        let parent = dir.parent().unwrap_or(self.dir);
+        fs::create_dir_all(parent).context(parent.display())?;
+        fs::create_dir(&dir).context(dir.display())?;
+        let inbox = self.clock.inbox();
+        Ok(Child {
+            which,
+            deadlines,
+            hard_end: self.unix_hard_end,
+            dir,
+            sandboxes: self.sandboxes,
+            clock: self.clock.clone(),
+            inbox,
+            reports: self.inbox.sender(),
+        })
     }
 }

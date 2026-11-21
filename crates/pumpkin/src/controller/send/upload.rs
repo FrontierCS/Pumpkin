@@ -10,7 +10,8 @@ use stdx::{Context as _, unpoisoned};
 use super::super::linking::{Build, Linked, Unlinked};
 use super::super::{Located, Reached};
 use super::{counting, holds};
-use crate::link::store::{Lacks, Put};
+use crate::link::Link;
+use crate::link::store::{self, Lacks};
 use crate::manifest::store::{Missing, PutAnswer};
 use crate::{manifest, say};
 
@@ -83,17 +84,18 @@ pub(super) fn send(
             // https://github.com/git-lfs/git-lfs/blob/33752a72ba9a30fc591a8a58ed8fc55197a36928/tq/transfer_queue.go#L455-L457
             missing.sort_unstable_by_key(|blob| Reverse(remaining(blob)));
             let progress = Mutex::new((&mut count, &mut *advanced));
+            let groups: Vec<_> = store::groups(&missing).collect();
             let together = together(
                 linked,
-                &missing,
+                &groups,
                 width,
                 || Linked::open(reached, build, at),
-                |link, blob| {
+                |link, group| {
                     put(
                         link,
                         reached,
                         hashed,
-                        blob,
+                        group,
                         |n| unpoisoned(progress.lock()).0(n),
                         || unpoisoned(progress.lock()).1(),
                     )
@@ -111,8 +113,8 @@ pub(super) fn send(
             }
             continue;
         }
-        for blob in &missing {
-            if !put(linked, reached, hashed, blob, &mut count, &mut *advanced)? {
+        for group in store::groups(&missing) {
+            if !put(linked, reached, hashed, group, &mut count, &mut *advanced)? {
                 continue 'lacks;
             }
         }
@@ -128,27 +130,27 @@ enum Batch {
 
 fn together(
     linked: &mut Linked,
-    missing: &[Missing],
+    groups: &[&[Missing]],
     width: usize,
     open: impl Fn() -> Result<Linked, Unlinked> + Sync,
-    put: impl Fn(&mut Linked, &Missing) -> Result<bool, Unlinked> + Sync,
+    put: impl Fn(&mut Linked, &[Missing]) -> Result<bool, Unlinked> + Sync,
 ) -> Result<Batch, Unlinked> {
-    let (first, queued) = missing.split_at(width);
-    let mut seeds = first.iter();
+    let (first, queued) = groups.split_at(width);
+    let mut seeds = first.iter().copied();
     let original = seeds.next();
-    let queued = Mutex::new(queued.iter());
-    let stop = || *unpoisoned(queued.lock()) = [].iter();
+    let queued = Mutex::new(queued.iter().copied());
+    let stop = || *unpoisoned(queued.lock()) = [].iter().copied();
     let terminal = |error: &Unlinked| {
         if matches!(error, Unlinked::HostKey(_) | Unlinked::Failed(_)) {
             stop();
         }
     };
-    let send = |link: &mut Linked, first: Option<&Missing>| {
-        let blobs = first
+    let send = |link: &mut Linked, first: Option<&[Missing]>| {
+        let groups = first
             .into_iter()
             .chain(std::iter::from_fn(|| unpoisoned(queued.lock()).next()));
-        for blob in blobs {
-            if !put(link, blob)? {
+        for group in groups {
+            if !put(link, group)? {
                 return Ok(false);
             }
         }
@@ -193,38 +195,36 @@ fn put(
     linked: &mut Linked,
     reached: &Reached,
     hashed: &manifest::Hashed,
-    blob: &Missing,
+    group: &[Missing],
     mut count: impl FnMut(u64),
     mut advanced: impl FnMut(),
 ) -> Result<bool, Unlinked> {
-    let Missing {
-        digest,
-        held_bytes,
-        size_bytes,
-    } = blob;
-    let Some(source) = hashed.sources.get(digest) else {
-        return Err(format!(
-            "the controller asked for an unknown blob {}: send the task again",
-            digest.hex()
-        )
-        .into());
-    };
-    let input = source.at(*held_bytes, *size_bytes)?;
-    let put = Put {
-        digest: digest.clone(),
-        from: *held_bytes,
-        size_bytes: *size_bytes,
-    };
-    match linked.stream(reached, |link| link.put(put, input, &mut count))?? {
-        PutAnswer::Stored => {
-            advanced();
-            Ok(true)
+    let mut inputs = Vec::new();
+    let opened: Result<(), String> = group.iter().try_for_each(|blob| {
+        let source = hashed.sources.get(&blob.digest).ok_or_else(|| {
+            format!(
+                "the controller asked for an unknown blob {}: send the task again",
+                blob.digest.hex()
+            )
+        })?;
+        inputs.push((blob, source.at(blob.held_bytes, blob.size_bytes)?));
+        Ok(())
+    });
+    let sent = &group[..inputs.len()];
+    linked.stream(reached, |link| link.send_puts(inputs, &mut count))?;
+    for blob in sent {
+        match linked.stream(reached, Link::put_answer)?? {
+            PutAnswer::Stored => advanced(),
+            PutAnswer::OffsetChanged => return Ok(false),
+            PutAnswer::NotItsDigest => {
+                return Err(format!(
+                    "{} changed since it was hashed: send the task again",
+                    hashed.shown(&blob.digest)
+                )
+                .into());
+            }
         }
-        PutAnswer::OffsetChanged => Ok(false),
-        PutAnswer::NotItsDigest => Err(format!(
-            "{} changed since it was hashed: send the task again",
-            hashed.shown(digest)
-        )
-        .into()),
     }
+    opened?;
+    Ok(true)
 }

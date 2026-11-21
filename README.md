@@ -65,8 +65,9 @@ context = "default"
 [providers.local.docker]
 ```
 
-Each task is an entry file, `task.star`. `examples/hello` ships in this repository, needs no model,
-and runs once `./pumpkin` and `.pumpkinversion` sit beside `examples/`. From that directory:
+Each task is an entry file, `task.star`. The [examples](examples/README.md) start with
+`examples/hello`, which needs no model and runs once `./pumpkin` and `.pumpkinversion` sit beside
+`examples/`. From that directory:
 
 ```console
 $ ./pumpkin check examples/hello/task.star
@@ -87,8 +88,8 @@ browser. The record is `.pumpkin/runs/<id>/`.
 
 ## Workflow in Pumpkin
 
-A workflow is the one `workflow()` call of a task's entry file: the workflow's name, its roles,
-and the final call that gives a run its result. `examples/hello` needs no model, so it runs
+A task's entry file calls `workflow()` once, giving its name, work deadline, roles and the
+final call that gives a run its result. `examples/hello` needs no model, so it runs
 wherever Docker does. Its agent is a shell script: it has a job function count the lines and bytes
 of its greeting, then submits the greeting, and the final call scores the greeting by its size.
 
@@ -104,18 +105,18 @@ load("//hello/final.star", "final_call")
 load("//submit.star", "submit")
 
 IMAGE = image("Dockerfile")
-SANDBOXCTL = "/.pumpkin/bin/sandboxctl"
 
 # Calls `count`, prints the job's status once it has ended, and submits the greeting.
 AGENT = """
 echo hello > greeting
-SANDBOXCTL call count greeting
-while SANDBOXCTL status 0 | grep -q -E '"state":"(queued|running)"'; do sleep 1; done
-SANDBOXCTL status 0
-SANDBOXCTL call final greeting --arg finalize=true
-""".replace("SANDBOXCTL", SANDBOXCTL)
+sandboxctl call count greeting
+while sandboxctl status 0 | grep -q -E '"state":"(queued|running)"'; do sleep 1; done
+sandboxctl status 0
+sandboxctl call final greeting --arg finalize=true
+"""
 
 workflow(
+    deadline_seconds = 300,
     name = "examples/hello",
     roles = [
         {
@@ -128,7 +129,6 @@ workflow(
                     "argv": ["sh", "-c", "set -e" + AGENT],
                     "cwd": "/workspace",
                 },
-                "deadline_seconds": 300,
                 "finalize_grace_seconds": 30,
                 "grants": [
                     {"name": "count", "job": {
@@ -187,17 +187,17 @@ def count(target: Target, payload: Payload) -> dict[str, int]:
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the final call, replacing the last.
+    """Sets the calling agent's submission, replacing its previous payload.
 
     Args:
       run: the run's state.
       payload: the agent's submission.
-      finalize: whether the call also ends the agent's work.
+      finalize: whether the call also locks the submission and ends the agent's work.
 
     Returns:
-      The selection's state: `stored`, or `accepted` once the work has ended.
+      `stored`, or `accepted` if the call locks the submission.
     """
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
@@ -209,16 +209,19 @@ and [`examples/hello/final.star`](examples/hello/final.star):
 ```python
 """The hello example's final call: it counts the greeting's bytes and lines in its target."""
 
-def final_call(target: Target, payload: Payload) -> dict[str, int]:
+def final_call(target: Target, submissions) -> dict[str, int]:
     """Shows the greeting's size as its score, and its lines.
 
     Args:
       target: the call's target.
-      payload: the greeting the agent submitted.
+      submissions: the greeting by agent role, or None if absent.
 
     Returns:
       The score and the lines, in the order the run shows them.
     """
+    payload = submissions["agent"]
+    if payload == None:
+        return {"score": 0, "lines": 0}
     target.put("/workspace/greeting", payload)
     target.run(["sh", "-c", "printf '{\"score\": %s, \"lines\": %s}' $(wc -c < /workspace/greeting) $(wc -l < /workspace/greeting) > /pumpkin/out/result.json"])
     result = json.decode(target.get("/pumpkin/out/result.json"))
@@ -252,12 +255,12 @@ learns only the job's state, what the grant has left, and the dict.
 
 **A now function's body**, here `submit`, answers in the call's reply, with no sandbox. The agent
 calls it as `final`, the name of its grant, which is not the final call. Its handle is a `Run`, the
-run's state: `run.select(payload)` makes the payload the selection, the one the final call gets,
-and `run.end_work()` ends the agent's work, after which the agent has `finalize_grace_seconds` to
-exit. The run applies what the body asked once it has returned, all of it or none. A parameter
-after the payload is the caller's: annotated `str`, `int` or `bool`, it is given as
-`--arg finalize=true` and read as its type before the body runs. `sandboxctl ops` lists each grant
-with its bounds and its caller's parameters.
+run's state. `run.set_submission(payload)` replaces the payload the final call receives for that
+role. `run.end_work()` locks the submission immediately and gives the agent
+`finalize_grace_seconds` to exit. The run applies what the body asked once it has returned, all
+of it or none. A parameter after the payload is the caller's. It is annotated `str`, `int` or
+`bool`, given as `--arg finalize=true` and read as its type before the body runs.
+`sandboxctl ops` lists each grant with its bounds and its caller's parameters.
 
 **Sessions** are the third kind of function, for work that one call of a body can't hold, such as
 training on a GPU. A session grant names a runner and bounds its leases: how many are open at once,
@@ -268,9 +271,9 @@ and ends it with `.close`.
 
 **The final call** runs once the agent's work has ended and everything it started has ended too:
 its body runs as a job's does, on a fresh sandbox of its `target`, which no job function may name,
-with the last payload selected. The dict it returns is the run's result, and its entries, in their
-order, are the values the run shows: `score=6 lines=1` in `pumpkin ls`. A run with nothing
-selected, or whose final call fails, finishes without a result.
+with a dictionary mapping each agent role to its submitted payload or `None`. The dict it returns
+is the run's result. The run shows its entries in their order, as `score=6 lines=1` in
+`pumpkin ls`. A failed final call leaves the run without a result.
 
 **Egress** is what a role reaches beyond its session. This agent has none; one that uses a model
 has a model route, whose entries each name an API, the models it allows and, if it is bounded, a

@@ -587,22 +587,22 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":0}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddee"}"#),
-            HelloJson(r#"{"version":0,"grant":"00112233445566778899aabbccddeefg"}"#),
-            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":0,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":2}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddee"}"#),
+            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeefg"}"#),
+            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
             Hello { grant: None, gpus: None }
             Hello { grant: Some(RegistrationGrant(..)), gpus: None }
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 0's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
             Hello { grant: None, gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 0's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            the hello isn't of sandbox protocol 2's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -673,8 +673,7 @@ fn in_sandbox_contract() {
     );
 }
 
-/// A valid IR, parsed: its agent, its `now` functions, the role of its final call with that call's
-/// keywords, and the agent's model route, by API.
+/// The work deadline, each agent's local functions and route, and the final call's input.
 struct Parsed(Value);
 
 impl Case for Parsed {
@@ -682,18 +681,151 @@ impl Case for Parsed {
         let ir: ir::Workflow = serde_json::from_value(self.0).unwrap();
         let workflow = Workflow::parse(&ir).unwrap();
         let name = |role| workflow.sandbox(role).name.as_str();
-        let now = workflow.now_functions().map(|(_, now)| now.name.as_str());
-        let route = workflow.agent().model.as_ref().unwrap();
-        let apis: Vec<ir::Api> = route.as_slice().iter().map(|entry| entry.api).collect();
+        let mut lines = vec![format!("work {:?}", workflow.work_deadline())];
+        for agent in workflow.agents() {
+            assert_eq!(workflow.agent_by_id(agent.id), agent);
+            let role = agent.id.role();
+            let jobs: Vec<_> = workflow
+                .job_functions_of(role)
+                .map(|(id, job)| {
+                    assert_eq!(workflow.job_function(id), job);
+                    (job.name.as_str(), job.calls.map(std::num::NonZeroU64::get))
+                })
+                .collect();
+            let now: Vec<_> = workflow
+                .now_functions_of(role)
+                .map(|(_, now)| now.name.as_str())
+                .collect();
+            let sessions: Vec<_> = workflow
+                .sessions()
+                .filter(|(_, session)| session.holder.role() == role)
+                .map(|(_, session)| session.name.as_str())
+                .collect();
+            let apis: Vec<_> = workflow
+                .model(role)
+                .iter()
+                .flat_map(|route| route.as_slice())
+                .map(|entry| entry.api)
+                .collect();
+            lines.push(format!(
+                "{}: jobs {jobs:?}, now {now:?}, sessions {sessions:?}, route {apis:?}",
+                name(role)
+            ));
+        }
         let final_call = workflow.final_call();
-        format!(
-            "agent `{}`, now functions {:?}, final call on `{}` with keywords {}, route {apis:?}",
-            name(workflow.agent().role),
-            now.collect::<Vec<_>>(),
+        lines.push(format!(
+            "final on {} with {}",
             name(final_call.target.role()),
-            serde_json::to_string(&final_call.keywords).unwrap(),
-        )
+            serde_json::to_string(&final_call.keywords).unwrap()
+        ));
+        lines.join("\n")
     }
+}
+
+fn agents() -> Value {
+    let mut ir = leasing();
+    let mut peer = ir["roles"][0].clone();
+    peer["name"] = json!("alpha");
+    let agent = &mut peer["runtime"]["agent"];
+    agent.as_object_mut().unwrap().remove("egress");
+    agent["grants"][0]["job"]["calls"] = json!(1);
+    ir["roles"].as_array_mut().unwrap().push(peer);
+    ir
+}
+
+struct GrantHelp(Value);
+
+impl Case for GrantHelp {
+    fn outcome(self) -> String {
+        let workflow = Workflow::parse(&serde_json::from_value(self.0).unwrap()).unwrap();
+        let mut agents = workflow.agents();
+        let raw = agents.next().unwrap();
+        assert_eq!(raw.stdin.as_deref(), Some("\0{\"raw\":true}\r\n"));
+        let agent = agents.next().unwrap();
+        let files: Vec<_> = agent
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.mode.bits(), f.content.as_str()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("/work/.codex/AGENTS.md", 0o640, "Existing instructions."),
+                (
+                    "/work/.codex/AGENTS.override.md",
+                    0o600,
+                    "Project overrides."
+                ),
+            ]
+        );
+        agent.stdin.clone().unwrap()
+    }
+}
+
+#[test]
+fn grant_help() {
+    let mut ir = agents();
+    ir["roles"][0]["runtime"]["agent"]["stdin"] = json!("\0{\"raw\":true}\r\n");
+    ir["roles"][0]["runtime"]["agent"]["grants"][0]["help"] = json!("A different role's grant.");
+    let peer = &mut ir["roles"].as_array_mut().unwrap().last_mut().unwrap()["runtime"]["agent"];
+    peer["prepend_grant_help"] = json!(true);
+    peer["stdin"] = json!("{\"task\":42}\n");
+    peer["files"] = json!([{"path":"/work/.codex/AGENTS.md", "mode":"0640", "content":"Existing instructions."},
+        {"path":"/work/.codex/AGENTS.override.md", "mode":"0600", "content":"Project overrides."}]);
+    peer["grants"][0]["name"] = json!("score");
+    peer["grants"][0]["help"] = json!("Score the source file and return its points.");
+    peer["grants"][0]["job"]["keywords"] = json!({"private": "never expose this"});
+    peer["grants"][0]["job"]["body"]["arguments"] =
+        json!({"draft":{"type":"str"}, "level":{"type":"int","default":2}});
+    check(
+        [GrantHelp(ir)],
+        &expect![[r#"
+        Sandbox commands for role alpha
+        Work time upper bound: 18000 seconds. Run `sandboxctl ops` for current limits.
+
+        sandboxctl call score [FILE] --arg draft=STR [--arg level=INT] [--wait SECONDS]
+        Default for level: 2.
+        Score the source file and return its points.
+        Payload limit: 4194304 bytes. Timeout: 12000 seconds per call. Call limit: 1. Total call time limit: 12000 seconds.
+
+        sandboxctl call gpu.open [--seconds SECONDS]
+        sandboxctl call gpu.run LEASE [--timeout SECONDS] -- COMMAND [ARG ...]
+        sandboxctl call gpu.put LEASE LOCAL REMOTE [--replace]
+        sandboxctl call gpu.get LEASE REMOTE LOCAL
+        sandboxctl call gpu.status LEASE
+        sandboxctl call gpu.close LEASE
+        Limits: 2 simultaneous leases, 900 seconds per lease, 1048576 bytes per transfer.
+        Command limit: 32 (each transfer counts as one).
+        Total lease time limit: 1200 seconds.
+
+        sandboxctl call submit [FILE] [--arg finalize=BOOL] [--wait SECONDS]
+        Default for finalize: false.
+        Payload limit: 4194304 bytes. Returns immediately.
+
+        FILE is a regular file containing the payload. Omit FILE for an empty payload.
+        Use --wait SECONDS to wait for the job. A completed job has a returned field. Without --wait, follow the job number with sandboxctl status JOB.
+
+        ---
+
+        Task
+
+        {"task":42}
+    "#]],
+    );
+}
+
+#[test]
+fn ops_frame_bound() {
+    let ir = fixture_with(
+        "/roles/0/runtime/agent/grants/0/help",
+        json!("\0".repeat(frame::MAX_MESSAGE_BYTES / 6)),
+    );
+    check(
+        [ir],
+        &expect![
+            "/roles/0: the role's ops reply cannot be sent: the message is 65968 bytes: a frame's message holds at most 65536: shorten its public grant interface"
+        ],
+    );
 }
 
 #[test]
@@ -702,10 +834,23 @@ fn parsed() {
         [
             Parsed(fixture()),
             Parsed(fixture_with("/final/keywords", json!({ "mode": "final" }))),
+            Parsed(leasing()),
+            Parsed(agents()),
         ],
         &expect![[r#"
-            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {}, route [Responses]
-            agent `agent`, now functions ["submit"], final call on `final_judge` with keywords {"mode":"final"}, route [Responses]"#]],
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions [], route [Responses]
+            final on final_judge with {}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions [], route [Responses]
+            final on final_judge with {"mode":"final"}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions ["gpu"], route [Responses]
+            final on final_judge with {}
+            work 18000s
+            agent: jobs [("train", Some(100))], now ["submit"], sessions ["gpu"], route [Responses]
+            alpha: jobs [("train", Some(1))], now ["submit"], sessions ["gpu"], route []
+            final on final_judge with {}"#]],
     );
 }
 
@@ -1133,6 +1278,12 @@ fn job_functions() {
         .as_array_mut()
         .unwrap()
         .push(again);
+    let mut resident = twice.clone();
+    resident["roles"][4]["runtime"] = json!({"target": {"lifetime": "work", "cwd": "/"}});
+    let mut resident_grants = target_holding();
+    resident_grants["roles"][4]["runtime"]["target"]["lifetime"] = json!("work");
+    let mut resident_final = resident.clone();
+    resident_final["final"]["target"] = json!("verifier");
     let mut uncalled = calling();
     let grants = &mut uncalled["roles"][0]["runtime"]["agent"]["grants"];
     grants.as_array_mut().unwrap().remove(3);
@@ -1151,6 +1302,9 @@ fn job_functions() {
             uncalled,
             target_holding(),
             shared,
+            resident,
+            resident_final,
+            resident_grants,
         ],
         &expect![[r#"
             parsed
@@ -1167,7 +1321,11 @@ fn job_functions() {
             /roles/4: `verifier` is a target that no job function or final call names: name it from one
             parsed
             /final/target: `verifier` is the final call's target and `check`'s: give the final call a role no job names
-            /roles/2: `final_judge` is a target that no job function or final call names: name it from one"#]],
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            parsed
+            /final/target: `verifier` is a shared work sandbox: give the final call a fresh target
+            /roles/2: `final_judge` is a target that no job function or final call names: name it from one
+            /roles/4/runtime/target/egress: model egress requires a call-lifetime target"#]],
     );
 }
 
@@ -1230,12 +1388,11 @@ fn broken_roles() {
     check(
         [ir, none],
         &expect![[r#"
-            /roles/3/runtime: `helper` is a second agent, after `agent`: a workflow has exactly one
             /roles/0/runtime/agent/grants/2/now/payload_max_bytes: `resubmit`'s `payload_max_bytes` is 67108865, over the op payload limit of 67108864: give at most that
             /roles/0/runtime/agent/grants/3/job/target: `trainer` is the target of job functions `train` and `retrain`: name each target from one function
             /final/target: `trainer` is the final call's target and `train`'s: give the final call a role no job names
             /roles/2: `final_judge` is a target that no job function or final call names: name it from one
-            /roles: no role is an agent: a workflow has exactly one"#]],
+            /roles: no role is an agent: declare an agent"#]],
     );
 }
 

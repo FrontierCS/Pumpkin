@@ -17,7 +17,7 @@
 //! It adds the annotations that the crate's doc names: each parameter with a type after `:` or
 //! without, as is a `def`'s return after `->`, a type being `None`, `bool`, `int`, `float`,
 //! `str`, `list[T]` or `dict[K, V]`, whose `K` is `int`, `float` or `str`, or the host's
-//! `Target`, `Run` or `Payload`.
+//! `Target`, `Runner`, `Run` or `Payload`.
 //!
 //! Each place where the subset is narrower than the specification is refused at its token, and
 //! the rule of the refusal is written where it is checked: the lexical ones in `lex`, the
@@ -196,7 +196,9 @@ impl Type {
             | (Self::Int, Kind::Int(_))
             | (Self::Float, Kind::Float(_))
             | (Self::Str, Kind::Str(_)) => None,
-            (Self::Hosted(hosted), Kind::Hosted(made)) => (made != hosted).then_some(Misfit::Whole),
+            (Self::Hosted(hosted), Kind::Hosted(made)) => {
+                (made.ty() != *hosted).then_some(Misfit::Whole)
+            }
             (Self::List(element), Kind::List(elements)) => {
                 (elements.iter()).find_map(|value| element.held(value, Part::Element))
             }
@@ -272,8 +274,9 @@ impl Type {
                 format!("dicts of {} to {}", key.as_type().plural(), value.plural())
             }
             Self::Hosted(Hosted::Target) => String::from("`Target`s"),
+            Self::Hosted(Hosted::Runner(())) => String::from("`Runner`s"),
             Self::Hosted(Hosted::Run) => String::from("`Run`s"),
-            Self::Hosted(Hosted::Payload) => String::from("payloads"),
+            Self::Hosted(Hosted::Payload(())) => String::from("payloads"),
         }
     }
 }
@@ -402,6 +405,7 @@ pub(crate) enum ExprKind {
     },
     Method {
         receiver: Box<Expr>,
+        depth: usize,
         name: Box<Name>,
         args: Box<Args>,
     },

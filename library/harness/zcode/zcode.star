@@ -17,9 +17,7 @@ _ROOT = "/harness/zcode-0.16.9"
 # The reasoning levels the provider file offers, each sent as the request's `reasoning_effort`.
 _EFFORTS = ["low", "high", "max"]
 
-# The one provider the provider file names. That file, the configuration and the command are
-# those FrontierCS 2 runs ZCode with
-# (https://github.com/FrontierCS/FrontierCS-2/blob/d247b3f15b73805e455ff93c6d043d84603ec341/candidates/zcode/launcher.py#L58-L146).
+# The one provider the provider file names.
 _PROVIDER = "pumpkin"
 
 def zcode(
@@ -29,7 +27,6 @@ def zcode(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
         finalize_grace_seconds,
         max_output_tokens,
         context_tokens):
@@ -45,7 +42,6 @@ def zcode(
       effort: as every harness; the request's `reasoning_effort`: one of `_EFFORTS`.
       workspace: as every harness.
       prompt: as every harness; not empty.
-      deadline_seconds: as every harness.
       finalize_grace_seconds: as every harness.
       max_output_tokens: as every harness that takes it; the request's `max_tokens`.
       context_tokens: as every harness that takes it.
@@ -169,7 +165,6 @@ def zcode(
                 {"path": cli + "/config.json", "mode": "0600", "content": json.encode(config)},
                 {"path": providers, "mode": "0600", "content": json.encode(provider)},
             ],
-            "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
                 "api": "chat",

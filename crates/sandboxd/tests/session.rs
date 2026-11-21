@@ -21,7 +21,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -77,11 +77,15 @@ struct Sandbox {
 
 impl Sandbox {
     fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
+        let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
+        Self::start_with(meeting, nvidia_smi, sandboxd)
+    }
+
+    fn start_with(meeting: Meeting, nvidia_smi: Option<&str>, mut sandboxd: Command) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
         let root = fs::canonicalize(dir.path()).unwrap();
-        let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
         if let Some(script) = nvidia_smi {
             sandboxd.env("PATH", stand_in(&root, script));
         }
@@ -395,7 +399,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -410,7 +414,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -425,7 +429,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -446,10 +450,13 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} in $(pwd)"
+        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} path=$PATH in $(pwd)"
         echo warning >&2
         exit 3"#;
-    let launch = sandbox.sh(script, &["HOME=/pumpkin/home", "MODE=train"]);
+    let launch = sandbox.sh(
+        script,
+        &["HOME=/pumpkin/home", "MODE=train", "PATH=/usr/bin:/bin"],
+    );
     let command = sandbox.session.start(launch, hung()).unwrap();
     let exited = sandbox.exit(command, Duration::from_secs(10)).unwrap();
     let mut lines = vec![format!("exited: {exited:?}")];
@@ -566,6 +573,18 @@ fn modes_and_stdin() {
 // So that a frame lost, repeated or out of order shows.
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|n| u8::try_from(n % 251).unwrap()).collect()
+}
+
+#[test]
+fn inherited_ignored_child_signal() {
+    // Linux reaps children itself when their parent explicitly ignores SIGCHLD.
+    let mut command = stdx::process::command("env", PATH_ONLY);
+    command.args(["--ignore-signal=CHLD", env!("CARGO_BIN_EXE_sandboxd")]);
+    let mut sandbox = Sandbox::start_with(Meeting::Socket, None, command);
+    let launch = sandbox.sh("exit 0", &[]);
+    sandbox.session.start(launch, hung()).unwrap();
+    let status = exited(&mut sandbox.sandboxd);
+    expect!["exit status: 1"].assert_eq(&status.to_string());
 }
 
 #[test]
@@ -863,7 +882,7 @@ fn hello_answers() {
             ]
         },
         &expect![[r#"
-            its hello: {"version":0}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 1
+            its hello: {"version":2}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 3
             unanswered: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/unanswered.sock failed: it closed the connection before it answered the hello: expected it to accept or refuse the session
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
@@ -918,18 +937,18 @@ fn listening() {
         },
         &expect![[r#"
             a second peer, once the session is open: Err(ConnectionRefused)
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(0)}), then closed
-            Accepted { grant: None }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 0" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 1" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 2" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 3" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 4" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 5" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 6" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 7" }: its hello Some(Object {"version": Number(0)}), then closed
-            Refused { message: "why 8" }: its hello Some(Object {"version": Number(0)}), then closed
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(0)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(2)}), then closed
+            Accepted { grant: None }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 0" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 1" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 2" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 3" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 4" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 5" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 6" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 7" }: its hello Some(Object {"version": Number(2)}), then closed
+            Refused { message: "why 8" }: its hello Some(Object {"version": Number(2)}), then closed
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(2)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
             then, its session ended: exit status: 0: sandboxd: turned away the peer at $PEER0: it presented another registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER1: it presented no registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER2: it refused the session: why 0
@@ -1091,6 +1110,43 @@ fn unclaimed() {
             sandboxd: exit status: 0
             left running: 0"#]],
     );
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+fn wait_at_a_full_control_socket() {
+    let dir = TestDir::new();
+    let socket = dir.path().join("socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    rustix::net::listen(&listener, 0).unwrap();
+    // Linux lets one connection through a backlog of zero. The next waits for an accept.
+    let _queued = UnixStream::connect(&socket).unwrap();
+    let binary = test_support::sandboxd();
+    let output = test_support::docker()
+        .args(["run", "--rm", "--network", "none", "--volume"])
+        .arg(format!("{}:/pumpkin/sandboxctl:ro", dir.path().display()))
+        .arg("--volume")
+        .arg(format!("{}:/sandboxctl:ro", binary.display()))
+        .args([
+            test_support::BUSYBOX,
+            "timeout",
+            "5",
+            "/sandboxctl",
+            "call",
+            "train",
+            "/etc/passwd",
+            "--wait",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    let code = output.status.code();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.stdout.as_slice(), b"");
+    expect![[r#"
+        Some(124): sandboxctl: wait expired connecting to sandboxd: the request was not sent
+    "#]]
+    .assert_eq(&format!("{code:?}: {stderr}"));
 }
 
 #[test]

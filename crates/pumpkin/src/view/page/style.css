@@ -130,19 +130,34 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .fact .name { color: var(--dim); font-size: var(--fs-mono); }
 .again .name { color: var(--dim); margin-right: var(--s1); }
 .fact .value { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); overflow-wrap: anywhere; }
-/* A result's values: how its work phase ended, then each value under its name, between hairlines,
-   and each object folded under its name. */
-.result { display: flex; flex-direction: column; gap: var(--s2); }
-.result:empty { display: none; }
-.result .ended { color: var(--dim); }
-.result .values { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: var(--s1) var(--s5); padding: var(--s2) 0; border-block: 1px solid var(--line-soft); }
-.result .kv { display: flex; flex-direction: column; min-width: 0; }
+/* Scalars appear together, with each object folded under its name. */
+.result, .failure { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.result:empty, .failure:empty { display: none; }
+.result .values, .failure .values { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: var(--s1) var(--s5); padding: var(--s2) 0; border-block: 1px solid var(--line-soft); }
+.result .kv, .failure .kv { display: flex; flex-direction: column; min-width: 0; }
 .result .k { font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
-.result .v { color: var(--text); overflow-wrap: anywhere; }
-.result .v.num { font-family: var(--mono); font-size: var(--fs-mono); }
-.result summary, .dropped summary { cursor: pointer; color: var(--accent); }
+.result .v, .failure .v { color: var(--text); overflow-wrap: anywhere; }
+.result .v.num, .failure .v.num { font-family: var(--mono); font-size: var(--fs-mono); }
+.result summary, .dropped summary, .failure summary { cursor: pointer; color: var(--accent); }
 .result summary .mono { color: var(--text-2); }
-.result summary .hint { color: var(--dim); margin-left: var(--s2); }
+.result summary .hint, .failure .hint { color: var(--dim); margin-left: var(--s2); }
+/* A failure, the same parts in the same places whatever failed: whose fault, the subject and the
+   time under their names; then what the subject left and the reason, folded. A part that the
+   record doesn't give says so, dim. In the inspector, a size smaller. */
+.failure .k, .failure .none, .failure .v small { color: var(--dim); }
+.failure .k, .failure .hint { font-size: var(--fs-mono); }
+.failure .hint { font-family: var(--mono); overflow-wrap: anywhere; }
+.failure .v small { display: block; font-size: var(--fs-diagram); }
+.failure .folds { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+/* As far in as a fold's words are, past its marker. */
+.failure .folds > .none { padding-left: var(--s4); }
+.failure .reason { margin-top: var(--s1); max-width: 96ch; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.failure pre.kept { margin: var(--s1) 0 0; padding: var(--s2) var(--s3); border: none; background: var(--hover); border-radius: var(--r-box); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.failure.small { margin-bottom: var(--s2); }
+.failure.small .verdict { font-size: var(--fs-title); line-height: var(--lh); }
+.failure.small .verdict .mark { width: 10px; height: 10px; border-radius: 2px; margin-top: calc((var(--lh) - 10px) / 2); }
+.failure.small details { margin: 0; padding: 0; border: none; }
+.failure.small summary { color: var(--accent); font-family: var(--sans); font-size: var(--fs); }
 .result pre.json { margin: var(--s2) 0 0; padding: var(--s2) var(--s3); background: var(--hover); border-radius: var(--r-box); overflow-x: auto; }
 .dropped:empty { display: none; }
 .dropped code { display: block; margin-top: var(--s1); overflow-wrap: anywhere; color: var(--dim); }
@@ -178,19 +193,27 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .axis { position: sticky; top: 0; z-index: 1; height: var(--axis); padding-left: var(--label); background: var(--panel); border-bottom: 1px solid var(--line); color: var(--dim); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--axis); }
 .axis .ticks { position: relative; height: 100%; }
 .axis span { position: absolute; transform: translateX(-50%); }
-.axis span:first-child { transform: none; } .axis span:last-child { transform: translateX(-100%); }
+.axis span:first-of-type { transform: none; } .axis span:last-of-type { transform: translateX(-100%); }
 .tracks { position: relative; }
 .guide { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--line-soft); pointer-events: none; }
 .span { position: absolute; top: 2px; height: 10px; border-radius: 2px; background: var(--kind); }
 .span.starting { opacity: 0.4; }
 .span.open { border-right: 2px dashed var(--bg); }
 .work { position: absolute; top: 5px; height: 4px; background: var(--on-bar); min-width: 1px; }
+.work.call { top: 3px; height: 8px; min-width: 3px; padding: 0; border: 0; }
+.work.call:hover, .work.call:focus-visible, .work.call.lit { background: var(--mark-bar); z-index: 1; }
 .work.failed { background: var(--fail-bar); outline: 1px solid var(--bg); }
-.tick { position: absolute; top: 0; height: 14px; width: 1px; background: var(--model); }
+.tick { position: absolute; top: 0; height: 14px; width: 1px; background: var(--model); pointer-events: none; }
 .tick.failed { width: 2px; background: var(--fail-bar); }
 .window { position: absolute; top: 0; bottom: 0; background: var(--select); opacity: 0.6; pointer-events: none; }
 .now { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--live); }
 .here { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text); pointer-events: none; }
+/* The one mark of a failure, the verdict's square, on the lane of what failed at the time it
+   failed, ringed so that it reads on a bar; on the axis for a run's own. */
+.lanes .failmark { position: absolute; top: 2px; width: 10px; height: 10px; min-width: 0; margin-left: -5px; padding: 0; border: none; border-radius: 2px; background: var(--fail-bar); outline: 1.5px solid var(--panel); z-index: 1; }
+.lanes button.failmark:hover { background: var(--fail); }
+.lanes .failmark:focus-visible { outline: 2px solid var(--focus); }
+.axis .failmark { top: auto; bottom: 2px; }
 
 /* The filter of the log. */
 .filter { flex: none; display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; color: var(--dim); }
@@ -237,6 +260,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node.idle > rect:not(.final):not(.chip) { stroke-dasharray: 4 3; }
 .talk .node rect.chip { fill: var(--line-soft); stroke: none; }
 .talk .node text.chip { font-size: 10.5px; font-weight: 600; fill: var(--text-2); }
+.talk rect.failmark { fill: var(--fail-bar); stroke: var(--panel); stroke-width: 1.5; }
 .talk ul { list-style: none; margin: var(--s2) 0 0; padding: 0; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
 .talk li { line-height: var(--lh); }
 .talk li .pair { color: var(--text); }
@@ -423,9 +447,8 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .payload-file + .payload-file { margin-top: var(--s5); }
 .payload-file > h3 { font-size: var(--fs); font-weight: 600; margin: 0 0 var(--s2); }
 .payload-file > h3 .num { color: var(--dim); font-weight: 400; }
-/* A patch as the FrontierCS site's patch viewer draws one (its `fcs2-patch.css`), in Claude Code's
-   diff colours: rows on the dim tone, changed words on the full one, signs and numbers in the word
-   tone; the dark theme's tones are the light ones' darkened. */
+/* Claude Code's diff colours: rows on the dim tone, changed words on the full one, signs and
+   numbers in the word tone. The dark theme uses darker versions of the same colours. */
 .cc { --add: light-dark(rgb(199, 225, 203), rgb(31, 60, 38)); --add-w: light-dark(rgb(105, 219, 124), rgb(46, 110, 62));
   --add-t: light-dark(rgb(47, 157, 68), rgb(105, 219, 124)); --del: light-dark(rgb(253, 210, 216), rgb(74, 33, 38));
   --del-w: light-dark(rgb(255, 168, 180), rgb(128, 48, 58)); --del-t: light-dark(rgb(209, 69, 75), rgb(255, 140, 150));

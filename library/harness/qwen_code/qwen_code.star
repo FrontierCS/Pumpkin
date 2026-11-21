@@ -28,7 +28,6 @@ def qwen_code(
         effort,
         workspace,
         prompt,
-        deadline_seconds,
         finalize_grace_seconds,
         max_output_tokens,
         context_tokens,
@@ -46,7 +45,6 @@ def qwen_code(
       effort: as every harness; the request's `reasoning_effort`: one of `_EFFORTS`.
       workspace: as every harness.
       prompt: as every harness; not empty.
-      deadline_seconds: as every harness.
       finalize_grace_seconds: as every harness.
       max_output_tokens: as every harness that takes it; the request's `max_tokens`.
       context_tokens: as every harness that takes it.
@@ -74,9 +72,6 @@ def qwen_code(
     state = home + "/qwen"
     body = extra_body | {"reasoning_effort": effort, "max_tokens": max_output_tokens}
 
-    # The settings, which, with the command and the environment, are those FrontierCS 2 runs Qwen
-    # Code with, but for the usage statistics, the update check and the catalog
-    # (https://github.com/FrontierCS/FrontierCS-2/blob/d247b3f15b73805e455ff93c6d043d84603ec341/candidates/qwen-code/launcher.py#L63-L154).
     settings = {
         "$version": 4,
         "security": {"auth": {"selectedType": "openai"}},
@@ -159,7 +154,6 @@ def qwen_code(
             "files": [
                 {"path": state + "/settings.json", "mode": "0600", "content": json.encode(settings)},
             ],
-            "deadline_seconds": deadline_seconds,
             "finalize_grace_seconds": finalize_grace_seconds,
             "egress": {"model": [{
                 "api": "chat",

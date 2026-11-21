@@ -1,6 +1,7 @@
 {
-  "ir_version": "pumpkin.ir/v0",
+  "ir_version": "pumpkin.ir/v1",
   "name": "example/task",
+  "deadline_seconds": 18000,
   "roles": [
     {
       "name": "agent",
@@ -28,7 +29,6 @@
             }
           ],
           "stdin": "Solve the task in /task/README.md.\n",
-          "deadline_seconds": 18000,
           "finalize_grace_seconds": 60,
           "egress": {
             "model": [{ "api": "responses", "models": ["gpt-6-astra"] }]

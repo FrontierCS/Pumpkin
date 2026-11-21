@@ -14,10 +14,11 @@ it ran. This page says where to look in a record, and what the page shows.
 | the workflow as it ran, where each role was placed, and each provider's report, whose strings name the provider's account | `ir.json`, `provider.json` |
 | the text of each file the evaluation read, from which each body is evaluated | `sources/task/`, `sources/library/` |
 | what the driver said after the start, such as why a sandbox failed to start | `driver.log` |
-| the agent's output, and what it left in its `out/` | `agent/log/`, `agent/out/` |
+| each agent's output, and what it left in its `out/` | `agents/<role>/log/`, `agents/<role>/out/` |
 | each call's target, a job function's or the final call's: each command's output, each file its body got, and what the target held in `/pumpkin/out` as the call ended | `jobs/<n>/log/<c>/`, `jobs/<n>/got/<k>/`, `jobs/<n>/out/` |
+| a work-lifetime target's log, output directory and physical sandbox | `shared/<role>/log/`, `shared/<role>/out/`, `shared/<role>/sandbox.json` |
 | each lease's runner sandbox: its output and what it wrote | `leases/<n>/log/`, `leases/<n>/out/` |
-| each call's payload, the selection among them | `payloads/<digest>`, by the SHA-256 that the log and `outcome.json` name |
+| each call's payload, including each agent's submission | `payloads/<digest>`, by the SHA-256 that the log and `outcome.json` name |
 | each model request and response, as they went through the route | `model/` |
 | the arguments that started the run, and the Pumpkin that ran it | `record.json` |
 
@@ -28,61 +29,32 @@ whose driver ended without an `outcome.json` is lost. A reap, once the driver ha
 line to `reaps.jsonl` for each sandbox it deleted, removes `sockets/`, and writes a lost run's
 `outcome.json`, as failed.
 
-`outcome.json`'s `state` is `finished`, `failed`, with a `reason`, or `interrupted`, with the
-`signal` that stopped it. A finished run's `work_end` says how the agent's work ended, and its
-`verdict` what came of the selection: `returned`, with the `submission`, its payload's digest and
-size, and the final call's `result`, the `values` the run shows, in the order its body returned
-them; `no_result`, with the `submission` and the `failure` of the final call, a `timeout` or an
-`error` with its `reason`; or `no_submission`. `pumpkin wait --outcome <run>` prints the file on its
-standard output once the run has ended, and says the summary on its standard error:
+A finished `outcome.json` has `state: "finished"`. Its `agents` array lists every agent in
+declaration order. Each entry names the role, the reason its work ended, and its submission.
+A submission gives the submitted payload's digest and byte size and whether the agent finalized
+it. A role that submitted nothing has a JSON `null` submission. An empty file has a digest
+and a size of zero.
+
+The `verdict` records the final call. If its `kind` is `returned`, the result holds the values
+in the order the final body returned them. If it is `no_result`, `failure` records a timeout
+or an error and its reason. A failed run instead records `state: "failed"` and a reason.
+An interrupted run records `state: "interrupted"` and the signal.
+
+For example, to see who submitted and what the judge returned for `examples/hello`:
 
 ```console
-$ ./pumpkin wait --outcome 234cd166 2> /dev/null
+$ ./pumpkin wait --outcome 234cd166 2> /dev/null | jq '{agents: [.agents[] | {role, bytes: .submission.payload.size}], verdict}'
 {
-  "state": "finished",
-  "usage": {
-    "model_requests": 0,
-    "ran_ns": "2289300505",
-    "sandboxes": [
-      {
-        "class": "container",
-        "count": 3,
-        "lasted_ns": "3158040199",
-        "provider": "local"
-      }
-    ],
-    "tokens": {
-      "input": 0,
-      "output": 0,
-      "responses": 0
-    }
-  },
+  "agents": [
+    {"role": "agent", "bytes": 6}
+  ],
   "verdict": {
     "kind": "returned",
     "result": {
       "values": [
-        {
-          "name": "score",
-          "value": 6
-        },
-        {
-          "name": "lines",
-          "value": 1
-        }
+        {"name": "score", "value": 6},
+        {"name": "lines", "value": 1}
       ]
-    },
-    "submission": {
-      "finalized": true,
-      "payload": {
-        "digest": "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
-        "size": 6
-      }
-    }
-  },
-  "work_end": {
-    "kind": "agent_exited",
-    "status": {
-      "code": 0
     }
   }
 }
@@ -91,7 +63,14 @@ $ ./pumpkin wait --outcome 234cd166 2> /dev/null
 `usage` holds the run's duration, the sandboxes counted by provider and class with their lifetimes,
 both in nanoseconds written as strings, and the model requests and tokens.
 
-[Workflows](workflows.md) says what the log keeps of each call.
+The log identifies agent callers by their role index (`agent-<n>`). Jobs and leases have
+run-wide numbers. Calls on a shared sandbox keep their command output and the files their
+bodies read under `jobs/<n>/`. Usage counts the shared sandbox once across all its calls. If a sweep deletes an
+allocation whose role is unknown, `usage.unplaced_sandbox` marks the cost as partial. The
+allocation contributes no estimate to a class’s count, time or price.
+The `start_final_call` action lists the selection for each agent by role.
+[Workflows](workflows.md) describes what the log keeps of each call.
+
 
 ## Model exchanges
 

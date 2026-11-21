@@ -20,6 +20,7 @@
 pub(crate) mod body;
 mod call;
 mod operators;
+mod runner;
 
 use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::Entry as Slot;
@@ -64,6 +65,7 @@ pub(crate) struct Evaluation<'l, 'h, L> {
     /// How many expressions it has evaluated, its files' and the functions' they call.
     steps: u64,
     max_steps: u64,
+    runners: BTreeMap<u64, schema::ir::Name>,
     budget: &'l Budget,
     /// How deep the running function's body starts: the sum of the `depth`s of the calls that
     /// run, each as the parser counts it in its file; 0 at a module's top level.
@@ -155,6 +157,7 @@ impl<'l, 'h, L: Loader> Evaluation<'l, 'h, L> {
             tops: Vec::new(),
             running: FileId::FIRST,
             calls: Vec::new(),
+            runners: BTreeMap::new(),
             steps: 0,
             max_steps,
             budget,
@@ -578,6 +581,7 @@ impl<'l, 'h, L: Loader> Evaluation<'l, 'h, L> {
                 } => self.call(scope, value, callee, args, depth, at)?,
                 Suffix::Method {
                     receiver,
+                    depth,
                     name,
                     args,
                     at,
@@ -585,7 +589,7 @@ impl<'l, 'h, L: Loader> Evaluation<'l, 'h, L> {
                     let receiver = (receiver, value);
                     let method = builtins::method(&receiver, name)?;
                     let call = self.arguments(scope, args, at)?;
-                    method.call(name, &call, &mut self.purpose)?
+                    method.call(name, &call, self, depth)?
                 }
                 Suffix::Index(index) => {
                     let key = self.eval(scope, index)?;
@@ -782,6 +786,7 @@ enum Suffix<'e> {
     },
     Method {
         receiver: Span,
+        depth: usize,
         name: &'e Name,
         args: &'e Args,
         at: Span,
@@ -808,11 +813,13 @@ impl<'e> Suffix<'e> {
             }
             ExprKind::Method {
                 receiver,
+                depth,
                 name,
                 args,
             } => {
                 let suffix = Self::Method {
                     receiver: receiver.span,
+                    depth: *depth,
                     name,
                     args,
                     at,

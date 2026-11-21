@@ -20,6 +20,7 @@
 mod asked;
 mod cancel;
 mod export;
+mod failure;
 mod http;
 mod json;
 mod page;
@@ -46,6 +47,7 @@ use stdx::Context;
 
 use self::asked::{Asked, START, allowed, asked};
 pub(crate) use self::export::{Exported, exported};
+use self::failure::Failures;
 use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 pub(crate) use self::scrub::Scrub;
@@ -214,6 +216,7 @@ struct Held {
     /// run's ending changes, and shared by every answer until then.
     readout: Readout,
     talk: Option<Talk>,
+    failures: Failures,
     task: Option<String>,
     /// The byte at which each line of the log starts.
     lines: Vec<u64>,
@@ -238,6 +241,7 @@ impl Held {
             fold,
             record,
             talk: None,
+            failures: Failures::default(),
             task: None,
             lines: Vec::new(),
             recent: VecDeque::new(),
@@ -279,6 +283,7 @@ impl Held {
         let Self {
             fold,
             talk,
+            failures,
             lines,
             recent,
             exchanges,
@@ -294,6 +299,7 @@ impl Held {
             if let Ok(record) = serde_json::from_slice(line.bytes) {
                 if let Some(talk) = talk.as_mut() {
                     talk.take(&record);
+                    failures.take(line.byte, &record, talk);
                 }
                 exchanges.take(line.byte, &record);
                 ops.take(&record);

@@ -1,4 +1,4 @@
-//! The final call: the body that judges the selection once the work phase has ended.
+//! The final call judges the submissions once the work phase has ended.
 
 use std::num::NonZeroU64;
 
@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{Label, Name};
 
-/// What the run calls with the selection once the work phase has ended: a body that runs in a
-/// fresh sandbox of `target`, as a job function's does, on the selected submission.
+/// The body receives a fresh sandbox of `target` and every agent's submission, by role, in
+/// declaration order. A submission is a payload of zero or more bytes, or `None` if absent.
 ///
-/// The host starts the target, calls the body with a handle on it and the selection, and ends
+/// The host starts the target, calls the body, and ends
 /// the target once the body returns. What it returns is the run's result: each of its entries is
 /// a value the run shows, in the order the body gives them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct Final {
     pub keywords: serde_json::Map<String, serde_json::Value>,
     /// The most bytes a submission may hold, at most
     /// [`MAX_OP_PAYLOAD_BYTES`](crate::sandbox::MAX_OP_PAYLOAD_BYTES), since each comes in an op:
-    /// what is selected fits the call.
+    /// every submission fits the call.
     pub payload_max_bytes: NonZeroU64,
     /// The call's timeout, counted from its target's start.
     pub timeout_seconds: NonZeroU64,

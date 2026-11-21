@@ -11,7 +11,7 @@ use std::path::Path;
 use expect_test::expect;
 use test_support::BUSYBOX;
 
-use super::{Scratch, Step, check, ran};
+use super::{Scratch, Step, check, copy_tree, ran};
 
 /// A neutral library, which writes a task's workflow from the task's own values: Codex works
 /// as the agent, on the image that the package's agent recipe builds, and a trainer and the final
@@ -80,11 +80,11 @@ def bench_task(
         tools = "native",
         workspace = "/workspace",
         prompt = PROMPT,
-        deadline_seconds = DEADLINE,
         finalize_grace_seconds = 60,
     )
     workflow(
         name = "neutral/" + task.replace("_", "-"),
+        deadline_seconds = DEADLINE,
         roles = [
             {
                 "name": "agent",
@@ -149,14 +149,14 @@ def train(target: Target, payload: Payload, *, metrics: list[str]):
     return {"score": found["score"]} | {name: found["metrics"][name] for name in metrics}
 
 def submit(run: Run, payload: Payload, finalize: bool = False):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {}
 
-def final_call(target: Target, payload: Payload):
+def final_call(target: Target, submissions):
     """Judges the submission in its target, and shows its score."""
-    target.put("/pumpkin/in/payload/raw", payload)
+    target.put("/pumpkin/in/payload/raw", submissions["agent"])
     target.run(["/opt/judge/run"])
     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["score"]}
 "##;
@@ -911,29 +911,70 @@ fn library_lints() {
     );
 }
 
-/// The `--arg`s that [`examples`] checks an example with, by the name of its directory below
-/// `examples/`; it checks one not named here with none.
+/// The `--arg`s that [`examples`] checks an example with, by its entry file below `examples/`.
+/// An entry file not listed here needs no argument.
 const EXAMPLE_ARGS: &[(&str, &[&str])] = &[
-    ("codex", &["--arg", "model=model-a"]),
+    ("codex/task.star", &["--arg", "model=model-a"]),
+    ("hypergraph/task.star", &["--arg", "model=model-a"]),
+    ("team/codex.star", &["--arg", "model=model-a"]),
     // So that the GPU runner, which the smoke adds only for a GPU's model, is checked too.
-    ("smoke", &["--arg", "gpu_model=gpu-a"]),
+    ("smoke/task.star", &["--arg", "gpu_model=gpu-a"]),
 ];
+
+fn write_benchmark_inputs(scratch: &Scratch) {
+    // Preparation supplies the upstream recipes, source trees and replay selections.
+    for context in [
+        "agent-base",
+        "verifier-base",
+        "native-agent",
+        "native-verifier",
+    ] {
+        scratch.write(
+            &format!("examples/benchmark-input/{context}/Dockerfile"),
+            "FROM scratch\n",
+        );
+    }
+    for mount in [
+        "benchmark-input/generation",
+        "benchmark-input/agent",
+        "benchmark-input/judge",
+        "benchmark-replay",
+    ] {
+        fs::create_dir_all(scratch.0.join("examples").join(mount)).unwrap();
+    }
+}
 
 #[test]
 fn examples() {
     let scratch = Scratch::new();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-    let mut names: Vec<String> = (fs::read_dir(&examples).unwrap())
-        .map(Result::unwrap)
-        .filter(|entry| entry.file_type().unwrap().is_dir())
-        .map(|entry| entry.file_name().into_string().unwrap())
-        .collect();
+    let mut names = Vec::new();
+    let root = scratch.0.join("examples");
+    fs::create_dir(&root).unwrap();
+    for entry in fs::read_dir(examples).unwrap() {
+        let entry = entry.unwrap();
+        let dest = root.join(entry.file_name());
+        if entry.path().join("task.star").is_file() {
+            copy_tree(&entry.path(), &dest);
+            names.push(format!(
+                "{}/task.star",
+                entry.file_name().into_string().unwrap()
+            ));
+        } else if entry.path().is_file() {
+            fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+    write_benchmark_inputs(&scratch);
+    names.extend([
+        "team/codex.star".into(),
+        "hypergraph-benchmark/replay/task.star".into(),
+    ]);
     names.sort();
     let steps = names.iter().map(|name| {
         let args = EXAMPLE_ARGS.iter().find(|(example, _)| example == name);
-        let mut command = scratch.pumpkin(&["check", &format!("{name}/task.star")]);
+        let mut command = scratch.pumpkin(&["check", name]);
         command.args(args.map_or(&[][..], |(_, args)| args));
-        command.current_dir(&examples);
+        command.current_dir(&root);
         Step::from(command)
     });
     check(
@@ -946,7 +987,17 @@ fn examples() {
             exit status: Some(0)
             $ pumpkin check hello/task.star
             exit status: Some(0)
+            $ pumpkin check hypergraph-benchmark/replay/task.star
+            exit status: Some(0)
+            $ pumpkin check hypergraph-benchmark/task.star
+            exit status: Some(0)
+            $ pumpkin check hypergraph/task.star --arg model=model-a
+            exit status: Some(0)
             $ pumpkin check smoke/task.star --arg gpu_model=gpu-a
+            exit status: Some(0)
+            $ pumpkin check team/codex.star --arg model=model-a
+            exit status: Some(0)
+            $ pumpkin check team/task.star
             exit status: Some(0)"#]],
     );
 }
@@ -994,7 +1045,7 @@ fn bodies() {
     // The `def` line of `LIBRARY`'s now function's body.
     const SUBMIT: &str = "def submit(run: Run, payload: Payload, finalize: bool = False):";
     // The `def` line of `LIBRARY`'s final call's body.
-    const FINAL: &str = "def final_call(target: Target, payload: Payload):";
+    const FINAL: &str = "def final_call(target: Target, submissions):";
     let scratch = Scratch::new();
     // A task below `dir` whose library gives the agent a job function, `check`, whose body is
     // `body`, a value of `verify`, the text of `lib/verify.star`, on a target of the judges' image,
@@ -1044,11 +1095,11 @@ fn bodies() {
     write("int/", VERIFY, "3", (SUBMIT, FINAL));
     let submit = "def submit(run: Run, payload: Payload, finalize: float = 0.0):";
     write("now/", VERIFY, "verify", (submit, FINAL));
-    let final_call = "def final_call(target: Run, payload: Payload):";
+    let final_call = "def final_call(target: Run, submissions):";
     write("final/", VERIFY, "verify", (SUBMIT, final_call));
-    let final_call = "def final_call(target: Target, payload: Payload, level: int = 1):";
+    let final_call = "def final_call(target: Target, submissions, level: int = 1):";
     write("after/", VERIFY, "verify", (SUBMIT, final_call));
-    let final_call = "def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):";
+    let final_call = "def final_call(target: Target, submissions, *, mode: str, extra = 0):";
     write("keywords/", VERIFY, "verify", (SUBMIT, final_call));
     let bench = scratch.0.join("keywords/lib/bench.star");
     let library = fs::read_to_string(&bench).unwrap().replace(
@@ -1101,25 +1152,25 @@ fn bodies() {
             $ pumpkin check final/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:151:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
-                151 | def final_call(target: Run, payload: Payload):
+                151 | def final_call(target: Run, submissions):
                     |                ^^^^^^
             pumpkin: final/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/final/tasks/bench/task.star
             $ pumpkin check after/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
-            lib/bench.star:151:50: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
-                151 | def final_call(target: Target, payload: Payload, level: int = 1):
-                    |                                                  ^^^^^
+            lib/bench.star:151:45: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
+                151 | def final_call(target: Target, submissions, level: int = 1):
+                    |                                             ^^^^^
             pumpkin: after/tasks/bench/task.star: the task has 1 problem
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/after/tasks/bench/task.star
             $ pumpkin check keywords/tasks/bench/task.star --arg=model=m
             exit status: Some(1)
             lib/bench.star:151:5: the final call's `keywords` gives `level`, which is no keyword-only parameter of `final_call`: remove it
-                151 | def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):
+                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
                     |     ^^^^^^^^^^
-            lib/bench.star:151:53: the final call's keyword `mode` can't be `3`: `final_call` takes a string
-                151 | def final_call(target: Target, payload: Payload, *, mode: str, extra = 0):
-                    |                                                     ^^^^
+            lib/bench.star:151:48: the final call's keyword `mode` can't be `3`: `final_call` takes a string
+                151 | def final_call(target: Target, submissions, *, mode: str, extra = 0):
+                    |                                                ^^^^
             pumpkin: keywords/tasks/bench/task.star: the task has 2 problems
             pumpkin: to check it again: pumpkin check --arg model=m <scratch>/keywords/tasks/bench/task.star"#]],
     );

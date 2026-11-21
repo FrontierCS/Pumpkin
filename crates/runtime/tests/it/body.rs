@@ -47,8 +47,10 @@ impl runtime::Bodies for Bodies<'_> {
     ) -> Result<Vec<(Name, Value)>, String> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
+            "capture" => capture(target, keywords),
+            "scoped" => scoped(target, keywords, 0),
             "check" => {
-                target.put(&AbsolutePath::from_static("/work/payload"))?;
+                target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 let dir = keywords["dir"].as_str().unwrap();
                 target.run(&argv(&["list", dir]))?;
                 let stdout = AbsolutePath::from_static("/pumpkin/log/0/command.stdout");
@@ -63,7 +65,7 @@ impl runtime::Bodies for Bodies<'_> {
                 ])
             }
             "train" => {
-                target.put(&AbsolutePath::from_static("/work/payload"))?;
+                target.put(&AbsolutePath::from_static("/work/payload"), 0)?;
                 target.run(&argv(&["judge", "/work/payload", "/work/result.json"]))?;
                 let result = target.get(&AbsolutePath::from_static("/work/result.json"))?;
                 let result: Value = serde_json::from_str(&result).unwrap();
@@ -71,10 +73,11 @@ impl runtime::Bodies for Bodies<'_> {
                 Ok(vec![(Name::from_static("raw_score"), score)])
             }
             "run" => {
-                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"))?;
+                target.put(&AbsolutePath::from_static("/pumpkin/in/payload/raw"), 0)?;
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
                 Ok(Vec::new())
             }
+            "board" => board(target),
             "slow" => {
                 target.run(&argv(&["slow"]))?;
                 Ok(Vec::new())
@@ -97,7 +100,7 @@ impl runtime::Bodies for Bodies<'_> {
                 // The core stops the run's calls as the agent's work ends, before the agent's
                 // teardown, whose delete of its sandbox the record then shows.
                 let deleted =
-                    r#""kind":"sandbox_deleted","provider":"simulated","sandbox":"agent""#;
+                    r#""kind":"sandbox_deleted","provider":"simulated","sandbox":"agent-0""#;
                 sim::logged(self.record, deleted);
                 target.run(&argv(&["print", "two"]))?;
                 Ok(Vec::new())
@@ -123,16 +126,43 @@ impl runtime::Bodies for Bodies<'_> {
         &self,
         body: &ir::FinalBody,
         keywords: &Map<String, Value>,
+        submissions: &[(Name, Option<usize>)],
         target: &mut dyn runtime::Target,
     ) -> Result<Vec<(Name, Value)>, String> {
         let argv = |words: &[&str]| -> Argv { serde_json::from_value(json!(words)).unwrap() };
         match body.def.as_str() {
             "final_call" => {
                 let payload = AbsolutePath::from_static("/pumpkin/in/payload/raw");
-                target.put(&payload)?;
+                let Some(slot) = submissions[0].1 else {
+                    return Ok(vec![(Name::from_static("score"), json!(0))]);
+                };
+                target.put(&payload, slot)?;
                 target.run(&argv(&["judge", payload.as_str()]))?;
                 let score = raw_score(target)?;
                 Ok(vec![(Name::from_static("score"), score)])
+            }
+            "scoped" => scoped(target, keywords, submissions[0].1.unwrap()),
+            "submissions" => {
+                assert_eq!(target.caller(), None);
+                let mut files = Map::new();
+                let path = AbsolutePath::from_static("/work/submission");
+                let mut command = 0;
+                for (role, slot) in submissions {
+                    let bytes = if let Some(slot) = slot {
+                        target.put(&path, *slot)?;
+                        target.run(&argv(&["bytes", path.as_str()]))?;
+                        let stdout = AbsolutePath::try_from(format!(
+                            "/pumpkin/log/{command}/command.stdout"
+                        ))
+                        .unwrap();
+                        command += 1;
+                        serde_json::from_str(&target.get(&stdout)?).unwrap()
+                    } else {
+                        Value::Null
+                    };
+                    files.insert(role.to_string(), bytes);
+                }
+                Ok(vec![(Name::from_static("files"), json!(files))])
             }
             "routed" => {
                 target.run(&serde_json::from_value(keywords["argv"].clone()).unwrap())?;
@@ -159,7 +189,7 @@ impl runtime::Bodies for Bodies<'_> {
         match body.def.as_str() {
             "submit" => {
                 deep(DEEP_BYTES / FRAME_BYTES);
-                run.select();
+                run.set_submission();
                 let finalize = arguments.get(&Name::from_static("finalize"))
                     == Some(&ir::ArgumentValue::Bool(true));
                 if finalize {
@@ -201,4 +231,59 @@ fn raw_score(target: &mut dyn runtime::Target) -> Result<Value, String> {
     let result = target.get(&AbsolutePath::from_static("/pumpkin/out/result.json"))?;
     let mut result: Value = serde_json::from_str(&result).map_err(|error| error.to_string())?;
     Ok(result["raw_score"].take())
+}
+
+fn board(target: &mut dyn runtime::Target) -> Result<Vec<(Name, Value)>, String> {
+    let caller = target.caller().unwrap().to_owned();
+    let path = AbsolutePath::from_static("/work/message");
+    if caller == "alpha" {
+        target.put(&path, 0)?;
+    }
+    target.run(&serde_json::from_value(json!(["print", caller])).unwrap())?;
+    let message = target.get(&path)?;
+    Ok(vec![(Name::from_static("message"), json!(message))])
+}
+
+fn capture(
+    target: &mut dyn runtime::Target,
+    keywords: &Map<String, Value>,
+) -> Result<Vec<(Name, Value)>, String> {
+    let argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
+    let stdin = keywords["stdin"].as_bool().unwrap().then_some(0);
+    let reply = target.capture(&argv, stdin)?;
+    Ok(vec![(Name::from_static("reply"), json!(reply))])
+}
+
+fn scoped(
+    target: &mut dyn runtime::Target,
+    keywords: &Map<String, Value>,
+    input: usize,
+) -> Result<Vec<(Name, Value)>, String> {
+    let grant = Name::from_static("box");
+    let lease = target.runner_open(&grant)?;
+    let tree =
+        AbsolutePath::try_from(format!("/work/{}", target.caller().unwrap_or("src"))).unwrap();
+    target.put(
+        &tree.join(&schema::sandbox::RelativePath::from_static("source")),
+        input,
+    )?;
+    target.runner_put(&grant, lease, tree, AbsolutePath::from_static("/work/src"))?;
+    let argv: Argv = serde_json::from_value(keywords["argv"].clone()).unwrap();
+    let timeout = std::num::NonZeroU64::new(1);
+    let command = target.runner_run(&grant, lease, argv.clone(), timeout)?;
+    let received = AbsolutePath::try_from(format!(
+        "/pumpkin/out/{}",
+        target.caller().unwrap_or("final")
+    ))
+    .unwrap();
+    target.runner_get(
+        &grant,
+        lease,
+        AbsolutePath::from_static("/work/src/source"),
+        received,
+    )?;
+    let refused = target.runner_run(&grant, lease, argv, timeout).unwrap_err();
+    assert!(refused.contains("no commands left"));
+    target.runner_close(&grant, lease)?;
+    Ok(vec![(Name::from_static("command"), json!(command))])
 }

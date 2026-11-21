@@ -8,16 +8,16 @@ use schema::ir::{self, Gpu, Name};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::Place;
 use super::progress::{Sandbox, places};
+use super::{CallerName, Place};
 use crate::TokenPrices;
 use crate::read_error::{ReadError, read_optional};
 
 /// What the IR and `provider.json` say of a run's roles: what the log's lines refer to by name.
 #[derive(Default)]
 pub(super) struct Roles {
-    pub(super) agent_role: String,
-    pub(super) routed: bool,
+    pub(super) agents: BTreeMap<CallerName, Agent>,
+    pub(super) shared: BTreeMap<String, usize>,
     pub(super) grants: BTreeMap<(String, String), Grant>,
     pub(super) final_target: Option<String>,
     pub(super) places: BTreeMap<String, Place>,
@@ -33,10 +33,22 @@ impl Roles {
         let roles = ir.map_or(&[][..], |ir| ir.roles.as_slice());
         let gpus = (roles.iter())
             .filter_map(|role| Some((role.name.to_string(), role.needs.gpu.clone()?)));
-        let agent = roles.iter().find_map(|role| match &role.runtime {
-            ir::Runtime::Agent(agent) => Some((&role.name, agent)),
-            ir::Runtime::Target(_) | ir::Runtime::Runner(_) => None,
-        });
+        let agents = roles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, role)| {
+                let ir::Runtime::Agent(agent) = &role.runtime else {
+                    return None;
+                };
+                Some((
+                    CallerName::Agent(index),
+                    Agent {
+                        name: role.name.to_string(),
+                        routed: agent.egress.model.is_some(),
+                    },
+                ))
+            })
+            .collect();
         let grants = roles.iter().flat_map(|role| {
             held(&role.runtime)
                 .map(|(name, grant)| ((role.name.to_string(), name.to_string()), grant))
@@ -59,26 +71,27 @@ impl Roles {
                 }
             }
         }
-        // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
-        let entries = provided["routes"].as_object().into_iter().flatten();
-        let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
-        let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
-        let token_prices = models.filter_map(|(model, served)| {
-            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
-            Some((model.clone(), prices))
-        });
         Self {
-            agent_role: agent.map(|(name, _)| name.to_string()).unwrap_or_default(),
-            routed: agent.is_some_and(|(_, agent)| agent.egress.model.is_some()),
+            agents,
+            shared: roles
+                .iter()
+                .enumerate()
+                .filter(|(_, role)| matches!(&role.runtime, ir::Runtime::Target(target) if target.lifetime == Some(ir::TargetLifetime::Work)))
+                .map(|(index, role)| (role.name.to_string(), index))
+                .collect(),
             grants: grants.collect(),
             final_target,
             places: places(provided),
             gpus: gpus.collect(),
-            deadline: agent.map(|(_, agent)| Duration::from_secs(agent.deadline_seconds.get())),
+            deadline: ir.map(|ir| Duration::from_secs(ir.deadline_seconds.get())),
             startups,
             prices,
-            token_prices: token_prices.collect(),
+            token_prices: token_prices(provided),
         }
+    }
+
+    pub(super) fn agent_name(&self, caller: CallerName) -> Option<&str> {
+        self.agents.get(&caller).map(|role| role.name.as_str())
     }
 
     pub(super) fn sandbox(&self, role: Option<&str>, asked: Duration) -> Sandbox {
@@ -91,6 +104,25 @@ impl Roles {
             ..Sandbox::default()
         }
     }
+}
+
+fn token_prices(provided: &Value) -> BTreeMap<String, TokenPrices> {
+    // `{"routes": {role: [{"models": {m: {"usd_per_mtok": t}}}]}}`.
+    let entries = provided["routes"].as_object().into_iter().flatten();
+    let entries = entries.flat_map(|(_, entries)| entries.as_array().into_iter().flatten());
+    let models = entries.flat_map(|entry| entry["models"].as_object().into_iter().flatten());
+    models
+        .filter_map(|(model, served)| {
+            let prices = TokenPrices::deserialize(&served["usd_per_mtok"]).ok()?;
+            Some((model.clone(), prices))
+        })
+        .collect()
+}
+
+#[derive(Default)]
+pub(super) struct Agent {
+    pub(super) name: String,
+    pub(super) routed: bool,
 }
 
 #[derive(Clone, Default)]
@@ -137,11 +169,34 @@ pub(crate) fn ir_in(dir: &Path) -> Result<Option<ir::Workflow>, ReadError> {
     let Some(bytes) = read_optional(&path)? else {
         return Ok(None);
     };
-    let ir = serde_json::from_slice(&bytes).map_err(|error| {
-        ReadError::Form(format!(
-            "{} holds an IR that this build doesn't read: {error}",
-            path.display()
-        ))
-    })?;
+    let ir = serde_json::from_slice(&bytes)
+        .or_else(|error| legacy_ir(&bytes).ok_or(error))
+        .map_err(|error| {
+            ReadError::Form(format!(
+                "{} holds an IR that this build doesn't read: {error}",
+                path.display()
+            ))
+        })?;
     Ok(Some(ir))
+}
+
+/// Recorded service roles used the same physical sandbox and job records as work-lifetime
+/// targets. Only record readers accept their old declaration.
+fn legacy_ir(bytes: &[u8]) -> Option<ir::Workflow> {
+    let mut ir: Value = serde_json::from_slice(bytes).ok()?;
+    let mut converted = false;
+    for role in ir.get_mut("roles")?.as_array_mut()? {
+        let runtime = role.get_mut("runtime")?.as_object_mut()?;
+        if runtime.len() == 1
+            && let Some(mut shared) = runtime.remove("shared")
+        {
+            let target = shared.as_object_mut()?;
+            ir::Command::deserialize(target.remove("command")?).ok()?;
+            target.insert("lifetime".to_owned(), Value::from("work"));
+            runtime.insert("target".to_owned(), shared);
+            converted = true;
+        }
+    }
+    converted.then_some(())?;
+    serde_json::from_value(ir).ok()
 }

@@ -18,12 +18,11 @@ use rustix::thread;
 use stdx::Context;
 
 /// Waits until a child has exited, or a child that made this process its tracer has stopped,
-/// without reaping it: false if there are no children. Fails with waitid's errno.
-pub(crate) fn wait_for_child() -> io::Result<bool> {
+/// without reaping it. Fails with waitid's errno, including when there are no children.
+pub(crate) fn wait_for_child() -> io::Result<()> {
     loop {
         match process::waitid(WaitId::All, WaitIdOptions::EXITED | WaitIdOptions::NOWAIT) {
-            Ok(_) => return Ok(true),
-            Err(Errno::CHILD) => return Ok(false),
+            Ok(_) => return Ok(()),
             Err(Errno::INTR) => {}
             Err(error) => return Err(error.into()),
         }

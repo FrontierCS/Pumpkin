@@ -12,8 +12,10 @@
 mod upload;
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStrExt as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use provider::RunTag;
@@ -63,8 +65,21 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
     let top = git(dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
         format!("{entry}: {error}: a run on the controller sends the entry's git repository: put it in one")
     })?;
-    let top = PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches('\n'));
-    let top = fs::canonicalize(&top).context(top.display())?;
+    let top = Path::new(OsStr::from_bytes(top.strip_suffix(b"\n").unwrap_or(&top)));
+    let top = fs::canonicalize(top).context(top.display())?;
+    let below = path.strip_prefix(&top).map_err(|_| {
+        format!(
+            "{entry}: {} is outside its git repository, {}: put the entry in the repository",
+            path.display(),
+            top.display()
+        )
+    })?;
+    let below = below.to_str().ok_or_else(|| {
+        format!(
+            "{entry}: its path below the git repository isn't UTF-8: rename it so it can be sent \
+             to the controller"
+        )
+    })?;
     let files = git(
         &top,
         &[
@@ -81,14 +96,6 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
     };
     let files = needed(entry, &reach.root, &reach.paths, &top, &files)?;
     let hashed = manifest::hash(&top, &files)?;
-    let below = path.strip_prefix(&top).ok().and_then(Path::to_str);
-    let Some(below) = below else {
-        unreachable!(
-            "{} is below {}, as git found it from the entry's directory",
-            path.display(),
-            top.display()
-        )
-    };
     let name = top
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

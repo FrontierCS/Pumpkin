@@ -49,13 +49,17 @@ fn reaps_ended() {
     let runs = TestDir::new();
     let older = json!({ "state": "finished", "verdict": { "kind": "graded" } });
     let records = [
-        (ENDED, None, &[("agent", "a"), ("leases/0", "b")][..]),
-        (OLDER_ENDED, Some(older), &[("agent", "d")]),
+        (
+            ENDED,
+            None,
+            &[("agents/solver", "a"), ("leases/0", "b")][..],
+        ),
+        (OLDER_ENDED, Some(older), &[("agents/solver", "d")]),
     ];
     for (id, outcome, sandboxes) in records {
         let dir = runs.path().join(id);
         fs::create_dir_all(&dir).unwrap();
-        let record = json!({ "record_version": "pumpkin.record/v0", "args": [] });
+        let record = json!({ "record_version": "pumpkin.record/v1", "args": [] });
         fs::write(dir.join("record.json"), record.to_string()).unwrap();
         fs::write(dir.join("driver.pid"), "4242\n").unwrap();
         if let Some(outcome) = outcome {

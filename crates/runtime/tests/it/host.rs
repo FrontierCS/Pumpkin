@@ -36,13 +36,15 @@ pub(crate) struct SimHost {
 struct State {
     now: Duration,
     late: Option<LateTake>,
-    slow: Option<SlowSync>,
-    failed: Option<u64>,
+    late_armed: bool,
+    after_take: Option<fn()>,
+    slow: VecDeque<SlowSync>,
+    failed: Option<Synced>,
     failed_file: Option<(&'static str, u32)>,
     first: Option<Arc<dyn Fill>>,
 }
 
-/// The run's first take of an input, from whichever of its inboxes, comes late: once `behind`
+/// A take comes late, after setup or the agent's initial ops query: once `behind`
 /// more inputs are queued behind it, and at `at`, as if the loop had been busy until then. Then
 /// each of the next `then` takes from that inbox waits for an input, whatever the time, as if the
 /// loop had been busy until one came.
@@ -76,7 +78,9 @@ impl SimHost {
         let state = State {
             now: Duration::ZERO,
             late: None,
-            slow: None,
+            late_armed: false,
+            after_take: None,
+            slow: VecDeque::new(),
             failed: None,
             failed_file: None,
             first: None,
@@ -87,18 +91,26 @@ impl SimHost {
         }
     }
 
+    pub(crate) fn during_setup(self, late: LateTake, after: fn()) -> Self {
+        let mut state = stdx::unpoisoned(self.state.lock());
+        state.late_armed = true;
+        state.after_take = Some(after);
+        drop(state);
+        self.late_take(late)
+    }
+
     pub(crate) fn late_take(self, late: LateTake) -> Self {
         stdx::unpoisoned(self.state.lock()).late = Some(late);
         self
     }
 
     pub(crate) fn slow_sync(self, slow: SlowSync) -> Self {
-        stdx::unpoisoned(self.state.lock()).slow = Some(slow);
+        stdx::unpoisoned(self.state.lock()).slow.push_back(slow);
         self
     }
 
-    /// Fails the first sync of the run log that holds its record numbered `record`.
-    pub(crate) fn failed_sync(self, record: u64) -> Self {
+    /// Fails the first sync that makes `record` last.
+    pub(crate) fn failed_sync(self, record: Synced) -> Self {
         stdx::unpoisoned(self.state.lock()).failed = Some(record);
         self
     }
@@ -137,10 +149,17 @@ impl Host for SimHost {
         let lasts = |record: u64| last.is_some_and(|last| last >= record);
         let mut state = stdx::unpoisoned(self.state.lock());
         let holds = |text: &str| fs::read_to_string(&path).is_ok_and(|held| held.contains(text));
-        let slow = state.slow.take_if(|slow| match slow.record {
+        if state.late.is_some()
+            && path.ends_with("log.jsonl")
+            && holds(r#""request":{"kind":"ops"}"#)
+        {
+            state.late_armed = true;
+        }
+        let reached = |record: &Synced| match *record {
             Synced::Seq(record) => lasts(record),
             Synced::Holding(file, text) => path.ends_with(file) && holds(text),
-        });
+        };
+        let slow = state.slow.pop_front_if(|slow| reached(&slow.record));
         let named = |name: &str| path.file_name() == Some(name.as_ref());
         let file = match &mut state.failed_file {
             Some((name, 0)) => named(name),
@@ -155,7 +174,7 @@ impl Host for SimHost {
         if file {
             state.failed_file = None;
         }
-        let failed = state.failed.take_if(|record| lasts(*record)).is_some() || file;
+        let failed = state.failed.take_if(|record| reached(record)).is_some() || file;
         let first = state.first.clone();
         // Without the lock, so that the run's other threads read the clock as they hand the loop
         // its inputs.
@@ -248,6 +267,10 @@ trait Fill: Send + Sync {
 
 impl<T: Send> Fill for Mutex<Queue<T>> {
     fn fill(&self, queued: usize, expected: &str) {
+        // A worker syncing its record may be the sender that the loop awaits under this lock.
+        if queued == 0 {
+            return;
+        }
         let mut queue = stdx::unpoisoned(self.lock());
         while queue.behind.len() < queued {
             let next = queue.received(expected);
@@ -289,7 +312,13 @@ impl<T: Send> SimInbox<T> {
     }
 
     fn late(&mut self, input: T) -> T {
-        let late = stdx::unpoisoned(self.clock.state.lock()).late.take();
+        let mut state = stdx::unpoisoned(self.clock.state.lock());
+        if !state.late_armed {
+            return input;
+        }
+        let late = state.late.take();
+        let after = state.after_take.take();
+        drop(state);
         let Some(LateTake { behind, at, then }) = late else {
             return input;
         };
@@ -297,6 +326,9 @@ impl<T: Send> SimInbox<T> {
         // Without the clock's lock, so that the run's other threads read the clock as they wait.
         self.queue.fill(behind, SCRIPTED);
         stdx::unpoisoned(self.clock.state.lock()).now = at;
+        if let Some(after) = after {
+            after();
+        }
         input
     }
 }

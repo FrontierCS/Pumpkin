@@ -19,9 +19,21 @@ use crate::TokenPrices;
 
 impl Progress {
     fn each_sandbox(&self) -> impl Iterator<Item = &Sandbox> {
-        let calls = self.calls.iter().map(|call| &call.sandbox);
+        let calls = self
+            .calls
+            .iter()
+            .filter(|call| call.shared.is_none())
+            .map(|call| &call.sandbox);
         let leases = self.leases.iter().map(|lease| &lease.sandbox);
-        std::iter::once(&self.agent.sandbox)
+        self.agents
+            .values()
+            .map(|agent| &agent.sandbox)
+            .chain(
+                self.shared
+                    .values()
+                    .filter(|service| service.sandbox.deleted.is_some())
+                    .map(|service| &service.sandbox),
+            )
             .chain(calls)
             .chain(leases)
     }
@@ -67,7 +79,7 @@ impl Progress {
         }
         (
             usd,
-            sandboxes.values().any(|used| used.usd_per_hour.is_none()),
+            self.unplaced_sandbox || sandboxes.values().any(|used| used.usd_per_hour.is_none()),
         )
     }
 
@@ -166,7 +178,7 @@ pub struct Cost {
     pub priced: Priced,
     /// The models whose tokens went unpriced.
     pub unpriced_models: Vec<String>,
-    /// Whether a sandbox's class has no price, so its time went unpriced.
+    /// Whether some sandbox time went unpriced because its class or its price is unknown.
     pub unpriced_classes: bool,
     /// How many responses of the models that have a price went with tokens unreported
     /// ([`ModelUse::unreported`]).
@@ -271,6 +283,9 @@ pub(crate) fn usage_of(progress: &Progress) -> Value {
             })
         })
         .collect();
+    if progress.unplaced_sandbox {
+        usage["unplaced_sandbox"] = json!(true);
+    }
     if !calls.is_empty() {
         usage["calls"] = json!(calls);
     }
@@ -313,6 +328,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         unpriced_models: Vec<String>,
         #[serde(default)]
         unreported_responses: u64,
+        #[serde(default)]
+        unplaced_sandbox: bool,
     }
     #[derive(Deserialize)]
     struct Counted {
@@ -335,6 +352,7 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
         usd,
         unpriced_models,
         unreported_responses,
+        unplaced_sandbox,
     } = Usage::deserialize(usage).map_err(|error| error.to_string())?;
     let Counted {
         responses,
@@ -356,7 +374,8 @@ pub(crate) fn used(usage: &Value) -> Result<Used, String> {
             reasoning,
         },
         usd,
-        partial: !unpriced_models.is_empty()
+        partial: unplaced_sandbox
+            || !unpriced_models.is_empty()
             || unreported_responses > 0
             || sandboxes.iter().any(|placed| placed.usd_per_hour.is_none()),
     })

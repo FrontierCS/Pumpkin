@@ -3,10 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::num::NonZeroU64;
 
 use expect_test::{Expect, expect};
 use lang::{Args, Body, BodyKind, Bounds, Host, Label};
 use schema::ir::{AbsolutePath, ArgumentValue, Argv, Name};
+use schema::sandbox::ExitStatus;
+use schema::sandbox::op::{CommandEnd, RunnerOutput};
 use serde_json::{Value, json};
 
 use crate::{Case, Sources, files, on_stack};
@@ -22,8 +25,66 @@ const RESULT: (&str, &str) = (
 struct Logged(Vec<String>);
 
 impl lang::Target for Logged {
-    fn put(&mut self, path: &AbsolutePath) -> Result<(), String> {
-        self.0.push(format!("put the payload at {path}"));
+    fn runner_open(&mut self, grant: &Name) -> Result<u64, String> {
+        let lease = self.0.len() as u64;
+        self.0.push(format!("{grant} open"));
+        Ok(lease)
+    }
+
+    fn runner_put(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        tree: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.push(format!("{grant} {lease} put {tree} at {to}"));
+        Ok(())
+    }
+
+    fn runner_get(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        from: AbsolutePath,
+        to: AbsolutePath,
+    ) -> Result<(), String> {
+        self.0.push(format!("{grant} {lease} get {from} at {to}"));
+        Ok(())
+    }
+
+    fn runner_run(
+        &mut self,
+        grant: &Name,
+        lease: u64,
+        argv: Argv,
+        timeout_seconds: Option<NonZeroU64>,
+    ) -> Result<RunnerOutput, String> {
+        self.0.push(format!(
+            "{grant} {lease} run {} with timeout {timeout_seconds:?}",
+            argv.program()
+        ));
+        Ok(RunnerOutput {
+            end: CommandEnd::Exited(ExitStatus::Code(7)),
+            stdout_tail: "answer".into(),
+            stderr_tail: "diagnostic".into(),
+        })
+    }
+
+    fn runner_close(&mut self, grant: &Name, lease: u64) -> Result<(), String> {
+        self.0.push(format!("{grant} close {lease}"));
+        if grant.as_str() == "lost" {
+            return Err("lost contact with the runner".to_owned());
+        }
+        Ok(())
+    }
+
+    fn caller(&self) -> Option<&str> {
+        Some("agent")
+    }
+
+    fn put(&mut self, path: &AbsolutePath, input: usize) -> Result<(), String> {
+        self.0.push(format!("put payload {input} at {path}"));
         Ok(())
     }
 
@@ -31,6 +92,12 @@ impl lang::Target for Logged {
         self.0
             .push(format!("run {} {:?}", argv.program(), argv.args()));
         Ok(())
+    }
+
+    fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
+        self.0
+            .push(format!("capture {} with stdin {stdin:?}", argv.program()));
+        Ok(RESULT.1.to_owned())
     }
 
     fn get(&mut self, path: &AbsolutePath) -> Result<String, String> {
@@ -47,8 +114,8 @@ impl lang::Target for Logged {
 }
 
 impl lang::Run for Logged {
-    fn select(&mut self) {
-        self.0.push(String::from("select the payload"));
+    fn set_submission(&mut self) {
+        self.0.push(String::from("set the submission"));
     }
 
     fn end_work(&mut self) {
@@ -70,6 +137,24 @@ fn check(def: &str, kind: BodyKind, keywords: Value, fixture: &str, expect: &Exp
     );
 }
 
+fn caller_arguments(given: Value) -> BTreeMap<Name, ArgumentValue> {
+    let Value::Object(given) = given else {
+        panic!("the arguments are {given}: give an object")
+    };
+    given
+        .into_iter()
+        .map(|(name, value)| {
+            let value = match value {
+                Value::String(text) => ArgumentValue::Str(text),
+                Value::Bool(bool) => ArgumentValue::Bool(bool),
+                Value::Number(int) => ArgumentValue::Int(int.as_i64().unwrap()),
+                other => panic!("an argument can't be {other}"),
+            };
+            (Name::try_from(name).unwrap(), value)
+        })
+        .collect()
+}
+
 /// Checks, against `expect`, what a call of `def`, a body of `kind`, gives with `keywords`, a JSON
 /// object, and the caller's arguments that `given`, an object of strings, ints and bools, holds,
 /// within `bounds`: each method its handle calls, then each name and value it returns, in order;
@@ -88,20 +173,7 @@ fn check_within(
     let Value::Object(keywords) = keywords else {
         panic!("the keywords are {keywords}: give an object")
     };
-    let Value::Object(given) = given else {
-        panic!("the arguments are {given}: give an object")
-    };
-    let arguments: BTreeMap<Name, ArgumentValue> = (given.into_iter())
-        .map(|(name, value)| {
-            let value = match value {
-                Value::String(text) => ArgumentValue::Str(text),
-                Value::Bool(bool) => ArgumentValue::Bool(bool),
-                Value::Number(int) => ArgumentValue::Int(int.as_i64().unwrap()),
-                other => panic!("an argument can't be {other}"),
-            };
-            (Name::try_from(name).unwrap(), value)
-        })
-        .collect();
+    let arguments = caller_arguments(given);
     let files = files();
     let shown = on_stack(|| {
         let (args, case) = Case::parse(fixture, &files, bounds);
@@ -118,10 +190,12 @@ fn check_within(
         };
         let checked = lang::check(&body, kind, &mut sources, &args, bounds);
         let mut host = Logged::default();
+        let submissions = [("z", Some(1)), ("a", None), ("b", Some(0))]
+            .map(|(role, slot)| (Name::try_from(role.to_owned()).unwrap(), slot));
         let host_of_kind = match kind {
             BodyKind::Job => Host::Job(&mut host),
             BodyKind::Now => Host::Now(&mut host),
-            BodyKind::Final => Host::Final(&mut host),
+            BodyKind::Final => Host::Final(&mut host, &submissions),
         };
         let called = lang::call(&body, host_of_kind, &arguments, &mut sources, &args, bounds);
         match (checked, called) {
@@ -158,6 +232,105 @@ fn check_within(
 }
 
 #[test]
+fn runner_returns_its_callback_value() {
+    check(
+        "judge",
+        BodyKind::Job,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner: Runner, source):
+    runner.put(source, "/work/src")
+    result = runner.run(["compile"], timeout_seconds = 2)
+    runner.get("/work/result", "/out")
+    return result
+def judge(target: Target, payload: Payload):
+    return target.with_runner("cpp", check, "/source")
+"#,
+        &expect![[r#"
+            cpp open
+            cpp 0 put /source at /work/src
+            cpp 0 run compile with timeout Some(2)
+            cpp 0 get /work/result at /out
+            cpp close 0
+            returns end={"exited":{"code":7}} stderr_tail="diagnostic" stdout_tail="answer""#]],
+    );
+}
+
+#[test]
+fn callback_error_survives_a_failed_close() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def check(runner):
+    return fail("invalid checker data")
+def judge(target, submissions):
+    return target.with_runner("lost", check)
+"#,
+        &expect![[r#"
+            lost open
+            lost close 0
+            score.star:2:12: fail: invalid checker data
+                2 |     return fail("invalid checker data")
+                  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                in `check()`, called at score.star:4:12
+                closing the runner also failed: lost contact with the runner
+                in `judge()`, called at score.star:3:5"#]],
+    );
+}
+
+#[test]
+fn runner_lifetime() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def identity(runner: Runner):
+    return runner
+def run_with(runner: Runner, earlier: Runner):
+    return earlier.run(["outside"])
+def judge(target: Target, submissions):
+    earlier = target.with_runner("cpp", identity)
+    return target.with_runner("cpp", run_with, earlier)
+"#,
+        &expect![[r#"
+            cpp open
+            cpp close 0
+            cpp open
+            cpp close 2
+            score.star:4:12: the runner's callback has ended: use a runner within its callback
+                4 |     return earlier.run(["outside"])
+                  |            ^^^^^^^^^^^^^^^^^^^^^^^^
+                in `run_with()`, called at score.star:7:12
+                in `judge()`, called at score.star:5:5"#]],
+    );
+}
+
+#[test]
+fn captures_stdout_with_the_selected_input() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //score.star
+def judge(target: Target, submissions):
+    return {name: json.decode(target.capture(["worker"], stdin = submission))["raw_score"] for name, submission in submissions.items()}
+"#,
+        &expect![[r#"
+            capture worker with stdin Some(1)
+            capture worker with stdin None
+            capture worker with stdin Some(0)
+            returns z=43.12 a=43.12 b=43.12"#]],
+    );
+}
+
+#[test]
 fn targets() {
     check(
         "train_call",
@@ -169,7 +342,7 @@ PAYLOAD = "/pumpkin/in/payload"
 
 def _verified(target: Target, payload: Payload):
     target.put(PAYLOAD, payload)
-    target.run(["/opt/frontier/verifier", "--fast"])
+    target.run(["/opt/frontier/verifier", "--fast", target.caller()])
     return json.decode(target.get("/pumpkin/out/result.json"))
 
 def train_call(target: Target, payload: Payload, *, metrics: list[str]):
@@ -179,8 +352,8 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
     return top | {name: found[name] for name in metrics if name in found}
 "#,
         &expect![[r#"
-            put the payload at /pumpkin/in/payload
-            run /opt/frontier/verifier ["--fast"]
+            put payload 0 at /pumpkin/in/payload
+            run /opt/frontier/verifier ["--fast", "agent"]
             get /pumpkin/out/result.json
             returns raw_score=43.12 failure="slow" passed=7"#]],
     );
@@ -190,16 +363,19 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
         json!({}),
         r#"
 #- //lib/verify.star
-def final_call(target: Target, payload: Payload, *, mode: str = "final"):
-    target.put("/pumpkin/in/payload", payload)
+def final_call(target: Target, submissions, *, mode: str = "final"):
+    _ = [target.put("/in/" + name, submissions[name]) for name in submissions if submissions[name] != None]
+    target.put("/another", submissions["z"])
     target.run(["/opt/frontier/verifier", mode])
-    return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"]}
+    return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"], "missing": submissions["a"]}
 "#,
         &expect![[r#"
-            put the payload at /pumpkin/in/payload
+            put payload 1 at /in/z
+            put payload 0 at /in/b
+            put payload 1 at /another
             run /opt/frontier/verifier ["final"]
             get /pumpkin/out/result.json
-            returns score=43.12"#]],
+            returns score=43.12 missing=null"#]],
     );
 }
 
@@ -208,7 +384,7 @@ fn arguments() {
     let submit = r#"
 #- //lib/submit.star
 def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
     return {"note": note}
@@ -228,7 +404,7 @@ def submit(run: Run, payload: Payload, finalize: bool, note: str = "none"):
     check(
         json!({"finalize": true, "note": "last"}),
         &expect![[r#"
-            select the payload
+            set the submission
             end the work
             returns note="last""#]],
     );
@@ -276,14 +452,14 @@ fn now() {
         r#"
 #- //lib/submit.star
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
     return {"state": "stored"}
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             returns state="stored""#]],
     );
     check(
@@ -293,12 +469,12 @@ def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]
         r#"
 #- //lib/submit.star
 def final(run, payload):
-    run.select(payload)
+    run.set_submission(payload)
     run.end_work()
     return {}
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             end the work
             returns"#]],
     );
@@ -310,6 +486,20 @@ def final(run, payload):
     reason = "most of it is the cases and their snapshots"
 )]
 fn refusals() {
+    check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //lib/judge.star
+def judge(target: Target, submissions: Payload):
+    return {}
+"#,
+        &expect![[r#"
+            lib/judge.star:1:27: `judge` takes the submissions by role: leave `submissions` unannotated
+                1 | def judge(target: Target, submissions: Payload):
+                  |                           ^^^^^^^^^^^"#]],
+    );
     check(
         "train_call",
         BodyKind::Job,
@@ -327,14 +517,14 @@ fn refusals() {
         json!({}),
         r#"
 #- //lib/verify.star
-workflow(name = "verify", roles = [], final = None)
+workflow(name = "verify", roles = [], final = None, deadline_seconds = 1)
 def train_call(target, payload):
     pass
 "#,
         &expect![[r#"
             lib/verify.star:1:1: `workflow()` is called while `//lib/verify.star` loads: call it in the entry file, which loads `//lib/verify.star`
-                1 | workflow(name = "verify", roles = [], final = None)
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
+                1 | workflow(name = "verify", roles = [], final = None, deadline_seconds = 1)
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"#]],
     );
     check(
         "train_cal",
@@ -444,10 +634,10 @@ def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = 
             lib/final.star:1:16: `final_call`'s first parameter is a `Run`, and the final call's body takes its `Target`: write `def final_call(target: Target, …)`
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                ^^^^^^
-            lib/final.star:1:38: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
+            lib/final.star:1:38: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                                      ^^^^^
-            lib/final.star:1:50: `final_call`'s `mode` follows the payload, and the final call has no caller to give it: remove it
+            lib/final.star:1:50: `final_call`'s `mode` follows the submissions, and the final call has no caller to give it: remove it
                 1 | def final_call(target: Run, payload, level: int, mode = "x", *, metric, extra = ""):
                   |                                                  ^^^^
             lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
@@ -479,6 +669,23 @@ def train_call(target, payload, *, deep):
 )]
 fn failures() {
     check(
+        "judge",
+        BodyKind::Final,
+        json!({}),
+        r#"
+#- //lib/judge.star
+def judge(target: Target, submissions):
+    target.put("/in/absent", submissions["a"])
+    return {}
+"#,
+        &expect![[r#"
+            lib/judge.star:2:30: `put` can't put `None`: give it the payload
+                2 |     target.put("/in/absent", submissions["a"])
+                  |                              ^^^^^^^^^^^^^^^^
+                the argument, `None`, is made at lib/judge.star:1:5
+                in `judge()`, called at lib/judge.star:1:5"#]],
+    );
+    check(
         "train_call",
         BodyKind::Job,
         json!({}),
@@ -489,7 +696,7 @@ def train_call(target, payload):
     return json.decode(target.get("/pumpkin/out/missing.json"))
 "#,
         &expect![[r#"
-            put the payload at /pumpkin/in/payload
+            put payload 0 at /pumpkin/in/payload
             get /pumpkin/out/missing.json
             lib/verify.star:3:24: the target has no file at `/pumpkin/out/missing.json`: get `/pumpkin/out/result.json`
                 3 |     return json.decode(target.get("/pumpkin/out/missing.json"))
@@ -506,7 +713,7 @@ def train_call(target, payload):
     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
 "#,
         &expect![[r#"
-            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
+            lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`, `with_runner`
                 2 |     return target.pt(target.get("/pumpkin/out/missing.json"), payload)
                   |                   ^^
                 the receiver, a `Target`, is made at lib/verify.star:1:5
@@ -553,7 +760,7 @@ def submit(run, payload):
     return payload.read()
 "#,
         &expect![[r#"
-            lib/submit.star:2:20: the payload has no method `read`: pass it to a `Target`'s `put` or a `Run`'s `select`
+            lib/submit.star:2:20: the payload has no method `read`: pass it to `target.put`, `target.capture` as stdin, or `run.set_submission`
                 2 |     return payload.read()
                   |                    ^^^^
                 the receiver, the payload, is made at lib/submit.star:1:5
@@ -566,12 +773,28 @@ def submit(run, payload):
         r#"
 #- //lib/submit.star
 def submit(run, payload):
-    run.select("text")
+    run.select(payload)
 "#,
         &expect![[r#"
-            lib/submit.star:2:16: `select` can't select a string: give it the payload
-                2 |     run.select("text")
-                  |                ^^^^^^
+            lib/submit.star:2:9: `select` is no method of a `Run`: call one of `end_work`, `set_submission`
+                2 |     run.select(payload)
+                  |         ^^^^^^
+                the receiver, a `Run`, is made at lib/submit.star:1:5
+                in `submit()`, called at lib/submit.star:1:5"#]],
+    );
+    check(
+        "submit",
+        BodyKind::Now,
+        json!({}),
+        r#"
+#- //lib/submit.star
+def submit(run, payload):
+    run.set_submission("text")
+"#,
+        &expect![[r#"
+            lib/submit.star:2:24: `set_submission` can't use a string: give it the payload
+                2 |     run.set_submission("text")
+                  |                        ^^^^^^
                 in `submit()`, called at lib/submit.star:1:5"#]],
     );
     check(
@@ -646,10 +869,10 @@ def train_call(target, payload):
         r#"
 #- //lib/submit.star
 def submit(run, payload):
-    run.select(payload)
+    run.set_submission(payload)
 "#,
         &expect![[r#"
-            select the payload
+            set the submission
             lib/submit.star:1:5: `submit` returns `None`, and a body returns a dict of names to values: return a dict
                 1 | def submit(run, payload):
                   |     ^^^^^^"#]],

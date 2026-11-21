@@ -5,8 +5,9 @@
 //!
 //! | Command | Call | Reply |
 //! | --- | --- | --- |
-//! | `sandboxctl ops` | [`OpCall::Ops`] | [`OpsReply`] |
+//! | `sandboxctl ops [--text]` | [`OpCall::Ops`] | [`OpsReply`] |
 //! | `sandboxctl call <function> <file>` | [`OpCall::Call`] | [`CallReply`] |
+//! | `sandboxctl call <function> <file> --wait <seconds>` | [`OpCall::Call`], [`OpCall::Status`] | [`NowReply`] or [`StatusReply`] |
 //! | `sandboxctl status <job>` | [`OpCall::Status`] | [`StatusReply`] |
 //! | `sandboxctl call <session>.open [--seconds <n>]` | [`SessionOp::Open`] | [`LeaseReply`] |
 //! | `sandboxctl call <session>.run <lease> [--timeout <s>] -- <argv>…` | [`SessionOp::Run`] | [`LeaseReply`] |
@@ -15,13 +16,15 @@
 //! | `sandboxctl call <session>.status <lease>` | [`SessionOp::Status`] | [`LeaseStatusReply`] |
 //! | `sandboxctl call <session>.close <lease>` | [`SessionOp::Close`] | [`LeaseReply`] |
 //!
-//! A payload is read from its file when its caller's turn comes, so leave the file be until the
-//! call returns.
+//! An omitted payload file sends zero bytes. A supplied file is read when its caller's turn
+//! comes, so leave the file be until the call returns.
 //!
 //! A reply is an object whose `kind` is its [`OpReply`]'s variant, `refused` answering any op. Its
 //! fields are its type's, under the same names; a limit or a quota that doesn't exist is `null`. A
 //! status has `returned` once its job has given a result, and `failure` only if it gave none; once
 //! its job has ended, it has `model_requests_over_budget` only if that is 1 or more.
+
+mod guide;
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -153,7 +156,20 @@ pub enum OpReply {
     /// The owner refused the op, and did nothing, for the reason given.
     Refused {
         message: String,
+        /// True if the caller can retry this uncharged call once the current call ends.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        busy: bool,
     },
+}
+
+impl OpReply {
+    /// Refuses the op without inviting the caller to retry.
+    pub fn refused(message: String) -> Self {
+        Self::Refused {
+            message,
+            busy: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +177,7 @@ pub enum OpReply {
 /// The reply to [`OpCall::Ops`]: the time left to work, the caller's resources and the grants it
 /// holds.
 pub struct OpsReply {
+    pub role: Name,
     /// The time left to work, in whole seconds rounded down: from when the op reached its owner, or
     /// later, until its caller's work ends.
     pub remaining_seconds: u64,
@@ -205,6 +222,9 @@ pub enum Grant {
 /// A job function, which [`OpCall::Call`] calls; see [`ir::JobFunction`](crate::ir::JobFunction)
 /// for its limits.
 pub struct JobFunction {
+    /// The public description of the call, its payload and its result, shown to its caller.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
     pub name: Name,
     pub payload_max_bytes: NonZeroU64,
     pub calls: Option<NonZeroU64>,
@@ -220,6 +240,9 @@ pub struct JobFunction {
 /// A session, whose functions [`OpCall::Session`] calls; see [`ir::Session`](crate::ir::Session)
 /// for its limits.
 pub struct SessionGrant {
+    /// The public description of the call, its payload and its result, shown to its caller.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
     pub name: Name,
     pub instances: NonZeroU32,
     pub instance_seconds: NonZeroU64,
@@ -234,6 +257,9 @@ pub struct SessionGrant {
 #[serde(deny_unknown_fields)]
 /// A now function that [`OpCall::Call`] calls; see [`ir::NowFunction`](crate::ir::NowFunction).
 pub struct NowFunction {
+    /// The public description of the call, its payload and its result, shown to its caller.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub help: String,
     pub name: Name,
     /// The most bytes a payload may hold.
     pub payload_max_bytes: NonZeroU64,
@@ -451,6 +477,14 @@ pub enum CommandEnd {
     TimedOut,
     /// It didn't start, for the reason its standard error's end gives.
     Unstarted,
+}
+
+/// A body callback's result for a started runner command with both recorded output streams.
+#[derive(Debug, Serialize)]
+pub struct RunnerOutput {
+    pub end: CommandEnd,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
 }
 
 #[derive(Serialize, Deserialize)]

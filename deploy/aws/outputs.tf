@@ -16,6 +16,7 @@ locals {
       ", cpu_features = ${jsonencode(sort(var.classes[class].cpu_features))}",
       var.classes[class].cpu_model == null ? "" : ", cpu_model = ${jsonencode(var.classes[class].cpu_model)}",
       var.classes[class].usd_per_hour == null ? "" : ", usd_per_hour = ${jsonencode(var.classes[class].usd_per_hour)}",
+      var.classes[class].startup_seconds == null ? "" : ", startup_seconds = ${jsonencode(var.classes[class].startup_seconds)}",
       " }",
     ])],
   )

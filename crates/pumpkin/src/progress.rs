@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
-    Sandbox, Writer,
+    CallEnd, CallOf, CallSpan, CallerName, Ending, LeaseSpan, Place, Progress, ReadError, Readout,
+    Record, Sandbox, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -20,16 +20,18 @@ use serde_json::Value;
 
 use crate::next;
 
+mod agent;
 mod child;
 pub(crate) mod cost;
 mod model;
 mod row;
 
-use child::{STOPPED, call_name, command, exited, lease_end, lease_name, over_budget};
+pub(crate) use agent::{caller_lane, line as agent_line};
+use child::{STOPPED, call_name, command, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
-use model::{answered, failed_upstream, model};
+use model::model;
 pub(crate) use row::Row;
 use row::{Spent, Stage};
 
@@ -398,7 +400,7 @@ fn columns(id: &str, listed: &Listed, state: State, now: UnixTime, runs: Option<
     let ran =
         (run.progress.as_ref()).map(|progress| column_span(progress.end.unwrap_or(progress.last)));
     let rest = match ending {
-        Ending::Returned { values, after: _ } if !values.is_empty() => {
+        Ending::Returned { values } if !values.is_empty() => {
             format!("{task}: {}", shown_values(values))
         }
         Ending::Returned { .. } | Ending::NoResult(_) | Ending::Stopped(_) | Ending::Lost => {
@@ -457,11 +459,9 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
     let flying = in_flight(&progress.model, at);
     let Progress {
         hard_end,
-        deadline,
-        agent,
+        agents,
         calls,
         leases,
-        model,
         work_end,
         ..
     } = progress;
@@ -476,12 +476,15 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
                 doing: on(call) + &flying,
             };
         }
-        let agent = (agent.sandbox.gone.is_none()).then(|| "the agent's sandbox".to_owned());
+        let agents = agents
+            .values()
+            .filter(|agent| agent.sandbox.gone.is_none())
+            .map(|agent| format!("{}'s sandbox", agent.role));
         let calls = calls.iter().filter(|call| call.sandbox.gone.is_none());
         let calls = calls.map(|call| format!("job {}", call.job));
         let leases = leases.iter().filter(|lease| lease.sandbox.gone.is_none());
         let leases = leases.map(|lease| format!("lease {}", lease.lease));
-        let waited: Vec<String> = agent.into_iter().chain(calls).chain(leases).collect();
+        let waited: Vec<String> = agents.chain(calls).chain(leases).collect();
         let doing = match waited.split_last() {
             None => "the final call's start".to_owned(),
             Some((last, [])) => format!("the end of {last}"),
@@ -494,39 +497,7 @@ fn phase(progress: &Progress, at: Duration) -> Phase {
             doing: doing + &flying,
         };
     }
-    let on = placed(&agent.sandbox);
-    let Some(started) = agent.sandbox.started else {
-        return Phase {
-            name: "starting".to_owned(),
-            since: Duration::ZERO,
-            bound: agent.sandbox.startup,
-            doing: format!("the agent on {on}") + &flying,
-        };
-    };
-    let requests = crate::counted(model.requests, "model request");
-    // What wasn't good: each stated failure, and each status once one isn't a whole 2xx.
-    let statuses = answered(model).filter(|_| model.not_2xx > 0);
-    let not_good: Vec<String> = failed_upstream(model).into_iter().chain(statuses).collect();
-    let not_good = not_good.join("; ");
-    let doing = match (agent.model.is_some(), model.last_good) {
-        (false, _) => format!("the agent on {on}"),
-        (true, Some(last)) if not_good.is_empty() => format!(
-            "{requests}, the last answered {} ago",
-            span(at.saturating_sub(last))
-        ),
-        (true, Some(last)) => format!(
-            "{requests}, {not_good}; the last good one answered {} ago",
-            span(at.saturating_sub(last))
-        ),
-        (true, None) if model.requests == 0 => "no model request answered yet".to_owned(),
-        (true, None) => format!("{requests}, {not_good}; no good one answered yet"),
-    };
-    Phase {
-        name: "agent".to_owned(),
-        since: started,
-        bound: deadline.map(|deadline| started + deadline),
-        doing: doing + &flying,
-    }
+    agent::work(progress, at)
 }
 
 fn in_flight(model: &runtime::ModelUse, at: Duration) -> String {
@@ -553,6 +524,9 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
             let asked = call.sandbox.asked;
             let bound = call_bound(call);
             let mut doing = format!("{function} call on {}", placed(&call.sandbox));
+            if let Some(caller) = call.caller {
+                let _ = write!(doing, " for {}", caller_lane(caller));
+            }
             if call.sandbox.started.is_none() {
                 doing.push_str(", starting");
             }
@@ -575,9 +549,7 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
                 ..
             } = &lease.sandbox;
             let mut on = lease.grant.clone();
-            if let Some(job) = lease.holder {
-                let _ = write!(on, " of job {job}");
-            }
+            let _ = write!(on, " of {}", caller_lane(lease.holder));
             let _ = write!(on, " on {}", placed(&lease.sandbox));
             let (since, bound, mut doing) = match (lease.closed, started) {
                 (Some((closed, _)), _) => {
@@ -605,7 +577,9 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
             };
             (sorted(progress, lease), phase)
         });
-    let mut children: Vec<((Duration, Duration), Phase)> = calls.chain(leases).collect();
+    let members = agent::children(progress, at);
+    let mut children: Vec<((Duration, Duration), Phase)> =
+        members.chain(calls).chain(leases).collect();
     // By when they began, stably, so that a call and a lease begun at once keep the core's order.
     children.sort_by_key(|(begun, _)| *begun);
     children.into_iter().map(|(_, child)| child).collect()
@@ -628,7 +602,7 @@ fn call_bound(call: &CallSpan) -> Option<Duration> {
 /// the call that holds it, if one does, by when the core began each.
 pub(crate) fn sorted(progress: &Progress, lease: &LeaseSpan) -> (Duration, Duration) {
     let asked = lease.sandbox.asked;
-    let call = (progress.calls.iter()).find(|call| Some(call.job) == lease.holder);
+    let call = (progress.calls.iter()).find(|call| CallerName::Job(call.job) == lease.holder);
     (call.map_or(asked, |call| call.sandbox.asked), asked)
 }
 
@@ -730,7 +704,8 @@ pub(crate) fn column_span(span: Duration) -> String {
 }
 
 pub(crate) fn summary(record: &Record) -> Result<Option<String>, String> {
-    Ok(summary_of(record, &record.progress()?))
+    let readout = record.progress()?;
+    Ok(summary_of(record, &readout))
 }
 
 /// The summary of what `readout` says of `record`'s run, or `None` if it says nothing.
@@ -749,16 +724,12 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         ),
         None => format!("run {} ran {ran}:\n", record.id()),
     };
-    let _ = writeln!(
-        summary,
-        "  {:>7} {}",
-        clock(Duration::ZERO),
-        agent_line(progress)
-    );
     let now = progress.end.unwrap_or(progress.last);
     let cost = progress.cost();
     // Only a run that has a cost says what its tokens cost.
     let prices = cost.is_some().then_some(&progress.token_prices);
+    agent::summarize(&mut summary, progress, prices);
+    shared_summary(&mut summary, progress);
     let calls = (progress.calls.iter()).map(|call| {
         let asked = call.sandbox.asked;
         let mut line = called(call);
@@ -770,7 +741,11 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         ((asked, asked), line)
     });
     let leases = (progress.leases.iter()).map(|lease| {
-        let step = if lease.holder.is_some() { "  " } else { "" };
+        let step = if matches!(lease.holder, CallerName::Job(_)) {
+            "  "
+        } else {
+            ""
+        };
         (
             sorted(progress, lease),
             format!("{step}{}", leased(lease, now)),
@@ -783,7 +758,7 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
         let _ = writeln!(summary, "  {:>7} {line}", clock(asked));
     }
     // A run whose roles have no route made no model request.
-    if progress.agent.model.is_some() || progress.model.requests > 0 {
+    if progress.agents.values().any(|agent| agent.model.is_some()) || progress.model.requests > 0 {
         let model = model(&progress.model, prices);
         let _ = writeln!(summary, "  model: {model}");
     }
@@ -808,26 +783,32 @@ pub(crate) fn summary_of(record: &Record, readout: &Readout) -> Option<String> {
     Some(summary)
 }
 
-pub(crate) fn agent_line(progress: &Progress) -> String {
-    let agent = &progress.agent;
-    let mut line = format!("agent on {}", placed(&agent.sandbox));
-    if let Some(started) = agent.sandbox.started {
-        let _ = write!(line, ", started at {}", clock(started));
+fn shared_summary(summary: &mut String, progress: &Progress) {
+    for service in progress.shared.values() {
+        let _ = writeln!(
+            summary,
+            "  {:>7} {}",
+            clock(service.sandbox.asked),
+            work_target_line(service)
+        );
     }
-    match &agent.end {
-        Some((at, runtime::AgentEnd::Exited(status))) => {
-            let _ = write!(line, ", {} at {}", exited(*status), clock(*at));
-        }
-        Some((at, runtime::AgentEnd::Failed(reason))) => {
-            let reason = crate::escaped(reason);
-            let _ = write!(line, ", failed at {}: {reason}", clock(*at));
-        }
-        None => {}
-    }
-    if let Some(work_end) = progress.work_end {
-        let _ = write!(line, "; the work phase ended at {}", clock(work_end));
-    }
-    line
+}
+
+pub(crate) fn work_target_line(service: &runtime::SharedSpan) -> String {
+    let state = if let Some(reason) = &service.failure {
+        format!("failed: {}", crate::escaped(reason))
+    } else if service.sandbox.gone.is_some() {
+        "ended".to_owned()
+    } else if service.sandbox.started.is_some() {
+        "running".to_owned()
+    } else {
+        "starting".to_owned()
+    };
+    format!(
+        "work-lifetime target {} on {}: {state}",
+        service.role,
+        placed(&service.sandbox)
+    )
 }
 
 fn sandboxes(progress: &Progress) -> String {
@@ -877,10 +858,12 @@ fn clock(at: Duration) -> String {
 /// The lines that say what the run has done so far, in the order of the time that each says.
 pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     let mut milestones = Vec::new();
-    let agent = &progress.agent.sandbox;
-    let start = agent
-        .started
-        .map(|at| (at, format!("the agent started on {}", placed(agent))));
+    for agent in progress.agents.values() {
+        if let Some(at) = agent.sandbox.started {
+            let on = place(agent.sandbox.place.as_ref());
+            milestones.push((at, format!("{} started on {on}", agent.role)));
+        }
+    }
     // Ahead of the ends of the leases it closes and the final call's ask at the same instant.
     if let Some(work_end) = progress.work_end {
         milestones.push((work_end, "the work phase ended".to_owned()));
@@ -921,14 +904,8 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
     }
     // By time, stably, so that a call asked and ended at once keeps its order.
     milestones.sort_by_key(|(at, _)| *at);
-    // The agent's reader can stamp its first ops or its exit before the loop stamps its start.
-    // Show them after the start, keeping their observed order even when their shown times tie.
-    start
+    milestones
         .into_iter()
-        .chain(milestones)
-        .map(|(at, milestone)| {
-            let at = at.max(agent.started.unwrap_or_default());
-            format!("{:>7} {milestone}", clock(at))
-        })
+        .map(|(at, milestone)| format!("{:>7} {milestone}", clock(at)))
         .collect()
 }

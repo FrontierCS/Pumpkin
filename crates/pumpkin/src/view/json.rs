@@ -7,6 +7,7 @@ use std::time::Duration;
 use runtime::{CallerName, Cost, Ending, ModelUse, Progress, Readout, Tokens};
 use serde_json::{Value, json};
 
+use super::failure::{self, Failures};
 use super::talk::Talk;
 use super::{Held, when};
 use crate::progress::{self, Listed, Row};
@@ -118,18 +119,18 @@ pub(super) fn tokens_json(tokens: &Tokens, requests: u64) -> Value {
 /// The values a run's result shows, each by its name, in their order, and how its work phase
 /// ended, for a run that finished with a result; `null` for any other.
 fn result_json(ending: Option<&Ending>) -> Value {
-    let Some(Ending::Returned { values, after }) = ending else {
+    let Some(Ending::Returned { values }) = ending else {
         return Value::Null;
     };
     let values: Vec<Value> = (values.iter())
         .map(|(name, value)| json!({ "name": name, "value": value }))
         .collect();
-    json!({ "values": values, "after": after })
+    json!({ "values": values })
 }
 
 fn how(ending: &Ending) -> String {
     match ending {
-        Ending::Returned { values, after } => crate::ending::returned(values, after),
+        Ending::Returned { values } => crate::ending::returned(values),
         Ending::NoResult(why) => why.clone(),
         Ending::Stopped(stopped) => stopped.to_string(),
         Ending::Lost => "is lost: its driver ended without writing outcome.json".to_owned(),
@@ -188,6 +189,16 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
             "now": live_at.map(|at| at.as_secs_f64()),
         })
     });
+    let ended = progress
+        .as_ref()
+        .map(|progress| progress.end.unwrap_or(progress.last));
+    let failure = held.ending.as_ref().map(|ending| {
+        let ended = ended.map(|ended| ended.as_secs_f64());
+        failure::ended_json(ending, ended, &held.failures)
+    });
+    let lanes = progress
+        .as_ref()
+        .map(|progress| with_failures(lanes(progress, held.talk.as_ref()), &held.failures));
     let unread =
         progress::unread(unread).map(|said| json!({ "count": unread.len(), "said": said }));
     let mut run = json!({
@@ -198,9 +209,11 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "has_result": row.has_result(),
         "verdict": verdict,
         "result": result_json(held.ending.as_ref()),
+        "failure": failure,
+        "failures": held.failures.json(),
         "other_build": record.other_build(),
         "times": times,
-        "lanes": progress.as_ref().map(|progress| lanes(progress, held.talk.as_ref())),
+        "lanes": lanes,
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
         "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
@@ -261,18 +274,28 @@ fn model_json(model: &ModelUse) -> Value {
     })
 }
 
+fn sandbox(sandbox: &runtime::Sandbox) -> Value {
+    json!({
+        "place": progress::placed(sandbox),
+        "asked": sandbox.asked.as_secs_f64(),
+        "started": sandbox.started.map(|at| at.as_secs_f64()),
+        "gone": sandbox.gone.map(|at| at.as_secs_f64()),
+        "deleted": sandbox.deleted,
+    })
+}
+
+fn shared_lanes(progress: &Progress) -> impl Iterator<Item = Value> {
+    progress.shared.iter().map(|(index, service)| {
+        json!({
+            "lane": format!("shared {index}"), "kind": "target", "lifetime": "work", "role": service.role,
+            "sandbox": sandbox(&service.sandbox), "said": progress::work_target_line(service),
+        })
+    })
+}
+
 fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     let now = progress.end.unwrap_or(progress.last);
     let span = now.as_secs_f64().max(1.0) / f64::from(LANE_TICKS);
-    let sandbox = |sandbox: &runtime::Sandbox| {
-        json!({
-            "place": progress::placed(sandbox),
-            "asked": sandbox.asked.as_secs_f64(),
-            "started": sandbox.started.map(|at| at.as_secs_f64()),
-            "gone": sandbox.gone.map(|at| at.as_secs_f64()),
-            "deleted": sandbox.deleted,
-        })
-    };
     let answered = |caller: CallerName, json: &mut Value| {
         let answered = talk.and_then(|talk| talk.answered.get(&caller));
         let failed = talk.and_then(|talk| talk.failed.get(&caller));
@@ -285,14 +308,20 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         json["answered"] = json!(answered);
         json["failed"] = json!(failed);
     };
-    let mut agent = json!({
-        "lane": "agent",
-        "caller": CallerName::Agent,
-        "kind": "agent",
-        "sandbox": sandbox(&progress.agent.sandbox),
-        "said": progress::agent_line(progress),
+    let agents = progress.agents.iter().map(|(&caller, agent)| {
+        let mut lane = json!({
+            "lane": progress::caller_lane(caller),
+            "caller": caller,
+            "kind": "agent",
+            "sandbox": sandbox(&agent.sandbox),
+            "role": agent.role,
+            "said": progress::agent_line(agent),
+            "model": agent.model.as_ref().map(model_json),
+        });
+        answered(caller, &mut lane);
+        lane
     });
-    answered(CallerName::Agent, &mut agent);
+    let shared = shared_lanes(progress);
     let calls = (progress.calls.iter()).map(|call| {
         let caller = CallerName::Job(call.job);
         let mut lane_json = json!({
@@ -305,6 +334,12 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "said": progress::called(call),
             "model": model_json(&call.model),
         });
+        if let Some(shared) = call.shared {
+            lane_json["service"] = json!(format!("shared {shared}"));
+        }
+        if let Some(holder) = call.caller {
+            lane_json["holder"] = json!(progress::caller_lane(holder));
+        }
         answered(caller, &mut lane_json);
         ((call.sandbox.asked, call.sandbox.asked), lane_json)
     });
@@ -314,7 +349,7 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
             "kind": "runner",
             "role": talk.and_then(|talk| talk.runners.get(&lease.lease)),
             "grant": lease.grant,
-            "holder": lease.holder.map_or("agent".to_owned(), |job| format!("job {job}")),
+            "holder": progress::caller_lane(lease.holder),
             "sandbox": sandbox(&lease.sandbox),
             "said": progress::leased(lease, now),
             "work": talk.map(|talk| talk.work_json(lease.lease)),
@@ -323,9 +358,21 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
     });
     let mut children: Vec<((Duration, Duration), Value)> = calls.chain(leases).collect();
     children.sort_by_key(|(begun, _)| *begun);
-    std::iter::once(agent)
+    agents
+        .chain(shared)
         .chain(children.into_iter().map(|(_, lane)| lane))
         .collect()
+}
+
+/// `lanes`, each that failed with the failure that `failures` holds of it.
+fn with_failures(mut lanes: Vec<Value>, failures: &Failures) -> Vec<Value> {
+    let failed = failures.of_lanes();
+    for lane in &mut lanes {
+        if let Some(failure) = lane["lane"].as_str().and_then(|name| failed.get(name)) {
+            lane["failure"] = failure.clone();
+        }
+    }
+    lanes
 }
 
 /// The marks of a lane's `answered` and `failed` times: one per span of the run's time, at the

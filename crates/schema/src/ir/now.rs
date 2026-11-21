@@ -10,8 +10,8 @@ use super::Body;
 /// A body that a call evaluates at once, with a handle on the run's state, the payload and the
 /// caller's arguments, and whose return the call replies with.
 ///
-/// The body only proposes effects on the run's state, `run.select()` and `run.end_work()`; the
-/// call applies them all, or, if one is refused, none.
+/// The body only proposes effects on the run's state, `run.set_submission(payload)` and
+/// `run.end_work()`. The call applies them all, or, if one is refused, none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NowFunction {

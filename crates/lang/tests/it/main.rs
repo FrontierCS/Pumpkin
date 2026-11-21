@@ -389,7 +389,7 @@ ROLES = [AGENT, FINAL_TARGET]
 
 load("//lib/parts.star", "FINAL")
 
-workflow(name = "neutral/names", roles = ROLES, final = FINLA)
+workflow(name = "neutral/names", roles = ROLES, final = FINLA, deadline_seconds = 3600)
 "#,
         &expect![[r#"
             bad/names/task.star:1:35: `_DRAFT` is private to `//lib/parts.star`: load a name that doesn't start with `_`
@@ -407,7 +407,7 @@ workflow(name = "neutral/names", roles = ROLES, final = FINLA)
                   | ^^^^
                 the first other statement is at bad/names/task.star:3:1
             bad/names/task.star:8:57: `FINLA` is not defined: bind it in this file, or load it
-                8 | workflow(name = "neutral/names", roles = ROLES, final = FINLA)
+                8 | workflow(name = "neutral/names", roles = ROLES, final = FINLA, deadline_seconds = 3600)
                   |                                                         ^^^^^"#]],
     );
     check(
@@ -520,6 +520,7 @@ workflow(
     name = "neutral/status",
     roles = [AGENT, FINAL_TARGET | {"status": "ready"}],
     final = FINAL,
+    deadline_seconds = 3600,
 )
 "#,
         &expect![[r#"
@@ -539,6 +540,7 @@ workflow(
     name = "neutral/zero",
     roles = [AGENT, FINAL_TARGET | {"needs": {"cpu_millis": CPU_MILLIS, "memory_bytes": 512 * MiB}}],
     final = FINAL,
+    deadline_seconds = 3600,
 )
 "#,
         &expect![[r#"
@@ -563,6 +565,7 @@ workflow(
     name = "neutral/payload",
     roles = [AGENT | {"runtime": {"agent": AGENT["runtime"]["agent"] | {"grants": GRANTS}}}, FINAL_TARGET],
     final = FINAL | {"payload_max_bytes": MAX_BYTES},
+    deadline_seconds = 3600,
 )
 "#,
         &expect![[r#"
@@ -2031,48 +2034,48 @@ _PRIVATE = "private to this file"
     check(
         r#"workflow(name = "")"#,
         &expect![[r#"
-            text.star:1:1: `workflow` lacks `roles`, `final`: give them
+            text.star:1:1: `workflow` lacks `roles`, `final`, `deadline_seconds`: give them
                 1 | workflow(name = "")
                   | ^^^^^^^^^^^^^^^^^^^"#]],
     );
     // Values the IR's types refuse, in the language's words.
     check(
-        r#"workflow(name = "n/x", roles = [1], final = None)"#,
+        r#"workflow(name = "n/x", roles = [1], final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:1:33: an element of `roles` can't be an int: expected a dict
-                1 | workflow(name = "n/x", roles = [1], final = None)
+                1 | workflow(name = "n/x", roles = [1], final = None, deadline_seconds = 3600)
                   |                                 ^
                 the IR's /roles/0"#]],
     );
     check(
-        r#"workflow(roles = [{"user": {"uid": -1}}], name = "", final = None)"#,
+        r#"workflow(roles = [{"user": {"uid": -1}}], name = "", final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:1:36: `uid` can't be `-1`: expected an int from 1 to 4294967295
-                1 | workflow(roles = [{"user": {"uid": -1}}], name = "", final = None)
+                1 | workflow(roles = [{"user": {"uid": -1}}], name = "", final = None, deadline_seconds = 3600)
                   |                                    ^^
                 the IR's /roles/0/user/uid"#]],
     );
     check(
-        r#"workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None)"#,
+        r#"workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:1:36: `uid` can't be a float: expected an int
-                1 | workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None)
+                1 | workflow(roles = [{"user": {"uid": 1.5}}], name = "", final = None, deadline_seconds = 3600)
                   |                                    ^^^
                 the IR's /roles/0/user/uid"#]],
     );
     check(
-        r#"workflow(roles = [{"runtime": "agent"}], name = "", final = None)"#,
+        r#"workflow(roles = [{"runtime": "agent"}], name = "", final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:1:31: `runtime` can't be `"agent"`: expected a dict that gives the kind its value, as `{"agent": …}`
-                1 | workflow(roles = [{"runtime": "agent"}], name = "", final = None)
+                1 | workflow(roles = [{"runtime": "agent"}], name = "", final = None, deadline_seconds = 3600)
                   |                               ^^^^^^^
                 the IR's /roles/0/runtime"#]],
     );
     check(
-        r#"workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None)"#,
+        r#"workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:1:68: `finalize_grace_seconds` can't be `-1`: expected an int of 0 or more
-                1 | workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None)
+                1 | workflow(roles = [{"runtime": {"agent": {"finalize_grace_seconds": -1}}}], name = "", final = None, deadline_seconds = 3600)
                   |                                                                    ^^
                 the IR's /roles/0/runtime/agent/finalize_grace_seconds"#]],
     );
@@ -2889,12 +2892,12 @@ X = check(4)"#,
 load("//lib.star", "X")
 #- //lib.star
 def make():
-    workflow(name = "n/x", roles = [], final = None)
+    workflow(name = "n/x", roles = [], final = None, deadline_seconds = 3600)
 X = make()"#,
         &expect![[r#"
             lib.star:2:5: `workflow()` is called while `//lib.star` loads: call it in the entry file, which loads `//lib.star`
-                2 |     workflow(name = "n/x", roles = [], final = None)
-                  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                2 |     workflow(name = "n/x", roles = [], final = None, deadline_seconds = 3600)
+                  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 in `make()`, called at lib.star:3:5"#]],
     );
     check(
@@ -3352,7 +3355,7 @@ load("//lib.star", "X")
 def f(x: Strng):
     pass"#,
         &expect![[r#"
-            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, `dict[…, …]`, `Target`, `Run` or `Payload`
+            lib.star:1:10: `Strng` is no type: give `None`, `bool`, `int`, `float`, `str`, `list[…]`, `dict[…, …]`, `Target`, `Runner`, `Run` or `Payload`
                 1 | def f(x: Strng):
                   |          ^^^^^"#]],
     );
@@ -3516,6 +3519,7 @@ fn plans() {
             building 5 and 6
             building 6
             {
+              "deadline_seconds": 7200,
               "final": {
                 "body": {
                   "def": "final_call",
@@ -3525,7 +3529,7 @@ fn plans() {
                 "target": "final_judge",
                 "timeout_seconds": 120
               },
-              "ir_version": "pumpkin.ir/v0",
+              "ir_version": "pumpkin.ir/v1",
               "name": "neutral/images",
               "roles": [
                 {
@@ -3543,7 +3547,6 @@ fn plans() {
                         ],
                         "cwd": "/workspace"
                       },
-                      "deadline_seconds": 7200,
                       "egress": {
                         "model": [
                           {
@@ -4145,12 +4148,12 @@ fail("255 characters fit")"#,
     );
     check(
         r#"
-workflow(name = "neutral/twice", roles = [], final = None)
-workflow(name = "neutral/twice", roles = [], final = None)"#,
+workflow(name = "neutral/twice", roles = [], final = None, deadline_seconds = 3600)
+workflow(name = "neutral/twice", roles = [], final = None, deadline_seconds = 3600)"#,
         &expect![[r#"
             text.star:2:1: `workflow()` is called a second time: call it once
-                2 | workflow(name = "neutral/twice", roles = [], final = None)
-                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                2 | workflow(name = "neutral/twice", roles = [], final = None, deadline_seconds = 3600)
+                  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                 it is first called at text.star:1:1"#]],
     );
 }
@@ -4743,7 +4746,7 @@ fn labels() {
 load("//lib/parts.star", "AGENT", "FINAL_TARGET", "FINAL")
 load("@pumpkin//harness/agent.star", "agent")
 
-workflow(name = "neutral/library", roles = [AGENT | {"image": agent()}, FINAL_TARGET], final = FINAL)
+workflow(name = "neutral/library", roles = [AGENT | {"image": agent()}, FINAL_TARGET], final = FINAL, deadline_seconds = 3600)
 #- @pumpkin//harness/agent.star
 load("@pumpkin//harness/names.star", "NAME")
 
@@ -4757,6 +4760,7 @@ NAME = "one"
             image 1: @pumpkin//harness/one's Dockerfile, with @pumpkin//harness/two at m, with N="one", in pumpkin-library/harness/one
             building 1
             {
+              "deadline_seconds": 3600,
               "final": {
                 "body": {
                   "def": "final_call",
@@ -4766,7 +4770,7 @@ NAME = "one"
                 "target": "final_judge",
                 "timeout_seconds": 120
               },
-              "ir_version": "pumpkin.ir/v0",
+              "ir_version": "pumpkin.ir/v1",
               "name": "neutral/library",
               "roles": [
                 {
@@ -4784,7 +4788,6 @@ NAME = "one"
                         ],
                         "cwd": "/workspace"
                       },
-                      "deadline_seconds": 3600,
                       "finalize_grace_seconds": 0,
                       "grants": [
                         {

@@ -5,7 +5,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use super::{DictMethod, ModuleMethod, StringMethod, origin};
-use crate::eval::{Purpose, body};
+use crate::Loader;
+use crate::eval::{Evaluation, body};
 use crate::problem::Fault;
 use crate::syntax::Name;
 use crate::value::{Budget, Dict, Key, Kind, Span, Text, Value};
@@ -14,15 +15,16 @@ pub(crate) enum BoundMethod<'v> {
     Dict(&'v Dict, DictMethod),
     String(&'v str, &'v (Span, Value), StringMethod),
     Module(ModuleMethod),
-    Hosted(body::Method),
+    Hosted(crate::value::Hosted<usize, u64>, body::Method),
 }
 
 impl BoundMethod<'_> {
-    pub(crate) fn call(
+    pub(crate) fn call<L: Loader>(
         self,
         name: &Name,
         call: &Call<'_>,
-        purpose: &mut Purpose<'_>,
+        evaluation: &mut Evaluation<'_, '_, L>,
+        depth: usize,
     ) -> Result<Value, Fault> {
         match self {
             Self::Dict(dict, method) => method(&name.text, dict, call),
@@ -31,7 +33,7 @@ impl BoundMethod<'_> {
                 span: call.at,
             }),
             Self::Module(method) => method(call),
-            Self::Hosted(method) => method.call(purpose, name, call),
+            Self::Hosted(handle, method) => method.call(evaluation, handle, name, call, depth),
         }
     }
 }

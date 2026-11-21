@@ -535,7 +535,7 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
             sandboxes * CHECKS_PER_SANDBOX
         ));
     }
-    let mut dirs = vec![record.join("agent")];
+    let mut dirs = vec![record.join("agents/agent")];
     for kind in ["jobs", "leases"] {
         if let Ok(entries) = fs::read_dir(record.join(kind)) {
             dirs.extend(entries.flatten().map(|entry| entry.path()));

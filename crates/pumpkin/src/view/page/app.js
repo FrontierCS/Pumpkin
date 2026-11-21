@@ -11,7 +11,8 @@ import { runView } from "./run.js";
 import { traceView } from "./trace.js";
 
 function render() {
-  const { parts } = route();
+  const { parts, query } = route();
+  const caller = query.get("caller");
   setKeys(null);
   byId("follow").replaceChildren();
   byId("notice").hidden = true;
@@ -21,12 +22,11 @@ function render() {
     fill(where, h("a", { href: "#/", title: "All runs" }, "Runs"), sep(), h("a", { href: "#/run/" + encodeURIComponent(parts[1]), class: "id", title: "The run" }, parts[1]), sep(), h("span", {}, "payload"));
     keyOf("payload");
     payloadView(parts[1], parts[3]);
-  } else if (parts[0] === "run" && parts[1] && parts[2] === "trace") {
-    const caller = route().query.get("caller") || "agent";
+  } else if (parts[0] === "run" && parts[1] && parts[2] === "trace" && caller) {
     const sep = () => h("span", { class: "sep" }, "›");
     fill(where, h("a", { href: "#/", title: "All runs" }, "Runs"), sep(), h("a", { href: "#/run/" + encodeURIComponent(parts[1]), class: "id", title: "The run" }, parts[1]), sep(), h("span", { class: "id" }, caller.replace("-", " ")));
     keyOf("trace");
-    traceView(parts[1]);
+    traceView(parts[1], caller);
   } else if (parts[0] === "run" && parts[1]) {
     fill(where, h("a", { href: "#/", title: "All runs" }, "Runs"), h("span", { class: "sep" }, "›"), h("span", { class: "id" }, parts[1]));
     keyOf("run");

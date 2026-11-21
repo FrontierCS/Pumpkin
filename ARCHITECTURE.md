@@ -7,16 +7,15 @@ search.
 
 ## Bird's-eye view
 
-Pumpkin runs workflows in which an AI agent works on a task and a final call judges what it
-submits. The agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses
+Pumpkin runs workflows in which one or more agents work on a task. A final call judges their
+submissions. The agent's code is untrusted: it may be buggy, and it is goal-directed, so it uses
 whatever it can reach to finish its task or raise its result. Pumpkin's job is to give each part
 of a run exactly what the workflow grants it and nothing more, to bound what a run spends in time
 and money, and to keep a record of the run that no sandbox can alter.
 
-A workflow is data, the workflow IR. It names its roles, one agent, the targets its calls start
-and the runners its sessions lease; the grants each role holds, such as the agent's job functions,
-its sessions and its now functions; each role's model route; and the final call, a body that runs
-on the selection in a fresh sandbox of its target, and whose return is the run's result. A task's
+A workflow is data, the workflow IR. It declares the agent roles, targets for calls, and runners
+for leases, the grants each role holds, each role's model route, and the final call, a body that runs
+in a fresh sandbox of its target and returns the run's result. A task's
 source, in Pumpkin's workflow language, a subset of Starlark, evaluates to that IR and to the
 images its roles run. The IR is the only input the runtime reads, and the bodies of its functions
 and of its final call reach it as `Bodies`, which the driver gives, so that the runtime depends on
@@ -127,16 +126,26 @@ so the same events give the same actions, and time reaches it only with each eve
 reachable through it.
 
 **Architecture Invariant:** only the core authorizes ops. `sandboxd` carries any op that any code
-in its sandbox makes, the gateway hands each to the session's owner as an `Arrival`, and the
-runtime answers each with the core's `Action::Reply`.
+in its sandbox makes. The gateway hands each to the session's owner as an `Arrival`. The runtime
+identifies the caller by the agent role or job registered for that session and sends the core's
+`Action::Reply` back to that caller.
 
 **Architecture Invariant:** the agent learns of a call only its state, what its function has left,
 how many of its target's model requests a budget barred, and what its body returns, so the
 workflow decides the agent's feedback. The status reply's types hold nothing else.
 
-**Architecture Invariant:** the final call starts only once the agent's sandbox, its jobs and
-every lease that they held have ended, so nothing the agent started runs while its submission is
-judged. The core's phases (`Teardown`, then `Final`) hold this.
+**Architecture Invariant:** before the final call starts, the driver confirms deletion of every
+work sandbox it claimed, including shared targets and lease runners. Work ends at the common
+deadline or once every agent has ended its work. The final body
+receives every agent role's last submission, an opaque payload or `None`. The body sends a selected payload
+to a file with `put` or to a command’s standard input with `capture`.
+
+A target with work lifetime has one sandbox across its work-phase grants. The core admits one complete
+body at a time across all those grants. The runtime supplies the caller’s role from its session.
+
+A failed provider create can allocate a sandbox without returning its identity. The driver gives
+that sandbox no session or command. It sweeps the affected providers before the final call and
+all providers at run end. An allocation can become visible only on a later sweep.
 
 ### `crates/recipe`
 
@@ -379,6 +388,11 @@ the reap of what it left (`Record::reap`).
 provider's crate, not even in its tests, which run on a simulated provider, so a new provider
 changes no runtime code.
 
+A job body can use a target's session grant through a scoped runner callback. The core authorizes
+and meters its operations as the job's. The runtime sends the body the receipt of its admitted
+command or transfer through the job's inbox. Closing waits for the runner's recorded deletion.
+On a work-lifetime target, each body holds its own leases and the sandbox has no control socket.
+
 **Architecture Invariant:** every sandbox starts on the one start path (`Sandboxes::start`), and a
 run's end deletes whatever each of its providers still lists of it, so a run ends with none of its
 sandboxes left, or fails.
@@ -552,7 +566,7 @@ and so is each `docker` command but a build. Before a run starts, a build and a 
 files to a controller have no bound on their whole time, as their inputs' size sets it: a send
 gives up only once it stalls.
 
-A run's bounds are the workflow's: the agent's deadline and finalize grace, each job function's
+A run's bounds are the workflow's: the shared work deadline and each agent's finalize grace, each job function's
 calls, seconds and payload size, each session's instances, seconds, commands and transfer bytes,
 and the final call's payload size and timeout. The core meters each from its own jobs and leases,
 and refuses an op that would pass one. From them and each class's startup, `lasts` gives the run's

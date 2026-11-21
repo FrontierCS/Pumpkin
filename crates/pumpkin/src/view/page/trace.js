@@ -1,6 +1,6 @@
 // A caller's trace: its model exchanges as threads, steps and entries, in a timeline
 // ([`timeline.js`]) above a ledger at left and an inspector at right, with what is shown and
-// selected in the address (`#/run/<id>/trace?caller=agent&fold=steps&sel=12/out/1&q=…`), so
+// selected in the address (`#/run/<id>/trace?caller=agent-0&fold=steps&sel=12/out/1&q=…`), so
 // that a link shows the same.
 // Its Statistics and Log tabs are [`stats.js`]'s and [`log.js`]'s, `view=stats` and `view=log` in
 // the address.
@@ -76,10 +76,9 @@ function shapeOf() {
   };
 }
 
-/** @param {string} id */
-export async function traceView(id) {
+/** @param {string} id @param {string} caller */
+export async function traceView(id, caller) {
   const base = "/api/runs/" + encodeURIComponent(id);
-  const caller = route().query.get("caller") || "agent";
   const api = base + "/trace/" + encodeURIComponent(caller);
   const state = {
     /** @type {any} */
@@ -169,7 +168,7 @@ export async function traceView(id) {
     },
     (first, end) => seen(first, end),
   );
-  const split = h("div", { class: "trace-split" + (caller === "agent" ? "" : " of-target") });
+  const split = h("div", { class: "trace-split" + (caller.startsWith("job-") ? " of-target" : "") });
   const inspectorGrip = grip({ name: "inspector", across: "x", sized: inspector, on: split, property: "--inspector", title: "Drag to widen the inspector" });
   fill(split, h("div", { class: "left" }, list.node), inspectorGrip, inspector);
   const pane = h("div", { class: "pane" }, toolbar, startedOver, timeline.node, split);
@@ -419,7 +418,7 @@ export async function traceView(id) {
     fill(
       callers,
       lanes.length > 1 ? h("span", { class: "dim" }, "Other traces") : null,
-      lanes.length > 1 ? lanes.map((lane) => h("a", { href: "#/run/" + encodeURIComponent(id) + "/trace?caller=" + encodeURIComponent(lane.caller), class: "kind " + lane.kind + (lane.caller === caller ? " on" : ""), title: "The trace of " + lane.lane }, lane.lane)) : null,
+      lanes.length > 1 ? lanes.map((lane) => h("a", { href: "#/run/" + encodeURIComponent(id) + "/trace?caller=" + encodeURIComponent(lane.caller), class: "kind " + lane.kind + (lane.caller === caller ? " on" : ""), title: "The trace of " + lane.lane }, lane.caller.startsWith("agent-") ? lane.role : lane.lane)) : null,
     );
     drawFollow();
   };

@@ -622,7 +622,7 @@ pub(crate) fn method<'v>(
         Kind::Hosted(hosted) => match hosted.methods() {
             Ok(methods) => {
                 if let Some((_, run)) = methods.iter().find(|(has, _)| *has == method) {
-                    return Ok(BoundMethod::Hosted(*run));
+                    return Ok(BoundMethod::Hosted(*hosted, *run));
                 }
                 (Ok(methods.iter().map(|(has, _)| *has).collect()), &[])
             }

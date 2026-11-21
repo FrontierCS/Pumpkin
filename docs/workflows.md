@@ -12,19 +12,20 @@ chosen elsewhere.
 ## The entry file
 
 A task is an entry file below a root, the nearest directory at or above it that holds a
-`PUMPKIN.star`. The entry file makes one `workflow()` call, with three keyword arguments:
+`PUMPKIN.star`. The entry file makes one `workflow()` call, with these keyword arguments:
 
 | Key | What it is |
 | --- | --- |
 | `name` | what `pumpkin ls` and the page show: 1 to 128 characters from A-Z, a-z, 0-9, `.`, `_`, `-` and `/` |
-| `roles` | the run's roles, exactly one of them an agent |
+| `roles` | the run's roles in declaration order, including at least one agent |
+| `deadline_seconds` | how long all agents may work, from their start or, at the latest, when the longest agent startup bound has passed since the run started |
 | `final` | the final call, which gives the run its result |
 
 `workflow()` is called once, while the entry file's own statements run; the files it loads give it
 values and bodies. A missing key is refused at the call:
 
 ```text
-text.star:1:1: `workflow` lacks `roles`, `final`: give them
+text.star:1:1: `workflow` lacks `roles`, `final`, `deadline_seconds`: give them
     1 | workflow(name = "")
       | ^^^^^^^^^^^^^^^^^^^
 ```
@@ -57,44 +58,60 @@ bad/zero/task.star:3:14: `cpu_millis` can't be `0`: expected a positive int
     the IR's /roles/1/needs/cpu_millis
 ```
 
-### The agent
+### Agents
 
-The one role that works on the task. Its sandbox starts first, and its command runs once.
+Each agent works in its own sandbox and runs its command once. Agents may differ in resources,
+command, model route and grants. They work under one deadline.
 
 | Key | What it is |
 | --- | --- |
 | `command` | `{"argv": [...], "cwd": …, "env": [...]}`: the whole command line, as the image's entrypoint is not used; the directory it starts in; and `NAME=value` entries added to the image's environment, which may be left out |
-| `deadline_seconds` | how long the work phase may last, counted once the sandbox and its command have started or, at the latest, once its class's `startup_seconds` have passed since the run's start |
 | `finalize_grace_seconds` | how long the agent may keep running once a call has ended its work, its ops refused meanwhile; 0 ends the work in that call's step |
 | `dirs`, `files` | directories (`{"path", "mode"}`) and text files (`{"path", "mode", "content"}`) made before the command starts, as the role's user, with modes written as `"0644"` |
-| `stdin` | the text the command reads on its standard input; absent, it reads nothing |
+| `prepend_grant_help` | when true, put the role’s generated grant guide, a separator and a task heading before the original `stdin` bytes. The Codex harness enables this for its first prompt. Defaults to false. |
+| `stdin` | the task text, empty when absent. The command reads these bytes verbatim unless its harness enables `prepend_grant_help`. |
 | `egress` | its routes out: `{"model": [...]}`, a model route ([models](models.md)) |
 | `grants` | the functions it may call |
 
-The work phase ends when the command exits, when the grace after an `end_work()` runs out, or at
-the deadline, whichever comes first. Like every sandbox, the agent's has `/pumpkin`, which holds
+Each agent ends when its command exits, when its grace after an `end_work()` runs out, or at
+the shared deadline, whichever comes first. Its peers can keep working. Like every sandbox, the agent's has `/pumpkin`, which holds
 Pumpkin's own files: `in/`, which holds its `stdin`, `out/`, which is collected into the record
 when the agent ends, `home/`, its commands' `HOME`, and `log/`, their output. A path of `dirs` or
 `files` below `/pumpkin` or `/.pumpkin` is refused.
 
 ### Targets
 
-A role that a function's body drives: each call of the job function that names it, and the final
-call if it names it, starts a fresh sandbox of it, which runs no command of its own and ends with
-the call. Each target is named by one job function or by the final call, and by no other: a target
-that nothing names is refused, so that every role of a workflow is reached.
+A target runs the commands sent by a call's body. Its `lifetime` determines which calls share
+a sandbox. Every target must be reached. The final call has an exclusive call-lifetime target.
 
 | Key | What it is |
 | --- | --- |
+| `lifetime` | `"call"` (also when omitted) starts a sandbox for each call. `"work"` keeps one sandbox for the work phase. |
 | `cwd` | the directory each command of the body's starts in |
 | `env` | `NAME=value` entries added to each command's environment |
-| `egress` | its model route, open while a call's body runs |
-| `sessions` | the sessions it may call while a call's body runs, written as a grant of one is; each call uses them afresh |
+| `egress` | a call-lifetime sandbox's model route, open while its body runs |
+| `sessions` | the body's runner grants, each with fresh limits per call. Commands in a call-lifetime sandbox can also use these grants through `sandboxctl`. |
+
+Each agent may name a given call-lifetime target from one job function. Different agents may
+run independent calls of the same target concurrently.
+
+A work-lifetime target starts alongside the agents. Its sandbox keeps files between calls.
+Multiple grants can name it. The driver admits one complete body at a time. A competing call
+receives a busy refusal and keeps its quota. A failed body can leave files behind. If the
+sandbox's session ends, further calls fail and agents can still submit. After active calls
+end, the driver collects the sandbox's output and deletes it before starting the final call.
+
+The driver authenticates the calling agent and carries the body's inputs, commands and results.
+A process in a work-lifetime sandbox can outlive its call, so the driver cannot attribute
+requests from that sandbox to a particular job. Sandbox-issued sessions and model egress
+require a call-lifetime target. The trusted body can use `target.with_runner` on either
+lifetime. Its job holds the runner until deletion, and a work target stays busy until then.
 
 ### Runners
 
-A sandbox that a session leases for its holder, which sends it commands and copies. Each runner is
-named by one session. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
+A sandbox that a session leases for its holder, which sends it commands and copies. Distinct
+agents may lease the same runner role. Every lease starts its own sandbox. A target's session
+names a runner no other session names. It holds `cwd` and `env`, as a target does, and neither egress nor grants. A
 runner of an agent's session has an image that no target has, so that the agent never runs what a
 target's image holds.
 
@@ -104,19 +121,25 @@ A grant is `{"name": …, <kind>: {…}}`: a name, unique among the role's grant
 it by, and one function under its kind's key, `job`, `now` or `session`. A second key after the kind
 is refused, and so is a grant with none.
 
+A grant may include a public `"help"` string beside its name to describe its purpose, payload
+and return value. Pumpkin combines that description with the role’s actual grant name,
+caller arguments and limits. The body’s source, its docstring and the task’s private keywords
+stay with the host. Target sessions may likewise declare a public `help` string beside
+the session name. The target sees it through its own `sandboxctl ops`.
+
 ### A job function
 
 | Key | What it is |
 | --- | --- |
-| `target` | the target that each call starts afresh, which no other job function names |
+| `target` | the role whose fresh or shared sandbox runs the body |
 | `body` | a `def` of a loaded file, which drives the target ([bodies](#bodies)) |
 | `keywords` | the values of the body's keyword-only parameters, as JSON; may be left out |
 | `payload_max_bytes` | the most bytes a call's payload may hold, at most 64 MiB |
 | `calls` | the most calls the agent may make; left out, no bound |
 | `cumulative_seconds` | the most time its calls may take in all, each counting once it has ended; left out, no bound |
-| `call_timeout_seconds` | each call's timeout, counted from its target's start |
+| `call_timeout_seconds` | each call's timeout, counted from its body's start |
 
-A job function runs one call at a time. A call ends with its timeout, with the function's
+An agent's job grant runs one call at a time. Each agent has its own call and time limits. A call ends with its timeout, with the function's
 cumulative time, or with the work phase, whichever comes first.
 
 ### A now function
@@ -133,7 +156,7 @@ asked of it.
 
 | Key | What it is |
 | --- | --- |
-| `runner` | the runner that each lease starts afresh, which no other session names |
+| `runner` | the runner that each lease starts afresh |
 | `instances` | the most leases open at once |
 | `instance_seconds` | the most time each lease may last, from when its runner is ready |
 | `cumulative_seconds` | the most time its leases may last in all, each open lease counting; left out, no bound |
@@ -148,12 +171,24 @@ bounds each call afresh.
 
 `final` holds `target`, which no job function names, `body`, `keywords`, as a job function's, which
 may be left out, `payload_max_bytes`, at most 64 MiB, and `timeout_seconds`, counted from its
-target's start. The final call runs once the agent's sandbox and every call and lease it made have
-ended: its body drives a fresh sandbox of the target, as a job's body does, with the last payload
-selected. The dict it returns is the run's
-result: each entry is a value the run shows, in the body's order, as `pumpkin wait`, `pumpkin ls`
-and the page show `score=6 lines=1`. A run with nothing selected makes no final call; a run whose
-final call fails or times out finishes without a result, and `pumpkin wait` exits 3 for both.
+target's start. The body drives a fresh sandbox once all agents, calls and leases have ended.
+The dict it returns is the run's result. Each entry is a value the run shows in the body's order,
+as `pumpkin wait`, `pumpkin ls` and the page show `score=6 lines=1`.
+
+The final body's second parameter, conventionally named `submissions`, is a dictionary in agent
+declaration order. Each role name maps to its last submitted opaque `Payload`, or to `None`
+if it submitted nothing. A submitted zero-byte file is still a `Payload`. The body runs even
+when every value is `None`. It chooses which submissions to send to files or commands in the target
+and what result to return.
+For example, a task with a scoring function for the role named `agent` can write:
+
+```python
+def final_score(target: Target, submissions):
+    payload = submissions["agent"]
+    if payload == None:
+        return {"score": 0}
+    return score(target, payload)
+```
 
 ## Bodies
 
@@ -163,26 +198,51 @@ the text the record keeps. Its parameters, in order:
 
 1. The handle, which only the host makes: a `Target` for a job function's body and the final
    call's, a `Run` for a now function's.
-2. The payload, a `Payload`: the bytes the caller sent, which the body can only pass on, to
-   `put` or `select`.
+2. A job or now function receives the caller’s bytes as an opaque `Payload`. A final body receives
+   the dictionary of submissions described above. Leave that parameter unannotated.
 3. The caller's parameters, if any: each annotated `str`, `int` or `bool`, with or without a
    default. The final call's body has none, as no caller gives it an argument.
 4. After `*`, the keyword-only parameters, which a job function's `keywords` or the final call's
    give, each a JSON value that must fit its annotation. One that they don't give needs a default.
 
-The two handles' methods:
+Methods available to a body and its runner callbacks follow.
 
 | Method | What it does |
 | --- | --- |
+| `target.caller()` | returns the issuing agent's role name, authenticated by its session; available in a job body |
 | `target.put(path, payload)` | writes the payload as one file at `path`, an absolute path, its parents made |
 | `target.run(argv)` | runs `argv`, a list of strings, in the target's `cwd`, and waits for it to end, whatever its exit status |
+| `target.capture(argv, stdin = payload)` | runs the command with the payload as standard input. Omit `stdin` or pass `None` for no input. Returns complete UTF-8 stdout, at most 1 MiB, on exit code zero. The record keeps stdout and stderr |
+| `target.with_runner(session, callback, ...)` | opens a fresh runner under the target's named session grant, calls `callback(runner, ...)` with the remaining positional arguments, then closes the runner and waits for deletion before returning the callback's value |
+| `runner.put(tree, to)` | copies the directory `tree` on the target into the runner at `to`, which must be new. Both paths are absolute. The copy counts as one grant operation |
+| `runner.get(from, to)` | copies a file or directory from the runner into a new directory on the target. A file keeps its basename. Both paths are absolute. The copy counts as one grant operation and uses the session's per-copy byte limit |
+| `runner.run(argv, timeout_seconds = seconds)` | runs a command in that runner and waits for its recorded output. Its optional timeout is a positive number of seconds. The result holds `end`, `stdout_tail` and `stderr_tail` |
 | `target.get(path)` | the text of the file at `path`, which must be UTF-8 and at most 1 MiB |
-| `run.select(payload)` | makes the payload the selection, the one the final call gets, replacing the last |
-| `run.end_work()` | ends the caller's work, its selection locked, once its grace has run out |
+| `run.set_submission(payload)` | sets or replaces the caller’s submission |
+| `run.end_work()` | locks the caller’s submission immediately and ends its work once its grace has run out |
 
-A now function's body only proposes: the run applies its `select` and `end_work`, in order, once
-the body has returned, each checked against the state the ones before it leave, and applies none
-if one is refused. `end_work()` needs a selection, and must come last.
+A runner handle works only during its callback. A callback error also closes the runner.
+A runner command reports its own timeout as `"timed_out"` and an exit as
+`{"exited": {"code": n}}` or `{"exited": {"signal": n}}`. Its output fields hold at most
+21 KiB each, with invalid UTF-8 replaced. The record keeps the raw streams.
+A refused operation, failed copy, unstarted command, incomplete output collection or expired
+lease fails the body. A runner that cannot be deleted fails the run.
+
+A body can call `target.with_runner("judge", _grade, target, argv)` when its judge command
+writes `/work/result.json`. The destination directory `/work/feedback` must be new on the target.
+
+```python
+def _grade(runner, target, argv):
+    result = runner.run(argv)
+    if result["end"] != {"exited": {"code": 0}}:
+        fail("judge failed")
+    runner.get("/work/result.json", "/work/feedback")
+    return json.decode(target.get("/work/feedback/result.json"))
+```
+
+A now function's body proposes these operations. When the body returns, the run applies them
+in order if they all pass validation. A refused operation leaves the state unchanged.
+`end_work()` can end a caller that submitted nothing and must come last.
 
 A body returns a dict whose keys are names, as a role's are, and whose values JSON can hold; it is
 encoded as `json.encode` would, and takes at most 1 MiB as JSON. Within a body, annotations are checked on entry and on return of
@@ -207,22 +267,25 @@ body unrun, as `examples/hello`'s `final` answers:
 
 ## From inside a sandbox
 
-A role's code makes ops with `sandboxctl`, at `/.pumpkin/bin/sandboxctl` in the agent's sandbox,
-and in a target's that holds sessions. It prints the reply as one line of JSON, whose `kind` names it, and
-exits 0, 1 for a refused op, or 2 for the status of a job that gave no result; `sandboxctl --help`
-gives each command's arguments, and the `schema` crate's `sandbox::op` module each reply's fields.
+An agent, or a call-lifetime target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
+directory first on each command's `PATH`, ahead of the path the role or image sets.
+`sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
+1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait
+expires. `sandboxctl --help` gives each command's arguments, and the `schema` crate's
+`sandbox::op` module each reply's fields.
 The replies below come from `examples/hello` with its agent changed to try each, and its `count`
 grant given `"calls": 2` and `"cumulative_seconds": 120`.
 
-`sandboxctl ops` gives the time left to work, the sandbox's resources, and each grant with its
+`sandboxctl ops --text` prints shell usage for this role.
+`sandboxctl ops` gives the role name, the time left to work, the sandbox's resources, and each grant with its
 bounds and its caller's parameters:
 
 ```json
-{"kind":"ops","remaining_seconds":299,"resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"count","payload_max_bytes":1024,"calls":2,"cumulative_seconds":120,"call_timeout_seconds":60},{"kind":"now","name":"final","payload_max_bytes":1024,"arguments":{"finalize":{"type":"bool","default":false}}}]}
+{"kind":"ops","role":"agent","remaining_seconds":299,"resources":{"cpu_millis":500,"memory_bytes":268435456},"grants":[{"kind":"job","name":"count","payload_max_bytes":1024,"calls":2,"cumulative_seconds":120,"call_timeout_seconds":60},{"kind":"now","name":"final","payload_max_bytes":1024,"arguments":{"finalize":{"type":"bool","default":false}}}]}
 ```
 
-`sandboxctl call <function> <file> [--arg <name>=<value>]...` calls a function with the file's
-bytes as the payload. A job function's call answers at once with the job's number and what the
+`sandboxctl call <function> [<file>] [--arg <name>=<value>]...` calls a function with the file's
+bytes as the payload. Omitting the file sends zero bytes. A job function's call answers at once with the job's number and what the
 function has left, `null` for a bound it doesn't set:
 
 ```json
@@ -236,6 +299,13 @@ what the body `returned`, or `errored`, with a `failure` whose `code` is `call_t
 ```json
 {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":119}}
 ```
+
+`sandboxctl call <function> <file> --wait <seconds>` waits for the result. Give a positive
+number of seconds for admission and completion together. The command retries an uncharged
+busy refusal, then polls the admitted job and prints its terminal status. A now function
+returns its usual reply. On timeout the command exits with 124 and reports the job number
+if it received one. An admitted job continues to run. If the connection fails before the
+admission reply arrives, the call may already have started.
 
 Once a job has ended, `model_requests_over_budget` says how many of its target's model requests a
 spent model budget barred, if any. `hello`'s target makes none; a job whose target's budget ran out
@@ -262,15 +332,16 @@ the ends of the command's output; and `close <lease>` ends it.
 A refusal says why, and what to do instead. Each of these is a real reply:
 
 ```json
-{"kind":"refused","message":"`count` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged"}
+{"kind":"refused","message":"`count` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged","busy":true}
 {"kind":"refused","message":"you have no job 7: ask about a job that one of your calls returned"}
 {"kind":"refused","message":"the work was ended: make no more ops"}
 ```
 
 ## How a call is bounded
 
-Before a call runs, the run checks its payload against the function's `payload_max_bytes` and
-refuses an empty one, and checks the function's `calls` and `cumulative_seconds`. A job's body may
+A job or now function's payload may be empty and must fit its `payload_max_bytes`. A saved
+submission must also fit the final call's payload limit. A job function's `calls` and
+`cumulative_seconds` bound the jobs it can start. A job's body may
 drive its target until `call_timeout_seconds` have passed since the target started, or less if the
 function's cumulative time or the work phase ends first; then the command the body runs is ended,
 or its next method fails, and the job is `errored` with `call_timeout`. Each file a body gets
@@ -298,10 +369,10 @@ column; a problem in how the parts fit is said with its place in the IR. Among t
 - a key the IR doesn't take, or a value its type refuses, as above, a kind that holds what it
   can't among them;
 - a function defined in the entry file;
-- a workflow with no agent, or with two;
+- a workflow with no agent;
 - a name that names no role, or a role of another kind than its place takes;
-- a target that two job functions name, or that a job function and the final call both name, and
-  a runner that two sessions name;
+- a target that two grants of one agent name or that a job and the final call both name;
+- a runner that two sessions name unless their holders are distinct agents;
 - a target or a runner that nothing names;
 - an agent's runner whose image a target has;
 - a payload or transfer bound past the protocol's.
@@ -311,7 +382,6 @@ Each in the words `check` says it:
 ```text
 `egress` is no field of `runner`: expected one of `cwd`, `env`
 a function defined in an entry file is not in Pumpkin's Starlark: define it in a library, and load it
-`helper` is a second agent, after `agent`: a workflow has exactly one
 `agent` is an agent: name a target as the final call's target
 `final_judge` is the final call's target and `check`'s: give the final call a role no job names
 `gpu` is a runner that no session names: name it from one
@@ -325,7 +395,7 @@ parameters don't fit its kind, is refused at the parameter:
 ```text
 lib/submit.star:1:12: `submit`'s first parameter is a `Target`, and a now function's body takes its `Run`: write `def submit(target: Run, …)`
 lib/submit.star:1:47: `submit`'s `finalize` follows the payload, so its caller gives it: annotate it `str`, `int` or `bool`
-lib/final.star:1:38: `final_call`'s `level` follows the payload, and the final call has no caller to give it: remove it
+lib/final.star:1:38: `final_call`'s `level` follows the submissions, and the final call has no caller to give it: remove it
 lib/final.star:1:65: `final_call` takes the keyword `metric`, which the final call's `keywords` does not give: give it, or a default
 ```
 
@@ -333,5 +403,5 @@ A body's own statements run only when it is called, so a misspelt method fails t
 reaches it, not the check:
 
 ```text
-lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `get`, `put`, `run`
+lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
 ```

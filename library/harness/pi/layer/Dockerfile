@@ -6,8 +6,8 @@
 # The build's named context `node` is the image of `node()` in `harness/node/node.star`, whose npm
 # installs Pi. `package-lock.json`
 # pins each package by its version and the SHA-512 of its tarball; npm made it for
-# `package.json` with `npm install --package-lock-only --before=2026-10-14T00:00:00Z`, so that
-# it pins the packages FrontierCS 2 evaluated Pi 1.2.0 with.
+# `package.json` with `npm install --package-lock-only --before=2026-10-14T00:00:00Z` to
+# limit resolution to versions published before the cutoff.
 
 FROM node AS pi-1.2.0
 COPY package.json package-lock.json /layer/harness/pi-1.2.0/

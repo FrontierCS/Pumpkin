@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use schema::ir::{Name, argument};
 use schema::sandbox::op::{CallReply, JobReply, OpReply, Remaining};
-use schema::workflow::{JobFunctionId, JobOf};
+use schema::workflow::{Holder, JobFunctionId, JobOf, TargetId};
 
 use crate::ops::fits;
 use crate::{Action, Caller, Core, PayloadRef};
@@ -38,16 +38,6 @@ impl Core<'_> {
                 "`{name}` has no calls left of the {calls} it allows: make no more calls to it"
             ));
         }
-        // A call has ended only once every lease it held has.
-        let holding = (self.jobs)
-            .of(JobOf::Function(id))
-            .any(|job| self.leases.holds(Caller::Job(job)));
-        if usage.busy || holding {
-            return Err(format!(
-                "`{name}` runs one call at a time, and already has one queued or running: call \
-                 again once it has finished; this call is not charged"
-            ));
-        }
         let cumulative = function.cumulative();
         if let Some(total) = cumulative
             && usage.used >= total
@@ -57,8 +47,36 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        // The work phase's end stops every call (`end_work`), so a call is given at most the time
-        // the work phase has left when it is accepted; after a wait in the queue, its timeout can
+        if let Some(service) = self.shared.get(&function.target) {
+            if *service != crate::Availability::Available {
+                return Err(format!(
+                    "`{name}` cannot run because its shared sandbox is unavailable"
+                ));
+            }
+            if self.work_target_busy(function.target) {
+                return Ok(OpReply::Refused {
+                    busy: true,
+                    message: format!(
+                        "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
+                    ),
+                });
+            }
+        } else if usage.busy
+            || self
+                .jobs
+                .of(JobOf::Function(id))
+                .any(|job| self.leases.holds(Caller::Job(job)))
+        {
+            return Ok(OpReply::Refused {
+                busy: true,
+                message: format!(
+                    "`{name}` runs one call at a time, and already has one queued or running: call \
+                 again once it has finished; this call is not charged"
+                ),
+            });
+        }
+        // Ending an agent's work stops its calls (`end_work`), so a call is given at most the time
+        // its caller has left when it is accepted; after a wait in the queue, its timeout can
         // reach past the deadline, where that stop ends it all the same. Each term is positive: the
         // work phase ends at the deadline, and every limit is left above zero.
         let work_left = deadline.saturating_sub(self.now);
@@ -77,6 +95,15 @@ impl Core<'_> {
             job: job.0,
             remaining,
         })))
+    }
+
+    fn work_target_busy(&self, target: TargetId) -> bool {
+        // A job can report its end while its runner still occupies this target's slot.
+        self.jobs.active_on(self.workflow, target).is_some()
+            || self
+                .leases
+                .active()
+                .any(|lease| self.workflow.session(lease.grant).holder == Holder::Target(target))
     }
 
     /// What job function `id` has left of its quotas.

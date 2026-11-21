@@ -8,17 +8,17 @@ the language of Bazel's files, with type annotations on a `def`'s parameters and
 """The agent's submissions."""
 
 def submit(run: Run, payload: Payload, finalize: bool = False) -> dict[str, str]:
-    """Selects `payload` for the final call, replacing the last.
+    """Sets the calling agent's submission, replacing its previous payload.
 
     Args:
       run: the run's state.
       payload: the agent's submission.
-      finalize: whether the call also ends the agent's work.
+      finalize: whether the call also locks the submission and ends the agent's work.
 
     Returns:
-      The selection's state: `stored`, or `accepted` once the work has ended.
+      `stored`, or `accepted` if the call locks the submission.
     """
-    run.select(payload)
+    run.set_submission(payload)
     if finalize:
         run.end_work()
         return {"state": "accepted"}
@@ -100,7 +100,7 @@ module do.
 
 A `def` may annotate each parameter after `:` and its return after `->`. A type is `None`,
 `bool`, `int`, `float`, `str`, `list[T]`, `dict[K, V]`, whose `K` is `int`, `float` or `str`, or
-one of the handles `Target`, `Run` and `Payload`. A `list` or a `dict` names its elements' types,
+one of the handles `Target`, `Runner`, `Run` and `Payload`. A `list` or a `dict` names its elements' types,
 and a type is one type, with no `|`.
 
 An annotation is checked as the function is called, against each argument, and as it returns,
@@ -117,7 +117,7 @@ Every file can use these, besides Starlark's:
 
 | Name | What it is |
 | --- | --- |
-| `workflow(*, name, roles, final)` | the workflow, which [Workflows](workflows.md) describes; called once |
+| `workflow(*, name, roles, final, deadline_seconds)` | the workflow, which [Workflows](workflows.md) describes; called once |
 | `arg(name, type, *, default)` | the value of `--arg <name>=<value>`, read as `type`, `str`, `int` or `bool`; without a `default`, it must be given |
 | `image(recipe, *, context, mount, target, args, contexts)` | the image that the Dockerfile `recipe` builds; its value names it in a role |
 | `package_name()` | the entry file's directory below the root, such as `tasks/bench` |
@@ -139,9 +139,10 @@ handle has methods and nothing else, and no JSON holds one, so a body can't retu
 
 | Handle | Methods |
 | --- | --- |
-| `Target`, a job's or the final call's target | `put(path, payload)`, `run(argv)`, `get(path)` |
-| `Run`, the run's state, a now function's | `select(payload)`, `end_work()` |
-| `Payload`, the call's payload | none: it is passed to `put` or `select` |
+| `Target`, a job's or the final call's target | `caller()`, `put(path, payload)`, `run(argv)`, `capture(argv, stdin = payload)`, `get(path)`, `with_runner(session, callback, ...)` |
+| `Runner`, the lease passed to a callback | `put(tree, to)`, `get(from, to)`, `run(argv, timeout_seconds = seconds)` |
+| `Run`, the calling agent’s state | `set_submission(payload)`, `end_work()` |
+| `Payload`, an opaque file supplied to the call | passed to `put`, to `capture` as stdin, or to `set_submission` |
 
 [Workflows](workflows.md#bodies) says what each method does. A handle may be passed to a function
 of the body's file, whose parameter it fits if annotated so.

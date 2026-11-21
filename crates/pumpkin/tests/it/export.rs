@@ -50,7 +50,7 @@ pub(super) fn write_exported(
     let mut third = second.to_vec();
     third.extend([said("A.TXT is there"), user("and now?")]);
     let mut log = whole_log();
-    log.push(started(1001, "agent", 10));
+    log.push(started(1001, "agent-0", 10));
     let kept = model.keep(
         10,
         "input",
@@ -59,8 +59,8 @@ pub(super) fn write_exported(
         rest(),
         Some(&answer(json!([call]))),
     );
-    log.push(answered(1002, "agent", 10, 200, kept, Some("responses")));
-    log.push(started(1003, "agent", 11));
+    log.push(answered(1002, "agent-0", 10, 200, kept, Some("responses")));
+    log.push(started(1003, "agent-0", 11));
     let kept = model.keep(
         11,
         "input",
@@ -69,8 +69,8 @@ pub(super) fn write_exported(
         rest(),
         Some(&answer(json!([said("A.TXT is there")]))),
     );
-    log.push(answered(1004, "agent", 11, 200, kept, Some("responses")));
-    log.push(started(1005, "agent", 12));
+    log.push(answered(1004, "agent-0", 11, 200, kept, Some("responses")));
+    log.push(started(1005, "agent-0", 12));
     let briefer = [("instructions", json!("be briefer")), tools];
     let kept = model.keep(
         12,
@@ -80,7 +80,7 @@ pub(super) fn write_exported(
         rest(),
         Some(&answer(json!([]))),
     );
-    log.push(answered(1006, "agent", 12, 200, kept, Some("responses")));
+    log.push(answered(1006, "agent-0", 12, 200, kept, Some("responses")));
     let judging = [
         json!({ "role": "system", "content": "judge it" }),
         json!({ "role": "user", "content": "is a.txt right?" }),
@@ -288,7 +288,7 @@ fn exports_what_the_view_answers() {
     }
     let file = |key: String| serde_json::from_slice::<Value>(&files[&key]).unwrap();
     let run = file(format!("runs/{EXPORTED}/run.json"));
-    let stats = file(format!("runs/{EXPORTED}/trace/agent/stats-thread.json"));
+    let stats = file(format!("runs/{EXPORTED}/trace/agent-0/stats-thread.json"));
     said.push(format!(
         "its cost: {}; the list's: {}; its agent's steps': {}, {} of unknown cost",
         run["cost"],
@@ -298,7 +298,11 @@ fn exports_what_the_view_answers() {
     ));
     let request = String::from_utf8(files[&format!("runs/{EXPORTED}/kept/12.request")].clone());
     said.push(format!("request 12, as kept: {}", request.unwrap()));
-    for (caller, query) in [("agent", "A.TXT"), ("agent", "a.txt\nb"), ("job-0", "is")] {
+    for (caller, query) in [
+        ("agent-0", "A.TXT"),
+        ("agent-0", "a.txt\nb"),
+        ("job-0", "is"),
+    ] {
         let target = format!("/api/runs/{EXPORTED}/trace/{caller}/search?q={query}");
         let target = target.replace('\n', "%0A");
         let (_, reply) = piped.ask(&target, false);
@@ -325,9 +329,9 @@ fn exports_what_the_view_answers() {
         false,
         &[(EXPORTED, "<id>")],
         &expect![[r#"
-            pumpkin: exported 1 run into public, and left out 0: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 0: wrote 99 files
 
-            the page: index.html, and 21 files below its digest
+            the page: index.html, and 22 files below its digest
             robots.txt: -
             runs.json: /api/runs
             runs/<id>/diff/11-12-system.json: /api/runs/<id>/diff?a=11&b=12&part=system
@@ -359,19 +363,19 @@ fn exports_what_the_view_answers() {
             runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000009: /api/runs/<id>/item/0000000000000000000000000000000000000000000000000000000000000009
             runs/<id>/log/0.json: /api/runs/<id>/log?at=0
             runs/<id>/run.json: /api/runs/<id>
-            runs/<id>/trace/agent/entries/0-0.json: /api/runs/<id>/trace/agent/entries?from=0&to=0&entry=0
-            runs/<id>/trace/agent/entries/1-0.json: /api/runs/<id>/trace/agent/entries?from=1&to=1&entry=0
-            runs/<id>/trace/agent/entries/10-0.json: /api/runs/<id>/trace/agent/entries?from=10&to=10&entry=0
-            runs/<id>/trace/agent/entries/11-0.json: /api/runs/<id>/trace/agent/entries?from=11&to=11&entry=0
-            runs/<id>/trace/agent/entries/12-0.json: /api/runs/<id>/trace/agent/entries?from=12&to=12&entry=0
-            runs/<id>/trace/agent/entries/2-0.json: /api/runs/<id>/trace/agent/entries?from=2&to=2&entry=0
-            runs/<id>/trace/agent/entry/11/in/2/0.json: /api/runs/<id>/trace/agent/entry?at=11/in/2/0
-            runs/<id>/trace/agent/ops.json: /api/runs/<id>/trace/agent/ops
-            runs/<id>/trace/agent/search/0.json: -
-            runs/<id>/trace/agent/stats-step.json: /api/runs/<id>/trace/agent/stats?by=step
-            runs/<id>/trace/agent/stats-thread.json: /api/runs/<id>/trace/agent/stats?by=thread
-            runs/<id>/trace/agent/stats-turn.json: /api/runs/<id>/trace/agent/stats?by=turn
-            runs/<id>/trace/agent/steps.json: /api/runs/<id>/trace/agent/steps
+            runs/<id>/trace/agent-0/entries/0-0.json: /api/runs/<id>/trace/agent-0/entries?from=0&to=0&entry=0
+            runs/<id>/trace/agent-0/entries/1-0.json: /api/runs/<id>/trace/agent-0/entries?from=1&to=1&entry=0
+            runs/<id>/trace/agent-0/entries/10-0.json: /api/runs/<id>/trace/agent-0/entries?from=10&to=10&entry=0
+            runs/<id>/trace/agent-0/entries/11-0.json: /api/runs/<id>/trace/agent-0/entries?from=11&to=11&entry=0
+            runs/<id>/trace/agent-0/entries/12-0.json: /api/runs/<id>/trace/agent-0/entries?from=12&to=12&entry=0
+            runs/<id>/trace/agent-0/entries/2-0.json: /api/runs/<id>/trace/agent-0/entries?from=2&to=2&entry=0
+            runs/<id>/trace/agent-0/entry/11/in/2/0.json: /api/runs/<id>/trace/agent-0/entry?at=11/in/2/0
+            runs/<id>/trace/agent-0/ops.json: /api/runs/<id>/trace/agent-0/ops
+            runs/<id>/trace/agent-0/search/0.json: -
+            runs/<id>/trace/agent-0/stats-step.json: /api/runs/<id>/trace/agent-0/stats?by=step
+            runs/<id>/trace/agent-0/stats-thread.json: /api/runs/<id>/trace/agent-0/stats?by=thread
+            runs/<id>/trace/agent-0/stats-turn.json: /api/runs/<id>/trace/agent-0/stats?by=turn
+            runs/<id>/trace/agent-0/steps.json: /api/runs/<id>/trace/agent-0/steps
             runs/<id>/trace/job-0/entries/13-0.json: /api/runs/<id>/trace/job-0/entries?from=13&to=13&entry=0
             runs/<id>/trace/job-0/ops.json: /api/runs/<id>/trace/job-0/ops
             runs/<id>/trace/job-0/search/0.json: -
@@ -407,8 +411,8 @@ fn exports_what_the_view_answers() {
 
             its cost: {"said":"$2.48, $2.05 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$2.48+"}; the list's: "$2.48+"; its agent's steps': 1.65375, 1 of unknown cost
             request 12, as kept: {"conversation":{"field":"input","items":[{"item":"0000000000000000000000000000000000000000000000000000000000000000"},{"item":"0000000000000000000000000000000000000000000000000000000000000003"},{"item":"0000000000000000000000000000000000000000000000000000000000000004"},{"item":"0000000000000000000000000000000000000000000000000000000000000005"},{"item":"0000000000000000000000000000000000000000000000000000000000000006"}]},"fields":[{"item":"0000000000000000000000000000000000000000000000000000000000000007","name":"instructions"},{"name":"model","sent":"glm-5.3"},{"name":"stream","sent":false},{"item":"0000000000000000000000000000000000000000000000000000000000000002","name":"tools"}]}
-            agent's "A.TXT": 2 found, as the view's search finds them
-            agent's "a.txt\nb": 1 found, as the view's search finds them
+            agent-0's "A.TXT": 2 found, as the view's search finds them
+            agent-0's "a.txt\nb": 1 found, as the view's search finds them
             job-0's "is": 1 found, as the view's search finds them
             pumpkin: exported 1 run into public, and left out 0: wrote 0 files
         "#]],
@@ -452,7 +456,7 @@ fn rewrites_what_a_live_run_changed() {
         .0
         .join(format!(".pumpkin/runs/{EXPORTED}/log.jsonl"));
     let lines = fs::read_to_string(&log).unwrap().lines().count();
-    let mut grown = started(1009, "agent", 14);
+    let mut grown = started(1009, "agent-0", 14);
     grown["seq"] = json!(lines);
     writeln!(
         OpenOptions::new().append(true).open(&log).unwrap(),
@@ -482,7 +486,7 @@ fn rewrites_what_a_live_run_changed() {
         &[(EXPORTED, "<id>"), (UNREADABLE, "<unreadable>")],
         &expect![[r#"
             pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
-            pumpkin: exported 1 run into public, and left out 1: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 1: wrote 99 files
 
             pumpkin: left out run <unreadable>: /api/runs/<unreadable>: 500 Internal Server Error: {"error":"<scratch>/.pumpkin/runs/<unreadable>/provider.json: unknown variant `realtime`, expected one of `responses`, `chat`, `messages` at line 1 column 507"}
             pumpkin: exported 1 run into public, and left out 1: wrote 14 files
@@ -491,12 +495,12 @@ fn rewrites_what_a_live_run_changed() {
               runs.json
               runs/<id>/log/0.json
               runs/<id>/run.json
-              runs/<id>/trace/agent/entries/14-0.json, new
-              runs/<id>/trace/agent/search/0.json
-              runs/<id>/trace/agent/stats-step.json
-              runs/<id>/trace/agent/stats-thread.json
-              runs/<id>/trace/agent/stats-turn.json
-              runs/<id>/trace/agent/steps.json
+              runs/<id>/trace/agent-0/entries/14-0.json, new
+              runs/<id>/trace/agent-0/search/0.json
+              runs/<id>/trace/agent-0/stats-step.json
+              runs/<id>/trace/agent-0/stats-thread.json
+              runs/<id>/trace/agent-0/stats-turn.json
+              runs/<id>/trace/agent-0/steps.json
               runs/<id>/trace/job-0/steps.json
               runs/<id>/trace/job-1/steps.json
               runs/<id>/trace/job-2/steps.json
@@ -526,7 +530,7 @@ fn replaces_what_names_the_machines() {
     write_exported(&scratch, true, &asked, &reports);
     let dir = scratch.0.join(format!(".pumpkin/runs/{EXPORTED}"));
     let sandbox = json!({ "id": ec2, "provider": "aws", "delete": { "state": "deleted" } });
-    fs::write(dir.join("agent/sandbox.json"), sandbox.to_string()).unwrap();
+    fs::write(dir.join("agents/solver/sandbox.json"), sandbox.to_string()).unwrap();
     let record = dir.join("record.json");
     let mut made: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
     made["args"] = json!(["/home/pumpkin/trees/task.star"]);
@@ -569,7 +573,7 @@ fn replaces_what_names_the_machines() {
         assert!(held.is_empty(), "{why}, {text}, is in {held:?}");
     }
     for text in [
-        "<sandbox of agent>",
+        "<sandbox of agents/solver>",
         "<sandbox of job-0>",
         "<modal.dials_from>",
         "<aws.account>",
@@ -593,17 +597,17 @@ fn replaces_what_names_the_machines() {
         false,
         &[(EXPORTED, "<id>")],
         &expect![[r#"
-            pumpkin: exported 1 run into public, and left out 0: wrote 98 files
+            pumpkin: exported 1 run into public, and left out 0: wrote 99 files
 
-            <sandbox of agent>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            <sandbox of job-0>: in 4 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/log/0.json runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            <modal.dials_from>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            <aws.account>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            ~/work: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            ~/trees: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            <user>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            pumpkin,: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            Ubuntu 24.04.5 LTS: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json
-            i-0123456789abcdef0: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent/entries/10-0.json runs/<id>/trace/agent/search/0.json"#]],
+            <sandbox of agents/solver>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            <sandbox of job-0>: in 4 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/log/0.json runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            <modal.dials_from>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            <aws.account>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            ~/work: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            ~/trees: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            <user>: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            pumpkin,: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            Ubuntu 24.04.5 LTS: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json
+            i-0123456789abcdef0: in 3 files, runs/<id>/kept/items/0000000000000000000000000000000000000000000000000000000000000000 runs/<id>/trace/agent-0/entries/10-0.json runs/<id>/trace/agent-0/search/0.json"#]],
     );
 }

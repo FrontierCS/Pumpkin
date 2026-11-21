@@ -6,14 +6,14 @@
 //! the run.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
-use std::{fmt, io, iter};
+use std::{fmt, io};
 
 use decision::{JobId, LeaseId};
 use gateway::{Arrival, Dialer, GrantListener, Session, Sockets};
@@ -27,7 +27,10 @@ use schema::sandbox::{
     Endpoint, Launch, Listening, OpPayloadLimit, PUMPKIN_BYTES, RelativePath, SocketDial, TcpDial,
     command_env, command_stderr, command_stdout, pumpkin_dir,
 };
-use schema::workflow::{ByProvider, ByRole, Holder, Placed, RoleId, RunnerId, TargetId, Workflow};
+use schema::workflow::{
+    AgentId, ByProvider, ByRole, JobFunctionId, Placed, RoleId, RunnerId, SessionId, TargetId,
+    Workflow,
+};
 use serde::{Deserialize, Deserializer, de};
 use stdx::{Context, Deadline};
 
@@ -42,44 +45,104 @@ const PUMPKIN: Limits = Limits {
     entries: ENTRIES,
 };
 
-/// The roles that `provider` hosts, in the phases that [`Provider::reserve`] takes: the work
-/// phase's roles (the agent, the target of each job function, and the runner of each session that
-/// the others hold), then the final call's (its target and the runners it holds). The second
-/// starts only once the first has ended. A phase with no role on `provider` is left out.
-pub(super) fn phases(placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
-    let workflow = placed.workflow();
-    let target = workflow.final_call().target;
-    let runners = |last: bool| {
-        (workflow.sessions())
-            .filter(move |(_, grant)| (grant.holder == Holder::Target(target)) == last)
-            .map(|(_, grant)| grant.runner.role())
-    };
-    let agent = iter::once(workflow.agent().role);
-    let targets = (workflow.job_functions()).map(|(_, function)| function.target.role());
-    let work: Vec<RoleId> = (agent.chain(targets)).chain(runners(false)).collect();
-    let last: Vec<RoleId> = iter::once(target.role()).chain(runners(true)).collect();
-    let on = |roles: Vec<RoleId>| -> Vec<Role> {
-        (roles.into_iter())
-            .filter(|&role| placed.placement(role).provider == *provider)
-            .map(|role| provider_role(workflow, role))
-            .collect()
-    };
-    [on(work), on(last)]
-        .into_iter()
-        .filter(|phase| !phase.is_empty())
-        .collect()
+/// The simultaneous instances reserved in each phase. Each function owns one slot of its
+/// target; each session owns a range of runner slots for every instance of its holder.
+pub(super) struct Capacity {
+    work: BTreeMap<RoleId, NonZeroU32>,
+    final_phase: BTreeMap<RoleId, NonZeroU32>,
+    pub(super) functions: BTreeMap<JobFunctionId, u32>,
+    pub(super) sessions: BTreeMap<SessionId, u32>,
 }
 
-// A runner's sandboxes run at once as many as its grant opens leases at once, and any other
-// role's, one.
-fn provider_role(workflow: &Workflow, role: RoleId) -> Role {
+impl Capacity {
+    pub(super) fn of(workflow: &Workflow) -> Result<Self, String> {
+        let mut work = BTreeMap::new();
+        let mut final_phase = BTreeMap::new();
+        let final_role = workflow.final_call().target.role();
+        final_phase.insert(final_role, NonZeroU32::MIN);
+        for agent in workflow.agents() {
+            work.insert(agent.id.role(), NonZeroU32::MIN);
+        }
+        for target in workflow.work_targets() {
+            work.insert(target.role(), NonZeroU32::MIN);
+        }
+        let overflow = |role| {
+            format!(
+                "role `{}` needs more than {} simultaneous sandboxes: reduce its grants",
+                workflow.sandbox(role).name,
+                u32::MAX
+            )
+        };
+        let reserve = |phase: &mut BTreeMap<_, NonZeroU32>, role, count: u32| {
+            let first = phase.get(&role).map_or(0, |count| count.get());
+            let total = first
+                .checked_add(count)
+                .and_then(NonZeroU32::new)
+                .ok_or_else(|| overflow(role))?;
+            phase.insert(role, total);
+            Ok::<_, String>(first)
+        };
+        let mut functions = BTreeMap::new();
+        for (id, function) in workflow.job_functions() {
+            if workflow.target(function.target).lifetime == schema::ir::TargetLifetime::Call {
+                functions.insert(id, reserve(&mut work, function.target.role(), 1)?);
+            }
+        }
+        let mut sessions = BTreeMap::new();
+        for (id, grant) in workflow.sessions() {
+            let holder = grant.holder.role();
+            let runner = grant.runner.role();
+            let phase = if holder == final_role {
+                &mut final_phase
+            } else {
+                &mut work
+            };
+            let count = phase[&holder]
+                .get()
+                .checked_mul(grant.instances.get())
+                .ok_or_else(|| overflow(runner))?;
+            sessions.insert(id, reserve(phase, runner, count)?);
+        }
+        Ok(Self {
+            work,
+            final_phase,
+            functions,
+            sessions,
+        })
+    }
+
+    pub(super) fn phases(&self, placed: &Placed, provider: &Name) -> Vec<Vec<Role>> {
+        [&self.work, &self.final_phase]
+            .into_iter()
+            .map(|phase| {
+                phase
+                    .iter()
+                    .filter(|(role, _)| placed.placement(**role).provider == *provider)
+                    .map(|(&role, &instances)| provider_role(placed.workflow(), role, instances))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|phase| !phase.is_empty())
+            .collect()
+    }
+
+    fn instances(&self, role: RoleId) -> NonZeroU32 {
+        self.work
+            .get(&role)
+            .into_iter()
+            .chain(self.final_phase.get(&role))
+            .copied()
+            .max()
+            .unwrap_or(NonZeroU32::MIN)
+    }
+}
+
+fn provider_role(workflow: &Workflow, role: RoleId, instances: NonZeroU32) -> Role {
     let sandbox = workflow.sandbox(role);
-    let leased = (workflow.sessions()).find(|(_, grant)| grant.runner.role() == role);
     Role {
         name: sandbox.name.clone(),
         user: sandbox.user,
         resources: sandbox.needs.resources(),
-        instances: leased.map_or(NonZeroU32::MIN, |(_, grant)| grant.instances),
+        instances,
     }
 }
 
@@ -93,6 +156,7 @@ pub(super) struct Published<'p> {
 /// Starts, records and deletes the sandboxes of one run.
 pub(super) struct Sandboxes<'p, H: Host> {
     run: RunTag,
+    pub(super) capacity: &'p Capacity,
     placed: &'p Placed,
     providers: ByProvider<Hosting<'p>>,
     images: ByRole<ImageRef>,
@@ -102,9 +166,16 @@ pub(super) struct Sandboxes<'p, H: Host> {
     logged: Sender<Input>,
     // Every sandbox created, which tells a delete where the record keeps it. Shared by the
     // threads that start and delete sandboxes: the loop's and each child's.
-    created: Mutex<Vec<Made<'p>>>,
+    inventory: Mutex<Inventory<'p>>,
     // How long a start waits between its lists of its sandbox's provider.
     between_looks: Duration,
+}
+
+#[derive(Default)]
+struct Inventory<'p> {
+    created: Vec<Made<'p>>,
+    // A provider can fail a create after allocating an instance whose ID it cannot return.
+    unnamed: BTreeSet<&'p Name>,
 }
 
 #[derive(Clone)]
@@ -112,6 +183,7 @@ struct Made<'p> {
     on: &'p Name,
     id: SandboxId,
     which: Which,
+    deleted: bool,
     gpus: Option<Vec<GpuModel>>,
 }
 
@@ -159,58 +231,63 @@ impl Meets<'_> {
 /// Whose sandbox: the agent's, a call's target, or an instance of a lease's runner.
 #[derive(Clone, Copy)]
 pub(super) enum Which {
-    Agent,
-    Call(JobId, TargetId),
+    Agent(AgentId),
+    Shared(TargetId),
+    Call(JobId, TargetId, u32),
     Lease(LeaseId, RunnerId, u32),
 }
 
 impl Which {
-    fn role(self, workflow: &Workflow) -> RoleId {
+    fn role(self) -> RoleId {
         match self {
-            Self::Agent => workflow.agent().role,
-            Self::Call(_, target) => target.role(),
+            Self::Agent(agent) => agent.role(),
+            Self::Shared(target) | Self::Call(_, target, _) => target.role(),
             Self::Lease(_, runner, _) => runner.role(),
         }
     }
 
     fn instance(self) -> u32 {
         match self {
-            Self::Agent | Self::Call(..) => 0,
-            Self::Lease(_, _, instance) => instance,
+            Self::Agent(_) | Self::Shared(_) => 0,
+            Self::Call(_, _, instance) | Self::Lease(_, _, instance) => instance,
         }
     }
 
-    pub(super) fn record_dir(self) -> String {
+    pub(super) fn record_dir(self, workflow: &Workflow) -> String {
         match self {
-            Self::Agent => "agent".to_owned(),
-            Self::Call(job, _) => format!("jobs/{}", job.0),
+            Self::Agent(agent) => {
+                format!("agents/{}", workflow.sandbox(agent.role()).name)
+            }
+            Self::Shared(target) => format!("shared/{}", workflow.sandbox(target.role()).name),
+            Self::Call(job, ..) => format!("jobs/{}", job.0),
             Self::Lease(lease, ..) => format!("leases/{}", lease.0),
         }
     }
 
     pub(super) fn noun(self) -> &'static str {
         match self {
-            Self::Agent => "the agent's",
+            Self::Agent(_) => "the agent's",
+            Self::Shared(_) => "the shared role's",
             Self::Call(..) => "the job's",
             Self::Lease(..) => "the runner's",
         }
     }
 
-    /// The sandbox's name, which no other sandbox of its run has: `agent`, `job-<n>` or
-    /// `lease-<n>`.
+    /// The sandbox's name, unique within its run.
     pub(super) fn name(self) -> Name {
         let name = match self {
-            Self::Agent => SandboxName::Agent,
-            Self::Call(job, _) => SandboxName::Job(job.0),
+            Self::Agent(agent) => SandboxName::Agent(agent.role().index()),
+            Self::Shared(target) => SandboxName::Shared(target.role().index()),
+            Self::Call(job, ..) => SandboxName::Job(job.0),
             Self::Lease(lease, ..) => SandboxName::Lease(lease.0),
         };
         // A `Name` made of such parts, which couldn't fail, would be a `pub` item of the schema
         // for this one caller.
         let Ok(name) = Name::try_from(name.to_string()) else {
             unreachable!(
-                "a sandbox's name within its run is no name, though `agent`, and `job-` and \
-                 `lease-` with a number's digits, are names: a letter, then letters, digits and \
-                 `-`, 24 at most"
+                "a sandbox's name within its run is no name, though it is a prefix \
+                 `agent-`, `shared-`, `job-`, or `lease-` and decimal digits, at most 26 characters of \
+                 the 64 that a name allows"
             )
         };
         name
@@ -220,7 +297,8 @@ impl Which {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// A sandbox's name within its run, as [`Which::name`] makes it.
 pub(super) enum SandboxName {
-    Agent,
+    Agent(usize),
+    Shared(usize),
     Job(u64),
     Lease(u64),
 }
@@ -228,7 +306,8 @@ pub(super) enum SandboxName {
 impl fmt::Display for SandboxName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Agent => f.write_str("agent"),
+            Self::Agent(index) => write!(f, "agent-{index}"),
+            Self::Shared(index) => write!(f, "shared-{index}"),
             Self::Job(job) => write!(f, "job-{job}"),
             Self::Lease(lease) => write!(f, "lease-{lease}"),
         }
@@ -239,8 +318,10 @@ impl<'de> Deserialize<'de> for SandboxName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = String::deserialize(deserializer)?;
         let numbered = |prefix: &str| name.strip_prefix(prefix)?.parse().ok();
-        if name == "agent" {
-            Ok(Self::Agent)
+        if let Some(index) = name.strip_prefix("agent-").and_then(|n| n.parse().ok()) {
+            Ok(Self::Agent(index))
+        } else if let Some(index) = name.strip_prefix("shared-").and_then(|n| n.parse().ok()) {
+            Ok(Self::Shared(index))
         } else if let Some(job) = numbered("job-") {
             Ok(Self::Job(job))
         } else if let Some(lease) = numbered("lease-") {
@@ -248,8 +329,40 @@ impl<'de> Deserialize<'de> for SandboxName {
         } else {
             Err(de::Error::invalid_value(
                 de::Unexpected::Str(&name),
-                &"`agent`, `job-<n>` or `lease-<n>`",
+                &"`agent-<n>`, `shared-<n>`, `job-<n>` or `lease-<n>`",
             ))
+        }
+    }
+}
+
+pub(super) enum Unstarted {
+    Uncreated(String),
+    Created {
+        which: Which,
+        id: SandboxId,
+        reason: String,
+    },
+}
+
+impl From<String> for Unstarted {
+    fn from(reason: String) -> Self {
+        Self::Uncreated(reason)
+    }
+}
+
+impl Unstarted {
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Uncreated(reason) | Self::Created { reason, .. } => reason,
+        }
+    }
+
+    /// Returns the start failure with console evidence. An error also means that deletion
+    /// or its record failed, so this instance cannot acknowledge the work teardown.
+    pub(super) fn dispose(self, sandboxes: &Sandboxes<'_, impl Host>) -> Result<String, String> {
+        match self {
+            Self::Uncreated(reason) => Ok(reason),
+            Self::Created { which, id, reason } => sandboxes.unstarted(which, &id, &reason),
         }
     }
 }
@@ -283,15 +396,18 @@ impl<'p> Published<'p> {
             // minutes, as a push does; so a signal is heeded before each, not after them all.
             interruption::check()?;
             let provider = *providers.get(name);
-            let meets = match (provider.meeting(), private) {
-                (Meeting::Local(creator), _) => Meets::Sockets(creator),
-                (Meeting::Private(creator), Some(listener)) => Meets::Grants(creator, listener),
-                (Meeting::Listen(creator), _) => Meets::Dials(creator, dialer),
-                (Meeting::Private(_), None) => unreachable!(
-                    "provider `{name}` is private, and the run has no grant listener, though \
-                     `Run::execute`'s caller binds one for every run that places a role on a \
-                     private provider, as its doc requires"
-                ),
+            let meets = match provider.meeting() {
+                Meeting::Local(creator) => Meets::Sockets(creator),
+                Meeting::Private(creator) => {
+                    let listener = private.ok_or_else(|| {
+                        format!(
+                            "private provider `{name}` has no grant listener: bind one for its \
+                             sandboxes to dial"
+                        )
+                    })?;
+                    Meets::Grants(creator, listener)
+                }
+                Meeting::Listen(creator) => Meets::Dials(creator, dialer),
             };
             let published = provider.publish_sandboxd(sandboxd);
             let sandboxd = published.context(format_args!(
@@ -337,6 +453,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         published: Published<'p>,
         run: RunTag,
         placed: &'p Placed,
+        capacity: &'p Capacity,
         record: &'p Path,
         host: &'p H,
         logged: Sender<Input>,
@@ -354,6 +471,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             });
         Self {
             run,
+            capacity,
             placed,
             providers,
             images,
@@ -361,18 +479,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             record,
             host,
             logged,
-            created: Mutex::default(),
+            inventory: Mutex::default(),
             between_looks,
         }
     }
 
-    /// Creates the sandbox of `which`, waits until `by` for its session, and sets it up. The
-    /// session sends what it receives, wrapped by `wrap`, to `arrivals`. `ops` is the largest op
-    /// payload the session takes, or none for a session that takes no ops; `hard_end` bounds how
-    /// long the sandbox may live should the run's driver die.
-    ///
-    /// A sandbox that was created but didn't start is deleted before this fails, and the error
-    /// adds the end of its console, if the provider could read it.
+    /// Creates and registers a sandbox by its startup bound. On failure the caller owns
+    /// disposal, so it can release prepared peers before a console read or deletion.
     pub(super) fn start<T: Send + 'static>(
         &self,
         which: Which,
@@ -381,20 +494,20 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         hard_end: UnixTime,
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
-    ) -> Result<Started, String> {
+    ) -> Result<Started, Unstarted> {
         let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
         let by_unix = (by.remaining()).map_or(now, |left| now.saturating_add(left));
-        let role = which.role(self.workflow());
+        let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
         let hosting = self.providers.get(&placement.provider);
         let create = Create {
             run: self.run.clone(),
             name,
-            role: provider_role(self.workflow(), role),
+            role: provider_role(self.workflow(), role, self.capacity.instances(role)),
             instance: which.instance(),
             class: placement.class.clone(),
             image: self.images.get(role).clone(),
@@ -404,18 +517,27 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        let (Created { id }, registration) = hosting.meets.create(&self.sockets, &create)?;
+        let started = hosting.meets.create(&self.sockets, &create);
+        let (Created { id }, registration) = started.inspect_err(|_| {
+            let mut inventory = stdx::unpoisoned(self.inventory.lock());
+            inventory.unnamed.insert(&placement.provider);
+        })?;
         let made = Made {
             on: &placement.provider,
             id: id.clone(),
             which,
+            deleted: false,
             gpus: None,
         };
         let recorded = self.write_sandbox(&made, None);
         // Listed before the write's failure is looked at, as `unstarted` finds it there.
-        stdx::unpoisoned(self.created.lock()).push(made);
+        stdx::unpoisoned(self.inventory.lock()).created.push(made);
         if let Err(error) = recorded {
-            return Err(self.unstarted(which, &id, &error));
+            return Err(Unstarted::Created {
+                which,
+                id,
+                reason: error,
+            });
         }
         let looks = Looks::new();
         // The wait ends at once for a signal, and for a sandbox that its provider lists as
@@ -441,14 +563,18 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         });
         match session {
             Ok(session) => Ok(Started { which, id, session }),
-            Err(error) => Err(self.unstarted(which, &id, &error)),
+            Err(error) => Err(Unstarted::Created {
+                which,
+                id,
+                reason: error,
+            }),
         }
     }
 
     fn saw(&self, which: Which, id: &SandboxId, gpus: &[GpuModel]) -> Result<(), String> {
         let on = self.on(which);
-        let mut created = stdx::unpoisoned(self.created.lock());
-        let made = (created.iter_mut()).filter(|made| made.on == on && made.id == *id);
+        let mut inventory = stdx::unpoisoned(self.inventory.lock());
+        let made = (inventory.created.iter_mut()).filter(|made| made.on == on && made.id == *id);
         let made: Vec<Made<'_>> = made
             .map(|made| {
                 made.gpus = Some(gpus.to_vec());
@@ -456,7 +582,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             })
             .collect();
         // Written once the lock is let go, so that no other thread waits on the record's syncs.
-        drop(created);
+        drop(inventory);
         let saw = log::Entry::Gpus(which.name(), gpus.to_vec());
         // The loop's inbox outlives every thread that starts a sandbox.
         let _ = self.logged.send(Input::Logged(saw));
@@ -479,7 +605,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
 
     // Deletes a sandbox that didn't start. The message is `error` with the sandbox's console and
     // the failure of the delete or of its record, if any.
-    fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> String {
+    fn unstarted(&self, which: Which, id: &SandboxId, error: &str) -> Result<String, String> {
         let provider = self.provider(which);
         let mut parts = vec![format!("sandbox {}: {error}", id.as_str())];
         match provider.console(&self.run, id) {
@@ -495,11 +621,13 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         let (logged, recorded) =
             self.record_deletes(self.on(which), std::slice::from_ref(id), &deleted);
         self.send(logged);
+        let disposed = deleted.is_ok() && recorded.is_ok();
         if let Err(error) = deleted {
             parts.push(format!("deleting it failed: {error}"));
         }
         parts.extend(recorded.err());
-        parts.join("; ")
+        let reason = parts.join("; ");
+        if disposed { Ok(reason) } else { Err(reason) }
     }
 
     pub(super) fn workflow(&self) -> &'p Workflow {
@@ -507,17 +635,14 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     }
 
     fn on(&self, which: Which) -> &'p Name {
-        &self.placed.placement(which.role(self.workflow())).provider
+        &self.placed.placement(which.role()).provider
     }
 
     fn provider(&self, which: Which) -> &'p dyn Provider {
         self.providers.get(self.on(which)).provider
     }
 
-    /// Deletes the sandbox and drops its session. Returns the log entries of the delete, for the
-    /// caller to log in its turn, so that the agent's teardown, which the loop performs, is logged
-    /// as the loop performs it, before what the run's children report meanwhile; and its failure,
-    /// if it or the record of it failed.
+    /// Deletes the sandbox and returns its log entries and any failure of the delete or its record.
     pub(super) fn delete(&self, started: Started) -> (Vec<log::Entry>, Result<(), String>) {
         let Started { which, id, session } = started;
         let provider = self.provider(which);
@@ -539,8 +664,9 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             id,
             which,
             gpus,
+            ..
         } = made;
-        let dir = self.record.join(which.record_dir());
+        let dir = self.record.join(which.record_dir(self.workflow()));
         record::write_sandbox(self.host, &dir, on, id, gpus.as_deref(), deleted)
     }
 
@@ -553,13 +679,20 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         ids: &[SandboxId],
         deleted: &Result<(), Undeleted>,
     ) -> (Vec<log::Entry>, Result<(), String>) {
-        let created = stdx::unpoisoned(self.created.lock());
-        let made = (created.iter()).filter(|made| made.on == on && ids.contains(&made.id));
-        // Written once the lock is let go, so that no other thread waits on the record's syncs.
-        let made: Vec<Made<'_>> = made.map(Made::clone).collect();
-        drop(created);
         let undeleted = deleted.as_ref().err();
         let failed = |id: &SandboxId| undeleted.and_then(|undeleted| undeleted.why(id));
+        let mut inventory = stdx::unpoisoned(self.inventory.lock());
+        let made: Vec<_> = inventory
+            .created
+            .iter_mut()
+            .filter(|made| made.on == on && ids.contains(&made.id))
+            .map(|made| {
+                made.deleted = failed(&made.id).is_none();
+                made.clone()
+            })
+            .collect();
+        // File syncs don't hold the lock shared by concurrent creates and deletes.
+        drop(inventory);
         let mut logged = Vec::new();
         for id in ids.iter().filter(|id| failed(id).is_none()) {
             let made = made.iter().find(|made| made.id == *id);
@@ -591,19 +724,43 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         }
     }
 
+    /// After work drains, sweeps providers whose failed creates could have allocated an instance.
+    /// A provider can list such an instance only later. It never received a work command.
+    pub(super) fn finish_work(&self) -> Result<(), String> {
+        let unnamed = std::mem::take(&mut stdx::unpoisoned(self.inventory.lock()).unnamed);
+        if unnamed.is_empty() {
+            return Ok(());
+        }
+        self.sweep_on(|name| unnamed.contains(name))
+    }
+
     /// Deletes what each provider still lists of the run, so that a run ends with none of its
     /// sandboxes left, and records each delete.
     pub(super) fn sweep(&self) -> Result<(), String> {
-        let providers = (self.providers.iter()).map(|(name, hosting)| {
-            let provider: &dyn Sweep = hosting.provider;
-            (name, provider)
-        });
+        self.sweep_on(|_| true)
+    }
+
+    fn sweep_on(&self, include: impl Fn(&Name) -> bool) -> Result<(), String> {
+        let providers =
+            self.providers
+                .iter()
+                .filter(|(name, _)| include(name))
+                .map(|(name, hosting)| {
+                    let provider: &dyn Sweep = hosting.provider;
+                    (name, provider)
+                });
         let record = |name: &Name, ids: &[SandboxId], deleted: &Result<(), Undeleted>| {
             let (logged, recorded) = self.record_deletes(name, ids, deleted);
             self.send(logged);
             recorded
         };
-        let (_, failed) = sweep(providers, &self.run, &[], record);
+        let remaining: Vec<_> = stdx::unpoisoned(self.inventory.lock())
+            .created
+            .iter()
+            .filter(|made| !made.deleted)
+            .map(|made| (made.on.clone(), made.id.clone()))
+            .collect();
+        let (_, failed) = sweep(providers, &self.run, &remaining, record);
         failed.map_or(Ok(()), Err)
     }
 }
@@ -732,8 +889,17 @@ pub(super) fn collect(
     record: &Path,
     by: Deadline,
 ) -> Result<(), String> {
+    collect_as(session, dir, &record.join(dir.as_str()), by)
+}
+
+pub(super) fn collect_as(
+    session: &mut Session,
+    dir: &RelativePath,
+    into: &Path,
+    by: Deadline,
+) -> Result<(), String> {
     let from = pumpkin_dir().join(dir);
     session
-        .collect(&from, &record.join(dir.as_str()), PUMPKIN, by)
+        .collect(&from, into, PUMPKIN, by)
         .context(format_args!("collecting {from} failed"))
 }
