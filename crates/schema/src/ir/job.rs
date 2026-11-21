@@ -9,8 +9,9 @@ use super::{Body, Name};
 /// A body that a call runs on `target`, as a job that the caller follows. The body receives
 /// a handle to that sandbox and the caller's payload. Its return is the job's result.
 ///
-/// The function runs one call at a time: a call made while one of its calls is queued or running
-/// is refused.
+/// The function runs one call at a time: a call made while one of its calls is queued, running or
+/// releasing its sandbox is refused. The caller may hear how a call ended while its sandbox is
+/// still being deleted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobFunction {

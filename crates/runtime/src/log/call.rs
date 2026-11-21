@@ -29,9 +29,10 @@ pub struct CallSpan {
     pub stopped: bool,
     /// Whether it ran past its timeout.
     pub timed_out: bool,
-    /// How the call ended, collected or failed, at its sandbox's `gone`, with how many of its
-    /// model requests a spent model budget barred, as its end said: none if it barred none.
-    pub end: Option<(CallEnd, Option<NonZeroU64>)>,
+    /// When the call ended, collected or failed, and how, with how many of its model requests a
+    /// spent model budget barred, as its end said: none if it barred none. Its sandbox may be gone
+    /// later.
+    pub end: Option<(Duration, CallEnd, Option<NonZeroU64>)>,
     /// Its own model requests, which the run's (`Progress::model`) count too.
     pub model: ModelUse,
 }
@@ -67,8 +68,7 @@ impl CallSpan {
         end: CallEnd,
         model_requests_over_budget: Option<NonZeroU64>,
     ) {
-        self.end = Some((end, model_requests_over_budget));
-        self.sandbox.gone = Some(at);
+        self.end = Some((at, end, model_requests_over_budget));
     }
 }
 

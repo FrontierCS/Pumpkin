@@ -23,9 +23,24 @@ pub(super) fn call_name(call: &CallSpan) -> String {
     }
 }
 
+/// When `call` ended: as its end was reported, or as its sandbox was gone, for one stopped short of
+/// that report.
+pub(super) fn ended(call: &CallSpan) -> Option<Duration> {
+    (call.end.as_ref().map(|(at, ..)| *at)).or(call.sandbox.gone)
+}
+
+/// How `call` ended, as its line and its milestone say it.
+pub(super) fn call_end(call: &CallSpan) -> String {
+    match &call.end {
+        Some((_, CallEnd::Result(values), _)) => result(values),
+        Some((_, CallEnd::Failed(reason), _)) => format!("failed: {}", crate::escaped(reason)),
+        None => STOPPED.to_owned(),
+    }
+}
+
 /// The line of a call.
 pub(crate) fn called(call: &CallSpan) -> String {
-    let Some(at) = call.sandbox.gone else {
+    let Some(at) = ended(call) else {
         return format!(
             "{} on {}, which never ended",
             call_name(call),
@@ -45,15 +60,9 @@ pub(crate) fn called(call: &CallSpan) -> String {
         ),
     };
     let mut line = format!("{} on {}, {took}: ", call_name(call), placed(&call.sandbox));
-    let Some((end, _)) = &call.end else {
-        line.push_str(STOPPED);
+    line.push_str(&call_end(call));
+    if call.end.is_none() {
         return line;
-    };
-    match end {
-        CallEnd::Result(values) => line.push_str(&result(values)),
-        CallEnd::Failed(reason) => {
-            let _ = write!(line, "failed: {}", crate::escaped(reason));
-        }
     }
     for (said, what) in [(call.stopped, "stopped"), (call.timed_out, "timed out")] {
         if said {
@@ -67,7 +76,7 @@ pub(crate) fn called(call: &CallSpan) -> String {
 /// What ends the line of a call's end if its route barred any of its model requests for a spent
 /// model budget, as `; 1 model request barred by judge's model budget`; else nothing.
 pub(super) fn over_budget(call: &CallSpan) -> String {
-    let Some((_, Some(count))) = call.end else {
+    let Some((_, _, Some(count))) = call.end else {
         return String::new();
     };
     let role = call.role.as_deref().unwrap_or("its role");

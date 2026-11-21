@@ -120,6 +120,9 @@ pub(crate) const UNFREEZABLE: &str = "/sim/unfreezable";
 /// delete is under way, as a platform may finish a delete that began later first.
 pub(crate) const LAST: &str = "/sim/last";
 
+/// A sandbox whose delete waits as a `LAST` one's does, then fails, as an `UNDELETABLE` one's does.
+pub(crate) const UNDELETABLE_LAST: &str = "/sim/undeletable-last";
+
 // How long a delete of a `LAST` sandbox waits before the test fails instead of hanging.
 const LAST_WAITS: Duration = Duration::from_secs(60);
 
@@ -974,7 +977,7 @@ impl Faults {
         } else {
             Dialing::Hello
         };
-        let refusals = if names(UNDELETABLE) {
+        let refusals = if names(UNDELETABLE) || names(UNDELETABLE_LAST) {
             u32::MAX
         } else {
             u32::from(names(REFUSED_ONCE) || names(HUNG_REFUSED) || names(LOST_REFUSED))
@@ -984,7 +987,7 @@ impl Faults {
             dialing,
             listing,
             refusals,
-            last: names(LAST) || names(HUNG_LAST),
+            last: names(LAST) || names(HUNG_LAST) || names(UNDELETABLE_LAST),
             freezing: if names(SCRIBBLED) {
                 Freezing::Scribbler
             } else if names(UNFREEZABLE) {
@@ -1083,16 +1086,20 @@ fn open(connection: &mut Connection, hello: &Value, awaited: Option<&Registratio
 }
 
 enum Step {
-    /// An op, whose payload follows it, and which `less` bounds the remaining seconds of.
+    /// An op, whose payload follows it, and which `less` bounds the remaining seconds of, made
+    /// again while it is refused as busy if `retried`.
     Op {
         call: OpCall,
         payload: Vec<u8>,
         less: Option<u64>,
+        retried: bool,
     },
     /// A `status` or a session's `status` made until its reply gives `state`.
     Await {
         call: OpCall,
         state: String,
+        /// What the run log is then to hold before the next step.
+        then: Option<String>,
     },
     /// A model request, whose response's part or end the next step waits for.
     Model {
@@ -1139,7 +1146,9 @@ struct Caller {
     op: u32,
     less: Option<u64>,
     left: Option<u64>,
-    awaiting: Option<(OpCall, String)>,
+    awaiting: Option<(OpCall, String, Option<String>)>,
+    /// The call made last, with its payload, until its reply other than a busy refusal comes.
+    calling: Option<(OpCall, Vec<u8>)>,
     exited: bool,
     endpoint: bool,
     model: Option<u32>,
@@ -1163,6 +1172,7 @@ impl Caller {
             less: None,
             left: None,
             awaiting: None,
+            calling: None,
             exited: false,
             endpoint,
             model: None,
@@ -1197,17 +1207,29 @@ impl Caller {
             }
             self.left = Some(left);
         }
-        if let Some((call, state)) = self.awaiting.take()
-            && !reached(reply, &state)
+        if let Some((call, payload)) = self.calling.take()
+            && matches!(reply, OpReply::Refused { busy: true, .. })
         {
             thread::sleep(AWAIT_POLL);
-            self.make(call.clone(), Vec::new(), None, replies);
-            self.awaiting = Some((call, state));
+            self.make(call.clone(), payload.clone(), None, replies);
+            self.calling = Some((call, payload));
             return false;
+        }
+        if let Some((call, state, then)) = self.awaiting.take() {
+            if !reached(reply, &state) {
+                thread::sleep(AWAIT_POLL);
+                self.make(call.clone(), Vec::new(), None, replies);
+                self.awaiting = Some((call, state, then));
+                return false;
+            }
+            if let (Some(part), Some(record)) = (then, &self.record) {
+                logged(record, &part);
+            }
         }
         self.next(replies)
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per kind of step")]
     fn next(&mut self, replies: &mut Vec<(FromSandbox, Vec<u8>)>) -> bool {
         loop {
             let (call, payload, less) = match self.steps.pop_front() {
@@ -1215,7 +1237,13 @@ impl Caller {
                     call,
                     payload,
                     less,
-                }) => (call, payload, less),
+                    retried,
+                }) => {
+                    if retried {
+                        self.calling = Some((call.clone(), payload.clone()));
+                    }
+                    (call, payload, less)
+                }
                 Some(Step::Model {
                     model,
                     chat,
@@ -1229,8 +1257,8 @@ impl Caller {
                     }
                     continue;
                 }
-                Some(Step::Await { call, state }) => {
-                    self.awaiting = Some((call.clone(), state));
+                Some(Step::Await { call, state, then }) => {
+                    self.awaiting = Some((call.clone(), state, then));
                     (call, Vec::new(), None)
                 }
                 Some(Step::Sleep(seconds)) => {
@@ -1441,12 +1469,16 @@ fn state_name(reply: &OpReply) -> String {
 // `<session>.close <lease>`; `<session>.put <lease> <tree> <to> [replace]` or `<session>.get
 // <lease> <from> <to>`. An op is made once the one before it is answered. `ops at least <seconds>
 // less` exits 1 unless the reply's remaining seconds fell by `seconds` since an earlier ops reply.
+// A call refused as busy is made again, as `sandboxctl call --wait` makes it; `try_call`, alike,
+// takes that refusal as its answer, as `sandboxctl call` does.
 //
-// `await <job> <state>` makes `status <job>` until its reply's state is `state`; `await_lease
-// <session> <lease> <state>` likewise with `<session>.status <lease>`; `await_transfer <session>
-// <lease> moved|failed` until its last transfer ended so. `await_log <kind>` waits until the run
-// log holds an entry of kind `kind`, in the record that `Sim::records` named. An optional caller
-// limits that wait to the named caller's event.
+// `await <job> <state>` makes `status <job>` until its reply's state is `state`, then waits until
+// the run log holds the job's teardown, if `Sim::records` named the record, so that the log orders
+// what the agent does next after the call's end; `await_result <job> <state>` doesn't wait for the
+// teardown. `await_lease <session> <lease> <state>` makes `<session>.status <lease>` until its
+// reply's state is `state`; `await_transfer <session> <lease> moved|failed` until its last transfer
+// ended so. `await_log <kind>` waits until the run log holds an entry of kind `kind`, in the record
+// that `Sim::records` named. An optional caller limits that wait to the named caller's event.
 //
 // `model <model> <text> [<part>...]` is a model request that names `model`, with `text` as its
 // input, then each `part`, and the next step waits for its response's end; the body holds too the
@@ -1460,6 +1492,7 @@ fn state_name(reply: &OpReply) -> String {
 // any later one. `crash` and `close` end the session: after an op, `crash` reads nothing more as
 // the op goes out, so that its reply, which can't be written, ends the session, and `close` closes
 // the connection, so that the end reaches the gateway behind the op.
+#[expect(clippy::too_many_lines, reason = "one arm per kind of step")]
 fn step(arg: &str) -> Step {
     let words: Vec<&str> = arg.split(' ').collect();
     let grant = || Name::try_from(words[1].to_owned()).unwrap();
@@ -1477,22 +1510,28 @@ fn step(arg: &str) -> Step {
             let job = job.parse().unwrap();
             (OpCall::Status { job }, Vec::new(), None)
         }
-        ["call", _, _, ref given @ ..] => {
+        [kind @ ("call" | "try_call"), _, _, ref given @ ..] => {
             let arguments = arguments(given);
             let call = OpCall::Call {
                 grant: grant(),
                 arguments,
             };
+            if kind == "try_call" {
+                return Step::Op {
+                    call,
+                    payload: payload(),
+                    less: None,
+                    retried: false,
+                };
+            }
             (call, payload(), None)
         }
-        ["await", job, state] => {
-            let (call, state) = (
-                OpCall::Status {
-                    job: job.parse().unwrap(),
-                },
-                state.to_owned(),
-            );
-            return Step::Await { call, state };
+        [kind @ ("await" | "await_result"), job, state] => {
+            let job: u64 = job.parse().unwrap();
+            let then =
+                (kind == "await").then(|| format!(r#"{{"job":{job},"kind":"call_torn_down"}}"#));
+            let (call, state) = (OpCall::Status { job }, state.to_owned());
+            return Step::Await { call, state, then };
         }
         [function, ..] if function.contains('.') => (session_call(&words), Vec::new(), None),
         ["await_lease", grant, lease, state] => {
@@ -1500,12 +1539,17 @@ fn step(arg: &str) -> Step {
             return Step::Await {
                 call,
                 state: (*state).to_owned(),
+                then: None,
             };
         }
         ["await_transfer", grant, lease, end] => {
             let call = lease_status(grant, lease);
             let state = format!("transfer {end}");
-            return Step::Await { call, state };
+            return Step::Await {
+                call,
+                state,
+                then: None,
+            };
         }
         [kind @ ("model" | "chat" | "ask"), model, _, ..] => {
             return model_step(kind, model, &words[2..]);
@@ -1523,10 +1567,12 @@ fn step(arg: &str) -> Step {
         ["close"] => return Step::End(End::Close),
         _ => panic!("`{arg}` is no step of the simulated sandboxd's"),
     };
+    let retried = matches!(call, OpCall::Call { .. });
     Step::Op {
         call,
         payload,
         less,
+        retried,
     }
 }
 

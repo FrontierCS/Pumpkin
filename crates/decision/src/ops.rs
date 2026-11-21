@@ -10,8 +10,8 @@
 //!   now functions.
 //! - Its payload fits its function's `payload_max_bytes`; a job function's
 //!   caller's arguments read as its body's parameters are typed.
-//! - A job function has calls left, none of its calls queued or running, and call time left. A
-//!   refused call is not charged.
+//! - A job function has calls left, none of its calls queued, running or not yet torn down, and
+//!   call time left. A refused call is not charged.
 //! - A session has fewer leases open than its `instances`, and time left, for its caller, and a
 //!   lease asks to last at most its `instance_seconds`; a lease runs a command or a transfer once
 //!   ready, one at a time, while its session has commands left, a command with a timeout, if
@@ -462,8 +462,7 @@ impl Core<'_> {
         let state = match &job.state {
             State::Queued => JobState::Queued,
             State::Running { .. } | State::Ending { .. } => JobState::Running,
-            // A call has ended only once every lease it held has.
-            State::Ended { .. } if self.leases.holds(Caller::Job(id)) => JobState::Running,
+            // Its caller hears the end as it comes, while its sandboxes are destroyed.
             State::Ended {
                 outcome: Ok(result),
                 model_requests_over_budget,

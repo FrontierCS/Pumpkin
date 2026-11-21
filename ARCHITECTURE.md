@@ -142,7 +142,9 @@ how many of its target's model requests a budget barred, and what its body retur
 workflow decides the agent's feedback. The status reply's types hold nothing else.
 
 **Architecture Invariant:** before the final call starts, the driver confirms deletion of every
-work sandbox it claimed, including shared targets and lease runners. Work ends at the common
+work sandbox it claimed, including shared targets and lease runners: the core starts it once every
+agent and call is torn down, its sandbox's delete confirmed, and every lease has ended. A call's
+caller may hear its result before then. Work ends at the common
 deadline or once every agent has ended its work. The final body
 receives every agent role's last submission, an opaque payload or `None`. The body sends a selected payload
 to a file with `put` or to a command’s standard input with `capture`.

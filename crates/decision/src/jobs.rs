@@ -3,14 +3,16 @@
 //! A call counts from when it is accepted, unless its job fails before it starts, as when its
 //! sandbox fails to start: that is the run's or its provider's failure, not the caller's, so the
 //! call is given back, as a lease that fails to start costs nothing. A job starts with its body.
-//! Its seconds run from its start to its body's end once its target is gone, to its stop at the
-//! timeout, to the job's failure, or to the core stopping it when its caller's work ends, each as
-//! the runtime observed it. A call keeps its function, which [runs one call at a
-//! time](schema::ir::JobFunction), busy until its job has ended, once its outputs are collected and
-//! its sandbox destroyed, and every lease it held has ended, which the core reads from its leases.
+//! Its seconds run from its start to its body's end, once its outputs are collected, to its stop
+//! at the timeout, to the job's failure, or to the core stopping it when its caller's work ends,
+//! each as the runtime observed it. Its caller hears its result from then, while its sandbox is
+//! destroyed. A call keeps its function, which [runs one call at a
+//! time](schema::ir::JobFunction), busy until its job is torn down, its sandbox destroyed
+//! ([`Event::CallTornDown`](crate::Event::CallTornDown)), and every lease it held has ended,
+//! which the core reads from its leases.
 //!
 //! The cumulative seconds left are what the function allows less what ended calls used. A call
-//! is accepted only once the function's earlier calls have all ended, and its timeout is at most
+//! is accepted only once the function's earlier calls are all torn down, and its timeout is at most
 //! the time left then, so the function's calls stay within
 //! [`cumulative_seconds`](schema::ir::JobFunction::cumulative_seconds) but for how late
 //! the runtime observes a call's end.
@@ -75,16 +77,18 @@ pub(super) enum State {
     Queued,
     /// Its body started at `started`.
     Running { started: Duration },
-    /// It has ended, or the core stopped it; its sandbox is being collected and destroyed. `used`
-    /// is how long it ran, none if it didn't start.
+    /// It reached its timeout, or the core stopped it, and its end is yet to be reported. `used` is
+    /// how long it ran, none if it didn't start.
     Ending { used: Duration, end: End },
-    /// Its sandbox is gone. It is `charged` against its function's calls unless it failed before
-    /// it started. `model_requests_over_budget` is as its report said.
+    /// Its end is reported. It is `charged` against its function's calls unless it failed before
+    /// it started. `model_requests_over_budget` is as its report said. It is `torn_down` once its
+    /// sandbox is gone too.
     Ended {
         used: Duration,
         outcome: Result<CallResult, Failure>,
         charged: bool,
         model_requests_over_budget: Option<NonZeroU64>,
+        torn_down: bool,
     },
 }
 
@@ -102,7 +106,7 @@ pub(super) struct Usage {
     pub(super) calls: u64,
     /// The time the commands that have ended ran.
     pub(super) used: Duration,
-    /// Whether one of the function's calls hasn't ended.
+    /// Whether one of the function's calls isn't torn down.
     pub(super) busy: bool,
 }
 
@@ -149,7 +153,18 @@ impl State {
             outcome,
             charged,
             model_requests_over_budget,
+            torn_down: false,
         };
+    }
+
+    pub(super) fn torn_down(&mut self) {
+        let Self::Ended { torn_down, .. } = self else {
+            unreachable!(
+                "a call's teardown came before its end, though `Event::CallTornDown` comes only \
+                 after the call's end, which the runtime reports first"
+            )
+        };
+        *torn_down = true;
     }
 }
 
@@ -211,10 +226,16 @@ impl Jobs {
         stopped
     }
 
-    pub(super) fn all_ended(&self) -> bool {
-        self.0
-            .iter()
-            .all(|job| matches!(job.state, State::Ended { .. }))
+    pub(super) fn all_torn_down(&self) -> bool {
+        self.0.iter().all(|job| {
+            matches!(
+                job.state,
+                State::Ended {
+                    torn_down: true,
+                    ..
+                }
+            )
+        })
     }
 
     pub(super) fn usage(&self, call: JobOf) -> Usage {
@@ -228,7 +249,12 @@ impl Jobs {
                     usage.busy = true;
                     usage.used += used;
                 }
-                State::Ended { used, .. } => usage.used += used,
+                State::Ended {
+                    used, torn_down, ..
+                } => {
+                    usage.busy |= !torn_down;
+                    usage.used += used;
+                }
             }
         }
         usage

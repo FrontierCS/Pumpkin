@@ -526,6 +526,7 @@ fn event_json(event: &Event) -> Value {
         }),
         Event::CallStarted { job } => json!({ "kind": "call_started", "job": job.0 }),
         Event::CallTimedOut { job } => json!({ "kind": "call_timed_out", "job": job.0 }),
+        Event::CallTornDown { job } => json!({ "kind": "call_torn_down", "job": job.0 }),
         Event::CallReturned {
             job,
             result,

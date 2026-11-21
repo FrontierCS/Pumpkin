@@ -15,7 +15,7 @@
 //! - `agent_torn_down`, the end of the agent's teardown;
 //! - `call_started <job>`, `call_timed_out <job>`, `call_returned <job> [+<n>] [<name>=<value>]…`,
 //!   the body's return in its order, `call_failed <job> [+<n>] <reason>`, with `+<n>` if the route
-//!   barred `n` of the call's model requests over budget;
+//!   barred `n` of the call's model requests over budget, and `call_torn_down <job>`;
 //! - `lease_ready <lease>`, `command_ended <lease> <command> <code>|timed_out|unstarted
 //!   [<stdout>]`, `transfer_ended <lease> <transfer> moved <entries> <bytes>|failed <reason>`,
 //!   `lease_ended <lease>`, `lease_failed <lease> <reason>`;
@@ -170,6 +170,7 @@ fn call_event(words: &[&str]) -> Event {
     match words[0] {
         "call_started" => Event::CallStarted { job },
         "call_timed_out" => Event::CallTimedOut { job },
+        "call_torn_down" => Event::CallTornDown { job },
         "call_returned" => {
             let returned = (rest.split(' '))
                 .filter(|field| !field.is_empty())
@@ -641,6 +642,7 @@ fn whole_run() {
         2500 call_started 0
         3000 status 0
         9600 call_returned 0 raw_score=0 metrics={"solved":0}
+        9600 call_torn_down 0
         10000 status 0
         11000 now submit 10240 set_submission
         12000 now submit 10240 set_submission end_work
@@ -648,6 +650,7 @@ fn whole_run() {
         12100 agent_torn_down
         13500 call_started 1
         20100 call_returned 1 score=0 metrics={"solved":0}
+        20100 call_torn_down 1
         "#,
         &expect![[r#"
             start
@@ -666,6 +669,7 @@ fn whole_run() {
             3000 status 0
               reply to op 4: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":12000}}
             9600 call_returned 0 raw_score=0 metrics={"solved":0}
+            9600 call_torn_down 0
             10000 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"metrics":{"solved":0},"raw_score":0},"remaining":{"calls":99,"seconds":11992}}
             11000 now submit 10240 set_submission
@@ -680,8 +684,73 @@ fn whole_run() {
               start call 1 of final on agent=op 7's payload of 10240 bytes, with a timeout of 120s
             13500 call_started 1
             20100 call_returned 1 score=0 metrics={"solved":0}
+            20100 call_torn_down 1
               finish: agent: AgentExited(Code(0)), finalized op 7's payload of 10240 bytes
               final returned [score=0 metrics={"solved":0}]
+        "#]],
+    );
+}
+
+// A call's caller hears its result, and is charged its time, as its end is reported; its function
+// stays busy, and the final call and the run's finish wait, until its sandbox is torn down.
+#[test]
+fn result_before_teardown() {
+    check(
+        |_| {},
+        r#"
+        0 work_started
+        1000 call train 10
+        1500 call_started 0
+        2000 call_returned 0 raw_score=1
+        2100 status 0
+        2200 call train 10
+        30000 call_torn_down 0
+        30100 call train 10
+        30200 call_started 1
+        30300 call_returned 1 raw_score=2
+        30400 now submit 10 set_submission end_work
+        30500 agent_exited 0
+        30500 agent_torn_down
+        31000 call_torn_down 1
+        31500 call_started 2
+        32000 call_returned 2 score=2
+        60000 call_torn_down 2
+        "#,
+        &expect![[r#"
+            start
+              start agents
+              (tick due at 18010000)
+            0 work_started
+              (tick due at 18000000)
+            1000 call train 10
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
+            1500 call_started 0
+            2000 call_returned 0 raw_score=1
+            2100 status 0
+              reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11999}}
+            2200 call train 10
+              refuse op 3 (busy): `train` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
+            30000 call_torn_down 0
+            30100 call train 10
+              reply to op 4: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":11999}}
+              start call 1 of train on op 4's payload of 10 bytes, with a timeout of 11999.5s
+            30200 call_started 1
+            30300 call_returned 1 raw_score=2
+            30400 now submit 10 set_submission end_work
+              reply to op 5: {"kind":"call","returned":{"state":"done"},"remaining_seconds":60}
+              (tick due at 90400)
+            30500 agent_exited 0
+              tear down agent
+              (tick due at 18210000)
+            30500 agent_torn_down
+            31000 call_torn_down 1
+              start call 2 of final on agent=op 5's payload of 10 bytes, with a timeout of 120s
+            31500 call_started 2
+            32000 call_returned 2 score=2
+            60000 call_torn_down 2
+              finish: agent: AgentExited(Code(0)), finalized op 5's payload of 10 bytes
+              final returned [score=2]
         "#]],
     );
 }
@@ -702,11 +771,13 @@ fn quotas() {
         1000 call train 10
         2000 call_started 0
         6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
+        6100 call_torn_down 0
         6200 status 0
         7000 call train 10
         7500 call_started 1
         13600 call_timed_out 1
         13700 call_failed 1 +2 the call's timeout passed
+        13700 call_torn_down 1
         14000 status 1
         14100 call train 10
         14200 now submit 0 set_submission
@@ -728,6 +799,7 @@ fn quotas() {
               start call 0 of train on op 4's payload of 10 bytes, with a timeout of 6s
             2000 call_started 0
             6100 call_returned 0 +1 raw_score=null failure={"code":"wrong_answer"}
+            6100 call_torn_down 0
             6200 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{"failure":{"code":"wrong_answer"},"raw_score":null},"model_requests_over_budget":1,"remaining":{"calls":99,"seconds":5}}
             7000 call train 10
@@ -736,6 +808,7 @@ fn quotas() {
             7500 call_started 1
             13600 call_timed_out 1
             13700 call_failed 1 +2 the call's timeout passed
+            13700 call_torn_down 1
             14000 status 1
               reply to op 7: {"kind":"status","job":1,"state":"errored","failure":{"code":"call_timeout","message":"the call ran past its timeout"},"model_requests_over_budget":2,"remaining":{"calls":98,"seconds":0}}
             14100 call train 10
@@ -775,10 +848,12 @@ fn job_functions() {
         1100 call check 10 n=3
         1500 status 0
         2000 call_failed 0 the target's sandbox did not connect
+        2000 call_torn_down 0
         2050 status 0
         2100 call check 10 n=-1 mode=slow
         2300 call_started 1
         2600 call_returned 1 lines=1 bytes=6
+        2600 call_torn_down 1
         2700 status 1
         "#,
         &expect![[r#"
@@ -801,6 +876,7 @@ fn job_functions() {
             1500 status 0
               reply to op 6: {"kind":"status","job":0,"state":"queued","remaining":{"calls":1,"seconds":null}}
             2000 call_failed 0 the target's sandbox did not connect
+            2000 call_torn_down 0
             2050 status 0
               reply to op 7: {"kind":"status","job":0,"state":"errored","failure":{"code":"call_error","message":"the call's body failed: the run's record says why"},"remaining":{"calls":2,"seconds":null}}
             2100 call check 10 n=-1 mode=slow
@@ -808,6 +884,7 @@ fn job_functions() {
               start call 1 of check on op 8's payload of 10 bytes, mode="slow", n=-1, with a timeout of 60s
             2300 call_started 1
             2600 call_returned 1 lines=1 bytes=6
+            2600 call_torn_down 1
             2700 status 1
               reply to op 9: {"kind":"status","job":1,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":null}}
         "#]],
@@ -826,9 +903,11 @@ fn one_call_at_a_time() {
         2000 call_started 0
         3100 call train 10
         3200 call_returned 0
+        3200 call_torn_down 0
         3300 status 0
         3400 call train 10
         4000 call_failed 1 the target's sandbox did not connect
+        4000 call_torn_down 1
         4100 call train 10
         4200 status 1
         "#,
@@ -842,19 +921,21 @@ fn one_call_at_a_time() {
               reply to op 1: {"kind":"call","job":0,"remaining":{"calls":1,"seconds":12000}}
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1100 call train 10
-              refuse op 2 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 2 (busy): `train` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
             1200 status 0
               reply to op 3: {"kind":"status","job":0,"state":"queued","remaining":{"calls":1,"seconds":12000}}
             2000 call_started 0
             3100 call train 10
-              refuse op 4 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 4 (busy): `train` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
             3200 call_returned 0
+            3200 call_torn_down 0
             3300 status 0
               reply to op 5: {"kind":"status","job":0,"state":"completed","returned":{},"remaining":{"calls":1,"seconds":11998}}
             3400 call train 10
               reply to op 6: {"kind":"call","job":1,"remaining":{"calls":0,"seconds":11998}}
               start call 1 of train on op 6's payload of 10 bytes, with a timeout of 11998.8s
             4000 call_failed 1 the target's sandbox did not connect
+            4000 call_torn_down 1
             4100 call train 10
               reply to op 7: {"kind":"call","job":2,"remaining":{"calls":0,"seconds":11998}}
               start call 2 of train on op 7's payload of 10 bytes, with a timeout of 11998.8s
@@ -885,9 +966,11 @@ fn deadline() {
         60100 status 0
         60200 agent_exited 137
         60400 call_failed 0 stopped
+        60400 call_torn_down 0
         60500 call_started 1
         180500 call_timed_out 1
         180600 call_returned 1 score=7
+        180600 call_torn_down 1
         "#,
         &expect![[r#"
             start
@@ -915,10 +998,12 @@ fn deadline() {
               refuse op 3: your work has ended: make no more ops
             60200 agent_exited 137
             60400 call_failed 0 stopped
+            60400 call_torn_down 0
               start call 1 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             60500 call_started 1
             180500 call_timed_out 1
             180600 call_returned 1 score=7
+            180600 call_torn_down 1
               finish: agent: Deadline, stored op 1's payload of 10 bytes
               final failed: Timeout
         "#]],
@@ -930,6 +1015,7 @@ fn deadline() {
         50000 now submit 10 set_submission
         59999 call train 10
         60000 call_failed 0 the target's sandbox didn't start
+        60000 call_torn_down 0
         60000 agent_torn_down
         ",
         &expect![[r#"
@@ -947,6 +1033,7 @@ fn deadline() {
               stop call 0
               tear down agent
               (tick due at 270000)
+            60000 call_torn_down 0
             60000 agent_torn_down
               start call 1 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
         "#]],
@@ -1037,6 +1124,7 @@ fn hard_end_covers_the_run() {
         140000 agent_torn_down
         150000 call_started 0
         269999 call_returned 0 score=7
+        269999 call_torn_down 0
         "#,
         &expect![[r#"
             start
@@ -1052,6 +1140,7 @@ fn hard_end_covers_the_run() {
               start call 0 of final on agent=op 1's payload of 10 bytes, with a timeout of 120s
             150000 call_started 0
             269999 call_returned 0 score=7
+            269999 call_torn_down 0
               finish: agent: Deadline, stored op 1's payload of 10 bytes
               final returned [score=7]
         "#]],
@@ -1070,9 +1159,11 @@ fn agent_ends() {
         3200 agent_exited 0
         3200 agent_torn_down
         3400 call_returned 0 raw_score=1
+        3400 call_torn_down 0
         3500 call_started 1
         4000 call_failed 0 its report came again
         5100 call_returned 1 score="high"
+        5100 call_torn_down 1
         "#,
         &expect![[r#"
             start
@@ -1092,10 +1183,12 @@ fn agent_ends() {
               (tick due at 18210000)
             3200 agent_torn_down
             3400 call_returned 0 raw_score=1
+            3400 call_torn_down 0
               start call 1 of final on agent=op 2's payload of 10 bytes, with a timeout of 120s
             3500 call_started 1
             4000 call_failed 0 its report came again
             5100 call_returned 1 score="high"
+            5100 call_torn_down 1
               finish: agent: AgentExited(Code(0)), stored op 2's payload of 10 bytes
               final returned [score="high"]
         "#]],
@@ -1245,6 +1338,7 @@ fn hard_end_after_work() {
         122500 call_timed_out 0
         239999 tick
         240000 call_returned 0 score=7
+        240000 call_torn_down 0
         "#,
         &expect![[r#"
             start
@@ -1264,6 +1358,7 @@ fn hard_end_after_work() {
             239999 tick
             240000 call_returned 0 score=7
               abandon the run at its hard end
+            240000 call_torn_down 0
         "#]],
     );
 }
@@ -1278,6 +1373,7 @@ fn hard_end_bounds() {
         1000 agent_exited 0
         1000 agent_torn_down
         1500 call_returned 0
+        1500 call_torn_down 0
         270000 tick
         ",
         &expect![[r#"
@@ -1292,6 +1388,7 @@ fn hard_end_bounds() {
             1000 agent_torn_down
               start call 0 of final on agent=missing, with a timeout of 120s
             1500 call_returned 0
+            1500 call_torn_down 0
               finish: agent: AgentExited(Code(0)), missing
               final returned []
             270000 tick
@@ -1427,12 +1524,14 @@ fn exact_scores() {
         1000 call train 10
         1500 call_started 0
         2100 call_returned 0 raw_score=22.833062975103598
+        2100 call_torn_down 0
         2200 status 0
         3000 now submit 10 set_submission end_work
         3100 agent_exited 0
         3100 agent_torn_down
         3500 call_started 1
         4100 call_returned 1 score=22.830584316865718
+        4100 call_torn_down 1
         "#,
         &expect![[r#"
             start
@@ -1445,6 +1544,7 @@ fn exact_scores() {
               start call 0 of train on op 1's payload of 10 bytes, with a timeout of 12000s
             1500 call_started 0
             2100 call_returned 0 raw_score=22.833062975103598
+            2100 call_torn_down 0
             2200 status 0
               reply to op 2: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":22.833062975103598},"remaining":{"calls":99,"seconds":11999}}
             3000 now submit 10 set_submission end_work
@@ -1457,6 +1557,7 @@ fn exact_scores() {
               start call 1 of final on agent=op 3's payload of 10 bytes, with a timeout of 120s
             3500 call_started 1
             4100 call_returned 1 score=22.830584316865718
+            4100 call_torn_down 1
               finish: agent: AgentExited(Code(0)), finalized op 3's payload of 10 bytes
               final returned [score=22.830584316865718]
         "#]],
@@ -1503,6 +1604,7 @@ fn now_calls() {
         1810 locked
         1820 agent_torn_down
         1850 call_returned 0
+        1850 call_torn_down 0
         ",
         &expect![[r#"
             start
@@ -1537,6 +1639,7 @@ fn now_calls() {
             1820 agent_torn_down
               start call 0 of final on agent=missing, with a timeout of 120s
             1850 call_returned 0
+            1850 call_torn_down 0
               finish: agent: AgentExited(Code(0)), missing
               final returned []
         "#]],
@@ -1565,6 +1668,7 @@ fn finalize_lock() {
         62000 tick
         62000 agent_torn_down
         62200 call_failed 0 stopped
+        62200 call_torn_down 0
         ",
         &expect![[r#"
             start
@@ -1596,6 +1700,7 @@ fn finalize_lock() {
               (tick due at 18210000)
             62000 agent_torn_down
             62200 call_failed 0 stopped
+            62200 call_torn_down 0
               start call 1 of final on agent=op 2's payload of 10 bytes, with a timeout of 120s
         "#]],
     );
@@ -1670,6 +1775,7 @@ fn finalize_near_deadline() {
         30150 ops
         30200 call_started 0
         30400 call_returned 0 score=1
+        30400 call_torn_down 0
         "#,
         &expect![[r#"
             start
@@ -1689,6 +1795,7 @@ fn finalize_near_deadline() {
               refuse op 2: your work has ended: make no more ops
             30200 call_started 0
             30400 call_returned 0 score=1
+            30400 call_torn_down 0
               finish: agent: Finalized, finalized op 1's payload of 10 bytes
               final returned [score=1]
         "#]],
@@ -2245,6 +2352,7 @@ fn lease_start_bounds() {
         53000 call_timed_out 0
         53000 lease_failed 1 the runner's sandbox didn't start: it was given up
         53100 call_failed 0 the call's timeout passed
+        53100 call_torn_down 0
         54000 gpu.open
         18000000 tick
         18000000 agent_torn_down
@@ -2278,6 +2386,7 @@ fn lease_start_bounds() {
               close lease 1
             53000 lease_failed 1 the runner's sandbox didn't start: it was given up
             53100 call_failed 0 the call's timeout passed
+            53100 call_torn_down 0
             54000 gpu.open
               reply to op 7: {"kind":"lease","lease":2,"remaining":{"instances":1,"instance_seconds":900,"cumulative_seconds":1200,"commands":3}}
               open lease 2 of gpu, as instance 0, started by 18000000
@@ -2585,12 +2694,14 @@ fn call_model_routes() {
         12000 model
         12000 @0 model
         12100 call_returned 0 raw_score=1
+        12100 call_torn_down 0
         12200 call train 10
         13000 call_started 1
         13100 @1 model
         14000 call_timed_out 1
         14000 @1 model
         14100 call_failed 1 the call's timeout passed
+        14100 call_torn_down 1
         14200 call train 10
         15000 call_started 2
         15100 now submit 10 set_submission
@@ -2599,6 +2710,7 @@ fn call_model_routes() {
         15200 @2 model
         15200 model
         15300 call_failed 2 the call was stopped
+        15300 call_torn_down 2
         16000 call_started 3
         16000 @3 model
         16000 model
@@ -2629,6 +2741,7 @@ fn call_model_routes() {
             12000 @0 model
               model requests refused
             12100 call_returned 0 raw_score=1
+            12100 call_torn_down 0
             12200 call train 10
               reply to op 2: {"kind":"call","job":1,"remaining":{"calls":98,"seconds":11989}}
               start call 1 of train on op 2's payload of 10 bytes, with a timeout of 10s
@@ -2639,6 +2752,7 @@ fn call_model_routes() {
             14000 @1 model
               model requests refused
             14100 call_failed 1 the call's timeout passed
+            14100 call_torn_down 1
             14200 call train 10
               reply to op 3: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11988}}
               start call 2 of train on op 3's payload of 10 bytes, with a timeout of 10s
@@ -2655,6 +2769,7 @@ fn call_model_routes() {
             15200 model
               model requests refused
             15300 call_failed 2 the call was stopped
+            15300 call_torn_down 2
               start call 3 of final on agent=op 4's payload of 10 bytes, with a timeout of 120s
             16000 call_started 3
             16000 @3 model
@@ -2775,6 +2890,7 @@ fn call_leases() {
         3500 command_ended 0 1 0
         3600 @0 box.run 0 - c
         4000 call_returned 0 raw_score=1
+        4000 call_torn_down 0
         4100 @0 box.status 0
         4300 status 0
         4400 call train 10
@@ -2786,6 +2902,7 @@ fn call_leases() {
         6200 lease_ready 1
         6300 @1 box.run 1 - a
         7000 call_failed 1 the target's session ended
+        7000 call_torn_down 1
         8000 lease_ended 1
         8100 call train 10
         9000 call_started 2
@@ -2795,6 +2912,7 @@ fn call_leases() {
         9300 agent_exited 0
         9300 agent_torn_down
         9400 call_failed 2 the call was stopped
+        9400 call_torn_down 2
         9500 lease_ended 2
         "#,
         &expect![[r#"
@@ -2829,12 +2947,13 @@ fn call_leases() {
             4000 call_returned 0 raw_score=1
               close lease 0
               (tick due at 18000000)
+            4000 call_torn_down 0
             4100 @0 box.status 0
               refuse op 8: the call has ended: make no more ops
             4300 status 0
-              reply to op 9: {"kind":"status","job":0,"state":"running","remaining":{"calls":99,"seconds":11998}}
+              reply to op 9: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
             4400 call train 10
-              refuse op 10 (busy): `train` runs one call at a time, and already has one queued or running: call again once it has finished; this call is not charged
+              refuse op 10 (busy): `train` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
             5000 lease_ended 0
             5100 status 0
               reply to op 11: {"kind":"status","job":0,"state":"completed","returned":{"raw_score":1},"remaining":{"calls":99,"seconds":11998}}
@@ -2853,6 +2972,7 @@ fn call_leases() {
             7000 call_failed 1 the target's session ended
               close lease 1
               (tick due at 18000000)
+            7000 call_torn_down 1
             8000 lease_ended 1
             8100 call train 10
               reply to op 15: {"kind":"call","job":2,"remaining":{"calls":97,"seconds":11997}}
@@ -2872,6 +2992,7 @@ fn call_leases() {
               (tick due at 18210000)
             9300 agent_torn_down
             9400 call_failed 2 the call was stopped
+            9400 call_torn_down 2
             9500 lease_ended 2
               start call 3 of final on agent=op 17's payload of 10 bytes, with a timeout of 120s
         "#]],
@@ -2897,6 +3018,7 @@ fn final_call_leases() {
         34200 lease_ended 0
         34300 @0 box.open
         35100 call_returned 0 score=7
+        35100 call_torn_down 0
         36000 lease_ended 1
         "#,
         &expect![[r#"
@@ -2934,6 +3056,7 @@ fn final_call_leases() {
               open lease 1 of box for job 0, as instance 0, started by 123000
             35100 call_returned 0 score=7
               close lease 1
+            35100 call_torn_down 0
             36000 lease_ended 1
               finish: agent: AgentExited(Code(0)), stored op 1's payload of 10 bytes
               final returned [score=7]
@@ -2958,6 +3081,7 @@ fn work_target_drains_the_previous_jobs_lease_before_reusing_its_slot() {
         130 lease_ready 0
         1110 call_timed_out 0
         1120 call_failed 0 the call's timeout passed
+        1120 call_torn_down 0
         1130 @bob call train 1
         1140 lease_ended 0
         1150 @bob call train 1
@@ -2982,6 +3106,7 @@ fn work_target_drains_the_previous_jobs_lease_before_reusing_its_slot() {
             1110 call_timed_out 0
               close lease 0
             1120 call_failed 0 the call's timeout passed
+            1120 call_torn_down 0
             1130 @bob call train 1
               refuse op 3 (busy): `train`'s shared sandbox is busy: retry after its current call ends; this call is not charged
             1140 lease_ended 0
@@ -3020,6 +3145,7 @@ fn abandoned_final_call_leases() {
         151001 lease_ready 1
         151002 @0 box.status 1
         151003 call_returned 0 score=7
+        151003 call_torn_down 0
         151004 lease_ended 0
         151005 lease_ended 1
         ",
@@ -3049,6 +3175,7 @@ fn abandoned_final_call_leases() {
             151002 @0 box.status 1
               refuse op 4: the run has passed its hard end: make no more ops
             151003 call_returned 0 score=7
+            151003 call_torn_down 0
             151004 lease_ended 0
             151005 lease_ended 1
         "#]],
@@ -3097,12 +3224,15 @@ fn agents_work_until_their_own_end() {
         3400 @bob agent_exited 0
         3500 @bob agent_torn_down
         3600 call_failed 0 stopped
+        3600 call_torn_down 0
         3601 call_failed 1 stopped
+        3601 call_torn_down 1
         3700 lease_ended 0
         3701 lease_ended 1
         3702 lease_ended 2
         3800 @zoe agent_torn_down
         3900 call_returned 2 score=1
+        3900 call_torn_down 2
     "#,
         &expect![[r#"
             start
@@ -3164,13 +3294,16 @@ fn agents_work_until_their_own_end() {
               (tick due at 180000)
             3500 @bob agent_torn_down
             3600 call_failed 0 stopped
+            3600 call_torn_down 0
             3601 call_failed 1 stopped
+            3601 call_torn_down 1
             3700 lease_ended 0
             3701 lease_ended 1
             3702 lease_ended 2
             3800 @zoe agent_torn_down
               start call 2 of final on zoe=op 8's payload of 12 bytes, bob=op 11's payload of 0 bytes, with a timeout of 120s
             3900 call_returned 2 score=1
+            3900 call_torn_down 2
               finish: zoe: Finalized, finalized op 8's payload of 12 bytes
               bob: AgentExited(Code(0)), stored op 11's payload of 0 bytes
               final returned [score=1]
@@ -3196,6 +3329,7 @@ fn common_deadline_wins_a_tie() {
         50100 @zoe agent_torn_down
         50200 @bob agent_torn_down
         50500 call_failed 0 judge failed
+        50500 call_torn_down 0
     "#,
         &expect![[r#"
             start
@@ -3218,6 +3352,7 @@ fn common_deadline_wins_a_tie() {
             50200 @bob agent_torn_down
               start call 0 of final on zoe=op 1's payload of 2 bytes, bob=missing, with a timeout of 120s
             50500 call_failed 0 judge failed
+            50500 call_torn_down 0
               finish: zoe: Deadline, finalized op 1's payload of 2 bytes
               bob: Deadline, missing
               final failed: Error("judge failed")
@@ -3237,6 +3372,7 @@ fn agents_without_submissions_are_judged() {
         150 @bob agent_exited 0
         200 @zoe agent_torn_down
         250 call_returned 0 score=null
+        250 call_torn_down 0
     "#,
         &expect![[r#"
             start
@@ -3254,6 +3390,7 @@ fn agents_without_submissions_are_judged() {
             200 @zoe agent_torn_down
               start call 0 of final on zoe=missing, bob=missing, with a timeout of 120s
             250 call_returned 0 score=null
+            250 call_torn_down 0
               finish: zoe: AgentExited(Code(0)), missing
               bob: AgentFailed("could not start"), missing
               final returned [score=null]
@@ -3294,10 +3431,13 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
         210 @bob call board 7
         220 call_started 0
         230 call_returned 0 count=1
+        232 @zoe call board 3
+        235 call_torn_down 0
         240 @bob call board 7
         250 shared_failed board exited
         255 @bob call board 1
         260 call_failed 1 lost
+        260 call_torn_down 1
         270 @zoe call board 1
         300 @zoe agent_exited 0
         310 @bob agent_exited 0
@@ -3305,44 +3445,50 @@ fn shared_calls_serialize_across_grants_and_drain_before_judging() {
         330 @zoe agent_torn_down
         340 shared_torn_down board
         350 call_returned 2 score=0
+        350 call_torn_down 2
     "#,
         &expect![[r#"
-        start
-          start agents
-          (tick due at 30000)
-        100 work_started
-          (tick due at 20100)
-        200 @zoe call board 3
-          reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
-          start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
-        210 @bob call board 7
-          refuse op 2 (busy): `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
-        220 call_started 0
-        230 call_returned 0 count=1
-        240 @bob call board 7
-          reply to op 3: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
-          start call 1 of board on op 3's payload of 7 bytes, with a timeout of 19.86s
-        250 shared_failed board exited
-          stop call 1
-        255 @bob call board 1
-          refuse op 4: `board` cannot run because its shared sandbox is unavailable
-        260 call_failed 1 lost
-        270 @zoe call board 1
-          refuse op 5: `board` cannot run because its shared sandbox is unavailable
-        300 @zoe agent_exited 0
-          tear down zoe
-        310 @bob agent_exited 0
-          tear down bob
-          (tick due at 180000)
-        320 @bob agent_torn_down
-        330 @zoe agent_torn_down
-          tear down shared board
-        340 shared_torn_down board
-          start call 2 of final on zoe=missing, bob=missing, with a timeout of 120s
-        350 call_returned 2 score=0
-          finish: zoe: AgentExited(Code(0)), missing
-          bob: AgentExited(Code(0)), missing
-          final returned [score=0]
-    "#]],
+            start
+              start agents
+              (tick due at 30000)
+            100 work_started
+              (tick due at 20100)
+            200 @zoe call board 3
+              reply to op 1: {"kind":"call","job":0,"remaining":{"calls":99,"seconds":12000}}
+              start call 0 of board on op 1's payload of 3 bytes, with a timeout of 19.9s
+            210 @bob call board 7
+              refuse op 2 (busy): `board`'s shared sandbox is busy: retry after its current call ends; this call is not charged
+            220 call_started 0
+            230 call_returned 0 count=1
+            232 @zoe call board 3
+              refuse op 3 (busy): `board` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged
+            235 call_torn_down 0
+            240 @bob call board 7
+              reply to op 4: {"kind":"call","job":1,"remaining":{"calls":99,"seconds":12000}}
+              start call 1 of board on op 4's payload of 7 bytes, with a timeout of 19.86s
+            250 shared_failed board exited
+              stop call 1
+            255 @bob call board 1
+              refuse op 5: `board` cannot run because its shared sandbox is unavailable
+            260 call_failed 1 lost
+            260 call_torn_down 1
+            270 @zoe call board 1
+              refuse op 6: `board` cannot run because its shared sandbox is unavailable
+            300 @zoe agent_exited 0
+              tear down zoe
+            310 @bob agent_exited 0
+              tear down bob
+              (tick due at 180000)
+            320 @bob agent_torn_down
+            330 @zoe agent_torn_down
+              tear down shared board
+            340 shared_torn_down board
+              start call 2 of final on zoe=missing, bob=missing, with a timeout of 120s
+            350 call_returned 2 score=0
+            350 call_torn_down 2
+              finish: zoe: AgentExited(Code(0)), missing
+              bob: AgentExited(Code(0)), missing
+              final returned [score=0]
+        "#]],
     );
 }
