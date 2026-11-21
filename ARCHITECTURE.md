@@ -709,7 +709,8 @@ ledger of CPUs, which every run on the engine shares; and the machine's key to i
 with the host keys it pinned. On a controller, below the controller user's home, as the `job`
 module lays out, the jobs also keep the store of the files that clients sent, the trees of links
 into it and each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the
-clients upload; each run's job directory also names its member.
+clients upload; each job's directory also names its release and the envelopes it takes, and
+a run's its member.
 
 ### Testing
 

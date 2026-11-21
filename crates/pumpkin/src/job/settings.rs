@@ -33,8 +33,8 @@ impl fmt::Display for Version {
     }
 }
 
-// The oldest envelope that this build takes; it takes any later minor of its major too.
-const OLDEST: Version = Version { major: 1, minor: 0 };
+/// The oldest envelope that this build takes; it takes any later minor of its major too.
+pub(super) const OLDEST: Version = Version { major: 1, minor: 0 };
 
 // The newest envelope whose keys this build knows.
 const NEWEST: Version = Version { major: 1, minor: 0 };

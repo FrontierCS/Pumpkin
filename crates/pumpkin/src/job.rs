@@ -45,8 +45,10 @@ use crate::{cli, config, publish, say, star};
 
 mod boot;
 mod installs;
+mod line;
 mod member;
 mod records;
+mod release;
 mod settings;
 mod start;
 

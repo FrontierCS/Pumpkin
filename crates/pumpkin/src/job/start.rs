@@ -76,6 +76,7 @@ pub(crate) fn start(
     if let (JobKind::Run, Some(member)) = (start.kind, member) {
         super::write_member(job.path(), member)?;
     }
+    super::release::write(job.path())?;
     let answer = launch(
         &pumpkin,
         &name,
