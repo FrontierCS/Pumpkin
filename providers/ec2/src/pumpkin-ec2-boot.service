@@ -10,6 +10,9 @@ Type=exec
 WorkingDirectory=/
 # The start's deadline, scheduled first, bounds the steps instead.
 TimeoutStartSec=infinity
+# Each command still running once the unit is stopped, as by a deadline's poweroff, gets SIGTERM,
+# then SIGKILL after this long: the provider's STOP_TIMEOUT says why.
+TimeoutStopSec=@STOP_SECONDS@s
 # So that ECR's credential helper keeps no token on the instance:
 # https://github.com/awslabs/amazon-ecr-credential-helper/blob/7ff7d6bd7a06408ddb9646c9ebccf97dbd190d55/README.md#L320-L324
 Environment=AWS_ECR_DISABLE_CACHE=true

@@ -1,5 +1,5 @@
 //! The workflow IR and its parsing, tested through the crate's public API against a complete
-//! workflow, [`WORKFLOW`].
+//! workflow, [`WORKFLOW`], beside the crate's other schemas.
 //!
 //! The workflow stays whole, as the IR's golden fixture: every IR case is a change to it
 //! (`fixture`, `fixture_with`).
@@ -23,7 +23,7 @@ use schema::sandbox::{
     pumpkin_dir, pumpkin_subdirs,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
-use schema::{frame, ir};
+use schema::{ec2_boot, frame, ir};
 use serde_json::{Value, json};
 use test_support::WORKFLOW;
 
@@ -1440,5 +1440,83 @@ fn caller_arguments() {
             `--arg seed` is `"3.5"`, which `int` can't read: give it decimal digits, after `-` or `+` or neither, from -2^63 to 2^63 - 1
             `--arg seed` is required, as `submit` gives it no default: give it as `--arg seed=<value>`
             `--arg mode` is given, and `submit` takes no such argument: give only those that `ops` lists"#]],
+    );
+}
+
+/// The lines of an EC2 instance's console that its boot wrote, joined by ` | `.
+struct BootLines(&'static str);
+
+impl Case for BootLines {
+    fn outcome(self) -> String {
+        let lines: Vec<&str> = ec2_boot::boot_lines(self.0).collect();
+        format!("{:?}: {}", self.0, lines.join(" | "))
+    }
+}
+
+/// The user data of a start with a cloud-config, or why it can't be written.
+struct UserData(&'static str);
+
+impl Case for UserData {
+    fn outcome(self) -> String {
+        let start = ec2_boot::Start {
+            hard_end_unix_seconds: 2,
+            pulls_by_unix_seconds: 1,
+            role_image: "roles@sha256:aa".to_owned(),
+            sandboxd_image: "sandboxd@sha256:bb".to_owned(),
+            confinement: vec![],
+            gateway: "172.31.0.10:7433".parse().unwrap(),
+            grant: RegistrationGrant::from([0x5a; 16]),
+            ops: false,
+            model: false,
+        };
+        match ec2_boot::user_data(self.0, &start) {
+            Ok(user_data) => {
+                let read = ec2_boot::start_in(&user_data).unwrap();
+                assert_eq!(read.grant, start.grant);
+                user_data
+            }
+            Err(error) => error,
+        }
+    }
+}
+
+#[test]
+fn ec2_boot_user_data() {
+    check(
+        [
+            UserData("#cloud-config\n{}\n"),
+            UserData("#cloud-config\n# --pumpkin-ec2-part\n"),
+        ],
+        &expect![[r#"
+            Content-Type: multipart/mixed; boundary="pumpkin-ec2-part"
+            MIME-Version: 1.0
+
+            --pumpkin-ec2-part
+            Content-Type: text/cloud-config
+
+            #cloud-config
+            {}
+
+            --pumpkin-ec2-part
+            Content-Type: application/x-pumpkin-ec2-start
+
+            pumpkin-ec2 start
+            {"hard_end_unix_seconds":2,"pulls_by_unix_seconds":1,"role_image":"roles@sha256:aa","sandboxd_image":"sandboxd@sha256:bb","confinement":[],"gateway":"172.31.0.10:7433","grant":"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","ops":false,"model":false}
+            --pumpkin-ec2-part--
+
+            the user data's cloud-config holds `--pumpkin-ec2-part`, the parts' boundary: expected none"#]],
+    );
+}
+
+#[test]
+fn ec2_boot_console() {
+    check(
+        [
+            BootLines("pumpkin-ec2: docker 25.0.18\n[  OK  ] Started docker.service.\n"),
+            BootLines("ip-172-31-0-9 login: pumpkin-ec2: the boot's unit ended: success exited 0"),
+        ],
+        &expect![[r#"
+            "pumpkin-ec2: docker 25.0.18\n[  OK  ] Started docker.service.\n": pumpkin-ec2: docker 25.0.18
+            "ip-172-31-0-9 login: pumpkin-ec2: the boot's unit ended: success exited 0": pumpkin-ec2: the boot's unit ended: success exited 0"#]],
     );
 }

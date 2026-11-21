@@ -13,7 +13,7 @@ use std::process::Stdio;
 use std::{env, fs, iter};
 
 use expect_test::{Expect, expect};
-use schema::ec2_boot::{START_FILE, Start};
+use schema::ec2_boot::{Start, USER_DATA_FILE, user_data};
 use schema::sandbox::RegistrationGrant;
 use stdx::process::Environment;
 use test_support::TestDir;
@@ -62,9 +62,8 @@ impl Instance {
         let dir = TestDir::new();
         fs::create_dir_all(dir.path().join("bin")).unwrap();
         // As cloud-init makes it, before `ec2-boot` runs.
-        let grant_dir = dir.path().join("root/run/pumpkin");
-        fs::create_dir_all(&grant_dir).unwrap();
-        fs::set_permissions(&grant_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(dir.path().join("root/var/lib/cloud/instance")).unwrap();
+        fs::create_dir_all(dir.path().join("root/run")).unwrap();
         let stand_in = dir.path().join("stand-in");
         fs::write(&stand_in, STAND_IN).unwrap();
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
@@ -74,12 +73,10 @@ impl Instance {
         Self { dir }
     }
 
-    /// Runs `ec2-boot start` with `input` in its start's file, as the user data writes it, and
-    /// returns its exit status and what it printed to the console.
-    fn boot(&self, input: &str) -> Vec<String> {
-        let start = self.root(START_FILE);
-        fs::write(&start, input).unwrap();
-        fs::set_permissions(&start, fs::Permissions::from_mode(0o600)).unwrap();
+    /// Runs `ec2-boot start` with `user_data` as cloud-init keeps it, and returns its exit status
+    /// and what it printed to the console.
+    fn boot(&self, user_data: &str) -> Vec<String> {
+        fs::write(self.root(USER_DATA_FILE), user_data).unwrap();
         let path = env::var_os("PATH").unwrap_or_default();
         let path = iter::once(self.dir.path().join("bin")).chain(env::split_paths(&path));
         let boot = env!("CARGO_BIN_EXE_ec2-boot");
@@ -128,13 +125,12 @@ impl Instance {
     }
 }
 
-/// Boots with `input` in the start's file, and compares the console, the calls and the files
-/// left with `expect`. Whatever the start holds, the boot removes its file, leaves its directory
-/// root's alone, and shows no grant.
-fn check(input: &str, expect: &Expect) {
+/// Boots with `user_data`, and compares the console, the calls and the files left with `expect`.
+/// Whatever the user data holds, the boot makes the grant's directory root's alone, and shows no
+/// grant.
+fn check(user_data: &str, expect: &Expect) {
     let instance = Instance::new();
-    let mut lines = instance.boot(input);
-    assert!(!instance.root(START_FILE).exists());
+    let mut lines = instance.boot(user_data);
     let grant_dir = fs::metadata(instance.root("/run/pumpkin")).unwrap();
     assert_eq!(grant_dir.permissions().mode() & 0o777, 0o700);
     let grant = start().grant.digits();
@@ -147,6 +143,9 @@ fn check(input: &str, expect: &Expect) {
     lines.push(instance.file("root/opt/pumpkin/sandboxd"));
     expect.assert_eq(&lines.join("\n"));
 }
+
+/// The cloud-config of the user data, which the boot doesn't read.
+const CLOUD_CONFIG: &str = "#cloud-config\n{}\n";
 
 /// A start of a role that makes ops and has a model route, whose deadlines are far off, as JSON.
 fn start() -> Start {
@@ -168,7 +167,7 @@ fn start() -> Start {
 #[test]
 fn boots() {
     check(
-        &serde_json::to_string(&start()).unwrap(),
+        &user_data(CLOUD_CONFIG, &start()).unwrap(),
         &expect![[r#"
             exit status: Some(0)
               pumpkin-ec2: docker 29.1.3
@@ -215,18 +214,19 @@ fn boots() {
 
 #[test]
 fn refuses_a_start_it_cant_read() {
-    // A start as a provider of another build might write it, with a field this one lacks.
-    let mut older = serde_json::to_value(start()).unwrap();
-    older["registry"] = "123456789012.dkr.ecr.us-west-1.amazonaws.com".into();
+    // A start that doesn't parse, which fails the boot before it runs a command, with its directory
+    // root's alone and no grant on the console.
+    let user_data = user_data(CLOUD_CONFIG, &start()).unwrap();
+    let unread = user_data.replacen("{\"hard_end", "{\"registry\":\"\",\"hard_end", 1);
     check(
-        &older.to_string(),
+        &unread,
         &expect![[r#"
-        exit status: Some(1)
-          pumpkin-ec2: the boot failed: the start in run/pumpkin/start.json can't be read, at line 1, column 229: expected a start's JSON, as the provider writes it
-        calls:
-        bin/nft-rules: missing
-        bin/env-file: missing
-        root/run/pumpkin/grant.env: missing
-        root/opt/pumpkin/sandboxd: missing"#]],
+            exit status: Some(1)
+              pumpkin-ec2: the boot failed: the user data in var/lib/cloud/instance/user-data.txt can't be read: its start can't be read, at line 1 of the start, column 11: expected a start's JSON, as the provider writes it
+            calls:
+            bin/nft-rules: missing
+            bin/env-file: missing
+            root/run/pumpkin/grant.env: missing
+            root/opt/pumpkin/sandboxd: missing"#]],
     );
 }

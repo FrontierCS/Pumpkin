@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use provider::{
     Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, Undeleted, UnixTime,
 };
-use schema::ec2_boot::{CONSOLE_PREFIX, Start};
+use schema::ec2_boot::{Start, boot_lines};
 use schema::ir::Name;
 use schema::sandbox::TcpDial;
 use serde::Deserialize;
@@ -262,8 +262,7 @@ impl Ec2<'_> {
         let output = output.unwrap_or_default();
         // The boot's own lines alone, which tell of the sandbox: the kernel's, cloud-init's and the
         // shutdown's don't.
-        let boot = (output.lines()).filter(|line| line.starts_with(CONSOLE_PREFIX));
-        let text = boot.flat_map(|line| [line, "\n"]).collect();
+        let text = boot_lines(&output).flat_map(|line| [line, "\n"]).collect();
         Ok(Console { text })
     }
 }

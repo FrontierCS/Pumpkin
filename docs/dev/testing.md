@@ -36,11 +36,10 @@ The rules for writing Pumpkin's tests and their snapshots.
   past a bound; wait on the real clock only for a bound that production states in whole seconds
 - NEVER test against an invented model of a cloud or a service, which pins what the model answers,
   and NEVER add a stand-in that answers for another program either, though one may record that it
-  ran: what a program really answers is tested by `cargo xtask live`, or not at all; test a
-  provider by `cargo xtask live ec2` and `cargo xtask live modal` instead; RUN them at
-  review of a change to a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s
-  listen, dial or user drop, `ec2-boot`, the EC2 user data or the Modal helper, and give the run's id
-  in the pull request
+  ran: what a program really answers is tested by `cargo xtask live`, or not at all; test a provider
+  by `cargo xtask live ec2` and `cargo xtask live modal` instead; RUN them at review of a change to
+  a provider, `crates/aws`, `crates/tls`, the gateway's meeting, `sandboxd`'s listen, dial or user
+  drop, `ec2-boot`, the EC2 user data or the Modal helper, and give the run's id in the pull request
 - SET `test = false` on each library and binary target: tests live in the integration test
   binary, and `cargo test` would build each target again for an empty unit-test harness; SET
   `doctest = false` too on each library whose docs hold no Rust example, which rustdoc would build

@@ -1,29 +1,29 @@
-//! Boots a sandbox on its instance: reads and removes the `Start` in [`START_FILE`], locks the
-//! instance's network down, pulls the role's image and runs its container with `sandboxd` in it,
-//! until the container exits, then exits itself, with a failure if the boot failed. Whatever
-//! happens, it reports on its standard output, which its unit connects to the serial console,
-//! each line behind [`CONSOLE_PREFIX`] and none holding the grant. The `Start`'s deadlines say
-//! what bounds it. Its files are at their paths below the directory it runs in, which its unit
-//! makes `/`.
+//! Boots a sandbox on its instance: reads the `Start` in the user data ([`USER_DATA_FILE`]),
+//! locks the instance's network down, pulls the role's image and runs its container with
+//! `sandboxd` in it, until the container exits, then exits itself, with a failure if the boot
+//! failed. Whatever happens, it reports on its standard output, which its unit connects to the
+//! serial console, each line behind [`CONSOLE_PREFIX`] and none holding the grant. The `Start`'s
+//! deadlines say what bounds it. Its files are at their paths below the directory it runs in,
+//! which its unit makes `/`.
 
 #![expect(
-    clippy::print_stdout,
     clippy::print_stderr,
-    reason = "its console lines are its standard output, and a command line it can't run is \
-              reported on its standard error"
+    reason = "a command line it can't run is reported on its standard error"
 )]
 
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, OpenOptions, Permissions};
-use std::io::Write as _;
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{self, Path, PathBuf};
 use std::process::{ExitCode, Output};
 use std::time::Duration;
 use std::{env, fmt};
 
-use schema::ec2_boot::{CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, START_FILE, Start};
+use schema::ec2_boot::{
+    CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start, USER_DATA_FILE, start_in,
+};
 use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
@@ -56,7 +56,7 @@ fn main() -> ExitCode {
     if args != ["start"] {
         eprintln!(
             "ec2-boot: the command line is {args:?}: expected `ec2-boot start`, with a start in \
-             {START_FILE}"
+             {USER_DATA_FILE}"
         );
         return ExitCode::from(2);
     }
@@ -145,27 +145,17 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
     }
 }
 
-// Makes the start's directory root's alone first, as cloud-init makes it with its umask's mode,
-// then reads the file and removes it before parsing it, so it is gone whether or not it parses.
+// Makes the grant's directory, root's alone, then reads the start out of cloud-init's copy of the
+// user data, which it leaves.
 fn read_start() -> Result<Start, String> {
     let dir = Path::new(GRANT_DIR.trim_start_matches('/'));
-    let private = fs::set_permissions(dir, Permissions::from_mode(0o700));
-    private.context(format_args!("making {} root's alone failed", dir.display()))?;
-    let file = Path::new(START_FILE.trim_start_matches('/'));
-    let read = fs::read(file).context(format_args!("reading {} failed", file.display()));
-    let removed = fs::remove_file(file).context(format_args!("removing {} failed", file.display()));
-    let text = read?;
-    removed?;
-    serde_json::from_slice(&text).map_err(|error| {
-        // Where alone: serde's message may quote a value, such as the grant.
-        format!(
-            "the start in {} can't be read, at line {}, column {}: expected a start's JSON, as \
-             the provider writes it",
-            file.display(),
-            error.line(),
-            error.column()
-        )
-    })
+    let made = DirBuilder::new().mode(0o700).create(dir);
+    made.context(format_args!("making {} failed", dir.display()))?;
+    let file = Path::new(USER_DATA_FILE.trim_start_matches('/'));
+    let text =
+        fs::read_to_string(file).context(format_args!("reading {} failed", file.display()))?;
+    start_in(&text)
+        .map_err(|why| format!("the user data in {} can't be read: {why}", file.display()))
 }
 
 // Schedules the instance's poweroff at `at_unix_seconds` with logind, in place of the one
@@ -353,7 +343,10 @@ fn shown(program: &str, args: &[&str]) -> String {
 }
 
 fn say(text: impl fmt::Display) {
+    let mut console = io::stdout().lock();
     for line in text.to_string().lines() {
-        println!("{CONSOLE_PREFIX} {line}");
+        // A console that takes no more, as a hung-up terminal, ends no boot: its lines only
+        // report it.
+        let _ = writeln!(console, "{CONSOLE_PREFIX} {line}");
     }
 }

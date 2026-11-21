@@ -34,10 +34,11 @@ root.
 
 Its sandboxes are containers on EC2 instances of their own, one each, launched from the launch
 templates of the envelope that `deploy/aws` makes, which the configuration's classes name. The
-images go to the envelope's private ECR repositories, and each instance pulls its role's image
-with its own role, through ECR's credential helper, which keeps no login. An instance's firewall lets its container reach the gateway's
-address and port and nothing else, not the instance nor its metadata. Each instance's termination
-is scheduled at its run's hard end, outside the instance, so it ends even if the driver dies.
+images go to the envelope's private ECR repositories, and each instance pulls its role's image with
+its own role, through ECR's credential helper, which keeps no login. An instance's firewall lets its
+container reach the gateway's address and port and nothing else, not the instance nor its metadata.
+Each instance's termination is scheduled at its run's hard end, outside the instance, so it ends
+even if the driver dies.
 
 ## The Modal provider
 

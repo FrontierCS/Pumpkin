@@ -1,12 +1,16 @@
-//! The user data of a sandbox's instance: a cloud-config, and no shell program. Its files are two
-//! units, root's Docker configuration and the [`Start`]; its commands start the boot's unit, which
-//! copies `ec2-boot` out of the image of `sandboxd` and runs it.
+//! The user data of a sandbox's instance: the [`Start`], which `ec2-boot` reads, and a
+//! cloud-config with no shell program, which holds no secret. Its files are two units and root's
+//! Docker configuration; its commands start the boot's unit, which copies `ec2-boot` out of the
+//! image of `sandboxd` and runs it.
 //!
-//! cloud-init writes the files in its init stage, then runs the commands, once per instance, as
-//! its module order says:
-//! <https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/config/cloud.cfg.tmpl#L82-L88>.
+//! cloud-init writes the files in its init stage, then runs the commands in its config stage,
+//! once per instance, as AL2023's `/etc/cloud/cloud.cfg` (L34-L81 in
+//! `cloud-init-22.2.2-1.amzn2023.1.15`) orders its modules, as cloud-init's own template does:
+//! <https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/config/cloud.cfg.tmpl#L82-L153>.
 
-use schema::ec2_boot::{BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, START_FILE, Start};
+use std::time::Duration;
+
+use schema::ec2_boot::{self, BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
 use serde_json::{Value, json};
 
 const BOOT: &str = include_str!("pumpkin-ec2-boot.service");
@@ -16,6 +20,11 @@ const BOOT_UNIT: &str = "pumpkin-ec2-boot.service";
 const BOOTS_ONCE: &str = include_str!("pumpkin-boots-once.service");
 
 const BOOTS_ONCE_UNIT: &str = "pumpkin-boots-once.service";
+
+// How long the boot's commands get to end once their unit is stopped, as the poweroff of a
+// deadline stops it, before they are killed: as long as `docker stop` gives a container, as each is
+// a client of Docker's, or `ec2-boot`, which ends on the signal.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The constants that the units hold as they are: a systemd command line reads none of their
 // bytes as syntax.
@@ -30,14 +39,9 @@ const _: () = assert!(
 ///
 /// # Errors
 ///
-/// The image of `sandboxd` is empty, or holds a byte that a systemd command line reads as syntax.
+/// The image of `sandboxd` is empty, or holds a byte that a systemd command line reads as syntax,
+/// or a part of the user data holds its boundary.
 pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String> {
-    let Ok(start_json) = serde_json::to_string(start) else {
-        unreachable!(
-            "a start can't be written as JSON, though it holds only strings, numbers, booleans \
-             and an address"
-        )
-    };
     let sandboxd = exec_word(&start.sandboxd_image).map_err(|why| {
         format!(
             "the image of sandboxd `{}` {why}: expected a reference of letters, digits and \
@@ -51,6 +55,7 @@ pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String>
     let filled = [
         ("@PREFIX@", CONSOLE_PREFIX),
         ("@PULLS_BY_MICROS@", &pulls_by_micros.to_string()),
+        ("@STOP_SECONDS@", &STOP_TIMEOUT.as_secs().to_string()),
         ("@BOOTS_ONCE@", BOOTS_ONCE_UNIT),
         ("@SANDBOXD_IMAGE@", &sandboxd),
         ("@BOOT_IN_IMAGE@", BOOT_IN_IMAGE),
@@ -73,9 +78,6 @@ pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String>
             // In memory, so a later boot has none.
             file(&format!("/run/systemd/system/{BOOT_UNIT}"), &boot, None),
             file("/root/.docker/config.json", &docker, Some("0600")),
-            // Written, then made root's: as cloud-init writes the copy of the user data it keeps.
-            // https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/util.py#L2143-L2147
-            file(START_FILE, &start_json, Some("0600")),
         ],
         // cloud-init quotes each word of a list, so no shell reads one:
         // https://github.com/canonical/cloud-init/blob/905d10891051496bd196798b2a8e0d77f161db74/cloudinit/util.py#L2180-L2203
@@ -84,11 +86,9 @@ pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String>
             ["systemctl", "start", "--no-block", BOOT_UNIT],
         ],
     });
-    let Ok(config) = serde_json::to_string_pretty(&config) else {
-        unreachable!("a cloud-config of strings can't be written as JSON")
-    };
     // JSON, which YAML reads as it is.
-    Ok(format!("#cloud-config\n{config}\n"))
+    let config = format!("#cloud-config\n{config:#}\n");
+    ec2_boot::user_data(&config, start)
 }
 
 fn file(path: &str, content: &str, permissions: Option<&str>) -> Value {
