@@ -17,7 +17,7 @@ use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{self, Path, PathBuf};
-use std::process::{ExitCode, Output};
+use std::process::{Command, ExitCode};
 use std::time::Duration;
 use std::{env, fmt};
 
@@ -25,7 +25,7 @@ use schema::ec2_boot::{
     CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start, USER_DATA_FILE, start_in,
 };
 use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH};
-use stdx::process::Environment;
+use stdx::process::{self, Bound, Echo, Environment, Failure, Run, command, printed};
 use stdx::{Context as _, Deadline};
 
 const GRANT_FILE: &str = "grant.env";
@@ -100,7 +100,11 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
     // The start's deadline, which the unit scheduled, would power the instance off under the
     // running container: the hard end bounds it from here on.
     power_off_at(hard_end_unix_seconds, pulls_by)?;
-    let status = command("docker", &["wait", container], b"", hard_end)?;
+    let mut wait = command("docker", Environment::Inherited);
+    let status = stdout(
+        wait.args(["wait", container]),
+        silently(hard_end).named("docker wait"),
+    )?;
     say(format_args!(
         "container {container} exited with status {status}"
     ));
@@ -114,24 +118,22 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
     }
     // The container's last lines, which show why a boot failed.
     if let Some(container) = container {
-        let logs = ["logs", "--tail", LAST_LINES, container];
-        match ran("docker", &logs, b"", Deadline::after(END_TIMEOUT)) {
-            Ok(Output {
-                status,
-                stdout,
-                stderr,
-            }) => {
+        let mut logs = command("docker", Environment::Inherited);
+        logs.args(["logs", "--tail", LAST_LINES, container]);
+        // `docker logs` prints the container's lines even as it fails, so they are wanted then too.
+        match process::run(&mut logs, silently(Deadline::after(END_TIMEOUT))) {
+            Ok(output) | Err(Failure::Exited { output, .. }) => {
                 let (stdout, stderr) = (
-                    String::from_utf8_lossy(&stdout),
-                    String::from_utf8_lossy(&stderr),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
                 );
                 // Every line `docker logs` prints, even as it fails, may be the container's own, so
                 // each carries the container's prefix, never the boot's alone.
                 for line in stdout.lines().chain(stderr.lines()) {
                     say(format_args!("sandboxd: {line}"));
                 }
-                if !status.success() {
-                    say(format_args!("`docker logs` failed with {status}"));
+                if !output.status.success() {
+                    say(format_args!("`docker logs` failed with {}", output.status));
                 }
             }
             Err(error) => say(format_args!(
@@ -174,7 +176,8 @@ fn power_off_at(at_unix_seconds: u64, by: Deadline) -> Result<(), String> {
         "poweroff",
         &micros,
     ];
-    command("busctl", &call, b"", by).map(drop)
+    let mut busctl = command("busctl", Environment::Inherited);
+    stdout(busctl.args(call), silently(by).named("busctl call")).map(drop)
 }
 
 fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
@@ -197,24 +200,26 @@ fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
 }}
 "
     );
-    command("nft", &["--file", "-"], rules.as_bytes(), by).map(drop)
+    let mut nft = command("nft", Environment::Inherited);
+    let loaded = silently(by).input(rules.as_bytes());
+    stdout(nft.args(["--file", "-"]), loaded).map(drop)
 }
 
 fn check_docker(by: Deadline) -> Result<(), String> {
     // A limit that Docker can't enforce would leave the role unbounded.
     let format = "{{.MemoryLimit}} {{.SwapLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}";
-    let limits = command("docker", &["info", "--format", format], b"", by)?;
+    let mut info = command("docker", Environment::Inherited);
+    let limits = stdout(info.args(["info", "--format", format]), silently(by))?;
     if limits != "true true true true" {
         return Err(format!(
             "docker supports the memory, swap, CPU and process limits as `{limits}`: expected \
              all four"
         ));
     }
-    let version = command(
-        "docker",
-        &["version", "--format", "{{.Server.Version}}"],
-        b"",
-        by,
+    let mut version = command("docker", Environment::Inherited);
+    let version = stdout(
+        version.args(["version", "--format", "{{.Server.Version}}"]),
+        silently(by),
     )?;
     say(format_args!("docker {version}"));
     Ok(())
@@ -223,17 +228,19 @@ fn check_docker(by: Deadline) -> Result<(), String> {
 // By the instance's role, which ECR's credential helper gets a token with for each pull, as the
 // user data configures root's Docker.
 fn pull(role_image: &str, sandboxd_image: &str, by: Deadline) -> Result<(), String> {
-    command("docker", &["pull", "--quiet", role_image], b"", by)?;
+    let mut pull = command("docker", Environment::Inherited);
+    stdout(pull.args(["pull", "--quiet", role_image]), silently(by))?;
     // Docker's own record of what it pulled goes to the console, for an audit.
     for image in [role_image, sandboxd_image] {
-        let inspect = [
+        let mut inspect = command("docker", Environment::Inherited);
+        inspect.args([
             "image",
             "inspect",
             "--format",
             "{{index .RepoDigests 0}}",
             image,
-        ];
-        let pulled = command("docker", &inspect, b"", by)?;
+        ]);
+        let pulled = stdout(&mut inspect, silently(by))?;
         say(format_args!("pulled {image}: {pulled}"));
     }
     Ok(())
@@ -246,12 +253,19 @@ fn copy_sandboxd(sandboxd_image: &str, by: Deadline) -> Result<(), String> {
         .mode(0o755)
         .create(HOST_DIR);
     made.context(format_args!("making {HOST_DIR} failed"))?;
-    let create = ["create", "--entrypoint=/", sandboxd_image];
-    let copied = command("docker", &create, b"", by)?;
+    let mut create = command("docker", Environment::Inherited);
+    create.args(["create", "--entrypoint=/", sandboxd_image]);
+    let copied = stdout(&mut create, silently(by))?;
     let from = format!("{copied}:{SANDBOXD_IN_IMAGE}");
-    let to = host_sandboxd();
-    command("docker", &["cp", &from, &to.to_string_lossy()], b"", by)?;
-    command("docker", &["rm", &copied], b"", by).map(drop)
+    let mut copy = command("docker", Environment::Inherited);
+    copy.args(["cp", &from]).arg(host_sandboxd());
+    stdout(&mut copy, silently(by).named("docker cp"))?;
+    let mut remove = command("docker", Environment::Inherited);
+    stdout(
+        remove.args(["rm", &copied]),
+        silently(by).named("docker rm"),
+    )
+    .map(drop)
 }
 
 fn instance_options(ops: bool) -> Result<Vec<String>, String> {
@@ -292,8 +306,10 @@ fn run_granted(run: &[String], grant: &RegistrationGrant, by: Deadline) -> Resul
     let opened = (OpenOptions::new().write(true).create_new(true).mode(0o600)).open(&file);
     let written = opened.and_then(|mut file| writeln!(file, "{SANDBOXD_GRANT}={digits}"));
     let written = written.context(format_args!("writing {} failed", file.display()));
-    let run: Vec<&str> = run.iter().map(String::as_str).collect();
-    let started = written.and_then(|()| command("docker", &run, b"", by));
+    let started = written.and_then(|()| {
+        let mut docker = command("docker", Environment::Inherited);
+        stdout(docker.args(run), silently(by))
+    });
     // Removed whether or not the container started.
     let removed =
         fs::remove_file(&file).context(format_args!("removing {} failed", file.display()));
@@ -314,32 +330,14 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     path::absolute(path).context(format_args!("making {} absolute failed", path.display()))
 }
 
-fn command(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<String, String> {
-    let Output {
-        status,
-        stdout,
-        stderr,
-    } = ran(program, args, input, by)?;
-    if !status.success() {
-        return Err(format!(
-            "{} failed with {status}: {}: fix what it reports",
-            shown(program, args),
-            String::from_utf8_lossy(&stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&stdout).trim_end().to_owned())
+// What `command` printed on its standard output, or its failure as a message.
+fn stdout(command: &mut Command, how: Run<'_>) -> Result<String, String> {
+    printed(process::run(command, how).map_err(|failure| failure.to_string())?)
 }
 
-fn ran(program: &str, args: &[&str], input: &[u8], by: Deadline) -> Result<Output, String> {
-    let shown = shown(program, args);
-    let mut command = stdx::process::command(program, Environment::Inherited);
-    let ran = stdx::process::fed(command.args(args), input, by);
-    let ran = ran.context(format_args!("{shown} can't run"))?;
-    ran.ok_or_else(|| format!("{shown} didn't end by its deadline, and was killed"))
-}
-
-fn shown(program: &str, args: &[&str]) -> String {
-    format!("`{program} {}`", args.first().copied().unwrap_or_default())
+// A run that ends by `by`, with no echo of its command.
+fn silently(by: Deadline) -> Run<'static> {
+    Run::new(Bound::By(by), Echo::Silent)
 }
 
 fn say(text: impl fmt::Display) {
