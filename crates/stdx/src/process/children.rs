@@ -50,11 +50,12 @@ pub fn wait_any(children: &mut [&mut Child]) -> (usize, io::Result<ExitStatus>) 
     }
 }
 
-/// Kills every process in the group that `child`, unreaped, leads, and reaps `child`.
-pub(super) fn kill(child: &mut Child) -> io::Result<()> {
+/// Kills every process in the group that `child`, unreaped, leads, and reaps `child`, giving how
+/// it exited.
+pub(super) fn kill(child: &mut Child) -> io::Result<ExitStatus> {
     // `Child::id` casts the child's pid_t to the u32 it returns, which `cast_signed` undoes.
     kill_group(child.id().cast_signed())?;
-    child.wait().map(drop)
+    child.wait()
 }
 
 /// Kills every process left in the process group `group`, by SIGKILL; finding none left is no

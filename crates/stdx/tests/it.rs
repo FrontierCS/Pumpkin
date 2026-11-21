@@ -7,12 +7,14 @@ use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::num::NonZeroUsize;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, thread};
+use std::{env, io, thread};
 
 use expect_test::{Expect, expect};
 use rustix::net::sockopt;
@@ -22,18 +24,21 @@ use stdx::process::{Bound, Echo, Environment, Failure, Run, Stream};
 
 /// How long a stand-in that hangs first runs before its bound, which [`check`] doubles until the
 /// stand-in has started its process by then.
-// Short, since the test waits it out. Each such stand-in sleeps far longer, so its bound comes
-// first.
-const LIMIT: Duration = Duration::from_millis(200);
+// The floor: the doubling finds the bound by which `sh` starts on this machine.
+const LIMIT: Duration = Duration::from_millis(1);
 
-// Where the bound isn't what a test is about: one never reached.
-const UNBOUNDED: Bound = Bound::Within(Duration::MAX);
+// Where the bound isn't what a test is about: one that no test comes near, as nextest ends each
+// test within 5 s.
+const LONG_BOUND: Bound = Bound::Within(Duration::from_mins(1));
 
 #[derive(Clone, Copy)]
 enum Caller<'a> {
     /// Silent, within this long of the stand-in's start, or twice that, and so on, until the
-    /// stand-in has started its process by then.
-    Waits(Duration),
+    /// stand-in has started its process by then, with its standard error sent as said.
+    Waits(Duration, Stream),
+    /// Silent, by a deadline this long from now, or twice that, and so on, until the stand-in
+    /// had started by then.
+    Until(Duration),
     /// Echoed, by a deadline that has passed, in a directory that doesn't exist, where the
     /// stand-in can't start.
     Late,
@@ -44,7 +49,8 @@ enum Caller<'a> {
 /// Runs `script` with `sh`, from `caller`, in a directory of its own, and checks how it ended,
 /// what this process printed meanwhile, and how each process whose ID it wrote, a line each, to
 /// `pids` there ended, against `expect`. A script writes an ID once it has started that process,
-/// so a test that waits for the ID never rests on how slowly this machine starts `sh`.
+/// so a test that waits for the ID never rests on how slowly this machine starts `sh`. A process
+/// still running once the run has ended is ended by SIGTERM.
 fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
     // Adopted, a process the script left can be waited for.
     rustix::process::set_child_subreaper(Some(rustix::process::getpid())).unwrap();
@@ -52,8 +58,8 @@ fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
     let pids = || fs::read_to_string(dir.path().join("pids")).unwrap_or_default();
     let printing = Printing::start();
     let ended = match caller {
-        Caller::Waits(mut limit) => loop {
-            let how = Run::new(Bound::Within(limit), Echo::Silent);
+        Caller::Waits(mut limit, stderr) => loop {
+            let how = Run::new(Bound::Within(limit), Echo::Silent).stderr(stderr);
             match run(script, dir.path(), how) {
                 // Killed before it wrote what it started, so this run says nothing of what the
                 // kill reaches. A process it had started by then was killed with it.
@@ -61,6 +67,13 @@ fn check(script: &str, caller: Caller<'_>, expect: &Expect) {
                     limit = limit.saturating_mul(2);
                 }
                 Err(Failure::Unended { .. }) => break "killed at its bound".to_owned(),
+                ran => break ended(&ran),
+            }
+        },
+        Caller::Until(mut limit) => loop {
+            let how = Run::new(Bound::By(Deadline::after(limit)), Echo::Silent);
+            match run(script, dir.path(), how) {
+                Err(Failure::Unended { started: false, .. }) => limit = limit.saturating_mul(2),
                 ran => break ended(&ran),
             }
         },
@@ -105,15 +118,15 @@ fn written(output: &Output) -> String {
 /// This process's standard output and error, sent to files of their own until [`Printing::stop`].
 struct Printing {
     dir: tempfile::TempDir,
-    stdout: std::os::fd::OwnedFd,
-    stderr: std::os::fd::OwnedFd,
+    stdout: OwnedFd,
+    stderr: OwnedFd,
 }
 
 impl Printing {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let stdout = rustix::io::dup(rustix::stdio::stdout()).unwrap();
-        let stderr = rustix::io::dup(rustix::stdio::stderr()).unwrap();
+        let stdout = saved(rustix::stdio::stdout());
+        let stderr = saved(rustix::stdio::stderr());
         rustix::stdio::dup2_stdout(File::create(dir.path().join("stdout")).unwrap()).unwrap();
         rustix::stdio::dup2_stderr(File::create(dir.path().join("stderr")).unwrap()).unwrap();
         Self {
@@ -138,9 +151,17 @@ impl Printing {
     }
 }
 
-/// How process `pid`, which [`check`] made this process's child, ended, once it has.
+/// A copy of `fd` that no child gets.
+fn saved(fd: impl AsFd) -> OwnedFd {
+    rustix::io::fcntl_dupfd_cloexec(fd, 0).unwrap()
+}
+
+/// How process `pid`, which [`check`] made this process's child, ended, once it has, as SIGTERM
+/// ends it if it still runs.
 fn reaped(pid: i32) -> String {
     let pid = Pid::from_raw(pid).unwrap();
+    // One already killed, or exited, stays so.
+    rustix::process::kill_process(pid, Signal::TERM).unwrap();
     let waited = rustix::process::waitpid(Some(pid), WaitOptions::empty()).unwrap();
     let (_, status) = waited.unwrap();
     ExitStatus::from_raw(status.as_raw()).to_string()
@@ -150,7 +171,7 @@ fn reaped(pid: i32) -> String {
 fn captures() {
     check(
         "head --bytes=200000 /dev/zero; head --bytes=300000 /dev/zero >&2",
-        Caller::Runs(Run::new(UNBOUNDED, Echo::Silent)),
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
         &expect![[r#"
             exited with exit status: 0, with 200000 bytes of standard output and 300000 of standard error
             the processes it started: []"#]],
@@ -161,7 +182,7 @@ fn captures() {
 fn hangs() {
     check(
         "sleep 60 & echo $! >>pids; wait",
-        Caller::Waits(LIMIT),
+        Caller::Waits(LIMIT, Stream::Captured),
         &expect![[r#"
             killed at its bound
             the processes it started: ["signal: 9 (SIGKILL)"]"#]],
@@ -172,10 +193,35 @@ fn hangs() {
 fn leaves() {
     check(
         "sleep 60 & echo $! >>pids",
-        Caller::Waits(LIMIT),
+        Caller::Waits(LIMIT, Stream::Captured),
         &expect![[r#"
             killed at its bound
             the processes it started: ["signal: 9 (SIGKILL)"]"#]],
+    );
+}
+
+// What it started, with its output closed, ends with the run, though the run succeeds.
+#[test]
+fn leaves_closed() {
+    check(
+        "sleep 60 >/dev/null 2>&1 & echo $! >>pids",
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
+        &expect![[r#"
+            exited with exit status: 0, with 0 bytes of standard output and 0 of standard error
+            the processes it started: ["signal: 9 (SIGKILL)"]"#]],
+    );
+}
+
+// In this process's group, the command alone is killed at the bound. Its sleep is short, as a
+// run killed before it wrote its ID leaves one that no one ends.
+#[test]
+fn hangs_inherited() {
+    check(
+        "sleep 3 & echo $! >>pids; wait",
+        Caller::Waits(LIMIT, Stream::Inherited),
+        &expect![[r#"
+            killed at its bound
+            the processes it started: ["signal: 15 (SIGTERM)"]"#]],
     );
 }
 
@@ -186,8 +232,33 @@ fn unended() {
         "exec sleep 60",
         Caller::Runs(how),
         &expect![[r#"
-        `sh` didn't end within 0.001 s, so it was killed
+        `sh` didn't end within 0.001 s, so it was killed: expected it to end by then
         the processes it started: []"#]],
+    );
+}
+
+#[test]
+fn unended_by() {
+    check(
+        "exec sleep 60",
+        Caller::Until(Duration::from_millis(1)),
+        &expect![[r#"
+            `sh` hadn't ended by its deadline, so it was killed: expected it to end by then
+            the processes it started: []"#]],
+    );
+}
+
+// A process it started holds its input open, unread, past the bound.
+#[test]
+fn unended_fed() {
+    let input = vec![b'x'; 1 << 20];
+    let how = Run::new(Bound::Within(Duration::from_millis(500)), Echo::Silent).input(&input);
+    check(
+        "exec 3<&0; sleep 5 <&3 >/dev/null 2>&1 3<&- & exit 0",
+        Caller::Runs(how),
+        &expect![[r#"
+            `sh` didn't end within 0.5 s, so it was killed: expected it to end by then
+            the processes it started: []"#]],
     );
 }
 
@@ -197,8 +268,31 @@ fn late() {
         "echo $$ >>pids",
         Caller::Late,
         &expect![[r#"
-        the deadline passed before `sh` ended
+        `sh` didn't start, as its deadline had passed: expected one that leaves it time
         the processes it started: []"#]],
+    );
+}
+
+#[test]
+fn zero_bound() {
+    let how = Run::new(Bound::Within(Duration::ZERO), Echo::Line);
+    check(
+        "echo $$ >>pids",
+        Caller::Runs(how),
+        &expect![[r#"
+        `sh` didn't start, as its bound was 0 s: expected a bound that leaves it time
+        the processes it started: []"#]],
+    );
+}
+
+#[test]
+fn at_cap() {
+    check(
+        "head --bytes=134217728 /dev/zero",
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
+        &expect![[r#"
+            exited with exit status: 0, with 134217728 bytes of standard output and 0 of standard error
+            the processes it started: []"#]],
     );
 }
 
@@ -208,7 +302,7 @@ fn late() {
 fn capped() {
     check(
         "sleep 60 & echo $! >>pids; head --bytes=134217729 /dev/zero",
-        Caller::Runs(Run::new(UNBOUNDED, Echo::Silent)),
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
         &expect![[r#"
             running `sh` failed: its standard output passed the 128 MiB that a run captures, so it was killed: expected less
             the processes it started: ["signal: 9 (SIGKILL)"]"#]],
@@ -216,9 +310,20 @@ fn capped() {
 }
 
 #[test]
+fn capped_stderr() {
+    check(
+        "head --bytes=134217729 /dev/zero >&2",
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
+        &expect![[r#"
+            running `sh` failed: its standard error passed the 128 MiB that a run captures, so it was killed: expected less
+            the processes it started: []"#]],
+    );
+}
+
+#[test]
 fn fed() {
     let input = vec![b'x'; 300_000];
-    let how = Run::new(UNBOUNDED, Echo::Silent).input(&input);
+    let how = Run::new(LONG_BOUND, Echo::Silent).input(&input);
     check(
         "cat",
         Caller::Runs(how),
@@ -231,12 +336,12 @@ fn fed() {
 #[test]
 fn fed_unread() {
     let input = vec![b'x'; 300_000];
-    let how = Run::new(UNBOUNDED, Echo::Silent).input(&input);
+    let how = Run::new(LONG_BOUND, Echo::Silent).input(&input);
     check(
         "exit 4",
         Caller::Runs(how),
         &expect![[r#"
-        `sh` failed with exit status: 4 and wrote nothing to standard error
+        `sh` failed with exit status: 4 and wrote nothing to standard error: expected it to exit with 0
         exited with exit status: 4, with 0 bytes of standard output and 0 of standard error
         the processes it started: []"#]],
     );
@@ -244,7 +349,7 @@ fn fed_unread() {
 
 #[test]
 fn exited() {
-    let how = Run::new(UNBOUNDED, Echo::Silent).named("the script");
+    let how = Run::new(LONG_BOUND, Echo::Silent).named("the script");
     check(
         "echo some words; printf '  it broke.\\n\\n' >&2; exit 3",
         Caller::Runs(how),
@@ -259,17 +364,29 @@ fn exited() {
 fn exited_silently() {
     check(
         "exit 3",
-        Caller::Runs(Run::new(UNBOUNDED, Echo::Silent)),
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
         &expect![[r#"
-            `sh` failed with exit status: 3 and wrote nothing to standard error
+            `sh` failed with exit status: 3 and wrote nothing to standard error: expected it to exit with 0
             exited with exit status: 3, with 0 bytes of standard output and 0 of standard error
             the processes it started: []"#]],
     );
 }
 
 #[test]
+fn signalled() {
+    check(
+        "kill -s KILL $$",
+        Caller::Runs(Run::new(LONG_BOUND, Echo::Silent)),
+        &expect![[r#"
+            `sh` failed with signal: 9 (SIGKILL) and wrote nothing to standard error: expected it to exit with 0
+            exited with signal: 9 (SIGKILL), with 0 bytes of standard output and 0 of standard error
+            the processes it started: []"#]],
+    );
+}
+
+#[test]
 fn echoed_inherited() {
-    let how = Run::new(UNBOUNDED, Echo::Line)
+    let how = Run::new(LONG_BOUND, Echo::Line)
         .stdout(Stream::Inherited)
         .stderr(Stream::Inherited);
     check(
@@ -286,17 +403,55 @@ fn echoed_inherited() {
 
 #[test]
 fn discarded() {
-    let how = Run::new(UNBOUNDED, Echo::Silent)
+    let how = Run::new(LONG_BOUND, Echo::Silent)
         .stdout(Stream::Discarded)
         .stderr(Stream::Discarded);
     check(
         "echo out; echo err >&2; exit 1",
         Caller::Runs(how),
         &expect![[r#"
-            `sh` failed with exit status: 1
+            `sh` failed with exit status: 1, its standard error discarded: expected it to exit with 0
             exited with exit status: 1, with 0 bytes of standard output and 0 of standard error
             the processes it started: []"#]],
     );
+}
+
+/// The process group that a run of `sh` with its standard error sent to `stderr` is in, as this
+/// process's group or the one that `sh` leads.
+fn group(stderr: Stream) -> String {
+    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
+    // The fifth field of `stat` is the process's group.
+    command.args(["-c", "echo $$ $(cut -d ' ' -f 5 /proc/$$/stat)"]);
+    let how = Run::new(LONG_BOUND, Echo::Silent).stderr(stderr);
+    let printed = stdx::process::printed(stdx::process::run(&mut command, how).unwrap()).unwrap();
+    let (pid, group) = printed.split_once(' ').unwrap();
+    let ours = rustix::process::getpgrp().as_raw_nonzero().to_string();
+    match (group == pid, group == ours) {
+        (true, false) => "the group that it leads".to_owned(),
+        (false, true) => "this process's group".to_owned(),
+        (true, true) | (false, false) => format!("group {group}, as process {pid}"),
+    }
+}
+
+#[test]
+fn own_group() {
+    expect!["the group that it leads"].assert_eq(&group(Stream::Captured));
+}
+
+#[test]
+fn callers_group() {
+    expect!["this process's group"].assert_eq(&group(Stream::Inherited));
+}
+
+#[test]
+fn echo_failed() {
+    let stderr = saved(rustix::stdio::stderr());
+    rustix::stdio::dup2_stderr(File::options().write(true).open("/dev/full").unwrap()).unwrap();
+    let mut command = stdx::process::command("true", Environment::Only(&["PATH"]));
+    let ran = stdx::process::run(&mut command, Run::new(LONG_BOUND, Echo::Line));
+    rustix::stdio::dup2_stderr(&stderr).unwrap();
+    expect![[r#"`true` didn't start: echoing it failed: No space left on device (os error 28): expected this process's standard error to take the echo"#]]
+    .assert_eq(&ran.unwrap_err().to_string());
 }
 
 #[test]
@@ -306,7 +461,7 @@ fn cargo_environment() {
     let mut command = stdx::process::command("sh", Environment::Cargo);
     let script = "echo ${CARGO_PKG_NAME-unset} ${CARGO_MANIFEST_DIR-unset} ${PATH+set}";
     command.args(["-c", script]);
-    let ran = stdx::process::run(&mut command, Run::new(UNBOUNDED, Echo::Silent));
+    let ran = stdx::process::run(&mut command, Run::new(LONG_BOUND, Echo::Silent));
     expect!["unset unset set"].assert_eq(&stdx::process::printed(ran.unwrap()).unwrap());
 }
 
@@ -317,7 +472,7 @@ fn reported() {
     input.extend(b"x.\n");
     let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
     command.args(["-c", "cat >&2; exit 1"]);
-    let how = Run::new(UNBOUNDED, Echo::Silent).input(&input);
+    let how = Run::new(LONG_BOUND, Echo::Silent).input(&input);
     let failure = stdx::process::run(&mut command, how).unwrap_err();
     let reported = failure.reported();
     let chars: Vec<char> = reported.chars().collect();
@@ -335,21 +490,37 @@ fn unstarted() {
     let dir = tempfile::tempdir().unwrap();
     let only = Environment::Only(&["PATH"]);
     let run = |command: &mut std::process::Command| {
-        let failure = stdx::process::run(command, Run::new(UNBOUNDED, Echo::Silent));
+        let failure = stdx::process::run(command, Run::new(LONG_BOUND, Echo::Silent));
         failure.unwrap_err().to_string()
+    };
+    let in_dir = |dir: &Path| {
+        let mut command = stdx::process::command("true", only);
+        command.current_dir(dir);
+        command
     };
     let mut absent = stdx::process::command("pumpkin-absent", only);
     absent.args(["nextest", "run", "--workspace"]);
     let mut at = stdx::process::command(dir.path().join("absent"), only);
-    let mut lost = stdx::process::command("sh", only);
-    lost.args(["-c", "true"])
-        .current_dir(dir.path().join("absent"));
+    let script = dir.path().join("script");
+    fs::write(&script, "#!/absent/interpreter\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut interpreted = stdx::process::command(&script, only);
+    let unsearchable = dir.path().join("unsearchable");
+    fs::create_dir(&unsearchable).unwrap();
+    fs::set_permissions(&unsearchable, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut long = stdx::process::command("sh", only);
+    // Past the 128 KiB that Linux takes of one argument.
+    long.args(["-c".to_owned(), "x".repeat(200_000)]);
     let mut spawned = stdx::process::command("pumpkin-absent", only);
     let spawned = stdx::process::spawn(&mut spawned, Stdio::null(), Stdio::null(), Stdio::null());
     let shown = [
         run(&mut absent),
         run(&mut at),
-        run(&mut lost),
+        run(&mut interpreted),
+        run(&mut in_dir(&dir.path().join("absent"))),
+        run(&mut in_dir(&script)),
+        run(&mut in_dir(&unsearchable)),
+        run(&mut long),
         spawned.unwrap_err(),
     ];
     let shown = shown
@@ -358,7 +529,11 @@ fn unstarted() {
     expect![[r#"
         `pumpkin-absent nextest run` didn't start: No such file or directory (os error 2): install `pumpkin-absent` on `PATH`
         `$DIR/absent` didn't start: No such file or directory (os error 2): expected a program at `$DIR/absent`
-        `sh` didn't start in `$DIR/absent`: No such file or directory (os error 2): expected that directory to exist
+        `$DIR/script` didn't start: No such file or directory (os error 2): expected the interpreter that the first line of `$DIR/script` names to exist
+        `true` didn't start: No such file or directory (os error 2): expected its working directory `$DIR/absent` to exist
+        `true` didn't start: Not a directory (os error 20): expected its working directory `$DIR/script` to be a directory
+        `true` didn't start: Permission denied (os error 13): expected its working directory `$DIR/unsearchable` to be one that it may enter
+        `sh` didn't start: Argument list too long (os error 7): fix what the error says
         `pumpkin-absent` didn't start: No such file or directory (os error 2): install `pumpkin-absent` on `PATH`"#]]
     .assert_eq(&shown);
 }
@@ -378,8 +553,22 @@ fn shown() {
         OsStr::from_bytes(b"\xff"),
     ];
     command.args(words).env("SECRET", "kept");
-    expect![[r#"git -C a/b-c.d '' 'two words' 'it'"'"'s' '$HOME' key=value,x@y:z%+ 'ü' '�'"#]]
-        .assert_eq(&stdx::process::shown(&command));
+    let programs = ["a=b", "if", "done", "time"].map(|program| {
+        let mut command = stdx::process::command(program, Environment::Only(&[]));
+        stdx::process::shown(command.args(["if", "x=y"]))
+    });
+    let shown = format!(
+        "{}\n{}",
+        stdx::process::shown(&command),
+        programs.join("\n")
+    );
+    expect![[r#"
+        git -C a/b-c.d '' 'two words' 'it'"'"'s' '$HOME' key=value,x@y:z%+ 'ü' '�'
+        'a=b' if x=y
+        'if' if x=y
+        'done' if x=y
+        'time' if x=y"#]]
+    .assert_eq(&shown);
 }
 
 #[test]
@@ -391,12 +580,54 @@ fn printed() {
     };
     let shown = [
         stdx::process::printed(output(b"two\nlines\n\n")),
+        stdx::process::printed(output(b"crlf\r\n")),
         stdx::process::printed(output(b"none")),
         stdx::process::printed(output(b"not \xff")),
     ];
     let shown = format!("{shown:?}");
-    expect![[r#"[Ok("two\nlines\n"), Ok("none"), Err("the standard output isn't UTF-8: invalid utf-8 sequence of 1 bytes from index 4: expected text")]"#]]
+    expect![[r#"[Ok("two\nlines\n"), Ok("crlf"), Ok("none"), Err("the standard output isn't UTF-8: invalid utf-8 sequence of 1 bytes from index 4: expected text")]"#]].assert_eq(&shown);
+}
+
+fn unchecked(ran: io::Result<Option<Output>>) -> String {
+    match ran {
+        Ok(Some(output)) => format!("{}, with {} bytes", output.status, output.stdout.len()),
+        Ok(None) => "none".to_owned(),
+        Err(error) => format!("an error: {error}"),
+    }
+}
+
+#[test]
+fn output_exited() {
+    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
+    command.args(["-c", "echo it; exit 3"]);
+    let ran = stdx::process::output(&mut command, Deadline::after(Duration::from_mins(1)));
+    expect!["exit status: 3, with 3 bytes"].assert_eq(&unchecked(ran));
+}
+
+#[test]
+fn output_unstarted() {
+    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
+    command.args(["-c", "exit 3"]);
+    let late = stdx::process::output(&mut command, Deadline::after(Duration::ZERO));
+    let mut absent = stdx::process::command("pumpkin-absent", Environment::Only(&["PATH"]));
+    let absent = stdx::process::output(&mut absent, Deadline::after(Duration::from_mins(1)));
+    let shown = format!("late: {}\nabsent: {}", unchecked(late), unchecked(absent));
+    expect![[r#"
+        late: none
+        absent: an error: No such file or directory (os error 2)"#]]
     .assert_eq(&shown);
+}
+
+#[test]
+fn fed_exited() {
+    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
+    command.args(["-c", "cat; exit 2"]);
+    let by = Deadline::after(Duration::from_mins(1));
+    expect!["exit status: 2, with 3 bytes"].assert_eq(&unchecked(stdx::process::fed(
+        &mut command,
+        b"fed",
+        by,
+    )));
 }
 
 #[test]
