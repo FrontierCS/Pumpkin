@@ -7,6 +7,7 @@ use std::time::Duration;
 use runtime::{CallerName, Cost, Ending, ModelUse, Progress, Readout, Tokens};
 use serde_json::{Value, json};
 
+use super::failure::{self, Failures};
 use super::talk::Talk;
 use super::{Held, when};
 use crate::progress::{self, Listed, Row};
@@ -188,6 +189,16 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
             "now": live_at.map(|at| at.as_secs_f64()),
         })
     });
+    let ended = progress
+        .as_ref()
+        .map(|progress| progress.end.unwrap_or(progress.last));
+    let failure = held.ending.as_ref().map(|ending| {
+        let ended = ended.map(|ended| ended.as_secs_f64());
+        failure::ended_json(ending, ended, &held.failures)
+    });
+    let lanes = progress
+        .as_ref()
+        .map(|progress| with_failures(lanes(progress, held.talk.as_ref()), &held.failures));
     let unread =
         progress::unread(unread).map(|said| json!({ "count": unread.len(), "said": said }));
     let mut run = json!({
@@ -198,9 +209,11 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "has_result": row.has_result(),
         "verdict": verdict,
         "result": result_json(held.ending.as_ref()),
+        "failure": failure,
+        "failures": held.failures.json(),
         "other_build": record.other_build(),
         "times": times,
-        "lanes": progress.as_ref().map(|progress| lanes(progress, held.talk.as_ref())),
+        "lanes": lanes,
         "talk": held.talk.as_ref().map(Talk::json),
         "model": progress.as_ref().map(|progress| model_json(&progress.model)),
         "cost": progress.as_ref().and_then(Progress::cost).as_ref().map(cost_json),
@@ -349,6 +362,17 @@ fn lanes(progress: &Progress, talk: Option<&Talk>) -> Vec<Value> {
         .chain(shared)
         .chain(children.into_iter().map(|(_, lane)| lane))
         .collect()
+}
+
+/// `lanes`, each that failed with the failure that `failures` holds of it.
+fn with_failures(mut lanes: Vec<Value>, failures: &Failures) -> Vec<Value> {
+    let failed = failures.of_lanes();
+    for lane in &mut lanes {
+        if let Some(failure) = lane["lane"].as_str().and_then(|name| failed.get(name)) {
+            lane["failure"] = failure.clone();
+        }
+    }
+    lanes
 }
 
 /// The marks of a lane's `answered` and `failed` times: one per span of the run's time, at the
