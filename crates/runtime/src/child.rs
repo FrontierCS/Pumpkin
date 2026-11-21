@@ -2,11 +2,12 @@
 //! which a driver of its kind drives.
 //!
 //! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
-//! reports the child's end only once its sandbox is deleted; a sandbox that can't be deleted fails
-//! the run. A child's thread waits on an inbox of its own ([`Message`]), into which its session
-//! hands what its reader reads, and the loop the core's stop and its driver's orders. A stop takes
-//! effect before the child's command starts, as the thread takes what its inbox holds then, and
-//! while it waits.
+//! reports a lease's end once its sandbox is deleted, and a call's as it comes, before the delete,
+//! whose end the call's teardown reports ([`Event::CallTornDown`]); a sandbox that can't be
+//! deleted fails the run. A child's thread waits on an inbox of its own ([`Message`]), into which
+//! its session hands what its reader reads, and the loop the core's stop and its driver's orders.
+//! A stop takes effect before the child's command starts, as the thread takes what its inbox holds
+//! then, and while it waits.
 
 use std::iter;
 use std::num::NonZeroU64;
@@ -66,8 +67,8 @@ pub(super) enum Report {
     /// An event, at the time the thread observed it: the core meters a child's time from its
     /// reports' times, which the loop's delays then don't lengthen.
     Event(Duration, Event),
-    /// Job `job`'s call has ended, at the time `at` the thread observed it, its target gone or
-    /// never created: its body returned, or the call failed for the reason given.
+    /// Job `job`'s call has ended, at the time `at` the thread observed it: its body returned, or
+    /// the call failed for the reason given. Its teardown follows.
     CallEnded {
         at: Duration,
         job: JobId,
@@ -94,11 +95,12 @@ pub(super) enum Report {
     Undeleted(String),
 }
 
-/// How a child ended, which its last report says.
+/// How a child ended, which its reports say.
 pub(super) enum End {
-    /// The event of its end: a lease's, or the agent's failure.
+    /// The event of its end, reported once its sandbox is gone: a lease's, or the agent's failure.
     Event(Event),
-    /// A call's end: what its body returned, or why the call failed.
+    /// A call's end, reported before its target's delete: what its body returned, or why the call
+    /// failed.
     Call(JobId, Result<CallResult, String>),
 }
 
@@ -113,19 +115,23 @@ impl End {
         }
     }
 
-    /// The report of the end at `at`, a time since the run started.
-    pub(super) fn report(self, at: Duration) -> Report {
+    /// What is reported of the end at `at`, a time since the run started: before its sandbox's
+    /// delete, if anything, and the event after it.
+    pub(super) fn reports(self, at: Duration) -> (Option<Report>, Event) {
         match self {
-            Self::Event(event) => Report::Event(at, event),
-            Self::Call(job, end) => Report::CallEnded { at, job, end },
+            Self::Event(event) => (None, event),
+            Self::Call(job, end) => (
+                Some(Report::CallEnded { at, job, end }),
+                Event::CallTornDown { job },
+            ),
         }
     }
 }
 
 /// Runs `child` to its end, reporting as it goes: starts its sandbox, whose session takes ops
-/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose end is
-/// the child's last report once the sandbox is deleted. A child whose start is due by a time that
-/// has passed fails at once, with nothing created, as one whose sandbox doesn't start does
+/// with `ops` as their payload limit, if given, then hands its session to `drive`, whose end it
+/// reports around the sandbox's delete ([`Child::close`]). A child whose start is due by a time
+/// that has passed fails at once, with nothing created, as one whose sandbox doesn't start does
 /// ([`End::failed`]).
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
@@ -140,7 +146,7 @@ pub(super) fn run<H: Host, O: Send + 'static>(
     if child.clock.now() >= child.deadlines.startup {
         let reason =
             format!("{noun} sandbox wasn't created: its start was due by a time that had passed");
-        return child.end(End::failed(which, reason));
+        return child.close(End::failed(which, reason), || Ok(()));
     }
     let by = deadline(&child.clock, child.deadlines.startup);
     let inbox = child.inbox.sender();
@@ -150,20 +156,19 @@ pub(super) fn run<H: Host, O: Send + 'static>(
         Err(failure) => match failure.dispose(child.sandboxes) {
             Ok(reason) => {
                 let reason = format!("{noun} sandbox didn't start: {reason}");
-                return child.end(End::failed(which, reason));
+                return child.close(End::failed(which, reason), || Ok(()));
             }
             Err(reason) => return child.report(Report::Undeleted(reason)),
         },
     };
     let last = drive(child, &mut sandbox.session);
-    let (logged, deleted) = child.sandboxes.delete(sandbox);
-    for entry in logged {
-        let _ = child.reports.send(Input::Logged(entry));
-    }
-    match deleted {
-        Ok(()) => child.end(last),
-        Err(error) => child.report(Report::Undeleted(error)),
-    }
+    child.close(last, || {
+        let (logged, deleted) = child.sandboxes.delete(sandbox);
+        for entry in logged {
+            child.log(entry);
+        }
+        deleted
+    });
 }
 
 impl<H: Host, O: Send + 'static> Child<'_, H, O> {
@@ -178,8 +183,18 @@ impl<H: Host, O: Send + 'static> Child<'_, H, O> {
         self.report(Report::Event(self.clock.now(), event));
     }
 
-    fn end(&self, end: End) {
-        self.report(end.report(self.clock.now()));
+    /// Reports `end` around `delete`, which deletes what the child's sandbox left: a call's end
+    /// before it, so that the call's caller hears it as the delete runs, and the call's teardown
+    /// after it; any other end after it. A failed delete is reported in place of what follows it.
+    pub(super) fn close(&self, end: End, delete: impl FnOnce() -> Result<(), String>) {
+        let (before, after) = end.reports(self.clock.now());
+        if let Some(report) = before {
+            self.report(report);
+        }
+        match delete() {
+            Ok(()) => self.event(after),
+            Err(reason) => self.report(Report::Undeleted(reason)),
+        }
     }
 
     pub(super) fn note(&self, note: String) {

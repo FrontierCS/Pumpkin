@@ -47,21 +47,21 @@ impl Core<'_> {
                 total.as_secs()
             ));
         }
-        if let Some(service) = self.shared.get(&function.target) {
-            if *service != crate::Availability::Available {
-                return Err(format!(
-                    "`{name}` cannot run because its shared sandbox is unavailable"
-                ));
-            }
-            if self.work_target_busy(function.target) {
-                return Ok(OpReply::Refused {
-                    busy: true,
-                    message: format!(
-                        "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
-                    ),
-                });
-            }
-        } else if usage.busy
+        let shared = self.shared.get(&function.target);
+        if shared.is_some_and(|service| *service != crate::Availability::Available) {
+            return Err(format!(
+                "`{name}` cannot run because its shared sandbox is unavailable"
+            ));
+        }
+        if shared.is_some() && self.work_target_busy(function.target) {
+            return Ok(OpReply::Refused {
+                busy: true,
+                message: format!(
+                    "`{name}`'s shared sandbox is busy: retry after its current call ends; this call is not charged"
+                ),
+            });
+        }
+        if usage.busy
             || self
                 .jobs
                 .of(JobOf::Function(id))
@@ -70,8 +70,8 @@ impl Core<'_> {
             return Ok(OpReply::Refused {
                 busy: true,
                 message: format!(
-                    "`{name}` runs one call at a time, and already has one queued or running: call \
-                 again once it has finished; this call is not charged"
+                    "`{name}` runs one call at a time, and already has one queued, running or \
+                 releasing its sandbox: call again once it has finished; this call is not charged"
                 ),
             });
         }

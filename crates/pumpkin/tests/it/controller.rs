@@ -4394,14 +4394,14 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
                 http://127.0.0.1:<port>/?t=<token>
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 309485, end: 309485
+            next: 310332, end: 310332
             GET /api/runs
             HTTP/1.1 200 OK
             "<live>" "work"
             "<ended>" "finished"
             GET /api/runs/<ended>
             HTTP/1.1 200 OK
-            state: "finished", end: 309485"#]],
+            state: "finished", end: 310332"#]],
     );
 }
 
@@ -4432,7 +4432,7 @@ fn view_answers_502_once_the_reopened_connection_is_cut_too_then_recovers() {
             "controller `alice` didn't answer: ended within the answer's body"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            next: 309485, end: 309485"#]],
+            next: 310332, end: 310332"#]],
     );
 }
 
@@ -4521,7 +4521,7 @@ fn view_asks_ec2_once_no_link_opens() {
             "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309485"#]],
+            end: 310332"#]],
     );
 }
 
@@ -4586,11 +4586,11 @@ fn view_installs_its_serve_there() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309485
+            end: 310332
             the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
-            end: 309485
+            end: 310332
             the calls: none
             the install: buildifier 555, pumpkin 555
             its files:

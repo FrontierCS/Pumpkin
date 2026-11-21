@@ -409,7 +409,7 @@ fn exports_what_the_view_answers() {
             runs/<id>/trace/job-4/stats-turn.json: /api/runs/<id>/trace/job-4/stats?by=turn
             runs/<id>/trace/job-4/steps.json: /api/runs/<id>/trace/job-4/steps
 
-            its cost: {"said":"$2.48, $2.05 of it for tokens and $0.44 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$2.48+"}; the list's: "$2.48+"; its agent's steps': 1.65375, 1 of unknown cost
+            its cost: {"said":"$2.49, $2.05 of it for tokens and $0.45 for sandboxes, and more without a price, and for 1 response's unreported tokens","shown":"$2.49+"}; the list's: "$2.49+"; its agent's steps': 1.65375, 1 of unknown cost
             request 12, as kept: {"conversation":{"field":"input","items":[{"item":"0000000000000000000000000000000000000000000000000000000000000000"},{"item":"0000000000000000000000000000000000000000000000000000000000000003"},{"item":"0000000000000000000000000000000000000000000000000000000000000004"},{"item":"0000000000000000000000000000000000000000000000000000000000000005"},{"item":"0000000000000000000000000000000000000000000000000000000000000006"}]},"fields":[{"item":"0000000000000000000000000000000000000000000000000000000000000007","name":"instructions"},{"name":"model","sent":"glm-5.3"},{"name":"stream","sent":false},{"item":"0000000000000000000000000000000000000000000000000000000000000002","name":"tools"}]}
             agent-0's "A.TXT": 2 found, as the view's search finds them
             agent-0's "a.txt\nb": 1 found, as the view's search finds them

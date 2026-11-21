@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use provider::UnixTime;
 use runtime::{
-    CallEnd, CallOf, CallSpan, CallerName, Ending, LeaseSpan, Place, Progress, ReadError, Readout,
-    Record, Sandbox, Writer,
+    CallOf, CallSpan, CallerName, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
+    Sandbox, Writer,
 };
 use schema::ir::Name;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ mod model;
 mod row;
 
 pub(crate) use agent::{caller_lane, line as agent_line};
-use child::{STOPPED, call_name, command, lease_end, lease_name, over_budget};
+use child::{call_end, call_name, command, lease_end, lease_name, over_budget};
 pub(crate) use child::{called, leased};
 pub(crate) use cost::usd;
 pub(crate) use model::median;
@@ -522,21 +522,7 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
         .filter(|(call, _)| call.sandbox.gone.is_none())
         .map(|(call, function)| {
             let asked = call.sandbox.asked;
-            let bound = call_bound(call);
-            let mut doing = format!("{function} call on {}", placed(&call.sandbox));
-            if let Some(caller) = call.caller {
-                let _ = write!(doing, " for {}", caller_lane(caller));
-            }
-            if call.sandbox.started.is_none() {
-                doing.push_str(", starting");
-            }
-            let phase = Phase {
-                name: format!("job {}", call.job),
-                since: asked,
-                bound,
-                doing,
-            };
-            ((asked, asked), phase)
+            ((asked, asked), call_phase(call, function))
         });
     let leases = progress.leases.iter();
     let leases = leases
@@ -585,6 +571,28 @@ fn children(progress: &Progress, at: Duration) -> Vec<Phase> {
     children.into_iter().map(|(_, child)| child).collect()
 }
 
+fn call_phase(call: &CallSpan, function: &str) -> Phase {
+    let mut doing = format!("{function} call on {}", placed(&call.sandbox));
+    if let Some(caller) = call.caller {
+        let _ = write!(doing, " for {}", caller_lane(caller));
+    }
+    let (since, bound) = if let Some((at, ..)) = &call.end {
+        let _ = write!(doing, ", {}", releasing(call));
+        (*at, None)
+    } else {
+        if call.sandbox.started.is_none() {
+            doing.push_str(", starting");
+        }
+        (call.sandbox.asked, call_bound(call))
+    };
+    Phase {
+        name: format!("job {}", call.job),
+        since,
+        bound,
+        doing,
+    }
+}
+
 /// By when, since the run started, call `call` ends at the latest: its timeout after its sandbox
 /// started, or, before that, after its class's startup, if the record says.
 fn call_bound(call: &CallSpan) -> Option<Duration> {
@@ -607,12 +615,17 @@ pub(crate) fn sorted(progress: &Progress, lease: &LeaseSpan) -> (Duration, Durat
 }
 
 fn on(call: &CallSpan) -> String {
-    let starting = if call.sandbox.started.is_some() {
-        ""
-    } else {
-        ", starting"
+    let state = match (&call.end, call.sandbox.started) {
+        (Some(_), _) => format!(", {}", releasing(call)),
+        (None, Some(_)) => String::new(),
+        (None, None) => ", starting".to_owned(),
     };
-    format!("job {} on {}{starting}", call.job, placed(&call.sandbox))
+    format!("job {} on {}{state}", call.job, placed(&call.sandbox))
+}
+
+// What a call whose end has come, and whose sandbox is still being deleted, is doing.
+fn releasing(call: &CallSpan) -> String {
+    format!("ended: {}; its sandbox isn't gone yet", call_end(call))
 }
 
 fn place(place: Option<&Place>) -> String {
@@ -889,13 +902,8 @@ pub(crate) fn milestones(progress: &Progress) -> Vec<String> {
             let started_line = format!("{} started{}", call_name(call), gpus(&call.sandbox));
             milestones.push((started, started_line));
         }
-        if let Some(at) = call.sandbox.gone {
-            let ended = match &call.end {
-                Some((CallEnd::Result(values), _)) => result(values),
-                Some((CallEnd::Failed(reason), _)) => format!("failed: {}", crate::escaped(reason)),
-                None => STOPPED.to_owned(),
-            };
-            let over_budget = over_budget(call);
+        if let Some(at) = child::ended(call) {
+            let (ended, over_budget) = (call_end(call), over_budget(call));
             milestones.push((
                 at,
                 format!("{} ended: {ended}{over_budget}", call_name(call)),
