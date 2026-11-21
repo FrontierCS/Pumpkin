@@ -3534,8 +3534,10 @@ fn ls_installs_its_serve_there() {
         (".made.Xy12Zq".to_owned(), 2),
         ("b".repeat(64), 0),
     ] {
-        fs::create_dir_all(installs.join(&name)).unwrap();
-        days_ago(&installs.join(name), days);
+        let path = installs.join(name);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o775)).unwrap();
+        days_ago(&path, days);
     }
     let mut steps = Vec::new();
     for _ in 0..2 {
@@ -4516,7 +4518,7 @@ fn view_asks_ec2_once_no_link_opens() {
         &expect![[r#"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 502 Bad Gateway
-            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1: : fix what `aws` reports"
+            "controller `alice` didn't answer: ended before its hello; asking EC2 whether it runs failed too: `aws --version` failed with exit status: 1 and wrote nothing to standard error"
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 309485"#]],

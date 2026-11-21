@@ -261,6 +261,9 @@ mod flags {
 }
 
 fn main() -> ExitCode {
+    if let Some(failed) = tools::run_as_musl_cc() {
+        return failed;
+    }
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -660,15 +663,7 @@ fn build(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     fs::create_dir_all(&bin)
         .map_err(|error| format!("making {} failed: {error}", bin.display()))?;
     for (name, from, mode) in built {
-        let to = bin.join(name);
-        // Copied beside it, then renamed over it: a copy over a `pumpkin` that runs would fail,
-        // as Linux refuses to write a file that a process executes.
-        let copy = bin.join(format!(".{name}.xtask-build"));
-        // Each sandbox's processes run as its role's user, who must execute `sandboxd`.
-        let installed = (fs::copy(from, &copy))
-            .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(mode)))
-            .and_then(|()| fs::rename(&copy, &to));
-        installed.map_err(|error| format!("installing {} failed: {error}", to.display()))?;
+        let to = install_file(&bin, name, &from, mode)?;
         println!("{}", to.display());
     }
     let path = env::var_os("PATH").unwrap_or_default();
@@ -679,4 +674,18 @@ fn build(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn install_file(bin: &Path, name: &str, from: &Path, mode: u32) -> Result<PathBuf> {
+    let to = bin.join(name);
+    // Linux refuses a write to a running executable. Rename the finished copy into place.
+    let copy = bin.join(format!(".{name}.xtask-build.{}", std::process::id()));
+    let installed = fs::copy(from, &copy)
+        .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(mode)))
+        .and_then(|()| fs::rename(&copy, &to));
+    if let Err(error) = installed {
+        let _ = fs::remove_file(&copy);
+        return Err(format!("installing {} failed: {error}", to.display()).into());
+    }
+    Ok(to)
 }

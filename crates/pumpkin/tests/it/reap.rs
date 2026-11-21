@@ -9,8 +9,8 @@ use expect_test::expect;
 use serde_json::json;
 
 use super::{
-    EC2, INFO, LOCAL, POISON, Scratch, Step, check, docker_table, invocation, poll, ran, report,
-    returned, write_docker_record, write_record,
+    EC2, INFO, LOCAL, Scratch, Step, check, docker_table, invocation, poll, ran, report, returned,
+    write_docker_record, write_record,
 };
 
 /// A lost run, whose turn the test holds as the first reap begins.
@@ -257,7 +257,7 @@ esac
         calls.display()
     );
     let path = write_docker(&scratch, &docker);
-    symlink(Path::new(POISON).join("aws"), scratch.0.join("bin/aws")).unwrap();
+    symlink("/bin/false", scratch.0.join("bin/aws")).unwrap();
     let config = scratch.0.join("pumpkin.toml");
     scratch.write(
         "pumpkin.toml",
@@ -330,17 +330,17 @@ esac
         &expect![[r#"
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin cancel 20261108-120800-0a000009 --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
+            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1 and wrote nothing to standard error; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
             pumpkin: run 20261108-120800-0a000009 was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-120800-0a000009 failed: its driver ended without an outcome; its record is <scratch>/runs/20261108-120800-0a000009
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml
             pumpkin: to remove what it left once its provider can be reached: pumpkin reap --runs <scratch>/runs
             $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin reap --runs runs
             exit status: Some(3)
-            pumpkin: run 20261108-120700-0a000008's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120700-0a000008, to stop reaping it
+            pumpkin: run 20261108-120700-0a000008's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1 and wrote nothing to standard error; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120700-0a000008, to stop reaping it
             pumpkin: run 20261108-120700-0a000008 left 1 sandbox on provider `local`, now removed: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
             pumpkin: run 20261108-120700-0a000008 was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1: a test ran `aws --version` without a stand-in: put one first on its `PATH`: fix what `aws` reports; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
+            pumpkin: run 20261108-120800-0a000009's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: `aws --version` failed with exit status: 1 and wrote nothing to standard error; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120800-0a000009, to stop reaping it
             pumpkin: run 20261108-120900-0a00000a's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/gone.toml, can't be read (No such file or directory (os error 2)): put it back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-120900-0a00000a, to stop reaping it
             pumpkin: run 20261108-120900-0a00000a was lost, as its driver ended without an outcome.json: it is now recorded as failed
             pumpkin: run 20261108-121100-0a00000c's sandboxes on provider `aws`, if it left any, can't be removed, as it can't be reached: the configuration that ran it, <scratch>/bare.toml, names no provider `aws`: put its `[providers.aws]` table back there, as it was when the run ran; once it can be, `pumpkin reap --runs <scratch>/runs` removes them, and if it is gone for good, remove the record, <scratch>/runs/20261108-121100-0a00000c, to stop reaping it

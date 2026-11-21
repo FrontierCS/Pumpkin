@@ -10,7 +10,7 @@ use std::{env, fs, thread};
 use stdx::process::Environment;
 
 use crate::settings::{Provider, Settings};
-use crate::{Cargo, Result, root, sandboxd, star, tools, wait};
+use crate::{Cargo, Result, install_file, root, sandboxd, star, tools, wait};
 
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 5;
@@ -37,7 +37,17 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
     tools::require(cargo, tools::NEXTEST)?;
     star::link(cargo)?;
-    let sandboxd = sandboxd(cargo)?;
+    let built = sandboxd(cargo)?;
+    // A sandbox runs under its role's UID. Give it the installed mode even when the
+    // contributor's umask makes Cargo's own artifacts executable only by their owner.
+    let install = cargo.sh.create_dir(root().join("bin/live"))?;
+    let sandboxd = install_file(&install, "sandboxd", &built, 0o755)?;
+    install_file(
+        &install,
+        "ec2-boot",
+        &built.with_file_name("ec2-boot"),
+        0o755,
+    )?;
     let test = cargo.cmd(&[
         "nextest",
         "run",

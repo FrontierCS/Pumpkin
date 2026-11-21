@@ -418,6 +418,12 @@ fn succeeded(output: Output, shown: &str) -> Result<Vec<u8>, String> {
     let reported = String::from_utf8_lossy(&output.stderr);
     // AWS's messages end with a period, which the error's own punctuation follows.
     let reported = reported.trim().trim_end_matches('.');
+    if reported.is_empty() {
+        return Err(format!(
+            "`{shown}` failed with {} and wrote nothing to standard error",
+            output.status
+        ));
+    }
     Err(format!(
         "`{shown}` failed with {}: {reported}: fix what `aws` reports",
         output.status

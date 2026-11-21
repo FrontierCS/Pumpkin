@@ -1,6 +1,0 @@
-#!/bin/sh
-# The `aws` that pumpkin's tests put first on the `PATH` of each command they run, so that a test
-# that runs `aws` without a stand-in first on its own `PATH` fails, rather than reaching AWS with
-# this host's credentials.
-echo "a test ran \`aws $*\` without a stand-in: put one first on its \`PATH\`" >&2
-exit 1
