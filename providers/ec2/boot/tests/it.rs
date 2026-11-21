@@ -8,13 +8,11 @@
     reason = "a test helper fails the test that calls it"
 )]
 
-use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::process::Stdio;
 use std::{env, fs, iter};
 
 use expect_test::{Expect, expect};
-use schema::ec2_boot::Start;
+use schema::ec2_boot::{START_FILE, Start};
 use schema::sandbox::RegistrationGrant;
 use stdx::process::Environment;
 use test_support::TestDir;
@@ -74,7 +72,7 @@ impl Instance {
         Self { dir }
     }
 
-    /// Runs `ec2-boot start` with `input` on its standard input, and returns its exit status and
+    /// Runs `ec2-boot start` with `input` in the start file, and returns its exit status and
     /// what it printed to the console.
     fn boot(&self, input: &str) -> Vec<String> {
         let path = env::var_os("PATH").unwrap_or_default();
@@ -83,16 +81,13 @@ impl Instance {
         let mut boot = stdx::process::command(boot, Environment::Inherited);
         boot.arg("start").current_dir(self.dir.path().join("root"));
         boot.env("PATH", env::join_paths(path).unwrap());
-        let mut child = (boot.stdin(Stdio::piped()).stdout(Stdio::piped()))
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
+        let file = self
+            .dir
+            .path()
+            .join("root")
+            .join(START_FILE.trim_start_matches('/'));
+        fs::write(file, input).unwrap();
+        let output = boot.output().unwrap();
         let console = String::from_utf8(output.stdout).unwrap();
         let mut lines = vec![format!("exit status: {:?}", output.status.code())];
         lines.extend(
@@ -156,6 +151,7 @@ fn boots() {
             lines.extend(instance.calls().iter().map(|call| format!("  {call}")));
             lines.push(instance.file("bin/nft-rules"));
             lines.push(instance.file("bin/env-file"));
+            lines.push(instance.file("root/run/pumpkin-start.json"));
             lines.push(instance.file("root/run/pumpkin/grant.env"));
             lines.push(instance.file("root/opt/pumpkin/sandboxd"));
             lines
@@ -199,8 +195,27 @@ fn boots() {
 
             bin/env-file: mode 0600: SANDBOXD_GRANT=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
 
+            root/run/pumpkin-start.json: missing
             root/run/pumpkin/grant.env: missing
             root/opt/pumpkin/sandboxd: copied from c0ffee:/sandboxd
         "#]],
+    );
+}
+
+#[test]
+fn unreadable_start() {
+    check(
+        || {
+            let instance = Instance::new();
+            let mut lines = instance.boot(r#"{"private-value":0}"#);
+            lines.extend(instance.calls());
+            lines.push(instance.file("root/run/pumpkin-start.json"));
+            lines
+        },
+        &expect![[r#"
+            exit status: Some(1)
+              pumpkin-ec2: the boot failed: the start in run/pumpkin-start.json can't be read, at line 1, column 17: expected a start's JSON, as the provider writes it
+            shutdown --poweroff now
+            root/run/pumpkin-start.json: missing"#]],
     );
 }

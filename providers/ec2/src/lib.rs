@@ -36,6 +36,7 @@ use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod entry;
 mod launch;
 
 /// The most seconds a sandbox's start takes, as a class's [`Class::startup_seconds`] declares it

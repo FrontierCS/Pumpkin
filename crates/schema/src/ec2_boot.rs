@@ -1,7 +1,7 @@
 //! What the EC2 provider and `ec2-boot`, the boot of each of its sandboxes' instances, share.
 //!
-//! The provider writes a [`Start`] into an instance's user data, which `ec2-boot start` reads on
-//! its standard input.
+//! The provider gives cloud-init the instance's [`Start`] to write at [`START_FILE`], where
+//! `ec2-boot start` reads it.
 
 use std::net::SocketAddrV4;
 
@@ -19,6 +19,9 @@ pub const BOOT_IN_IMAGE: &str = "/ec2-boot";
 /// The directory, in memory and root's alone, that the user data makes on an instance's first
 /// boot, and in which `ec2-boot` keeps the grant's file.
 pub const GRANT_DIR: &str = "/run/pumpkin";
+
+/// The private file in memory that `ec2-boot` opens and unlinks before reading its [`Start`].
+pub const START_FILE: &str = "/run/pumpkin-start.json";
 
 /// The start of each line that an instance's boot writes to its serial console.
 pub const CONSOLE_PREFIX: &str = "pumpkin-ec2:";
