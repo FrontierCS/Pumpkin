@@ -49,7 +49,7 @@ fn linked(from: &Path, to: &Path) -> io::Result<()> {
 /// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build` does
 /// for an installed one. A link to it, or a copy, replaces what is there.
 pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
-    let beside = pumpkin.with_file_name("buildifier");
+    let beside = pumpkin.with_file_name(install::File::Buildifier.name());
     match fs::remove_file(&beside) {
         Err(error) if error.kind() != ErrorKind::NotFound => {
             return Err(format!("removing {} failed: {error}", beside.display()).into());

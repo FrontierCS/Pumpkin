@@ -117,9 +117,8 @@ mod flags {
             /// the static ec2-boot beside it, which the EC2 provider's sandboxd image holds.
             cmd sandboxd {}
 
-            /// Builds `pumpkin`, the static sandboxd and ec2-boot, and puts them in `<root>/bin`
-            /// with the pinned buildifier, the Modal helper and its lock. Prints each file's path.
-            /// The pinned tools require Linux on x86-64.
+            /// Builds the files of an install, which `install::File` lists, and puts them in
+            /// `<root>/bin`. Prints each file's path. The pinned tools require Linux on x86-64.
             cmd build {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
@@ -616,7 +615,7 @@ fn tree(repo: &Repo<'_>, base: &str, scratch: &Path, buildifier: &Path) -> Resul
     let bin = tree.join("bin");
     fs::create_dir_all(&bin).context(format_args!("making {} failed", bin.display()))?;
     tools::unpack(&archive, &tree)?;
-    let link = bin.join("buildifier");
+    let link = bin.join(install::File::Buildifier.name());
     let linked = std::os::unix::fs::symlink(buildifier, &link);
     linked.context(format_args!("making {} failed", link.display()))?;
     Ok(tree)
@@ -718,11 +717,10 @@ fn executables(mut build: Command) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin` for `target` and the static `sandboxd` and `ec2-boot`, and installs them
-/// with the Modal provider's helper and its lock, and the pinned
-/// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
-/// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
-/// `root`, says if `<root>/bin` is not on `PATH`.
+/// Builds the files of an install, which [`install::File`] lists, with `pumpkin` for `target`, and
+/// installs them in `<root>/bin`, made if need be, replacing what is there: `root` made
+/// absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a `root`, says
+/// if `<root>/bin` is not on `PATH`.
 fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));

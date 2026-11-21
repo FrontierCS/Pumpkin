@@ -91,9 +91,10 @@ fn package(dir: &Path, output: &Path, release: &Release<'_>) -> Result<()> {
     fs::copy(&license, dist.join("buildifier-LICENSE"))
         .context(format_args!("copying {} failed", license.display()))?;
     // The upstream formatter includes compressed Go debug sections in its release binary.
+    let buildifier = format!("dist/bin/{}", install::File::Buildifier.name());
     let mut strip = program("strip", dir);
     ran(
-        strip.args(["--strip-debug", "dist/bin/buildifier"]),
+        strip.args(["--strip-debug", &buildifier]),
         step(STEP_TIMEOUT),
     )?;
 
@@ -173,9 +174,10 @@ fn check(dir: &Path, commit: &str) -> Result<()> {
             return Err(format!("bin/{name} is {elf}: expected a static x86-64 ELF").into());
         }
     }
-    let mut buildifier = program(dir.join("bin/buildifier"), dir);
+    let bin = dir.join("bin");
+    let mut buildifier = program(bin.join(install::File::Buildifier.name()), dir);
     ran(buildifier.arg("--version"), step(STEP_TIMEOUT))?;
-    let mut pumpkin = program(dir.join("bin/pumpkin"), dir);
+    let mut pumpkin = program(bin.join(install::File::Pumpkin.name()), dir);
     let version = read(pumpkin.arg("--version"), STEP_TIMEOUT)?;
     if !version.contains(&format!("({commit:.9} ")) {
         return Err(
