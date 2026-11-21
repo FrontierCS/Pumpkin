@@ -494,9 +494,11 @@ its `.pumpkin` links to the controller's workspace, which no manifest path is be
 sends only what the store lacks, and no secret of a job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
-or that the IR of a running job's started run names. Each job names what it holds in its directory
-in tmpfs, which its unit removes as it ends, and a prune reads those names under the lock of the
-jobs' directory.
+or that the IR of a running job's started run names, nor an install that a running job runs, that
+a job started within `KEPT` ran, or that a start handed out within `KEPT`. Each job names what it
+holds in its directory in tmpfs, which its unit removes as it ends, and its install by its `OWN`
+link, and a prune reads those names under the lock of the jobs' directory, which a start holds as
+it hands out an install.
 
 **Architecture Invariant:** `serve` acts for the member that the controller's forced command
 names (`--member`, a `member::Member`), and each run's job it starts records that member.

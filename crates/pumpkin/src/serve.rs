@@ -313,7 +313,9 @@ fn mark_install_used(install: &Path) {
     }
 }
 
-fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
+/// Marks `install` as used at `now`: sets its modification time, by which each prune of installs
+/// tells how long ago it was used.
+pub(crate) fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
     let touched = File::open(install).and_then(|dir| dir.set_modified(now));
     touched.context(install.display())
 }
@@ -362,7 +364,8 @@ fn health(home: &Path) -> Result<Health, String> {
     })
 }
 
-fn boot(home: &Path) -> Boot {
+/// The state of the controller's boot unit, and of its last run if it failed.
+pub(crate) fn boot(home: &Path) -> Boot {
     let mut systemctl = stdx::process::command("systemctl", Environment::Only(&["PATH"]));
     systemctl.args([
         "show",
