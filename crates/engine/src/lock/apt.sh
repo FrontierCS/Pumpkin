@@ -25,7 +25,7 @@ esac
 root=${root%/}
 # Each suite's InRelease, as apt keeps it, each suite as the indexes' URIs name it, as the sources
 # do.
-targets=$(apt-get indextargets --no-release-info --format '$(METAKEY) $(URI)')
+targets=$(apt-get indextargets --no-release-info --format "\$(METAKEY) \$(URI)")
 suite() { sed "s|^$root/dists/||; s|/.*||"; }
 for suite in $(printf '%s\n' "$targets" | cut --delimiter=' ' --fields=2 | suite \
     | sort --unique); do

@@ -14,7 +14,8 @@ shutdown --poweroff now' EXIT
 # The hard end, armed first: `date` truncates to the second and `shutdown` counts whole minutes,
 # so the time left loses a second and is rounded down to the minute, and the instance starts
 # powering off by the hard end.
-left=$(( @HARD_END@ - $(date +%s) - 1 ))
+hard_end=@HARD_END@
+left=$(( hard_end - $(date +%s) - 1 ))
 shutdown --poweroff "+$(( left > 0 ? left / 60 : 0 ))"
 echo "@PREFIX@ the boot began" >/dev/console
 step='shutting down a later boot'
@@ -37,7 +38,8 @@ UNIT
 systemctl enable --quiet pumpkin-boots-once.service
 # Each step until `ec2-boot` runs is killed by the start's deadline, and none runs past it.
 bounded() {
-    local left=$(( @PULLS_BY@ - $(date +%s) ))
+    local pulls_by=@PULLS_BY@
+    local left=$(( pulls_by - $(date +%s) ))
     (( left > 0 )) && timeout --signal=KILL "$left" "$@"
 }
 step='starting Docker'
