@@ -1,18 +1,24 @@
 //! What `cargo xtask live` reads of what `./pumpkin` says as it follows and reaps a run.
 
-/// Whether `line`, one that `./pumpkin wait` says, is the milestone of a lease of the agent's
-/// that its runner is ready: `<grant> lease <n> ready`, `<grant>` the name of the lease's grant,
-/// with ` with <GPUs>` after it for a lease of GPUs, as `pumpkin`'s `progress::milestones` says
-/// it. A lease that a call's target holds says `<grant> lease <n> of job <j> ready`, which this
-/// doesn't count.
+/// Whether `line`, one that `./pumpkin wait` says, is the milestone of a lease of an agent's
+/// that its runner is ready: `<grant> lease <n> of agent <m> ready`, `<grant>` the name of the
+/// lease's grant, with ` with <GPUs>` after it for a lease of GPUs, as `pumpkin`'s
+/// `progress::milestones` says it, naming the holder with `progress::lease_name`. A lease that a
+/// call's target holds says `of job <j>` instead, which this doesn't count.
 pub(crate) fn lease_ready(line: &str) -> bool {
     let Some((_, after)) = line.split_once(" lease ") else {
         return false;
     };
+    let number = |word: Option<&str>| {
+        word.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
     let mut words = after.split(' ');
-    let numbered =
-        (words.next()).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    numbered && words.next() == Some("ready") && matches!(words.next(), None | Some("with"))
+    number(words.next())
+        && words.next() == Some("of")
+        && words.next() == Some("agent")
+        && number(words.next())
+        && words.next() == Some("ready")
+        && matches!(words.next(), None | Some("with"))
 }
 
 /// Whether `stderr`, what a `./pumpkin reap` that failed said, puts the failure on other runs

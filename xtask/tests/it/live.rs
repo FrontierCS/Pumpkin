@@ -69,14 +69,17 @@ fn settings() {
         no [controller]: /home/alice/.config/pumpkin/pumpkin.toml names no `[controller]`, which a live run goes through: name the one `deploy/aws` made, as the README says"#]].assert_eq(&lines.join("\n"));
 }
 
-// Lines that `./pumpkin wait` said of real runs on EC2 and Modal.
+// Lines that `./pumpkin wait` says, as its own tests pin them.
 #[test]
 fn lease_ready() {
     let lines = [
+        "pumpkin:    0:38 cpu lease 0 of agent 0 ready",
+        "pumpkin:    2:06 gpu lease 1 of agent 0 ready with NVIDIA A100-SXM4-80GB",
+        "pumpkin:    8:25 gpu lease 3 of agent 0 ready with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)",
+        "pumpkin:    0:55 box lease 0 of job 0 ready",
         "pumpkin:    0:39 cpu lease 0 ready",
-        "pumpkin:    0:46 gpu lease 1 ready with NVIDIA A100-SXM4-40GB",
-        "pumpkin:    0:19 cpu lease 0 asked on aws/judge",
-        "pumpkin:    1:14 gpu lease 1 ended: closed by its holder",
+        "pumpkin:    0:19 cpu lease 0 of agent 0 asked on aws/judge",
+        "pumpkin:    1:14 gpu lease 1 of agent 0 ended: closed by its holder",
         "     0:41 gpu lease 1 on modal/a100_40 with NVIDIA A100-SXM4-40GB, 1m41s: charged 1m34s, 0s of it busy, 0 commands; closed as the work phase ended",
         "pumpkin: run 20261114-215915-8388a47f started",
     ];
@@ -84,10 +87,13 @@ fn lease_ready() {
         .map(|line| format!("{}: {line}", wait::lease_ready(line)))
         .collect();
     expect![[r#"
-        true: pumpkin:    0:39 cpu lease 0 ready
-        true: pumpkin:    0:46 gpu lease 1 ready with NVIDIA A100-SXM4-40GB
-        false: pumpkin:    0:19 cpu lease 0 asked on aws/judge
-        false: pumpkin:    1:14 gpu lease 1 ended: closed by its holder
+        true: pumpkin:    0:38 cpu lease 0 of agent 0 ready
+        true: pumpkin:    2:06 gpu lease 1 of agent 0 ready with NVIDIA A100-SXM4-80GB
+        true: pumpkin:    8:25 gpu lease 3 of agent 0 ready with NVIDIA A100 80GB PCIe (its role needs NVIDIA A100-SXM4-80GB)
+        false: pumpkin:    0:55 box lease 0 of job 0 ready
+        false: pumpkin:    0:39 cpu lease 0 ready
+        false: pumpkin:    0:19 cpu lease 0 of agent 0 asked on aws/judge
+        false: pumpkin:    1:14 gpu lease 1 of agent 0 ended: closed by its holder
         false:      0:41 gpu lease 1 on modal/a100_40 with NVIDIA A100-SXM4-40GB, 1m41s: charged 1m34s, 0s of it busy, 0 commands; closed as the work phase ended
         false: pumpkin: run 20261114-215915-8388a47f started"#]].assert_eq(&shown.join("\n"));
 }
