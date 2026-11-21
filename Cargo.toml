@@ -58,9 +58,17 @@ unimplemented = "warn"
 unwrap_used = "warn"
 use_self = "warn"
 
-# Dependencies get line tables only, which backtraces need, and build faster without the rest of
-# their debug info; the workspace's crates keep it all. Build scripts and proc macros, which Cargo
-# otherwise builds without debug info, get line tables too, since this setting takes precedence.
+# Line tables only, which give each frame of a backtrace its file and line, as rust-analyzer keeps
+# its own crates' debug info limited and matklad's "Fast Rust Builds" advises dropping it:
+# https://github.com/rust-lang/rust-analyzer/blob/00825977ae82b9bcb984faede1367eff30ad0314/Cargo.toml#L13-L14
+# https://matklad.github.io/2021/09/04/fast-rust-builds.html#CI-Workflow
+# The rest of the debug info is most of a debug `pumpkin`, which tests hash and copy, and builds
+# take longer to write it.
+[profile.dev]
+debug = "line-tables-only"
+
+# Build scripts and proc macros, which Cargo otherwise builds without debug info, get line tables
+# too, since this setting takes precedence.
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
