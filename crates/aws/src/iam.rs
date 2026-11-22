@@ -94,6 +94,9 @@ pub enum Test {
     Bool,
     Null,
     StringEquals,
+    /// `StringEquals` where the resource's context holds the key, and true where it doesn't. A
+    /// statement uses it for a key that only some of its resource types have.
+    StringEqualsIfExists,
 }
 
 /// A condition key.

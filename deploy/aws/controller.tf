@@ -12,74 +12,53 @@ resource "aws_iam_role" "controller" {
   })
 }
 
+# What its jobs and its host call on AWS, as README.md's "Policies" says.
 resource "aws_iam_role_policy" "controller" {
   name = "run"
   role = aws_iam_role.controller.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      # A create's `run-instances`, from the envelope's templates alone, with none of the
-      # resources they name overridden, with its run's tags:
-      # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html#iam-example-runinstances-launch-templates
-      {
-        Effect   = "Allow"
-        Action   = "ec2:RunInstances"
-        Resource = "*"
-        Condition = {
-          ArnEquals = { "ec2:LaunchTemplate" = [for template in aws_launch_template.class : template.arn] }
-          Bool      = { "ec2:IsLaunchTemplateResource" = "true" }
-        }
-      },
-      {
-        Effect    = "Allow"
-        Action    = "ec2:CreateTags"
-        Resource  = ["${local.ec2}:instance/*", "${local.ec2}:volume/*"]
-        Condition = { StringEquals = { "ec2:CreateAction" = "RunInstances" } }
-      },
-      {
-        Effect    = "Allow"
-        Action    = "iam:PassRole"
-        Resource  = aws_iam_role.sandbox.arn
-        Condition = { StringEquals = { "iam:PassedToService" = "ec2.amazonaws.com" } }
-      },
-      # A sweep's list and delete, and a sandbox's console.
-      { Effect = "Allow", Action = "ec2:DescribeInstances", Resource = "*" },
-      local.terminate_sandboxes,
-      merge(local.terminate_sandboxes, { Action = "ec2:GetConsoleOutput" }),
-      # Each instance's timer.
-      {
-        Effect   = "Allow"
-        Action   = ["scheduler:CreateSchedule", "scheduler:DeleteSchedule"]
-        Resource = "${local.arn}:scheduler:${var.region}:${local.account}:schedule/${aws_scheduler_schedule_group.timer.name}/*"
-      },
-      {
-        Effect    = "Allow"
-        Action    = "iam:PassRole"
-        Resource  = aws_iam_role.timer.arn
-        Condition = { StringEquals = { "iam:PassedToService" = "scheduler.amazonaws.com" } }
-      },
-      # A publish: whether a repository holds an image, and its push.
-      { Effect = "Allow", Action = "ecr:GetAuthorizationToken", Resource = "*" },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:BatchGetImage",
-          "ecr:CompleteLayerUpload",
-          "ecr:DescribeRepositories",
-          "ecr:InitiateLayerUpload",
-          "ecr:PutImage",
-          "ecr:UploadLayerPart",
-        ]
-        Resource = [for repository in aws_ecr_repository.images : repository.arn]
-      },
-    ]
+  policy = templatefile("${path.module}/policies/controller.json.tftpl", {
+    partition               = data.aws_partition.current.partition
+    region                  = local.region
+    account                 = local.account
+    launch_template_arns    = [for template in aws_launch_template.class : template.arn]
+    instance_types          = sort(distinct([for template in aws_launch_template.class : template.instance_type]))
+    members_parameter_arn   = aws_ssm_parameter.members.arn
+    settings_parameter_arn  = aws_ssm_parameter.settings.arn
+    modal_repository_arn    = aws_ecr_repository.images["roles"].arn
+    roles_repository_arn    = aws_ecr_repository.images["roles"].arn
+    sandboxd_repository_arn = aws_ecr_repository.images["sandboxd"].arn
+    sandbox_profile_arn     = aws_iam_instance_profile.sandbox.arn
+    sandbox_role_arn        = aws_iam_role.sandbox.arn
+    timer_group             = aws_scheduler_schedule_group.timer.name
+    timer_role_arn          = aws_iam_role.timer.arn
   })
 }
 
 resource "aws_iam_instance_profile" "controller" {
   name = "${local.prefix}-controller"
   role = aws_iam_role.controller.name
+}
+
+# Pumpkin's settings as TOML lines of dotted keys, which hold under any table's header. TOML's
+# basic strings and arrays take JSON's, so `jsonencode` writes each value.
+locals {
+  modal_images = "images = { region = ${jsonencode(local.region)}, repository = ${jsonencode(aws_ecr_repository.images["roles"].name)}, role_arn = ${jsonencode(aws_iam_role.modal_pull.arn)} }"
+  ec2_settings = concat(
+    [
+      "region = ${jsonencode(local.region)}",
+      "repositories = { roles = ${jsonencode(aws_ecr_repository.images["roles"].name)}, sandboxd = ${jsonencode(aws_ecr_repository.images["sandboxd"].name)} }",
+      "timer = { group = ${jsonencode(aws_scheduler_schedule_group.timer.name)}, role_arn = ${jsonencode(aws_iam_role.timer.arn)} }",
+    ],
+    [for class, template in aws_launch_template.class : join("", [
+      "classes.${class} = { template = ${jsonencode(template.id)}, version = ${template.latest_version}",
+      ", vcpus = ${data.aws_ec2_instance_type.class[class].default_vcpus}",
+      ", memory_mib = ${data.aws_ec2_instance_type.class[class].memory_size}",
+      ", cpu_features = ${jsonencode(sort(var.classes[class].cpu_features))}",
+      var.classes[class].cpu_model == null ? "" : ", cpu_model = ${jsonencode(var.classes[class].cpu_model)}",
+      var.classes[class].usd_per_hour == null ? "" : ", usd_per_hour = ${jsonencode(var.classes[class].usd_per_hour)}",
+      " }",
+    ])],
+  )
 }
 
 # Each job's settings. `pumpkin controller job` reads them as it starts, so an apply that changes
@@ -112,15 +91,6 @@ resource "aws_ssm_parameter" "settings" {
   ))
 }
 
-resource "aws_iam_role_policy" "controller_settings" {
-  name = "settings"
-  role = aws_iam_role.controller.id
-  policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = aws_ssm_parameter.settings.arn }]
-  })
-}
-
 # The members' keys, a line `<member> <key>` for each key that `members` lists. The controller
 # copies them every minute into the file of keys that its `sshd` admits, each with the forced
 # command that names its member. `pumpkin-admin install` sets that up.
@@ -129,15 +99,6 @@ resource "aws_ssm_parameter" "members" {
   type  = "String"
   tier  = "Advanced"
   value = join("", flatten([for member, keys in var.members : [for key in keys : "${member} ${key}\n"]]))
-}
-
-resource "aws_iam_role_policy" "controller_members" {
-  name = "members"
-  role = aws_iam_role.controller.id
-  policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = aws_ssm_parameter.members.arn }]
-  })
 }
 
 # Canonical's Ubuntu 24.04 LTS, as its public parameter names the current release, whose Docker
@@ -172,7 +133,7 @@ resource "aws_instance" "controller" {
   })
 
   # The first boot's install reads the settings and the members' keys.
-  depends_on = [aws_iam_role_policy.controller_settings, aws_iam_role_policy.controller_members]
+  depends_on = [aws_iam_role_policy.controller]
 
   # Tokens required, within one hop, so that no build's container reaches the role.
   metadata_options {
@@ -195,7 +156,9 @@ resource "aws_instance" "controller" {
   # An apply never replaces or stops the controller under live runs: cloud-init runs the user
   # data at the instance's first boot alone.
   lifecycle {
-    ignore_changes = [ami, user_data]
+    # A stopped instance reads as having no public address, and a change to it replaces the
+    # instance, its volume and the records on it with it. The controller stops itself when idle.
+    ignore_changes = [ami, user_data, associate_public_ip_address]
   }
 }
 

@@ -1,4 +1,4 @@
-# What `terraform init`, `plan` and `apply` leave here; each person's values stay on their machine.
+# What `terraform init -backend=false` and `validate` leave here, which check this module alone.
+# The root that calls the module holds its own lock file.
 .terraform/
-*.tfplan
-*.tfvars
+.terraform.lock.hcl

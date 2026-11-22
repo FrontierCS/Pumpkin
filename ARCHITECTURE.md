@@ -595,8 +595,15 @@ says. The admin lists the team's members by key. The module makes the EC2 envelo
 relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
 controller. The controller comes with the SSM parameters of its jobs' settings and its members'
 keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
-`pumpkin-admin install`. No crate depends on the module. Its outputs feed a machine's
-configuration.
+`pumpkin-admin install`. The module is a child module. An admin's root calls it at a Pumpkin
+release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the
+provider's configuration, the backend and the lock file, and the provider's region is the module's.
+No crate depends on the module. Its outputs feed a machine's configuration, and its policies are
+`pumpkin-admin policy`'s output.
+
+**Architecture Invariant:** the permission policy of each principal that `pumpkin-admin policy`
+names is the one it prints. `deploy/aws/policies` keeps it, and `pumpkin`'s tests hold the two
+equal. The roles' trust policies and the AMI build's AWS-managed policies are the module's own.
 
 ### `examples`
 

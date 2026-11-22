@@ -622,6 +622,9 @@ fn configurations() {
         "mixed",
         "bundled",
         "regional",
+        "template-named",
+        "group-slashed",
+        "repository-cased",
         "unimaged",
         "unspecified",
         "portless",
@@ -802,6 +805,30 @@ fn configurations() {
               |          ^^^^^^^^^^^
             `us_west_1` is not an AWS region: use one such as `us-west-1`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/regional.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config template-named.toml
+            exit status: Some(1)
+            pumpkin: template-named.toml: TOML parse error at line 6, column 34
+              |
+            6 | classes = { agent = { template = "pumpkin-agent", version = 7, vcpus = 32, memory_mib = 262144 }, judge = { template = "lt-0bbbbbbbbbbbbbbbb", version = 2, vcpus = 8, memory_mib = 16384 } }
+              |                                  ^^^^^^^^^^^^^^^
+            `pumpkin-agent` is not a launch template's ID: use one such as `lt-0123456789abcdef0`, as `aws ec2 describe-launch-templates` lists it
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/template-named.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config group-slashed.toml
+            exit status: Some(1)
+            pumpkin: group-slashed.toml: TOML parse error at line 8, column 19
+              |
+            8 | timer = { group = "pumpkin/timer", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
+              |                   ^^^^^^^^^^^^^^^
+            `pumpkin/timer` is not a schedule group's name: use one such as `pumpkin`, of 1 to 64 ASCII letters, digits, `-`, `_` and `.`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/group-slashed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config repository-cased.toml
+            exit status: Some(1)
+            pumpkin: repository-cased.toml: TOML parse error at line 7, column 26
+              |
+            7 | repositories = { roles = "pumpkin/Roles", sandboxd = "pumpkin/sandboxd" }
+              |                          ^^^^^^^^^^^^^^^
+            `pumpkin/Roles` is not an ECR repository's name: use one such as `pumpkin/roles`, of 2 to 256 bytes: lowercase letters and digits, split by `/`, `.`, `_`, `__` or a run of `-`
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/repository-cased.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config unimaged.toml
             exit status: Some(1)
             pumpkin: unimaged.toml: TOML parse error at line 4, column 1
@@ -939,6 +966,18 @@ models = [{{ name = "{model}", upstream_name = "vendor/{model}" }}]
             ),
         ),
         ("regional", EC2.replace("\"us-west-1\"", "\"us_west_1\"")),
+        (
+            "template-named",
+            EC2.replace("\"lt-0aaaaaaaaaaaaaaaa\"", "\"pumpkin-agent\""),
+        ),
+        (
+            "group-slashed",
+            EC2.replace("group = \"pumpkin\"", "group = \"pumpkin/timer\""),
+        ),
+        (
+            "repository-cased",
+            EC2.replace("\"pumpkin/roles\"", "\"pumpkin/Roles\""),
+        ),
         (
             "unimaged",
             "[providers.gpus.modal]\nprofile = \"pumpkin\"\ndials_from = \"203.0.113.7\"\n\n\

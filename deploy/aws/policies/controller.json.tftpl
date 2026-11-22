@@ -1,0 +1,167 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "ssm:GetParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${members_parameter_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeRepositories",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${modal_repository_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeRepositories",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${roles_repository_arn}",
+        "${sandboxd_repository_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ec2.amazonaws.com"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "${sandbox_role_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "ssm:GetParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${settings_parameter_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "scheduler.amazonaws.com"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "${timer_role_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:LaunchTemplate": ${jsonencode(launch_template_arns)}
+        },
+        "Bool": {
+          "ec2:IsLaunchTemplateResource": [
+            "true"
+          ]
+        },
+        "StringEqualsIfExists": {
+          "ec2:InstanceType": ${jsonencode(instance_types)}
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:DescribeInstances",
+        "ecr:GetAuthorizationToken"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:GetConsoleOutput",
+        "ec2:TerminateInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:InstanceProfile": [
+            "${sandbox_profile_arn}"
+          ]
+        },
+        "Null": {
+          "ec2:ResourceTag/pumpkin:run": [
+            "false"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*",
+        "arn:${partition}:ec2:${region}:${account}:volume/*"
+      ]
+    },
+    {
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:DeleteSchedule"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:scheduler:${region}:${account}:schedule/${timer_group}/*"
+      ]
+    }
+  ],
+  "Version": "2012-10-17"
+}

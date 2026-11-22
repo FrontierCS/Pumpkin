@@ -57,20 +57,7 @@ resource "aws_iam_role" "modal_pull" {
 resource "aws_iam_role_policy" "modal_pull" {
   name = "pull"
   role = aws_iam_role.modal_pull.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      { Effect = "Allow", Action = "ecr:GetAuthorizationToken", Resource = "*" },
-      {
-        Effect   = "Allow"
-        Action   = local.ecr_pull
-        Resource = aws_ecr_repository.images["roles"].arn
-      },
-    ]
+  policy = templatefile("${path.module}/policies/modal-pull.json.tftpl", {
+    modal_repository_arn = aws_ecr_repository.images["roles"].arn
   })
-}
-
-locals {
-  # What `docker pull` of an image from ECR takes, once logged in.
-  ecr_pull = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
 }

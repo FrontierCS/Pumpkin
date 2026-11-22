@@ -85,13 +85,41 @@ impl TryFrom<String> for Region {
     }
 }
 
-/// The name of an ECR repository, such as `pumpkin/roles`, which AWS refuses if it names none.
+/// The name of an ECR repository, such as `pumpkin/roles`, in ECR's grammar of names.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "String")]
 pub struct RepositoryName(String);
 
 impl RepositoryName {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for RepositoryName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        // ECR's grammar: 2 to 256 bytes of components split by `/`. A component is words of
+        // lowercase letters and digits, split by `.`, `_`, `__` or a run of `-`:
+        // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/ecr/2015-09-21/service-2.json#L4709-L4714
+        let word = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+        let component = |component: &str| {
+            component.starts_with(word)
+                && component.ends_with(word)
+                && component.split(word).all(|separator| {
+                    matches!(separator, "." | "_" | "__") || separator.bytes().all(|b| b == b'-')
+                })
+        };
+        if !(2..=256).contains(&name.len()) || !name.split('/').all(component) {
+            return Err(format!(
+                "`{}` is not an ECR repository's name: use one such as `pumpkin/roles`, of 2 to \
+                 256 bytes: lowercase letters and digits, split by `/`, `.`, `_`, `__` or a run \
+                 of `-`",
+                name.escape_debug()
+            ));
+        }
+        Ok(Self(name))
     }
 }
 
