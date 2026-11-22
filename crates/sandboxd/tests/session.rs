@@ -79,19 +79,16 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
+    fn start(meeting: Meeting) -> Self {
         let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
-        Self::start_with(meeting, nvidia_smi, sandboxd)
+        Self::start_with(meeting, sandboxd)
     }
 
-    fn start_with(meeting: Meeting, nvidia_smi: Option<&str>, mut sandboxd: Command) -> Self {
+    fn start_with(meeting: Meeting, mut sandboxd: Command) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
         let root = fs::canonicalize(dir.path()).unwrap();
-        if let Some(script) = nvidia_smi {
-            sandboxd.env("PATH", stand_in(&root, script));
-        }
         let (gateway, registration) = match meeting {
             Meeting::Socket => {
                 let sockets = Sockets::create(root.join("sockets")).unwrap();
@@ -245,14 +242,6 @@ fn umask() -> u32 {
     u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
 }
 
-fn stand_in(root: &Path, script: &str) -> String {
-    let bin = root.join("bin");
-    fs::create_dir(&bin).unwrap();
-    fs::write(bin.join("nvidia-smi"), format!("#!/bin/sh\n{script}\n")).unwrap();
-    fs::set_permissions(bin.join("nvidia-smi"), fs::Permissions::from_mode(0o755)).unwrap();
-    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
-}
-
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -308,7 +297,7 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 }
 
 fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
-    let mut sandbox = Sandbox::start(meeting, None);
+    let mut sandbox = Sandbox::start(meeting);
     let mut lines = scenario(&mut sandbox);
     lines.extend(sandbox.end());
     expect.assert_eq(&lines.join("\n"));
@@ -349,51 +338,6 @@ impl Sandbox {
         drop(dir);
         lines
     }
-}
-
-#[test]
-fn gpus() {
-    // A stand-in that names two GPUs, as `nvidia-smi` does, if asked as `sandboxd` asks, without
-    // the grant or the attestation.
-    let named = r#"[ "$*" = "--query-gpu=name --format=csv,noheader" ] && [ -z "$SANDBOXD_GRANT$SANDBOXD_ATTESTATION" ] || exit 1
-printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
-    let long = format!(
-        "for i in $(seq 12); do echo 'NVIDIA {}'; done",
-        "X".repeat(100)
-    );
-    let cases = [
-        ("named, at a socket", Meeting::Socket, Some(named)),
-        ("named, over TCP", Meeting::Tcp, Some(named)),
-        ("named, listening", Meeting::Listen, Some(named)),
-        ("none on PATH", Meeting::Socket, None),
-        (
-            "failing",
-            Meeting::Socket,
-            Some("echo 'No devices were found'; exit 6"),
-        ),
-        ("naming none", Meeting::Socket, Some("true")),
-        (
-            "naming more than a hello holds",
-            Meeting::Socket,
-            Some(&long),
-        ),
-    ];
-    let lines = cases.map(|(case, meeting, nvidia_smi)| {
-        let sandbox = Sandbox::start(meeting, nvidia_smi);
-        let gpus = format!("{case}: {:?}", sandbox.session.gpus());
-        let ended = sandbox.end();
-        assert_eq!(ended.last().map(String::as_str), Some("left running: 0"));
-        gpus
-    });
-    let expected = expect![[r#"
-        named, at a socket: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        named, over TCP: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        named, listening: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        none on PATH: None
-        failing: None
-        naming none: None
-        naming more than a hello holds: None"#]];
-    expected.assert_eq(&lines.join("\n"));
 }
 
 #[test]
@@ -589,7 +533,7 @@ fn inherited_ignored_child_signal() {
     // Linux reaps children itself when their parent explicitly ignores SIGCHLD.
     let mut command = stdx::process::command("env", PATH_ONLY);
     command.args(["--ignore-signal=CHLD", env!("CARGO_BIN_EXE_sandboxd")]);
-    let mut sandbox = Sandbox::start_with(Meeting::Socket, None, command);
+    let mut sandbox = Sandbox::start_with(Meeting::Socket, command);
     let launch = sandbox.sh("exit 0", &[]);
     sandbox.session.start(launch, hung()).unwrap();
     let status = exited(&mut sandbox.sandboxd);
