@@ -6,14 +6,14 @@
 //! that none of its flags or forms is `pumpkin`'s interface, and another formatter could take its
 //! place.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
+use std::time::Duration;
 use std::{fs, io};
 
 use lang::Finding;
 use serde::Deserialize;
-use stdx::process::Environment;
+use stdx::process::{Bound, Echo, Environment, Failure, Run};
 
 use crate::cli::Exit;
 use crate::{absolute_utf8, cli, next, say};
@@ -21,6 +21,11 @@ use crate::{absolute_utf8, cli, next, say};
 // No configuration file, so that every `.star` file is written alike, wherever it is; and each
 // text is read as a generic Starlark file, not one of Bazel's, whatever its name.
 const ALWAYS: [&str; 2] = ["--config=off", "--type=default"];
+
+// The formatter answers at once, so this bound ends only one that hangs. It is TigerBeetle's
+// default for each command that its scripts run:
+// https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/shell.zig#L462-L469
+const FORMAT_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// The lints that a file can raise, by the formatter's name for each, with the message that
 /// says what is wrong and what to do. The formatter's other lints are of Bazel's own files, or
@@ -172,12 +177,11 @@ impl Formatter {
     /// `text` formatted; or, if the formatter reads it as no Starlark, the line and column where
     /// it says so, if it says. The outer error is a failure of the formatter.
     fn format(&self, text: &str) -> Result<Result<String, Option<(usize, usize)>>, String> {
-        let output = self.run(&["--mode=fix"], text)?;
-        match output.status.code() {
-            Some(0) => String::from_utf8(output.stdout)
+        match self.run(&["--mode=fix"], text) {
+            Ok(output) => String::from_utf8(output.stdout)
                 .map(Ok)
                 .map_err(|_| "the formatter wrote a text that isn't UTF-8".to_owned()),
-            Some(1) => {
+            Err(Failure::Exited { output, .. }) if output.status.code() == Some(1) => {
                 // Its first line is `<stdin>:<line>:<column>: <message>`.
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let place = stderr.strip_prefix("<stdin>:").and_then(|rest| {
@@ -186,7 +190,7 @@ impl Formatter {
                 });
                 Ok(Err(place))
             }
-            _ => Err(self.failed(&output)),
+            Err(failure) => Err(failure.to_string()),
         }
     }
 
@@ -195,10 +199,9 @@ impl Formatter {
     /// [`LINTS`] lacks or a place that `text` lacks.
     pub(crate) fn lint(&self, text: &str) -> Result<Vec<Finding>, String> {
         let args = ["--mode=check", "--lint=warn", "--format=json"];
-        let output = self.run(&args, text)?;
-        if !output.status.success() {
-            return Err(self.failed(&output));
-        }
+        let output = self
+            .run(&args, text)
+            .map_err(|failure| failure.to_string())?;
         let report: Report = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("the formatter's report isn't what is expected: {error}"))?;
         let Report { files } = report;
@@ -238,42 +241,14 @@ impl Formatter {
         Ok(findings)
     }
 
-    fn run(&self, args: &[&str], text: &str) -> Result<Output, String> {
+    // `run` takes a command that stops reading its input as no failure. The formatter reads all
+    // of its text before it exits, so one that exits with 0 read all of it.
+    fn run(&self, args: &[&str], text: &str) -> Result<Output, Failure> {
         // No variable of this process's environment, which could steer the formatter.
         let mut command = stdx::process::command(&self.0, Environment::Only(&[]));
         command.args(ALWAYS).args(args);
-        let spawned = (command.stdin(Stdio::piped()))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let mut child =
-            spawned.map_err(|error| format!("{} can't be run: {error}", self.0.display()))?;
-        // The formatter reads all of its input before it writes, so writing all of it first never
-        // waits on a pipe that is full.
-        let written = child
-            .stdin
-            .take()
-            .map(|mut stdin| stdin.write_all(text.as_bytes()));
-        let output = child.wait_with_output();
-        let output =
-            output.map_err(|error| format!("waiting for the formatter failed: {error}"))?;
-        // A formatter that failed may have stopped reading first: its failure is the one to say.
-        match written {
-            Some(Err(error)) if output.status.success() => {
-                Err(format!("writing to the formatter failed: {error}"))
-            }
-            Some(Ok(()) | Err(_)) | None => Ok(output),
-        }
-    }
-
-    fn failed(&self, output: &Output) -> String {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        format!(
-            "the formatter {} failed with {}: {}",
-            self.0.display(),
-            output.status,
-            stderr.trim_end()
-        )
+        let how = Run::new(Bound::Within(FORMAT_TIMEOUT), Echo::Silent).input(text.as_bytes());
+        stdx::process::run(&mut command, how)
     }
 }
 

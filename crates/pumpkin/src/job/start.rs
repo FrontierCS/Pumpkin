@@ -1,7 +1,7 @@
 //! Starts a job of the build that the start names, once for the id the client chose.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -10,8 +10,8 @@ use members::Member;
 use provider::RunTag;
 use retention::KEPT_DAYS;
 use schema::ir::Sha256Digest;
-use stdx::process::Environment;
-use stdx::{Context as _, Deadline};
+use stdx::Context as _;
+use stdx::process::{Bound, Echo, Environment, Failure, Run};
 
 use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
 use crate::link::{self, JobStart, StartAnswer};
@@ -186,28 +186,20 @@ fn launch(
             "run",
         ])
         .args(start.words);
-    let (problem, exited) = match stdx::process::output(&mut unit, Deadline::after(START_TIMEOUT)) {
-        Ok(Some(o)) if o.status.success() => return Ok(StartAnswer::Started),
-        Ok(Some(o)) => (
-            format!(
-                "systemd-run failed with {}: {}",
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            o.status.code().is_some(),
-        ),
-        Ok(None) => ("systemd-run timed out".to_owned(), false),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            return Err(format!(
-                "systemd-run could not start: {error}: install it on PATH"
-            ));
+    let how = Run::new(Bound::Within(START_TIMEOUT), Echo::Silent);
+    let (problem, exited) = match &stdx::process::run(&mut unit, how) {
+        Ok(_) => return Ok(StartAnswer::Started),
+        // Refused, as nothing started.
+        Err(failure @ (Failure::Unstarted { .. } | Failure::Unended { started: false, .. })) => {
+            return Err(failure.to_string());
         }
-        Err(error) => (format!("systemd-run failed: {error}"), false),
+        // Without its advice, as `after_launch` says what to do.
+        Err(failure @ Failure::Exited { output, .. }) => {
+            (failure.unadvised(), output.status.code().is_some())
+        }
+        Err(failure @ (Failure::Unwatched { .. } | Failure::Unended { started: true, .. })) => {
+            (failure.unadvised(), false)
+        }
     };
     after_launch(name, sent, job, &problem, exited)
 }
@@ -225,14 +217,15 @@ fn after_launch(
     let absent = exited && {
         let mut show = stdx::process::command("systemctl", SYSTEMD);
         show.args(["--user", "show", "--property=LoadState", "--value", name]);
-        let state = stdx::process::output(&mut show, Deadline::after(Duration::from_secs(10)));
-        matches!(state, Ok(Some(state)) if state.stdout == b"not-found\n")
+        let how = Run::new(Bound::Within(Duration::from_secs(10)), Echo::Silent);
+        let state = stdx::process::run(&mut show, how);
+        state.is_ok_and(|state| state.stdout == b"not-found\n")
     };
     // A short unit may have run ExecStopPost while systemctl was looking it up.
     match sent.try_exists() {
         Ok(false) => Ok(StartAnswer::Started),
         Ok(true) if absent => Err(format!(
-            "{problem}: fix what systemd-run reports and run the command again"
+            "{problem}: fix what `systemd-run` reports and run the command again"
         )),
         _ => Ok(unconfirmed(name, sent, problem)),
     }
