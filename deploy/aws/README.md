@@ -172,14 +172,18 @@ an `output` of its own.
   by hand, as `aws iam attach-role-policy --role-name <role> --policy-arn <arn>` (or
   `attach-user-policy`). `policies/client.json.tftpl` says what it allows. The machine reaches
   port 22 at the controller's private address from a network in `ssh_from`.
+- `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
+  machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
+  `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin
+  check` reads, and the list of the timer's schedules that a run left.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
-  on the controller: the groups admit only the ephemeral ports, 32768-60999, where the kernel's
-  pick for port 0 falls.
+  on the controller: the groups admit only the ephemeral ports that `gateway_ports.json` holds,
+  where the kernel's pick for port 0 falls.
 
 ## Policies
 
 The permission policies of the controller's, the timer's, the sandboxes' and the Modal pull roles,
-and the client's, are `policies/<principal>.json.tftpl`. This release's `pumpkin-admin policy
+the client's and the contributor's, are `policies/<principal>.json.tftpl`. This release's `pumpkin-admin policy
 <principal>` prints each from what its code's calls on AWS need. The module fills them with
 `templatefile`, as the GitHub runner module fills its policies
 ([policies-runner.tf](https://github.com/github-aws-runners/terraform-aws-github-runner/blob/f975153d6749b2ea2ddebc8d8cf5911196a1973a/modules/runners/policies-runner.tf#L31-L36)).

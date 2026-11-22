@@ -203,6 +203,7 @@ pub(crate) enum Command {
     Job(Job),
     Boot,
     Install(aws::ParameterArn),
+    CheckDeployment(aws::ParameterArn),
     BootAll,
     Idle,
     Members,
@@ -626,6 +627,7 @@ fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap:
         | Command::Job(_)
         | Command::Boot
         | Command::Install(_)
+        | Command::CheckDeployment(_)
         | Command::BootAll
         | Command::Idle
         | Command::Members

@@ -90,9 +90,10 @@ pub(crate) fn docker() -> Result<()> {
 }
 
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
-/// probe passed, every sandbox was deleted and nothing of the run is left on the provider. With
-/// `lost`, it loses the run instead, and checks that its sandboxes end by themselves and that a
-/// reap removes the rest. `again` names the command that repeats it.
+/// probe passed, every sandbox was deleted and nothing of the run is left on the provider. It
+/// first runs `pumpkin-admin check` on the controller's deployment, and fails if that finds a
+/// problem. With `lost`, it loses the run instead, and checks that its sandboxes end by
+/// themselves and that a reap removes the rest. `again` names the command that repeats it.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
         Provider::Ec2 => "cargo xtask live ec2",
@@ -112,6 +113,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     reached(&settings)?;
     let commit = head_commit()?;
     let repo = task_repository()?;
+    checked_deployment(&settings, &repo, again)?;
     if lost {
         return self::lost(&settings, &repo, again);
     }
@@ -349,7 +351,8 @@ fn reached(settings: &Settings) -> Result<()> {
         Some(credentials),
     )?;
     // Credentials that can't list schedules are refused here, before a run, not at its end.
-    let policy = "grant these credentials `scheduler:ListSchedules` on `*`, and run this again";
+    let policy = "grant these credentials `scheduler:ListSchedules` on `*`, as the policy that \
+                  deploy/aws outputs as `contributor_policy_arn` does, and run this again";
     schedules(settings, "no-such-run", Some(policy))?;
     if let Some(modal) = &settings.modal {
         let token = format!(
@@ -376,6 +379,37 @@ fn refused(failure: &Failure, expected: Option<&str>) -> String {
             }
         }
         (failure, _) => failure.to_string(),
+    }
+}
+
+/// Runs `pumpkin-admin check` from the install in `repo` on the controller's deployment, with the
+/// settings in the SSM parameter that `deploy/aws` names after the controller. Fails if the check
+/// finds a problem. The error names `again`, the command that repeats the live run.
+fn checked_deployment(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
+    let name = format!("/pumpkin-{}/settings", settings.name);
+    let parameter = listed(
+        &mut aws(settings, &["ssm", "get-parameter", "--name", &name]),
+        None,
+    )?;
+    let Some(arn) = parameter["Parameter"]["ARN"].as_str() else {
+        return Err(
+            format!("`aws ssm get-parameter` printed no ARN of {name}: {parameter}").into(),
+        );
+    };
+    let admin = repo
+        .join(".pumpkin/bin")
+        .join(install::File::PumpkinAdmin.name());
+    let mut check = process::command(&admin, Environment::Inherited);
+    check.args(["check", "--settings", arn]);
+    let how = step(PUMPKIN_TIMEOUT).named("pumpkin-admin check");
+    match process::run(&mut check, how) {
+        Ok(_) => Ok(()),
+        Err(Failure::Exited { .. }) => Err(format!(
+            "`pumpkin-admin check` found problems with the deployment, as it said above: fix \
+             each, and run `{again}` again"
+        )
+        .into()),
+        Err(failure) => Err(failure.to_string().into()),
     }
 }
 

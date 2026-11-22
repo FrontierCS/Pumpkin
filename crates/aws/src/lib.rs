@@ -15,6 +15,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use engine::{Login, MANIFEST_TYPES, Pusher};
+pub use problem::Problem;
 use schema::ir::Image;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ use stdx::{Context as _, Deadline};
 use crate::iam::{Call, Ecr};
 
 pub mod iam;
+mod problem;
 
 // Every command a provider runs is one AWS answers at once, in one page. Throttled, `aws` tries
 // again ([`RETRIES`]), waiting about 7 min in all at most; it gives up on a connection, and on a
@@ -176,7 +178,9 @@ impl TryFrom<String> for RoleArn {
 #[serde(try_from = "String", into = "String")]
 pub struct ParameterArn {
     arn: String,
+    partition: String,
     region: Region,
+    account: String,
 }
 
 impl ParameterArn {
@@ -184,9 +188,19 @@ impl ParameterArn {
         &self.arn
     }
 
+    /// The AWS partition it is in, such as `aws`.
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
+
     /// The region that holds it. A call on it is made there.
     pub fn region(&self) -> &Region {
         &self.region
+    }
+
+    /// The ID of the account that holds it.
+    pub fn account(&self) -> &str {
+        &self.account
     }
 }
 
@@ -216,25 +230,31 @@ impl TryFrom<String> for ParameterArn {
             let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"_.-/".contains(&byte);
             !name.is_empty() && !name.starts_with('/') && name.bytes().all(allowed)
         };
-        let region = match parts[..] {
+        let parsed = match parts[..] {
             ["arn", partition, "ssm", region, account, resource]
                 if !partition.is_empty()
                     && account.len() == 12
                     && account.bytes().all(|byte| byte.is_ascii_digit())
                     && resource.strip_prefix("parameter/").is_some_and(name) =>
             {
-                Region::try_from(region.to_owned()).ok()
+                let region = Region::try_from(region.to_owned()).ok();
+                region.map(|region| (partition.to_owned(), region, account.to_owned()))
             }
             _ => None,
         };
-        let Some(region) = region else {
+        let Some((partition, region, account)) = parsed else {
             return Err(format!(
                 "`{}` is not an SSM parameter's ARN: use one such as \
                  `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`",
                 arn.escape_debug()
             ));
         };
-        Ok(Self { arn, region })
+        Ok(Self {
+            arn,
+            partition,
+            region,
+            account,
+        })
     }
 }
 
@@ -263,6 +283,21 @@ impl Repository {
         let uri = &self.uri;
         uri.split_once('/').map_or(uri, |(registry, _)| registry)
     }
+}
+
+/// An IAM instance profile, as IAM describes it ([`Cli::instance_profile`]).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct InstanceProfile {
+    pub arn: String,
+    pub roles: Vec<ProfileRole>,
+}
+
+/// A role that an instance profile holds, by its ARN.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ProfileRole {
+    pub arn: String,
 }
 
 /// When an `aws` command is killed if it hasn't ended.
@@ -371,6 +406,22 @@ impl Cli {
                 shown(call)
             )
         })
+    }
+
+    /// Reads the instance profile named `name` with `call`, an `iam get-instance-profile`.
+    pub fn instance_profile(
+        &self,
+        call: &'static Call,
+        name: &str,
+    ) -> Result<InstanceProfile, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Got {
+            instance_profile: InstanceProfile,
+        }
+        let args = ["--instance-profile-name", name];
+        let Got { instance_profile } = self.json(call, &args, Bound::Call)?;
+        Ok(instance_profile)
     }
 
     /// Runs `call` with `args`, its options, killed at `bound`, and returns what it prints on

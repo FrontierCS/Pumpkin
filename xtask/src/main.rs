@@ -85,11 +85,11 @@ mod flags {
             /// Runs the checks that reach a real environment, which `ci` leaves out. `docker`
             /// runs the ignored tests, which need a Docker engine, the static sandboxd or a server
             /// elsewhere. They use the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
-            /// `ec2` and `modal` cost money. Each runs `examples/smoke` on that provider through
-            /// the controller that `~/.config/pumpkin/pumpkin.toml` names. `./pumpkin` builds
-            /// Pumpkin at `HEAD` for it in a task repository below the target directory. Every
-            /// probe of a sandbox's confinement must pass, and every sandbox must be deleted. If
-            /// anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
+            /// `ec2` and `modal` cost money. Each runs `pumpkin-admin check`, then `examples/smoke`
+            /// on that provider through the controller that `~/.config/pumpkin/pumpkin.toml`
+            /// names, with Pumpkin at `HEAD`, which `./pumpkin` builds below the target directory.
+            /// Every probe of a sandbox's confinement must pass, and every sandbox must be deleted.
+            /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
             /// check fails and runs `pumpkin cancel` to remove it.
             cmd live {
                 /// `docker`, `ec2` or `modal`.

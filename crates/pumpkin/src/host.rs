@@ -22,6 +22,7 @@
 
 mod boot;
 mod file;
+mod gateway_ports;
 mod idle;
 mod members;
 
@@ -34,6 +35,7 @@ use std::{fs, io};
 use aws::ParameterArn;
 pub(crate) use boot::boot_all;
 pub(crate) use file::settings;
+use gateway_ports::GATEWAY_PORTS;
 pub(crate) use idle::idle;
 pub(crate) use members::members;
 use stdx::Context as _;
@@ -105,9 +107,10 @@ const SYSTEM_TIMEOUT: Duration = Duration::from_mins(2);
 ///
 /// # Errors
 ///
-/// Fails if it doesn't run as root, if the provisioner's part is missing, or if a step fails. The
-/// steps before the failed one stay done. The install copies the members' keys first, so settings
-/// that name no members' keys change nothing, and a copy that fails leaves `sshd` as it was.
+/// Fails if it doesn't run as root, if the host's ephemeral ports aren't the gateway's, if the
+/// provisioner's part is missing, or if a step fails. The steps before the failed one stay done.
+/// The install copies the members' keys first, so settings that name no members' keys change
+/// nothing, and a copy that fails leaves `sshd` as it was.
 pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
     if !rustix::process::geteuid().is_root() {
         return Err(
@@ -115,6 +118,7 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
                 .to_owned(),
         );
     }
+    ports()?;
     members::copy(settings)?;
     file::write(settings)?;
     user()?;
@@ -162,6 +166,32 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
         ));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The file that holds the host's range of ephemeral ports, which a listen on port 0 picks from.
+const PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
+
+/// Fails unless the host's range of ephemeral ports is within [`GATEWAY_PORTS`].
+fn ports() -> Result<(), String> {
+    let text = fs::read_to_string(PORT_RANGE).context(PORT_RANGE)?;
+    let mut bounds = text.split_whitespace().map(str::parse::<u16>);
+    let within = match (bounds.next(), bounds.next(), bounds.next()) {
+        (Some(Ok(first)), Some(Ok(last)), None) => {
+            GATEWAY_PORTS.contains(&first) && GATEWAY_PORTS.contains(&last)
+        }
+        _ => false,
+    };
+    if !within {
+        return Err(format!(
+            "the host's ephemeral ports, `{}` in {PORT_RANGE}, aren't within {}-{}, which the \
+             deployment admits to the gateway from the sandboxes: set them within it, as \
+             Linux's default is",
+            text.trim(),
+            GATEWAY_PORTS.start(),
+            GATEWAY_PORTS.end()
+        ));
+    }
+    Ok(())
 }
 
 /// `text` with each placeholder replaced by its value. A unit's command line and `sshd`'s

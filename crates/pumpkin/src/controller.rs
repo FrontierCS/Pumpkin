@@ -29,6 +29,7 @@ use stdx::{Context as _, Deadline};
 pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, find, kept};
+pub(crate) use self::aws::{instances, live, tag, tagged};
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 

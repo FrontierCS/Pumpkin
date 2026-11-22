@@ -5,12 +5,17 @@
 
 use aws::iam::{Allow, Ecr, Placeholder, Resource};
 
-const IMAGES: Placeholder = Placeholder::new(
+pub(crate) const IMAGES: Placeholder = Placeholder::new(
     "modal_repository_arn",
     "the ARN of the repository that Modal imports images from",
 );
 
 const REPOSITORY: &[Resource] = &[Resource::Arn(&IMAGES)];
+
+pub const PULL_ROLE: Placeholder = Placeholder::new(
+    "modal_pull_role_arn",
+    "the ARN of the role that Modal assumes to import images",
+);
 
 /// The calls on the repository of the settings' `images`.
 pub(crate) const ECR: Ecr = Ecr::on(REPOSITORY);

@@ -1,0 +1,67 @@
+<svg width="860px" height="398px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Check the controller's deployment, with read-only calls on AWS.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>`check` reads the settings that the ARN names, what they name, and the controller's instance. It</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>asks IAM's policy simulator about the policy of each role that `pumpkin-admin policy` prints. It</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>runs every check, and says each problem on a line of its own: the resource, what is wrong, and what</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>to fix. It says nothing if there is none, and exits with 1 if there is one. It starts nothing, so it</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>leaves unchecked what only a running controller shows, and says so.</tspan>
+</tspan>
+    <tspan x="10px" y="154px">
+</tspan>
+    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin check</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;arn&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="190px">
+</tspan>
+    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--settings</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;arn&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>          The ARN of the SSM parameter of the controller's settings</tspan>
+</tspan>
+    <tspan x="10px" y="262px">
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="316px">
+</tspan>
+    <tspan x="10px" y="334px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  pumpkin-admin check \</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
+</tspan>
+  </text>
+
+</svg>

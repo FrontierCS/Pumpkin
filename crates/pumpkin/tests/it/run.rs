@@ -91,6 +91,7 @@ fn usage() {
         same(&["help", "controller"], &["controller", "--help"]),
         pumpkin(&["controller", "install", "--settings", "arn"]),
         admin(&["install", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["check", "--help"]),
         admin(&["run", "a.star"]),
     ];
     // What `--version` prints: this build, which names its commit if it was made in a git
@@ -268,6 +269,29 @@ fn usage() {
             exit status: Some(2)
             error: invalid value '/pumpkin-alice/settings' for '--settings <arn>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
             pumpkin: to read how to use it: pumpkin-admin install --help
+            $ pumpkin-admin check --help
+            exit status: Some(0)
+            printed:
+              Check the controller's deployment, with read-only calls on AWS.
+
+              `check` reads the settings that the ARN names, what they name, and the controller's instance. It
+              asks IAM's policy simulator about the policy of each role that `pumpkin-admin policy` prints. It
+              runs every check, and says each problem on a line of its own: the resource, what is wrong, and what
+              to fix. It says nothing if there is none, and exits with 1 if there is one. It starts nothing, so it
+              leaves unchecked what only a running controller shows, and says so.
+
+              Usage: pumpkin-admin check --settings <arn>
+
+              Options:
+                    --settings <arn>
+                        The ARN of the SSM parameter of the controller's settings
+
+                -h, --help
+                        Print help
+
+              Examples:
+                pumpkin-admin check \
+                  --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
             $ pumpkin-admin run a.star
             exit status: Some(2)
             error: unrecognized subcommand 'run'
