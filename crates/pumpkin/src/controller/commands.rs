@@ -156,10 +156,11 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
     Ok((build, id.to_owned()))
 }
 
-/// `error`, which says that `run` names none of the jobs `ids` or several, and if it names a run
-/// that may have been removed, where its record may be instead.
+/// `error`, which says that `run` names none of the jobs `ids` or several. If `run` names a run
+/// whose record the controller may have removed, it adds where the record may be instead.
 fn unnamed(ids: &[String], run: &str, error: String) -> String {
-    // A run whose record the controller removed has no job there either, and is as old.
+    // The controller removes a run's job directory with its record. Such a run is older than
+    // `KEPT`.
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = runtime::minted(run).is_some_and(|minted| minted < cutoff);
     let none = (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());

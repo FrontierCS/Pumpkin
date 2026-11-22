@@ -65,7 +65,7 @@ impl Reached {
                 id.as_str()
             )
         })?;
-        // Only once the copy is whole: the controller then removes its record in time.
+        // Only once the copy is whole. The controller then removes its record in time.
         let what = format!("noting the copy of run {}'s record", id.as_str());
         let noted = self.asked(build, &what, |reached, linked| {
             let id = id.as_str().to_owned();

@@ -46,8 +46,8 @@ fn send(
     sent
 }
 
-/// Sends the record at `root`, whose driver has let go of it, but for the files that `body` says
-/// the copy holds.
+/// Sends the record at `root`, whose driver has let go of it. Leaves out the files that `body`
+/// says the copy holds.
 fn send_ended(output: &mut impl Write, root: &Path, body: &[u8]) -> Result<(), String> {
     let held = serde_json::Deserializer::from_slice(body)
         .into_iter::<(OsString, Stamp)>()

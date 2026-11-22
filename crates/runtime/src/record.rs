@@ -390,9 +390,9 @@ impl Record {
         Ok(records)
     }
 
-    /// The names of the directories in `runs` that may hold a record, in order, which is by id,
-    /// oldest first, but for those that start with `.`, each a record in the making or being
-    /// removed, which isn't there.
+    /// The names of the directories in `runs` that may hold a record, in order of id, oldest
+    /// first. Leaves out the names that start with `.`, each a record in the making or being
+    /// removed.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }

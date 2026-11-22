@@ -1,7 +1,7 @@
-//! The prune of the runs' records. A run's record is evidence, and the controller's may be its only
-//! copy, so no shortage of room removes it: it lasts until the run's member has copied it whole, as
-//! `COPIED` in the run's job's directory says, then `KEPT` from that copy, the time that the
-//! controller keeps the run's tree to run it again.
+//! The prune of the runs' records. A run's record is evidence, and the controller's copy may be the
+//! only one. So no shortage of room removes a record. A record lasts until the run's member has
+//! copied it whole, which `COPIED` in the run's job's directory notes. It then lasts `KEPT` from
+//! that copy, as long as the controller keeps the run's tree to run it again.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -17,14 +17,14 @@ use super::{JOBS, KEPT, KEPT_DAYS, ids};
 use crate::member::Member;
 use crate::{counted, next, say, size};
 
-// The file in a run's job's directory that says that the run's member holds a whole copy of its
-// record, by being there, and when they last copied it, by its time.
+// The file in a run's job's directory that notes the member's copy of the run's record. It is
+// there once the run's member holds a whole copy. Its time is when they last copied it.
 const COPIED: &str = "copied";
 
-/// Notes, in its job's directory in `home`, that `member` holds a whole copy of run `id`'s record
-/// as of now, if `member` is the run's, or the run names none; notes nothing if no job started the
-/// run, so that the run has no such directory.
-// Only the member's copy, as another member's may be gone without the run's member knowing.
+/// Notes that `member` holds a whole copy of run `id`'s record as of now, in the run's job's
+/// directory in `home`. Notes it only if `member` is the run's, or the run names none. Notes
+/// nothing if no job started the run, as such a run has no job directory.
+// Another member's copy may be gone without the run's member knowing.
 pub(crate) fn mark_copied(home: &Path, id: &RunTag, member: Option<&Member>) -> Result<(), String> {
     let job = home.join(JOBS).join(id.as_str());
     match super::member(&job)? {
@@ -34,18 +34,19 @@ pub(crate) fn mark_copied(home: &Path, id: &RunTag, member: Option<&Member>) -> 
     let path = job.join(COPIED);
     let marked = (OpenOptions::new().write(true).create(true).truncate(false)).open(&path);
     match marked {
-        // As of this copy, not the first: the record lasts `KEPT` from the last.
+        // The record lasts `KEPT` from the last copy, not the first.
         Ok(file) => file.set_modified(SystemTime::now()).context(path.display()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).context(path.display()),
     }
 }
 
-/// Removes each record whose job in `home` no longer runs, as its directory in `jobs` is gone,
-/// and whose member last copied it more than `KEPT` ago, unless something holds it or wrote it
-/// since (`Record::remove`), and what a removal cut short left; says which it removed, with the
-/// room they took, and why it couldn't remove one, going on past it. Removes none until the boot
-/// unit has ended (`boot::after`), as the boot may reap a record.
+/// Removes each record whose member last copied it more than `KEPT` ago, and whose job in `home`
+/// no longer runs. A job that runs has its directory in `jobs`. Keeps a record that something
+/// holds or wrote since the copy (`Record::remove`). Also finishes each removal cut short. Says
+/// which records it removed, and the room they took. Says why it couldn't remove a record, and
+/// goes on with the others. Removes none until the boot unit has ended (`boot::after`).
+// The boot may reap a record.
 pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
     let Some(_locked) = super::boot::after(jobs)? else {
@@ -77,8 +78,8 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes the record of run `id` in `runs` as `collect` says, returning the room it took, or
-/// `None` if it is kept.
+/// Removes the record of run `id` in `runs` as `collect` says. Returns the room it took, or `None`
+/// if it is kept.
 fn removed_record(home: &Path, runs: &Path, jobs: &Path, id: &str) -> Result<Option<u64>, String> {
     let Some(copied) = copied(home, id)? else {
         return Ok(None);
@@ -90,10 +91,11 @@ fn removed_record(home: &Path, runs: &Path, jobs: &Path, id: &str) -> Result<Opt
     Record::remove(&runs.join(id), copied, size_bytes)
 }
 
-/// What a refusal for want of room adds of the records whose jobs in `home` have ended, as their
-/// directories in `jobs` are gone, and that their members haven't copied, which no prune removes:
-/// how many, the room they take, and the command that copies the oldest; nothing if there are
-/// none, or saying why it can't tell.
+/// What a refusal for want of room adds about the records that their members haven't copied,
+/// which no prune removes. It counts the records whose jobs in `home` have ended, as their
+/// directories in `jobs` are gone. It says how many there are, the room they take, and the command
+/// that copies the oldest. It adds nothing if there are none. If it can't tell, it adds nothing
+/// and says why.
 pub(super) fn uncopied(home: &Path, jobs: &Path) -> String {
     match uncopied_in(home, jobs) {
         Ok(Some(uncopied)) => format!("; {uncopied}"),
@@ -146,8 +148,8 @@ fn exists(path: &Path) -> Result<bool, String> {
     path.try_exists().context(path.display())
 }
 
-/// The room on its disk that what is below `dir` takes, as `du` counts it, by its blocks, of what
-/// it can read: what another prune removes meanwhile, or this can't read, it counts as none.
+/// The room on its disk that what is below `dir` takes, counted by blocks as `du` counts it. It
+/// counts as none what it can't read, or what another prune removes meanwhile.
 fn size_bytes(dir: &Path) -> u64 {
     let mut size_bytes = 0;
     let mut dirs = vec![dir.to_owned()];

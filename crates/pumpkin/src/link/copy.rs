@@ -23,9 +23,8 @@ pub(crate) struct CopyRequest {
     pub(crate) held_bytes: usize,
 }
 
-/// That the client holds a whole copy of run `id`'s record, for the member that its link acts for,
-/// from which the controller's record lasts the time that the controller's prune keeps a copied
-/// record, if that member is the run's.
+/// That the client holds a whole copy of run `id`'s record, for the member that its link acts for.
+/// If that member is the run's, the controller keeps its record `crate::job::KEPT` from then.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CopiedRequest {
     pub(crate) id: String,

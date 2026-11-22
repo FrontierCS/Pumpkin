@@ -439,8 +439,8 @@ fn closing_problems(has: fmt::Arguments<'_>, count: usize) -> String {
     format!("{has} {problems}")
 }
 
-/// `bytes` in the largest binary unit that holds at least one of it, to a tenth, as "16.0 MiB",
-/// or counted in bytes below a KiB: every size that Pumpkin says is said so.
+/// `bytes` in the largest binary unit that holds at least one of it, to a tenth, as "16.0 MiB".
+/// Below a KiB, it counts the bytes. Every size that Pumpkin says is said so.
 fn size(bytes: u64) -> String {
     let units = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
     let Some((unit, name)) = units.into_iter().find(|(unit, _)| bytes >= *unit) else {

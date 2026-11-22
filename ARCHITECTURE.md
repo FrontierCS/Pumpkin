@@ -664,11 +664,11 @@ workflow's evaluation read) and `provider.json` are written before it and never 
 of a live run reads only what the log gained (`LogFold`). A record
 appears only once its `driver.pid` is locked (`Lock`), and the lock is held until the run's last
 write, so `outcome.json` and the lock tell an ended run from a live or a lost one. Only the lock's
-holder writes the record; once it has let go, only `Record::reap` writes it and only
-`Record::remove` removes it, once nothing holds its directory's lock and nothing wrote it since the
-copy that its reader holds. On a controller, a record is removed only once the run's member has
-copied it whole, as the client tells `serve` after the copy, and `KEPT` after that, once the boot's
-reap has ended; no shortage of room removes one.
+holder writes the record. Once it has let go, only `Record::reap` writes it, and only
+`Record::remove` removes it. `Record::remove` removes a record only once nothing holds its
+directory's lock, and nothing wrote it since the copy that its reader holds. On a controller, a
+record is removed only `KEPT` after the run's member has copied it whole. The client tells `serve`
+of each whole copy. The boot's reap must also have ended. No shortage of room removes a record.
 
 The record keeps every model exchange as the route saw it pass, which no sandbox can alter: each
 request as it went upstream, or as its client sent it if the route refused it, each conversation

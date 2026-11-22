@@ -91,10 +91,10 @@ const BUILDING: &str = "building";
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
 
-// How long a job's tree and directory last, by the time in its id, an install after a start last
-// handed it out, and a run's record after a machine last copied it. A run's record names its entry
-// in its tree, to run it again, and a tree is links into the store, so it holds no bytes of its
-// own.
+// How long a job's tree and directory last, by the time in its id. An install lasts as long after
+// a start last handed it out. A run's record lasts as long after its member last copied it. A
+// run's record names its entry in its tree, to run it again. A tree is links into the store, so it
+// holds no bytes of its own.
 pub(crate) const KEPT_DAYS: u64 = 14;
 
 pub(crate) const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
@@ -151,8 +151,8 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             path.display()
         ));
     };
-    // Before the build, so that it has room, the records first, so that the prune removes the
-    // directory of each run's job whose record goes.
+    // Before the build, so that it has room. The records go first, so that the prune then removes
+    // the directory of each run's job whose record went.
     if let Err(error) = records::collect(&home, &jobs) {
         say(format_args!("the prune of the records failed: {error}"));
     }
@@ -746,7 +746,7 @@ fn build_first(
 /// build slots (`take_slot`) as the first build starts, and keeps the slot until its holder lets
 /// go. It prunes (`collect`) as each build starts, and as each ends while others run. Then it
 /// refuses to start a build while more than `REFUSED_PERCENT` of the volume is used. The refusal
-/// names the records that no machine has copied, which no prune removes.
+/// names the records that their members haven't copied, which no prune removes.
 struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
