@@ -66,10 +66,10 @@ impl Driver {
             .arg(std::process::id().to_string())
             .arg(id.as_str())
             .arg(reader.word())
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(output);
-        let child = command.spawn().context("starting the driver failed")?;
+            .args(args);
+        let child =
+            stdx::process::spawn(&mut command, Stdio::null(), output.into(), Stdio::inherit());
+        let child = child.context("starting the driver failed")?;
         // The command holds the pipe's write end, which must close here for its read to end
         // once the driver has closed its own.
         drop(command);
