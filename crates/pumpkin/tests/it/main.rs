@@ -10,6 +10,7 @@
     clippy::print_stderr,
     reason = "a test says which image it can't remove, and why it skips"
 )]
+#![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::borrow::Cow;
 use std::fmt::{Display, Write as _};

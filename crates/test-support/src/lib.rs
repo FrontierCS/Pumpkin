@@ -6,6 +6,10 @@
     clippy::missing_panics_doc,
     reason = "a test helper fails the test that calls it"
 )]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "nextest bounds each test that calls it"
+)]
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
