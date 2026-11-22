@@ -28,15 +28,15 @@
 </tspan>
     <tspan x="10px" y="82px"><tspan>the host file /etc/pumpkin/controller.toml, the units that run `boot-all`, `idle` and `members`, and</tspan>
 </tspan>
-    <tspan x="10px" y="100px"><tspan>sshd's settings. Those admit only the members' keys for `pumpkin`.</tspan>
+    <tspan x="10px" y="100px"><tspan>sshd's settings. Those admit only the members' keys for `pumpkin`. Last, it publishes sshd's host</tspan>
 </tspan>
-    <tspan x="10px" y="118px">
+    <tspan x="10px" y="118px"><tspan>key in SSM, where each member's machine reads it to pin it.</tspan>
 </tspan>
-    <tspan x="10px" y="136px"><tspan>It copies the members' keys first, and changes nothing else if the copy fails. It needs Docker and</tspan>
+    <tspan x="10px" y="136px">
 </tspan>
-    <tspan x="10px" y="154px"><tspan>AWS CLI v2 installed first. It writes a file only where it differs, reloads only what changed, and</tspan>
+    <tspan x="10px" y="154px"><tspan>It copies the members' keys first, and changes nothing else if the copy fails. It needs Docker and</tspan>
 </tspan>
-    <tspan x="10px" y="172px"><tspan>says each change, so a second run says nothing.</tspan>
+    <tspan x="10px" y="172px"><tspan>AWS CLI v2. It changes only what differs, and says each change.</tspan>
 </tspan>
     <tspan x="10px" y="190px">
 </tspan>

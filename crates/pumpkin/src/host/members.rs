@@ -21,14 +21,14 @@ pub(super) const MEMBERS: &str = "/etc/ssh/pumpkin/members";
 /// Copies the members' keys, as the module says, for the controller whose settings the host file
 /// names. Returns 0.
 pub(crate) fn members() -> Result<Exit, String> {
-    copy(&super::settings()?)?;
+    copy(&deployment(&super::settings()?)?)?;
     Ok(Exit::Success)
 }
 
-/// Copies the members' keys, as the module says, for the controller whose settings are SSM
-/// parameter `settings`. Says so if the keys changed.
-pub(super) fn copy(settings: &ParameterArn) -> Result<(), String> {
-    let Deployment { name, members } = deployment(settings)?;
+/// Copies the members' keys, as the module says, for the controller of `deployment`. Says so if
+/// the keys changed.
+pub(super) fn copy(deployment: &Deployment) -> Result<(), String> {
+    let Deployment { name, members } = deployment;
     let cli = Cli::connect(members.region().clone())?;
     let list = crate::job::parameter_value(&cli, &HOST.members, members.as_str())?;
     let keys = Members::parse(&list).map_err(|why| {
@@ -44,7 +44,7 @@ pub(super) fn copy(settings: &ParameterArn) -> Result<(), String> {
 }
 
 /// The `[deployment]` of the controller's settings in SSM parameter `settings`.
-fn deployment(settings: &ParameterArn) -> Result<Deployment, String> {
+pub(super) fn deployment(settings: &ParameterArn) -> Result<Deployment, String> {
     let cli = Cli::connect(settings.region().clone())?;
     let value = crate::job::parameter_value(&cli, &HOST.settings, settings.as_str())?;
     let named = format!("the controller's settings, SSM parameter `{settings}`,");

@@ -2,6 +2,16 @@
   "Statement": [
     {
       "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${host_key_parameter_arn}"
+      ]
+    },
+    {
+      "Action": [
         "ssm:GetParameter"
       ],
       "Effect": "Allow",

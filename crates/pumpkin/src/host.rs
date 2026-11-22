@@ -5,7 +5,8 @@
 //! its job units outlive every SSH session. It writes this `pumpkin-admin` at [`ADMIN`], where the
 //! units run it. It writes the host file, which names the controller's settings ([`mod@file`]). It
 //! writes the units that reap at boot, stop the controller when idle and copy the members' keys
-//! (`members`). It writes `sshd`'s settings, which admit only those keys for the user.
+//! (`members`). It writes `sshd`'s settings, which admit only those keys for the user. Last, it
+//! publishes the host's key, which clients pin ([`mod@host_key`]).
 //!
 //! The host's provisioner installs the OS, Docker and the other packages that jobs run. The
 //! install fails where it finds one missing, and names it.
@@ -23,6 +24,7 @@
 mod boot;
 mod file;
 mod gateway_ports;
+mod host_key;
 mod idle;
 mod members;
 
@@ -120,7 +122,8 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
         );
     }
     ports()?;
-    members::copy(settings)?;
+    let deployment = members::deployment(settings)?;
+    members::copy(&deployment)?;
     file::write(settings)?;
     user()?;
     let exe = crate::workspace::exe("expected the `pumpkin-admin` to install")?;
@@ -135,6 +138,15 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
         )?;
     }
     units(changed)?;
+    self::sshd()?;
+    // Last, so that a client that finds this host's key published finds the members admitted.
+    host_key::publish(settings.region(), &deployment.name)?;
+    Ok(Exit::Success)
+}
+
+/// Writes `sshd`'s drop-ins, and reloads `sshd` if any changed. Puts back the drop-ins that it
+/// replaced if the reload fails.
+fn sshd() -> Result<(), String> {
     let mut written = Vec::new();
     for (file, text) in SSHD {
         let path = Path::new(SSHD_DIR).join(file);
@@ -148,7 +160,7 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
         }
     }
     if written.is_empty() {
-        return Ok(Exit::Success);
+        return Ok(());
     }
     // Ubuntu's `ssh.service` checks the configuration before its reload signals `sshd`. If no
     // `sshd` runs, the next connection starts one, as `ssh.socket` does.
@@ -166,7 +178,7 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
              put back the ones it replaced"
         ));
     }
-    Ok(Exit::Success)
+    Ok(())
 }
 
 /// The file that holds the host's range of ephemeral ports, which a listen on port 0 picks from.

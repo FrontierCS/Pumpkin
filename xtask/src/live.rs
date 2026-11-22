@@ -317,8 +317,14 @@ fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
     let home =
         std::env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
     let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
-    let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
-    let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
+    let alias = format!("{}.{}", settings.name, settings.region);
+    // The key that the controller published, or else the one that it showed first.
+    let known_hosts = format!(
+        "UserKnownHostsFile={} {}",
+        kept.join(format!("{alias}.known_hosts")).display(),
+        kept.join("known_hosts").display()
+    );
+    let alias = format!("HostKeyAlias={alias}");
     let mut ssh = process::command("ssh", Environment::Inherited);
     ssh.args(["-F", "/dev/null", "-i"])
         .arg(kept.join("key"))

@@ -24,6 +24,7 @@ resource "aws_iam_role_policy" "controller" {
     instance_types          = sort(distinct([for template in aws_launch_template.class : template.instance_type]))
     members_parameter_arn   = aws_ssm_parameter.members.arn
     settings_parameter_arn  = aws_ssm_parameter.settings.arn
+    host_key_parameter_arn  = aws_ssm_parameter.host_key.arn
     modal_repository_arn    = aws_ecr_repository.images["roles"].arn
     roles_repository_arn    = aws_ecr_repository.images["roles"].arn
     sandboxd_repository_arn = aws_ecr_repository.images["sandboxd"].arn
@@ -101,6 +102,19 @@ resource "aws_ssm_parameter" "members" {
   value = join("", flatten([for member, keys in var.members : [for key in keys : "${member} ${key}\n"]]))
 }
 
+# The controller's ed25519 host key, as `ssh-ed25519 <blob>`. Its first boot's `pumpkin-admin
+# install` publishes it here, and each member's machine pins the key it reads here. Until then
+# it holds no key, and a member's machine pins the key that the controller shows first. The
+# controller writes it, so an apply leaves its value as it is.
+resource "aws_ssm_parameter" "host_key" {
+  name  = "/${local.prefix}/host-key"
+  type  = "String"
+  value = "unpublished"
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
 # Canonical's Ubuntu 24.04 LTS, as its public parameter names the current release, whose Docker
 # comes from Docker's own repository, as builds need Docker 28 or later with the containerd
 # image store, and Buildx. A controller takes the Ubuntu release that is current when it is made.
@@ -139,7 +153,7 @@ resource "aws_instance" "controller" {
     settings_arn       = aws_ssm_parameter.settings.arn
   })
 
-  # The first boot's install reads the settings and the members' keys.
+  # The first boot's install reads the settings and the members' keys, and publishes the host key.
   depends_on = [aws_iam_role_policy.controller]
 
   # Tokens required, within one hop, so that no build's container reaches the role.

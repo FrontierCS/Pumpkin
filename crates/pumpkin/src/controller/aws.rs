@@ -72,9 +72,9 @@ pub(super) struct Located {
 }
 
 /// The directory that holds this machine's `ssh` key to its controllers, `key` and `key.pub`,
-/// which this makes if there is none, and `known_hosts`, which pins the host key that each
-/// controller showed first, by its [`Reached::alias`](super::Reached::alias). Processes may call
-/// it at once.
+/// which this makes if there is none, `known_hosts`, which pins the host key that each controller
+/// showed first, by its [`Reached::alias`](super::Reached::alias), and the file of each key that a
+/// controller published ([`host_key::file`](super::host_key::file)). Processes may call it at once.
 // A credential, so beside the configuration, outside every workspace; one for the machine, so
 // that a controller's admin lists it once, whatever workspace reaches it.
 pub(super) fn kept() -> Result<PathBuf, String> {

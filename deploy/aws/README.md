@@ -15,11 +15,12 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
-| the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
+| the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter, the host key's parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
 | what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
+| the SSM parameter `/pumpkin-<name>/host-key`: the controller's ed25519 host key, which its first boot's `pumpkin-admin install` writes with the controller's role, and which an apply leaves as it is | each member's machine pins the key that it reads there with the client policy, so a replacement's new key needs no step of the members' |
 | the SSM parameter `/pumpkin-<name>/members` (advanced tier): a line `<member> <key>` for each key in `members`; the controller copies it every minute into `/etc/ssh/pumpkin/members`, with a forced command that names each key's member; `sshd` admits for `pumpkin` only the keys in that file | who may reach the controller, and which member each job belongs to; an apply changes the list within a minute |
 
 `ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
@@ -269,9 +270,12 @@ apply of its own, outside them.
    controller's first boot installs the release. The apply that creates
    `terraform_data.pumpkin_release` replaces nothing, as only a change of it does. So where the
    plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. The new
-   controller has a new host key, so each member's first command after the replacement is
-   refused. Once the admin confirms the replacement, the member runs the `ssh-keygen -R` command
-   that the refusal names, and the next command pins the new key.
+   controller publishes its new host key as its install ends, and each member's next command
+   pins it. Until then, a command is refused, and its refusal says to run it again in a few
+   minutes. The apply that first makes the parameter `/pumpkin-<name>/host-key` leaves no key
+   there until then, and a member whose `.pumpkinversion` names a release older than the
+   module's reads none. Such a member runs the `ssh-keygen -R` command that the refusal names
+   once the admin confirms the replacement, and the next command pins the new key.
 4. Once `pumpkin ls` reaches the controller, set `draining = false` and apply.
 5. At a tag, each member raises `.pumpkinversion` to its release.
 

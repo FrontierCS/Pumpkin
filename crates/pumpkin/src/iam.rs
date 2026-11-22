@@ -2,7 +2,8 @@
 //!
 //! A principal's policy is what IAM must allow of each call that it makes. The controller's role
 //! makes its jobs' calls: they run the providers and read their settings. The providers'
-//! other principals make their own calls. A client's calls reach its controller.
+//! other principals make their own calls. A client's calls reach its controller and read its host
+//! key.
 
 use aws::iam::{self, Allow, Call, Fill, Placeholder, Resource};
 use clap::ValueEnum;
@@ -43,6 +44,11 @@ pub(crate) const MEMBERS: Placeholder = Placeholder::new(
     "the ARN of the SSM parameter of the controller's members",
 );
 
+pub(crate) const HOST_KEY: Placeholder = Placeholder::new(
+    "host_key_parameter_arn",
+    "the ARN of the SSM parameter of the controller's host key",
+);
+
 impl Principal {
     /// Its name, as `pumpkin-admin policy` takes it.
     pub(crate) fn name(self) -> String {
@@ -71,19 +77,32 @@ pub(crate) struct Host {
     pub(crate) settings: Call,
     /// Reads the members' keys.
     pub(crate) members: Call,
+    /// Reads the host key that it published.
+    pub(crate) published: Call,
+    /// Publishes its host key.
+    pub(crate) publish: Call,
 }
 
 pub(crate) const HOST: Host = Host {
     settings: Call::new(["ssm", "get-parameter"], READ_SETTINGS),
     members: Call::new(["ssm", "get-parameter"], READ_MEMBERS),
+    published: Call::new(["ssm", "get-parameter"], READ_HOST_KEY),
+    publish: Call::new(
+        ["ssm", "put-parameter"],
+        Allow::new(&["ssm:PutParameter"], &[Resource::Arn(&HOST_KEY)]),
+    ),
 };
 
 const READ_MEMBERS: Allow = Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&MEMBERS)]);
 
-/// The calls of a client on its controller's instance.
+const READ_HOST_KEY: Allow = Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&HOST_KEY)]);
+
+/// The calls of a client on its controller.
 pub(crate) struct Client {
     pub(crate) describe: Call,
     pub(crate) start: Call,
+    /// Reads the host key that the controller published.
+    pub(crate) host_key: Call,
 }
 
 pub(crate) const CLIENT: Client = Client {
@@ -95,6 +114,7 @@ pub(crate) const CLIENT: Client = Client {
         ["ec2", "start-instances"],
         Allow::new(&["ec2:StartInstances"], &[Resource::Arn(&CONTROLLER)]),
     ),
+    host_key: Call::new(["ssm", "get-parameter"], READ_HOST_KEY),
 };
 
 /// The calls that `pumpkin-admin check` makes of its own. Each is a read.
@@ -144,20 +164,28 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
             let Host {
                 settings: host_settings,
                 members,
+                published,
+                publish,
             } = &HOST;
             (ec2::iam::caller())
                 .chain(modal::iam::caller())
                 .chain(settings.allows())
                 .chain(host_settings.allows())
                 .chain(members.allows())
+                .chain(published.allows())
+                .chain(publish.allows())
                 .collect()
         }
         Principal::Timer => ec2::iam::timer().collect(),
         Principal::Sandbox => ec2::iam::sandbox().collect(),
         Principal::ModalPull => modal::iam::puller().collect(),
         Principal::Client => {
-            let Client { describe, start } = &CLIENT;
-            [describe, start]
+            let Client {
+                describe,
+                start,
+                host_key,
+            } = &CLIENT;
+            [describe, start, host_key]
                 .into_iter()
                 .flat_map(Call::allows)
                 .collect()

@@ -44,10 +44,10 @@ enum Parsed {
     /// `install` makes the user `pumpkin`, lingering, in Docker's group. It installs this
     /// `pumpkin-admin`, the host file /etc/pumpkin/controller.toml, the units that run `boot-all`,
     /// `idle` and `members`, and sshd's settings. Those admit only the members' keys for `pumpkin`.
+    /// Last, it publishes sshd's host key in SSM, where each member's machine reads it to pin it.
     ///
     /// It copies the members' keys first, and changes nothing else if the copy fails. It needs
-    /// Docker and AWS CLI v2 installed first. It writes a file only where it differs, reloads only
-    /// what changed, and says each change, so a second run says nothing.
+    /// Docker and AWS CLI v2. It changes only what differs, and says each change.
     Install {
         /// The ARN of the SSM parameter that holds the controller's settings. The host file names
         /// it.

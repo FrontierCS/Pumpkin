@@ -491,10 +491,11 @@ machine whose runs go to a controller. `star`
 reads a task's source below its root (`Root`) and serves the standard library's. `driver` starts the
 driver process. `run` starts a run and drives it in that process. `ending` follows a run and says
 how it ended. `reaping` stops runs and removes what they left. `controller` reaches the controller,
-which its `aws` finds and starts. The controller admits the keys that its admin lists. A command
-keeps one direct SSH connection for its requests (`Reached`). The workspace saves the controller's
-address and serialises repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
-to four connections, then starts the job on the first. Its `copy` receives an ended record file by
+which its `aws` finds and starts. Its `host_key` pins the host key that the controller publishes
+in an SSM parameter, or the key it shows first where none can be read. The controller admits the
+keys that its admin lists. A command keeps one direct SSH connection for its requests
+(`Reached`). The workspace saves the controller's address and serialises repairs. `controller`'s
+`send` sends a run's job. It shares large task uploads by digest across up to four connections, then starts the job on the first. Its `copy` receives an ended record file by
 file, `record.json` last. Its `listing` lists the runs there for `ls`. Its `viewing` carries
 `view`'s requests there (`Viewing`). Each goes over a `Link` that its `linking` opens. Its `follow`
 follows a job, and its `commands` stop and reap runs. `link` is the protocol of a client's `Link` to
@@ -510,7 +511,8 @@ and refuses a job while they drain. `job` also holds the slots that admit its bu
 (`Admission`). Its prune removes what `retention` picks. `host` is the host's software, which
 `pumpkin-admin install` installs as root. Its units run the boot and the idle stop. They also copy
 the members' keys from the parameter that the settings' `[deployment]` names. Each key gets the
-forced command that `members` renders. `host`'s `file` is the host file,
+forced command that `members` renders. Last, the install publishes the host's key (`host_key`).
+`host`'s `file` is the host file,
 `/etc/pumpkin/controller.toml`. It names the settings' parameter to the units and to each job.
 `deployment` is `pumpkin-admin check`. It runs every check of a deployment, each a read, and says
 each `Problem` it finds. It checks what an apply of `deploy/aws` doesn't make by construction. Its
@@ -622,10 +624,10 @@ developer installs.
 The Terraform module that makes one team's Pumpkin on AWS, as [its README](deploy/aws/README.md)
 says. The admin lists the team's members by key. The module makes the EC2 envelope that `ec2`
 relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
-controller. The controller comes with the SSM parameters of its jobs' settings and its members'
-keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
-`pumpkin-admin install`. The module is a child module. An admin's root calls it at a Pumpkin
-release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the
+controller. The controller comes with the SSM parameters of its jobs' settings, its members'
+keys and its host key. Its first boot installs the packages that its jobs run, and then runs a
+pinned release's `pumpkin-admin install`. The module is a child module. An admin's root calls it
+at a Pumpkin release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the
 provider's configuration, the backend and the lock file, and the provider's region is the module's.
 No crate depends on the module. Its outputs feed a machine's configuration, and its policies are
 `pumpkin-admin policy`'s output.

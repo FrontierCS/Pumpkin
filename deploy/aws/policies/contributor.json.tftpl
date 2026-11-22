@@ -15,6 +15,15 @@
       ],
       "Effect": "Allow",
       "Resource": [
+        "${host_key_parameter_arn}"
+      ]
+    },
+    {
+      "Action": [
+        "ssm:GetParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": [
         "${members_parameter_arn}"
       ]
     },

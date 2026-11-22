@@ -197,6 +197,8 @@ const SHARED: &str = "repo/.pumpkin/controller/alice.us-west-1";
 
 const KEY: &str = "sk-client-stand-in";
 
+const PINNED_HOST_KEY: &str = ".config/pumpkin/ssh/alice.us-west-1.known_hosts";
+
 // Runs the controller command in the test's home, with cuts before the requested byte on either
 // stream. Each before-N action runs just before the Nth connection. A client home with a
 // `.member` is a key that the admin lists under that member, so the command runs as the
@@ -344,6 +346,15 @@ fn set_up_member(scratch: &Scratch, name: &str) -> [(String, String); 2] {
             .0
             .join(format!("{repo}/.pumpkin/controller/alice.us-west-1")),
     );
+    // The key that the member's first command made, then the host key that it pinned.
+    let kept = scratch.0.join(format!("{home}/.config/pumpkin/ssh"));
+    fs::create_dir_all(&kept).unwrap();
+    let keygen = stdx::process::command("ssh-keygen", Environment::Only(&["PATH"]))
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "pumpkin", "-f"])
+        .arg(kept.join("key"))
+        .status();
+    assert!(keygen.unwrap().success());
+    pinned(&scratch.0.join(&home));
     [
         (
             "HOME".to_owned(),
@@ -382,8 +393,8 @@ fn started_job(scratch: &Scratch) -> ([(String, String); 2], String, String) {
     (client, id, ran)
 }
 
-// As a previous command that found the controller left the address, with no AWS call on the
-// next warm connection.
+// As a previous command that found the controller left the address and pinned the host key that
+// it published, with no AWS call on the next warm connection.
 fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     let dir = scratch.0.join(SHARED);
     if dir.join("found").exists() {
@@ -393,6 +404,16 @@ fn connect(scratch: &Scratch, client: &[(String, String); 2]) {
     assert!(!first.status.success(), "{first:?}");
     fs::remove_file(dir.join("failed")).unwrap();
     found_at(&dir);
+    pinned(&scratch.0.join("client"));
+}
+
+// The host key that the controller published, as a command pins it in the home `home`, which
+// holds this machine's key.
+fn pinned(home: &Path) {
+    let key = format!("alice.us-west-1 ssh-ed25519 {}\n", "A".repeat(68));
+    let file = home.join(PINNED_HOST_KEY);
+    fs::write(&file, key).unwrap();
+    fs::set_permissions(file, Permissions::from_mode(0o644)).unwrap();
 }
 
 // The location of the controller, in the workspace's directory `dir` of it.
@@ -700,7 +721,7 @@ fn modes_of_what_the_client_keeps() {
         &lines.join("\n"),
         &[],
         &expect![[r#"
-            this machine's key: 700: key 600, key.pub 644
+            this machine's key: 700: alice.us-west-1.known_hosts 644, key 600, key.pub 644
             the saved controller location: 700: lock 600
             the jobs' directories in tmpfs: 700: <id> 700
             the job's directory in tmpfs: 700: config.toml 600, gateway.key 600"#]],
@@ -2772,6 +2793,57 @@ fn enrolment_refused() {
             exit status: Some(1)
             pumpkin: controller `alice` refused this machine's key: ask its admin to add this line under your name in deploy/aws's `members`, and to apply: "<key.pub>". If the key is listed already, run the command again in a minute, once the controller has copied the list
             aws ran: false"#]],
+    );
+}
+
+// What `ls` says, and how its `ssh` checks the host key, where this machine pins the key that the
+// controller published, and where it has none and reads none, as the tests' `aws` answers nothing.
+#[test]
+fn host_key_checked() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    noted(&scratch);
+    let mut lines = Vec::new();
+    for unpinned in [false, true] {
+        if unpinned {
+            fs::remove_file(scratch.0.join("client").join(PINNED_HOST_KEY)).unwrap();
+        }
+        let _ = fs::remove_file(scratch.0.join("bin/argv"));
+        lines.push(ran_by(
+            &scratch,
+            on_client(&scratch, &client, &["ls"]),
+            &["ls"],
+        ));
+        let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+        let mut checks: Vec<&str> = argv
+            .lines()
+            .filter(|line| line.starts_with("UserKnownHostsFile=") || line.starts_with("Strict"))
+            .collect();
+        checks.sort_unstable();
+        checks.dedup();
+        lines.extend(checks.into_iter().map(str::to_owned));
+        lines.push(format!("aws calls: {}", noted(&scratch).len()));
+    }
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            StrictHostKeyChecking=yes
+            UserKnownHostsFile=<scratch>/client/.config/pumpkin/ssh/alice.us-west-1.known_hosts
+            aws calls: 0
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`'s published host key can't be read: `aws --version` failed with exit status: 1 and wrote nothing to standard error: expected it to exit with 0: pinning the key it shows first
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            StrictHostKeyChecking=accept-new
+            UserKnownHostsFile=<scratch>/client/.config/pumpkin/ssh/known_hosts
+            aws calls: 1"#]],
     );
 }
 

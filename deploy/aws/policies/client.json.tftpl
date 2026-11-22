@@ -11,6 +11,15 @@
     },
     {
       "Action": [
+        "ssm:GetParameter"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "${host_key_parameter_arn}"
+      ]
+    },
+    {
+      "Action": [
         "ec2:DescribeInstances"
       ],
       "Effect": "Allow",

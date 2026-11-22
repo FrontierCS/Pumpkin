@@ -63,6 +63,8 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
     if let Some(Deployment { name, members }) = deployment {
         self::members(&members, &name, &mut found.problems);
         filling.set(&iam::MEMBERS, members.as_str().to_owned());
+        let host_key = format!("parameter{}", controller::host_key::parameter(&name));
+        filling.set(&iam::HOST_KEY, filling.arn("ssm", &host_key));
         controller = self::controller(&cli, settings.region(), &name, &mut found);
     }
     let mut principals = Vec::new();

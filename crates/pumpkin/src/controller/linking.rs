@@ -149,13 +149,23 @@ impl Linked {
 impl Reached {
     fn connected(&self, build: &Build, mut found: Found) -> Result<(Linked, Found), String> {
         let mut repaired = false;
+        let mut repinned = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
             let said = match Linked::open(self, build, &found.at) {
                 Ok(link) => return Ok((link, found)),
                 Err(Unlinked::Failed(error)) => return Err(error),
-                Err(Unlinked::HostKey(error)) => {
+                Err(Unlinked::HostKey(mut error)) => {
+                    // A controller that replaced the one pinned publishes its own key.
+                    if self.published && !repinned && attempt < OPENINGS {
+                        repinned = true;
+                        match self.repinned(&error) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(unread) => error = unread,
+                        }
+                    }
                     if !repaired && attempt < OPENINGS {
                         // The cached address may now belong to a different host. Check the pin
                         // against the discovered address before reporting a change there.
@@ -175,7 +185,7 @@ impl Reached {
                 }) => said,
             };
             if attempt == OPENINGS {
-                let hosts = self.kept.join("known_hosts");
+                let hosts = self.known_hosts();
                 let error = format!(
                     "{said}: check SSH access to the controller and the host key pinned for `{}` in {}, then run the command again",
                     self.alias,

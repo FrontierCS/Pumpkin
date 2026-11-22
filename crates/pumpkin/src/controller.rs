@@ -6,6 +6,7 @@ mod aws;
 mod commands;
 mod copy;
 mod follow;
+pub(crate) mod host_key;
 mod linking;
 mod listing;
 mod location;
@@ -125,6 +126,9 @@ pub(crate) struct Reached {
     kept: PathBuf,
     location: Location,
     linked: Option<(linking::Linked, Found)>,
+    /// Whether `ssh` checks the key that the controller published ([`host_key`]), rather than the
+    /// key that it showed first.
+    published: bool,
 }
 
 impl Reached {
@@ -137,6 +141,7 @@ impl Reached {
         let alias = format!("{name}.{}", region.as_str());
         let location = Location::new(Workspace::find()?.controller().join(&alias))?;
         let kept = kept()?;
+        let published = host_key::pinned(&kept, &alias, region, name)?;
         Ok(Self {
             region: region.clone(),
             name: name.clone(),
@@ -144,7 +149,25 @@ impl Reached {
             kept,
             location,
             linked: None,
+            published,
         })
+    }
+
+    /// The `known_hosts` file that pins the controller's host key.
+    fn known_hosts(&self) -> PathBuf {
+        if self.published {
+            host_key::file(&self.kept, &self.alias)
+        } else {
+            self.kept.join("known_hosts")
+        }
+    }
+
+    /// Pins the host key that the controller publishes now, after `said`, a refusal of the key
+    /// pinned. Returns true if that key differs from the one pinned.
+    fn repinned(&self, said: &str) -> Result<bool, String> {
+        let key = host_key::published(&self.region, &self.name);
+        let key = key.map_err(|error| format!("{said}; {error}"))?;
+        host_key::pin(&self.kept, &self.alias, &key)
     }
 
     fn found(&self) -> Result<Found, String> {
@@ -158,6 +181,14 @@ impl Reached {
     }
 
     fn host_refused(&self, said: &str) -> String {
+        if self.published {
+            return format!(
+                "{said}: its host key isn't the one pinned, from SSM parameter `{}`. A replaced \
+                 controller publishes its own there as its install ends: run the command again in \
+                 a few minutes, and if it is still refused, ask its admin",
+                host_key::parameter(&self.name)
+            );
+        }
         let hosts = self.kept.join("known_hosts");
         format!(
             "{said}: verify the host key for controller `{}` with its administrator. If its key changed as expected, unpin the old key: ssh-keygen -R {} -f {}",
@@ -203,7 +234,8 @@ impl Reached {
     fn ssh_options(&self) -> Vec<String> {
         let mut words = vec!["-F".to_owned(), "/dev/null".to_owned(), "-i".to_owned()];
         words.push(self.kept.join("key").display().to_string());
-        let known_hosts = self.kept.join("known_hosts").display().to_string();
+        let known_hosts = self.known_hosts().display().to_string();
+        let checking = if self.published { "yes" } else { "accept-new" };
         words.extend([
             "-o".to_owned(),
             format!("UserKnownHostsFile={known_hosts}"),
@@ -211,11 +243,12 @@ impl Reached {
             // By the controller's name, rather than the instance that the tag finds, so that the
             // tag that names the controller can't lead this machine's key to another instance.
             format!("HostKeyAlias={}", self.alias),
+            "-o".to_owned(),
+            format!("StrictHostKeyChecking={checking}"),
         ]);
         let options = [
             "IdentitiesOnly=yes",
             "BatchMode=yes",
-            "StrictHostKeyChecking=accept-new",
             "LogLevel=ERROR",
             "Compression=no",
             // So that a connection whose other end is gone, as when this machine slept, ends within
