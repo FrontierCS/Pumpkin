@@ -1,0 +1,25 @@
+Run the controller's own commands.
+
+These actions run on the controller. `serve` answers a client's `ssh` link and starts each `job` in
+a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
+
+Usage: pumpkin controller <action>
+
+Actions:
+  job      Run a client's `run` or `build` as a job
+  boot     Reap what lost runs left, at the controller's boot
+  cancel   Cancel a run for a client
+  serve    Answer a client on the standard input and output
+  publish  Upload the runs to the bucket of the public page
+
+Options:
+  -h, --help
+          Print help
+
+Examples:
+  cd ~/trees/tasks/20261108-000905-126a21e9 && \
+    pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 \
+    --parameter /pumpkin-alice/settings \
+    --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 \
+    -- run tasks/bench/task.star --arg model=model-a
+  pumpkin controller boot

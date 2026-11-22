@@ -1,0 +1,13 @@
+Answer a client on the standard input and output.
+
+Each job that `serve` starts belongs to the member that the link acts for. `serve` refuses to cancel
+another member's job unless the client asks for any member's.
+
+Usage: pumpkin controller serve [OPTIONS]
+
+Options:
+      --member <member>
+          The member that the controller's forced command names for the link (default: none)
+
+  -h, --help
+          Print help

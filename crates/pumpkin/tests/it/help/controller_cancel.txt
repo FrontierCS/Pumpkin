@@ -1,0 +1,24 @@
+Cancel a run for a client.
+
+The client then says how the run ended, from its copy of the record.
+
+Usage: pumpkin controller cancel [OPTIONS] <run>
+
+Arguments:
+  <run>
+          The run's id, a prefix of the id or of its last 8 digits that no other run shares, or its
+          record's path with a `/`
+
+Options:
+      --runs <dir>
+          The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)
+
+      --force
+          Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed
+
+  -h, --help
+          Print help
+
+Exit status:
+  102  The run has ended. The client copies its record.
+  103  The run has ended, but one of its providers can't be reached.

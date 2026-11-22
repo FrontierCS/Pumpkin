@@ -16,10 +16,6 @@ use super::check::{task, write_repository, write_variants};
 use super::{Scratch, Step, check, engine, invocation, machine, ran, report};
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
 fn refusals() {
     let scratch = Scratch::new();
     write_repository(&scratch, "");
@@ -37,7 +33,6 @@ fn refusals() {
     };
     let pumpkin = |args: &[&str]| scratch.pumpkin(args);
     let steps = [
-        pumpkin(&["build", "--help"]),
         alone(&["tasks/broken/task.star"]),
         alone(&["tasks/bench/task.star"]),
         alone(&["tasks/bench/task.star", "--config", "absent.toml"]),
@@ -55,39 +50,6 @@ fn refusals() {
         false,
         &[],
         &expect![[r#"
-            $ pumpkin build --help
-            exit status: Some(0)
-            printed:
-              Build a task's images and print its workflow's IR.
-
-              `build` checks the task as `pumpkin check` does. It then builds each image the task declares on the
-              machine's Docker engine. It prints the workflow's IR, which names each image by its ID, as a run's
-              record keeps it in `ir.json`. The standard output holds only the IR, and the builds' output goes to
-              the standard error.
-
-              With `[controller]` in the configuration, the controller builds the task, and `build` prints the IR.
-
-              Usage: pumpkin build [OPTIONS] <entry>
-
-              Arguments:
-                <entry>
-                        A task's entry file, below the nearest directory that holds PUMPKIN.star
-
-              Options:
-                    --arg <name>=<value>
-                        Set the arg that an `arg()` call declares as <name>
-
-                    --config <file>
-                        The machine's configuration, which `pumpkin help config` describes (default:
-                        `$HOME/.config/pumpkin/pumpkin.toml`)
-
-                -h, --help
-                        Print help
-
-              Examples:
-                pumpkin build tasks/bench/task.star --arg model=model-a > workflow.json
-                pumpkin build tasks/bench/task.star --arg model=model-a \
-                  --config pumpkin.toml
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
             lib/bench.star:52:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does

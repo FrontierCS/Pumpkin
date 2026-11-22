@@ -138,6 +138,7 @@ fn listed(repo: &Repo<'_>) -> Result<Vec<String>> {
 
 /// The problems of `paths`: a file under a `tests/` directory that isn't Rust, but for
 /// `crates/lang`'s vendored suites and the `.star` fixtures, which are input and not test data.
+/// The `.txt` snapshots of `pumpkin`'s help are allowed too, as `cargo xtask refill` writes them.
 fn test_data(paths: &[String]) -> Vec<String> {
     let mut problems = Vec::new();
     for path in paths {
@@ -148,7 +149,9 @@ fn test_data(paths: &[String]) -> Vec<String> {
         let extension = file.extension().and_then(|extension| extension.to_str());
         let input = path.starts_with("crates/lang/tests/conformance/")
             || (path.starts_with("crates/lang/tests/fixtures/") && extension == Some("star"));
-        if under_tests && extension != Some("rs") && !input {
+        let snapshot =
+            path.starts_with("crates/pumpkin/tests/it/help/") && extension == Some("txt");
+        if under_tests && extension != Some("rs") && !input && !snapshot {
             problems.push(format!(
                 "{path}: a file that isn't Rust, under a `tests/` directory: make what the test \
                  reads in the test, with Pumpkin's own writer where Pumpkin reads it"

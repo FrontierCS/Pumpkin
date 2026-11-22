@@ -292,7 +292,6 @@ fn tasks() {
     let mut many = vec!["--arg", "model=model-a"];
     many.extend(unused.iter().map(String::as_str));
     let steps = [
-        pumpkin(&["check", "--help"]),
         alone,
         bench(&[
             "--arg=model=model-a",
@@ -345,36 +344,6 @@ fn tasks() {
         false,
         &[],
         &expect![[r#"
-            $ pumpkin check --help
-            exit status: Some(0)
-            printed:
-              Check tasks without building or running them.
-
-              `check` evaluates each task's entry file and the files it loads with the given `--arg`s. Every task
-              gets the same `--arg`s. It then checks each image's recipe and the workflow, and lints the files it
-              read. It says every problem in every task, and prints nothing when it finds none. It reads only
-              files below each task's root. It reaches no Docker engine, network or configuration, so an image's
-              build can still fail.
-
-              Usage: pumpkin check [OPTIONS] <entry>...
-
-              Arguments:
-                <entry>...
-                        A task's entry file, below the nearest directory that holds PUMPKIN.star
-
-              Options:
-                    --arg <name>=<value>
-                        Set the arg that an `arg()` call declares as <name>
-
-                -h, --help
-                        Print help
-
-              Examples:
-                pumpkin check tasks/bench/task.star --arg model=model-a
-                pumpkin check tasks/*/task.star --arg model=model-a
-
-              The lint's rules:
-              https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint
             $ env --unset=HOME PATH=<scratch>/bin pumpkin check tasks/bench/task.star --arg model=model-a
             exit status: Some(0)
             docker was run: false
