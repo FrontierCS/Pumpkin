@@ -29,7 +29,6 @@ use serde_json::{Value, json};
 use stdx::process::Environment;
 use test_support::{BUSYBOX, TestDir, WORKFLOW, files};
 
-mod build;
 mod cancel;
 mod check;
 mod controller;
@@ -344,7 +343,10 @@ fn check(
 }
 
 /// Runs `command` again for up to ten minutes while it fails only because other runs hold the
-/// machine's CPUs.
+/// machine's CPUs, and gives its output without the lines that say an image's build started or
+/// ended.
+// Whether a run builds an image depends on whether the engine has it under its tag already, as
+// an earlier try, or another test's run of the same recipe, leaves it.
 fn with_room(command: &mut Command) -> Output {
     let room = Instant::now() + Duration::from_mins(10);
     loop {
@@ -354,7 +356,18 @@ fn with_room(command: &mut Command) -> Output {
             && stderr.contains("pumpkin: reserving on provider")
             && stderr.contains("run it once");
         if !crowded || Instant::now() >= room {
-            return output;
+            let building = [
+                "pumpkin: building an image in ",
+                "pumpkin: built an image in ",
+            ];
+            let stderr: String = (stderr.lines())
+                .filter(|line| !building.iter().any(|said| line.starts_with(said)))
+                .flat_map(|line| [line, "\n"])
+                .collect();
+            return Output {
+                stderr: stderr.into_bytes(),
+                ..output
+            };
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -1119,17 +1132,6 @@ fn write_docker_record(scratch: &Scratch, id: &str, context: &str, outcome: Opti
     let ready = json!({ "report": { "context": context } });
     let provided = json!({ "providers": { "local": ready } });
     scratch.write(&format!("runs/{id}/provider.json"), &provided);
-}
-
-/// Builds the images of `task` on the engine that `config` names, so that a `run` of it after
-/// finds them by their tags and says nothing of building them.
-fn build_first(scratch: &Scratch, task: &str, config: &str) {
-    let entry = format!("{task}/task.star");
-    let built = scratch
-        .pumpkin(&["build", &entry, "--config", config])
-        .output();
-    let built = built.unwrap();
-    assert!(built.status.success(), "{built:?}");
 }
 
 /// The fixture's workflow with `argv` as the agent's command and no model route, every role

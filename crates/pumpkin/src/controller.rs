@@ -20,7 +20,7 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use ::aws::Region;
-pub(crate) use commands::{build, cancel, here, reap, run, wait};
+pub(crate) use commands::{cancel, here, reap, run, wait};
 pub(crate) use listing::{ls, scratch};
 use location::{Found, Location};
 use serde::Deserialize;

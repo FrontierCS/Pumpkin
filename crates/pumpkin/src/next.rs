@@ -13,7 +13,7 @@ pub(crate) fn run_again(args: &[String]) -> String {
 }
 
 /// `pumpkin <command>` with `flags`, each argument a word, and then `operands`, such as `check`
-/// or `build` of the tasks whose entries are at `operands`, absolute paths.
+/// of the tasks whose entries are at `operands`, absolute paths.
 pub(crate) fn again(command: &str, flags: &[String], operands: &[String]) -> String {
     let words = flags.iter().chain(operands).map(|word| quoted(word));
     format!(

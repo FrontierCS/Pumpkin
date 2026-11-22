@@ -95,15 +95,14 @@ it places each role. The driver writes what it says after the start to `driver.l
 record. Whatever ends `run` before the start ends the driver too. After the start, the run goes on
 without `run`.
 
-`pumpkin build` builds a task's images and prints its workflow's IR, as `ir.json` keeps it, on
-the standard output. It tags each image by the digest of the build's inputs. The image goes in
-`pumpkin/<recipe's directory below the root>`, or for a recipe of the standard library in
-`pumpkin-library/<directory below @pumpkin//>`. An image that the engine already has under its
-tag isn't built again. As many builds run at once as the CPUs that `pumpkin` may run on, as
-Cargo's jobs do. Each build starts once the images it builds on are built. Each build's output is said whole
-as it ends, as `make --output-sync` does. A failed build is said at the `image()` call that
-declares its image. Once one has failed, no other build starts, and those already running are
-waited for.
+The driver tags each image by the digest of the build's inputs. The image goes in `pumpkin/<recipe's
+directory below the root>`, or for a recipe of the standard library in `pumpkin-library/<directory
+below @pumpkin//>`. An image that the engine already has under its tag isn't built again. As many
+builds run at once as the CPUs that `pumpkin` may run on, as Cargo's jobs do. Each build starts once
+the images it builds on are built. A failed build's output is said whole as it ends, as `make
+--output-sync` does. A build that succeeds says only that it ended. A failed build is said at the
+`image()` call that declares its image. Once one has failed, no other build starts, and those
+already running are waited for.
 
 A run outlives a logout unless its engine stops then, as rootless Docker does without
 `loginctl enable-linger`, or logind kills the session's processes (`KillUserProcesses`). Then only
@@ -199,5 +198,5 @@ runs that were cleaned before the cut.
 Every ending that `pumpkin` reports, of a run or of a refusal, ends with the commands to run next,
 each a line that a shell runs as it is: how to follow the run or stop it, how to run the task again
 with the arguments its record keeps, or how to remove what a lost run left. Their paths are made
-absolute. The command that runs a task again builds it as its source is then. A failed `check`,
-`fmt` or `build` ends with the command that retries the entries or files that failed.
+absolute. The command that runs a task again builds it as its source is then. A failed `check`
+or `fmt` ends with the command that retries the entries or files that failed.

@@ -1,4 +1,4 @@
-Run a client's `run` or `build` as a job.
+Run a client's `run` as a job.
 
 `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`. It then
 runs the command there.
@@ -10,7 +10,7 @@ Arguments:
           The job's id, which its run takes
 
   <command>...
-          `run` or `build` with its arguments, but not `--config`, which the job writes
+          `run` with its arguments, but not `--config`, which the job writes
 
 Options:
       --region <region>

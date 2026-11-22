@@ -63,11 +63,6 @@ fn help_help() {
 }
 
 #[test]
-fn build_help() {
-    check(&["build", "--help"], &expect_file!["help/build.txt"]);
-}
-
-#[test]
 fn reap_help() {
     check(&["reap", "--help"], &expect_file!["help/reap.txt"]);
 }

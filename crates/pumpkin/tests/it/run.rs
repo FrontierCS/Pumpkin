@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::thread::{self, JoinHandle};
 use std::{env, fs};
 
@@ -18,13 +18,11 @@ use expect_test::expect;
 use provider::{RunTag, Sweep as _};
 use schema::sandbox::{MODEL_PORT, SANDBOXCTL_PATH};
 use serde_json::{Value, json};
-use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_outputs};
+use test_support::{BUSYBOX, WORKFLOW, docker, docker_context, files, sandboxd, standard_outputs};
 
-use super::build::Labelled;
 use super::{
-    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, build_first, check, containers, copy_tree,
-    docker_table, engine, final_running, invocation, machine, record, report, through_shell,
-    with_room, workflow,
+    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, check, containers, copy_tree, docker_table, engine,
+    final_running, invocation, machine, record, report, through_shell, with_room, workflow,
 };
 
 #[test]
@@ -138,7 +136,6 @@ fn usage() {
               -h, --help     Print help
 
             Rarely needed:
-              build       Build a task's images and print its workflow's IR
               reap        Remove what ended runs left
               controller  Run the controller's own commands
 
@@ -251,7 +248,7 @@ fn usage() {
             pumpkin: to read how to use it: pumpkin help run
             $ pumpkin help bogus
             exit status: Some(2)
-            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `build`, `reap`, `controller`) or a topic (`config`)
+            error: there is no help for `bogus`: expected a command (`check`, `fmt`, `run`, `wait`, `ls`, `cancel`, `view`, `help`, `reap`, `controller`) or a topic (`config`)
 
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help
@@ -1089,9 +1086,6 @@ fn runs_on_docker() {
     scratch.write_task("submits", &workflow("", &["sh", "-c", &submit]));
     scratch.write_task("fails", &workflow("", &["sh", "-c", &submit]));
     scratch.write("fails/final.star", &final_running("exit 1"));
-    for task in ["asks", "exits", "submits", "fails"] {
-        build_first(&scratch, task, "conf/pumpkin.toml");
-    }
     let run = |entry, rest: &[&str]| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", &sandboxd, "--wait"]);
         command.args(rest);
@@ -1237,15 +1231,6 @@ fn writes_only_in_its_workspace() {
     fs::create_dir(&temp).unwrap();
     let before = files(&home);
     let config = ["--config", "pumpkin.toml"];
-    // Built first, as a run that waits for room may find its images built by an earlier try.
-    let mut built = at_home(
-        &scratch,
-        &home,
-        &temp,
-        &[&["build", HELLO], &config[..]].concat(),
-    );
-    let built = built.output().unwrap();
-    assert!(built.status.success(), "{built:?}");
     let mut run = at_home(
         &scratch,
         &home,
@@ -1313,6 +1298,89 @@ fn writes_only_in_its_workspace() {
         {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
         job 0's command 0's standard output:
         job 1's command 0's standard output:"#]].assert_eq(&shown);
+}
+
+#[test]
+#[ignore = "needs Docker: run cargo xtask live docker"]
+#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
+fn unbuilt_on_docker() {
+    let scratch = Scratch::new();
+    let sandboxd = sandboxd().into_os_string().into_string().unwrap();
+    let label = format!("pumpkin.test=unbuilt-{}", std::process::id());
+    let _images = Labelled(label.clone());
+    let mut ir = workflow("", &["true"]);
+    ir["roles"][2]["image"] = json!(RUNNER);
+    scratch.write_task("unbuilt", &ir);
+    let failing = format!(
+        "FROM {BUSYBOX}\nLABEL {label}\nRUN echo failing && echo 'error: the step failed' >&2 && false\n"
+    );
+    for recipe in ["unbuilt/Dockerfile", "unbuilt/runner/Dockerfile"] {
+        scratch.write(recipe, &failing);
+    }
+    let context = docker_context();
+    scratch.write("pumpkin.toml", &machine(&context));
+    let rootful = !engine(&scratch, &context).report().security.rootless;
+    let mut run = scratch.pumpkin(&["run", "unbuilt/task.star", "--sandboxd", &sandboxd]);
+    run.args(["--runs", "runs", "--config", "pumpkin.toml"]);
+    let invoked = invocation(&run);
+    let output = run.output().unwrap();
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    // `pumpkin`'s lines and the problems said once the builds stopped; the lines that say each
+    // build started or ended, in any order; and the rest, what each `docker build` wrote.
+    let (mut said, mut builds, mut written) = (Vec::new(), Vec::new(), Vec::new());
+    let mut problems = false;
+    for line in stderr.lines() {
+        problems |= line.starts_with("unbuilt/");
+        let build = [
+            "pumpkin: building an image in ",
+            "pumpkin: the build of an image in ",
+        ];
+        if build.iter().any(|build| line.starts_with(build)) {
+            builds.push(line);
+        } else if problems || line.starts_with("pumpkin: ") {
+            said.push(line);
+        } else {
+            written.push(line);
+        }
+    }
+    builds.sort_unstable();
+    let output = Output {
+        stderr: said.join("\n").into(),
+        ..output
+    };
+    let echoed = written.iter().any(|line| line.contains("RUN echo failing"));
+    let failed = (written.iter()).any(|line| line.ends_with("error: the step failed"));
+    let lines = [
+        report(invoked, &output, &scratch.0, rootful),
+        format!("the builds said: {builds:#?}"),
+        format!("what `docker build` wrote is said: its step {echoed}, its error {failed}"),
+        format!("a record was made: {}", scratch.0.join("runs").exists()),
+    ];
+    check(
+        &scratch,
+        lines.map(Step::Ran),
+        rootful,
+        &[(&sandboxd[..], "<sandboxd>")],
+        &expect![[r#"
+            $ pumpkin run unbuilt/task.star --sandboxd <sandboxd> --runs runs --config pumpkin.toml
+            exit status: Some(1)
+            unbuilt/task.star:5:9: building the image failed: `docker build` of `Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                5 | IMAGE = image("Dockerfile")
+                  |         ^^^^^^^^^^^^^^^^^^^
+            unbuilt/task.star:6:10: building the image failed: `docker build` of `runner/Dockerfile` failed with exit status: 1: its output above says why: fix what Docker reports
+                6 | RUNNER = image("runner/Dockerfile")
+                  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+            pumpkin: unbuilt/task.star: the task has 2 problems
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <sandboxd> <scratch>/unbuilt/task.star
+            the builds said: [
+                "pumpkin: building an image in pumpkin/unbuilt",
+                "pumpkin: building an image in pumpkin/unbuilt/runner",
+                "pumpkin: the build of an image in pumpkin/unbuilt failed",
+                "pumpkin: the build of an image in pumpkin/unbuilt/runner failed",
+            ]
+            what `docker build` wrote is said: its step true, its error true
+            a record was made: false"#]],
+    );
 }
 
 /// Writes `examples/hello` into `scratch`, with the marker of its root, and with `label` on its
@@ -1492,7 +1560,6 @@ fn leases_on_docker() {
         .insert(1, grant);
     scratch.write_task("leases", &ir);
     scratch.write("pumpkin.toml", &machine(&context));
-    build_first(&scratch, "leases", "pumpkin.toml");
     let mut run = scratch.pumpkin(&["run", "leases/task.star", "--sandboxd", &sandboxd, "--wait"]);
     run.args(["--config", "pumpkin.toml"]);
     let output = with_room(&mut run);
@@ -1599,7 +1666,6 @@ fn final_call_leases_on_docker() {
         format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace && echo 42 > /answers\n");
     scratch.write("isolation/Dockerfile", &recipe);
     scratch.write("pumpkin.toml", &machine(&context));
-    build_first(&scratch, "isolation", "pumpkin.toml");
     let mut run = scratch.pumpkin(&["run", "isolation/task.star", "--sandboxd", &sandboxd]);
     run.args(["--wait", "--config", "pumpkin.toml"]);
     let output = with_room(&mut run);
@@ -1654,7 +1720,6 @@ fn ops_on_docker() {
     scratch.write_task("ops", &ops_workflow());
     scratch.write("ops/final.star", &final_running(OPS_FINAL));
     scratch.write("pumpkin.toml", &machine(&context));
-    build_first(&scratch, "ops", "pumpkin.toml");
     let runs = format!("runs/{},\"quoted\"", "long".repeat(30));
     let mut run = scratch.pumpkin(&["run", "ops/task.star", "--sandboxd", &sandboxd, "--wait"]);
     run.args(["--runs", &runs, "--config", "pumpkin.toml"]);
@@ -1754,4 +1819,26 @@ fn ops_on_docker() {
             job 2's command 0's standard output:
             judged 6 bytes as 65532, with HOME=/pumpkin/home, in /pumpkin/home"#]],
     );
+}
+
+/// The images labelled with this, which dropping it removes by each of their tags.
+struct Labelled(String);
+
+impl Drop for Labelled {
+    // Nothing here panics, as a panic while a failed test unwinds would abort the test binary; a
+    // tag that can't be removed is printed.
+    fn drop(&mut self) {
+        let filter = format!("label={}", self.0);
+        let format = "{{.Repository}}:{{.Tag}}";
+        let listed = docker()
+            .args(["image", "ls", "--filter", &filter, "--format", format])
+            .output();
+        let tags = listed.map(|listed| String::from_utf8_lossy(&listed.stdout).into_owned());
+        for tag in tags.unwrap_or_default().lines() {
+            let removed = docker().args(["image", "rm", "--", tag]).output();
+            if !removed.is_ok_and(|removed| removed.status.success()) {
+                eprintln!("the test's image tag {tag} can't be removed");
+            }
+        }
+    }
 }

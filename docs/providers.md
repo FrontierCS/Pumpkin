@@ -66,15 +66,14 @@ systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the c
 with the same arguments, and `wait` copies an ended run's record back to the machine. A run whose
 copy there has ended needs no controller.
 
-A job of `run` or `build` builds once it takes one of the controller's build slots, one for every
-two of its CPUs. While every slot is taken, it waits. Once a prune has removed the images that no
-job holds, a job refuses to build while more than 85% of the controller's volume is used. `ls`
-says first how long the controller has been up, its jobs, how full its disk is, and whether its
-boot failed. It lists a job that has yet to start its run as `waiting` for a build slot or
-`building`, or as `unstarted` once it has ended without one. It lists this machine's copies of
-runs beside the controller's. `cancel` stops a job whose run has
-yet to start. `cancel` and `reap` send this machine's Modal configuration file, which the boot
-lacks.
+A job builds once it takes one of the controller's build slots, one for every two of its CPUs. While
+every slot is taken, it waits. Once a prune has removed the images that no job holds, a job refuses
+to build while more than 85% of the controller's volume is used. `ls` says first how long the
+controller has been up, its jobs, how full its disk is, and whether its boot failed. It lists a job
+that has yet to start its run as `waiting` for a build slot or `building`, or as `unstarted` once it
+has ended without one. It lists this machine's copies of runs beside the controller's. `cancel`
+stops a job whose run has yet to start. `cancel` and `reap` send this machine's Modal configuration
+file, which the boot lacks.
 
 `view` sends each of the page's requests for the runs' data over one `ssh` to
 `pumpkin controller serve`, a copy of this `pumpkin` that it installs on the controller if needed.

@@ -117,8 +117,7 @@ impl Ask {
     }
 }
 
-/// A job's log in frame bodies, milestones, then its ending. A built IR follows its head in
-/// body parts, so the client can print it whole even after a cut.
+/// A job's log in frame bodies, milestones, then its ending.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Followed {
@@ -126,8 +125,6 @@ pub(crate) enum Followed {
     Said { body_bytes: u64 },
     Ran { writer: Option<String> },
     Unstarted,
-    Built { body_bytes: u64 },
-    Unbuilt,
 }
 
 /// The head of an answer, or of a refusal.
@@ -330,14 +327,6 @@ impl Request for JobsRequest {
     }
 }
 
-/// The command that the job's unit runs, and thus where its log is kept.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum JobKind {
-    Run,
-    Build,
-}
-
 /// The body holds one key per upstream, in name order, the optional Modal file, then the job's
 /// JSON. A repeat of the same id leaves the first job alone.
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -349,7 +338,6 @@ pub(crate) struct StartRequest {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct JobStart {
     pub(crate) id: String,
-    pub(crate) kind: JobKind,
     pub(crate) repo: String,
     pub(crate) tree: Sha256Digest,
     pub(crate) install: Sha256Digest,

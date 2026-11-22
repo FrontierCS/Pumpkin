@@ -3,11 +3,10 @@
 //!
 //! What they read and write lies below the controller user's home: the store of the files that
 //! clients sent, each named by its SHA-256, as `crate::manifest` lays it out; each job's tree,
-//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, and each build's
-//! in `builds/<id>/`, with its configuration, `pumpkin.toml`, which holds no secret, and its unit's
-//! standard error and output, `log` and `out`; the one workspace, `.pumpkin/`, that every tree's
-//! `.pumpkin` links to, which keeps the installed builds, the runs' records, the build
-//! slots and `serve`'s installs.
+//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, with its
+//! configuration, `pumpkin.toml`, which holds no secret, and its unit's standard error and output,
+//! `log` and `out`; the one workspace, `.pumpkin/`, that every tree's `.pumpkin` links to, which
+//! keeps the installed builds, the runs' records, the build slots and `serve`'s installs.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
@@ -50,8 +49,6 @@ pub(crate) use member::{member, write_member};
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
-
-pub(crate) const BUILDS: &str = "builds";
 
 pub(crate) const TREES: &str = "trees";
 
@@ -113,28 +110,23 @@ const IMDS: &str = "http://169.254.169.254/latest";
 // own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs job `job`, in its tree and as its unit does. It assembles the job's
-/// configuration, prunes, builds the task's images under the controller's
-/// build slots, and then runs the task, or builds it for a build job, as the job's command says.
-/// Returns the command's exit status.
+/// Runs job `job`, in its tree and as its unit does. It assembles the job's configuration,
+/// prunes, builds the task's images under the controller's build slots, and then runs the task,
+/// as the job's `run` says. Returns the run's exit status.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
         region,
         parameter,
         tree,
-        command,
+        run,
     } = job;
     let home = crate::home("run the job as the controller's user")?;
     let working = std::env::current_dir().context("finding the job's working directory failed")?;
     materialize(&home, &id, &tree, &working)?;
     let jobs = jobs()?;
     let sent = jobs.join(id.as_str());
-    let (kind, entry, args) = match &command {
-        cli::JobCommand::Run(run) => (JOBS, &run.entry, &run.args.0),
-        cli::JobCommand::Build(build) => (BUILDS, &build.entry, &build.args.0),
-    };
-    let dir = home.join(kind).join(id.as_str());
+    let dir = home.join(JOBS).join(id.as_str());
     fs::create_dir_all(&dir).context(dir.display())?;
     // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
@@ -152,32 +144,20 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     if let Err(error) = prune(&home, &path, &jobs) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
-    build_first(&id, &home, &path, &jobs, entry, args)?;
-    let exit = match command {
-        cli::JobCommand::Run(run) => {
-            let run = cli::Run {
-                config: Some(config),
-                wait: cli::Waiting(None),
-                ..run
-            };
-            // Only one who follows the run reads the job's log.
-            let exit = crate::start(&id, run, crate::Reader::Follower)?;
-            // The run's end is the job's, so that the unit lasts as long as the run.
-            if exit == ExitCode::SUCCESS {
-                let runs = crate::default_runs()?;
-                let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
-                drop(record.wait(|| {})?);
-            }
-            exit
-        }
-        cli::JobCommand::Build(build) => crate::build(
-            cli::Build {
-                config: Some(config),
-                ..build
-            },
-            crate::Reader::Follower,
-        )?,
+    build_first(&id, &home, &path, &jobs, &run.entry, &run.args.0)?;
+    let run = cli::Run {
+        config: Some(config),
+        wait: cli::Waiting(None),
+        ..run
     };
+    // Only one who follows the run reads the job's log.
+    let exit = crate::start(&id, run, crate::Reader::Follower)?;
+    // The run's end is the job's, so that the unit lasts as long as the run.
+    if exit == ExitCode::SUCCESS {
+        let runs = crate::default_runs()?;
+        let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
+        drop(record.wait(|| {})?);
+    }
     Ok(exit)
 }
 
@@ -890,21 +870,12 @@ fn slots_count() -> NonZeroUsize {
     NonZeroUsize::new(cpus / 2).unwrap_or(NonZeroUsize::MIN)
 }
 
-/// The id of the newest job whose IR names each image that one names, a run's in its record's
-/// `ir.json` in `runs` and a build's in its `out` in `home`: ids sort as the jobs' starts do.
+/// The id of the newest job whose IR names each image that one names, in its run's record's
+/// `ir.json` in `runs`: ids sort as the jobs' starts do.
 fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String> {
-    let mut irs = Vec::new();
+    let mut last_used = BTreeMap::new();
     for id in ids(&home.join(JOBS))? {
         let ir = runs.join(&id).join("ir.json");
-        irs.push((id, ir));
-    }
-    for id in ids(&home.join(BUILDS))? {
-        let out = home.join(BUILDS).join(&id).join("out");
-        irs.push((id, out));
-    }
-    irs.sort();
-    let mut last_used = BTreeMap::new();
-    for (id, ir) in irs {
         for image in images(&ir)? {
             last_used.insert(image, id.clone());
         }
@@ -939,10 +910,9 @@ pub(crate) fn disk(path: &str) -> Result<Disk, String> {
 }
 
 /// The images that the IR at `path` names, none if there is no IR there, as of a job that ended
-/// before its run or build did, or a build's `out` that is empty, as a failed build leaves it.
+/// before its run did.
 fn images(path: &Path) -> Result<Vec<Image>, String> {
     let text = match fs::read_to_string(path) {
-        Ok(text) if text.is_empty() => return Ok(Vec::new()),
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("{}: {error}", path.display())),

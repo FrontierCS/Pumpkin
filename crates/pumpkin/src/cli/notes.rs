@@ -65,12 +65,6 @@ Examples:
   pumpkin help run
   pumpkin help config";
 
-pub(super) const BUILD_NOTES: &str = "\
-Examples:
-  pumpkin build tasks/bench/task.star --arg model=model-a > workflow.json
-  pumpkin build tasks/bench/task.star --arg model=model-a \\
-    --config pumpkin.toml";
-
 pub(super) const REAP_NOTES: &str = "\
 Examples:
   pumpkin reap
@@ -97,13 +91,13 @@ Examples:
   pumpkin controller boot";
 
 pub(super) const CONFIG: &str = "\
-pumpkin.toml is the machine's configuration, which `pumpkin run` and `pumpkin
-build` read. It is the file that --config names, by default
-$HOME/.config/pumpkin/pumpkin.toml. It is TOML, with the tables below. Every key
-is required unless it says what its absence means. [gateway] and the
-[upstreams.<name>] tables may be left out. Any other key is refused. On a
-machine whose runs go to the person's controller, [controller] takes the place
-of [docker], [providers.<name>.<kind>] and [gateway].
+pumpkin.toml is the machine's configuration, which `pumpkin run` reads. It is
+the file that --config names, by default $HOME/.config/pumpkin/pumpkin.toml. It
+is TOML, with the tables below. Every key is required unless it says what its
+absence means. [gateway] and the [upstreams.<name>] tables may be left out. Any
+other key is refused. On a machine whose runs go to the person's controller,
+[controller] takes the place of [docker], [providers.<name>.<kind>] and
+[gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -267,7 +261,7 @@ Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
-`ls`, `cancel`, `view`, `build` and `reap` go to it, as each one's help says.
+`ls`, `cancel`, `view` and `reap` go to it, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]
 and Modal's configuration file. They go into a directory of the run's own in
 the controller's tmpfs, which the run's end removes. The job runs the client's

@@ -26,8 +26,8 @@ use provider::RunTag;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
-    BUILD_NOTES, CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES,
-    HELP_NOTES, LS_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
+    LS_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
 use crate::member::Member;
@@ -68,8 +68,8 @@ enum Parsed {
     Fmt(Fmt),
     /// Build a task and start a run of it.
     ///
-    /// `run` starts a driver process, which builds the task as `pumpkin build` does, places each
-    /// role on a provider and drives the run. `run` prints the run's id once the run has started,
+    /// `run` starts a driver process, which builds the task's images, places each role on a
+    /// provider and drives the run. `run` prints the run's id once the run has started,
     /// and the run goes on without `run`.
     ///
     /// With `[controller]` in the configuration, `run` sends the task to the controller, which
@@ -126,17 +126,6 @@ enum Parsed {
         #[arg(value_name = "topic")]
         topic: Option<String>,
     },
-    /// Build a task's images and print its workflow's IR.
-    ///
-    /// `build` checks the task as `pumpkin check` does. It then builds each image the task
-    /// declares on the machine's Docker engine. It prints the workflow's IR, which names each
-    /// image by its ID, as a run's record keeps it in `ir.json`. The standard output holds only
-    /// the IR, and the builds' output goes to the standard error.
-    ///
-    /// With `[controller]` in the configuration, the controller builds the task, and `build`
-    /// prints the IR.
-    #[command(hide = true, after_help = BUILD_NOTES)]
-    Build(Build),
     /// Remove what ended runs left.
     ///
     /// For each run whose driver has ended, `reap` deletes the sandboxes that remain on each
@@ -162,12 +151,12 @@ enum Parsed {
 }
 
 // Hidden from clap's list of commands, so `command` lists them apart.
-const RARE: [&str; 3] = ["build", "reap", "controller"];
+const RARE: [&str; 2] = ["reap", "controller"];
 
 /// The actions of `pumpkin controller`.
 #[derive(Subcommand)]
 enum Action {
-    /// Run a client's `run` or `build` as a job.
+    /// Run a client's `run` as a job.
     ///
     /// `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`.
     /// It then runs the command there.
@@ -187,7 +176,7 @@ enum Action {
         #[arg(long, value_name = "sha256")]
         #[arg(value_parser = tree)]
         tree: Sha256Digest,
-        /// `run` or `build` with its arguments, but not `--config`, which the job writes.
+        /// `run` with its arguments, but not `--config`, which the job writes.
         #[arg(last = true, required = true, value_name = "command")]
         command: Vec<OsString>,
     },
@@ -220,7 +209,6 @@ pub(crate) enum Command {
     Reap(Reap),
     Check(Check),
     Fmt(Fmt),
-    Build(Build),
     View(View),
     Job(Job),
     Boot,
@@ -490,27 +478,12 @@ const ENTRY_HELP: &str = "A task's entry file, below the nearest directory that 
 const CONFIG_HELP: &str = "The machine's configuration, which `pumpkin help config` describes \
                            (default: `$HOME/.config/pumpkin/pumpkin.toml`)";
 
-#[derive(Args)]
-pub(crate) struct Build {
-    #[arg(value_name = "entry", value_parser = entry(), help = ENTRY_HELP)]
-    pub(crate) entry: Entry,
-    #[command(flatten)]
-    pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = CONFIG_HELP)]
-    pub(crate) config: Option<String>,
-}
-
 pub(crate) struct Job {
     pub(crate) id: RunTag,
     pub(crate) region: Region,
     pub(crate) parameter: String,
     pub(crate) tree: Sha256Digest,
-    pub(crate) command: JobCommand,
-}
-
-pub(crate) enum JobCommand {
-    Run(Run),
-    Build(Build),
+    pub(crate) run: Run,
 }
 
 #[derive(Clone)]
@@ -610,7 +583,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
         Parsed::Reap(reap) => Command::Reap(reap),
         Parsed::Check(check) => Command::Check(check),
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
-        Parsed::Build(build) => Command::Build(build),
         Parsed::View(view) => Command::View(view),
         Parsed::Controller {
             action: Action::Boot,
@@ -635,17 +607,16 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             region,
             parameter,
             tree,
-            command: job_command(cli, command)?,
+            run: job_run(cli, command)?,
         }),
         Parsed::Help { topic } => return help_of(cli, topic.as_deref()),
     })
 }
 
-fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCommand, clap::Error> {
+fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap::Error> {
     // The job's command is a whole command line of its own, so it is parsed as one.
     match parse(command).map_err(|refusal| refusal.error)? {
-        Command::Run(run) => Ok(JobCommand::Run(run)),
-        Command::Build(build) => Ok(JobCommand::Build(build)),
+        Command::Run(run) => Ok(run),
         Command::Wait(_)
         | Command::Ls(_)
         | Command::Cancel(_)
@@ -658,7 +629,7 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::CancelFor(_)
         | Command::Serve(_)
         | Command::Print(_) => {
-            let problem = "the job's command is neither `run` nor `build`: give one";
+            let problem = "the job's command isn't `run`: give one";
             let controller = cli.find_subcommand_mut("controller");
             Err(
                 match controller.and_then(|it| it.find_subcommand_mut("job")) {

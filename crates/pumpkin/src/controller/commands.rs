@@ -1,7 +1,7 @@
-//! The commands that a machine whose runs go to a controller makes of it: `run`, `build`,
-//! `wait`, `cancel` and `reap`.
+//! The commands that a machine whose runs go to a controller makes of it: `run`, `wait`,
+//! `cancel` and `reap`.
 //!
-//! A run or build follows its job over a link. An ended run's record is copied into this
+//! A run follows its job over a link. An ended run's record is copied into this
 //! machine's runs directory, where its ending is said.
 
 use std::path::PathBuf;
@@ -16,8 +16,7 @@ use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
 use crate::link::{
-    Ask, CancelAnswer, CancelRequest, Job, JobKind, Jobs, JobsRequest, Owner, ReapRequest,
-    Unanswered,
+    Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
 };
 use crate::workspace::Workspace;
 use crate::{cli, config, next, say};
@@ -72,7 +71,7 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
         id.as_str()
     ));
     let mut reached = Reached::reach(&client.controller)?;
-    let build = send(&mut reached, client, &id, JobKind::Run, &tree, &args)?;
+    let build = send(&mut reached, client, &id, &tree, &args)?;
     let id = id.as_str();
     say(format_args!(
         "run {id} is a job on controller `{name}`, which builds it, then runs it"
@@ -173,9 +172,6 @@ fn follow(
              again: {}",
             next::of_run("wait", None, id)
         )),
-        Finished::Built(_) | Finished::Unbuilt => Err(format!(
-            "job {id} on controller `{name}` is a build: expected a run"
-        )),
     }
 }
 
@@ -242,34 +238,6 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
     let entry = Workspace::find()?.repository().join(below);
     words.push(entry.to_string_lossy().into_owned());
     Ok(words)
-}
-
-/// Sends the task to the controller as a build job and prints its IR once the images are built.
-/// If the connection ends first, the build goes on there.
-pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCode, String> {
-    let cli::Build {
-        entry,
-        args: cli::TaskArgs(args),
-        config: _,
-    } = flags;
-    let id = runtime::new_id(SystemTime::now())?;
-    let tree = tree(&entry, &args)?;
-    let mut reached = Reached::reach(&client.controller)?;
-    let build = send(&mut reached, client, &id, JobKind::Build, &tree, &args)?;
-    let name = &client.controller.name;
-    match follow::job(&mut reached, &build, id.as_str())? {
-        Finished::Built(ir) => {
-            crate::print(&ir).context("printing the IR failed")?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Finished::Unbuilt => Err(format!(
-            "the build on controller `{name}` failed, as its log says above"
-        )),
-        Finished::Ran { .. } | Finished::Unstarted => Err(format!(
-            "job {} on controller `{name}` is a run: expected a build",
-            id.as_str()
-        )),
-    }
 }
 
 /// Stops the run that `run` names on the controller and copies its record once it has ended.
