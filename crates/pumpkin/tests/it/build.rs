@@ -58,63 +58,35 @@ fn refusals() {
             $ pumpkin build --help
             exit status: Some(0)
             printed:
-              Build a task: check its source as `pumpkin check` does, then build each image
-              that it declares on the machine's Docker engine, and print the IR of its
-              workflow, which names each image by its ID.
+              Build a task's images and print its workflow's IR.
+
+              `build` checks the task as `pumpkin check` does. It then builds each image the task declares on the
+              machine's Docker engine. It prints the workflow's IR, which names each image by its ID, as a run's
+              record keeps it in `ir.json`. The standard output holds only the IR, and the builds' output goes to
+              the standard error.
+
+              With `[controller]` in the configuration, the controller builds the task.
 
               Usage: pumpkin build [OPTIONS] <entry>
 
               Arguments:
                 <entry>
-                        The task's entry file, as `pumpkin check` takes it.
+                        A task's entry file, below the nearest directory that holds PUMPKIN.star
 
               Options:
                     --arg <name>=<value>
-                        The value of the arg that an arg() call declares as <name>, as
-                        `pumpkin check` takes it.
+                        Set the arg that an `arg()` call declares as <name>
 
                     --config <file>
-                        The machine's configuration, whose [docker] names the engine; see
-                        `pumpkin help config`.
-                        Default: $HOME/.config/pumpkin/pumpkin.toml
+                        The machine's configuration, which `pumpkin help config` describes (default:
+                        `$HOME/.config/pumpkin/pumpkin.toml`)
 
                 -h, --help
-                        Print this help.
+                        Print help
 
               Examples:
                 pumpkin build tasks/bench/task.star --arg model=model-a > workflow.json
                 pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml
-
-              Exit status:
-                0  The images are built, and the IR printed.
-                1  The task has problems, or an image's build failed, each said at its place;
-                   or another error.
-                2  A usage error.
-              Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-              why, and an exit of 1 then with the command that builds the task again, its
-              paths made absolute. The standard output holds only the IR, as a run's record
-              keeps it in ir.json; the builds' output goes to the standard error.
-
-              Every problem that `check` finds is said before the configuration is read, and
-              so before the engine is reached and any image is built. An image is built from
-              a stage of its context, and tagged by the digest of the build's inputs, in
-              pumpkin/<its recipe's directory below the root>, or, for a recipe of the
-              standard library, in pumpkin-library/<its directory below @pumpkin//>; one that
-              the engine has under its tag already is not built again. Images are built at
-              once, as many as the CPUs of this machine that `pumpkin` may run on, as Cargo's
-              jobs are, even if the engine is another machine's, each once those it is built
-              on are built. All that each build's `docker build` wrote is said at once when it
-              ends, as `make --output-sync` says a job's, then that it ended. A failed build
-              is said at the image() call that declares its image; once one has failed, no
-              other starts but those started with it, and each that runs is waited for, and
-              said if it fails.
-
-              With [controller] in the configuration, `build` sends the task as `pumpkin run`
-              does, follows the build's job on the controller, and prints the IR it printed.
-              A job there, of `run` or `build`, builds once it takes one of the controller's
-              build slots, one for every two of its CPUs, waiting, if each is taken, until one
-              is free; and, once a prune has removed what images no job holds, refuses to
-              build while more than 85% of the controller's volume is used.
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
             lib/bench.star:52:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does

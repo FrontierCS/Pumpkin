@@ -348,63 +348,32 @@ fn tasks() {
             $ pumpkin check --help
             exit status: Some(0)
             printed:
-              Check each task's source: evaluate its entry file, and the files that it loads,
-              with the args given, then check the recipe of each image that it declares, and
-              its workflow, then lint those files, and say every problem found, in all the
-              tasks.
+              Check tasks without building or running them.
+
+              `check` evaluates each task's entry file and the files it loads with the `--arg`s given, the same
+              for every task. It then checks each image's recipe and the workflow, and lints the files it read. It
+              says every problem in every task, and prints nothing when it finds none. It reads only files below
+              each task's root. It reaches no Docker engine, network or configuration, so an image's build can
+              still fail.
 
               Usage: pumpkin check [OPTIONS] <entry>...
 
               Arguments:
                 <entry>...
-                        A task's entry file, a .star file below the root of its repository: the
-                        nearest directory, at or above the entry's, that holds PUMPKIN.star.
-                        Each task is checked with the same args.
+                        A task's entry file, below the nearest directory that holds PUMPKIN.star
 
               Options:
                     --arg <name>=<value>
-                        The value of the arg that an arg() call declares as <name>, read as the
-                        type that it declares. Each arg is given at most once, and one with no
-                        default must be, for each task.
+                        Set the arg that an `arg()` call declares as <name>
 
                 -h, --help
-                        Print this help.
+                        Print help
 
               Examples:
                 pumpkin check tasks/bench/task.star --arg model=model-a
-                pumpkin check tasks/bench/task.star --arg model=model-a --arg deadline=3600
                 pumpkin check tasks/*/task.star --arg model=model-a
 
-              Exit status:
-                0  The check found no problem.
-                1  A task has problems, each said at its place; or another error. Every
-                   task is checked all the same.
-                2  A usage error.
-              Every exit but 0 ends with a `pumpkin:` line on the standard error, which says
-              why, and an exit of 1 then with the command that checks again the tasks that
-              failed, their entries' paths made absolute. On success, `check` prints nothing.
-
-              A problem is said at its file's path below the root, its line and its column,
-              then its source line, with carets under what it is about; a recipe's, at the
-              image() call that declares it. Past 20 problems, the rest are counted.
-
-              The lint, once a task has no other problem, finds in the files that it read
-              mistakes that evaluating them doesn't, as they may lie on paths that the args
-              given don't run: a name loaded but never used; a name bound but never used, as
-              a function's local, or a function or a global whose name starts with `_`; an
-              expression whose value is never used; a name used where a path to the use may
-              not have bound it; a statement never reached; a function that returns a value
-              on some paths but not on others; and what the language refuses once run, as
-              iterating over a string. It holds each file to one convention too: a docstring
-              for the file and for each public function, which names its parameters under
-              `Args:` and says what it returns under `Returns:`; and names in
-              lower_snake_case, constants in UPPER_SNAKE_CASE, and none of `l`, `I` or `O`.
-              It runs the formatter beside `pumpkin`, as `pumpkin fmt` does.
-
-              `check` reads only files below the root, with no symbolic link on the way to
-              them, and PUMPKIN.star holds only comments. It reaches no Docker engine, no
-              network and no configuration, so an image's build may still fail, as on a
-              recipe's step that fails.
+              docs/language.md lists the lint's rules.
             $ env --unset=HOME PATH=<scratch>/bin pumpkin check tasks/bench/task.star --arg model=model-a
             exit status: Some(0)
             docker was run: false

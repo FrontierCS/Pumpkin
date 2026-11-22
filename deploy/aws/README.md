@@ -117,7 +117,9 @@ over HTTPS from a private bucket, at the distribution's own `https://<id>.cloudf
 no login and kept out of search engines. The controller's jobs upload the runs, live and ended.
 
 Three variables in `terraform.tfvars`, which `variables.tf` says, set it up: `public_page`,
-`publish_from_jobs` and `publish_since`, such as `"2026-11-15T00:00:00Z"`.
+`publish_from_jobs` and `publish_since`, such as `"2026-11-15T00:00:00Z"`. Each publish uploads
+what changed since the last one that uploaded all it planned, in an order in which no file names
+one not uploaded yet.
 
 - The controller role's policy `publish`, which `public_page` gives it, has no read and no
   delete. `terraform output -raw public_page` is the address, and `public_bucket` the bucket.

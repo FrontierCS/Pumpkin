@@ -86,16 +86,25 @@ the headers it left behind, never their values.
 and prints the address to open. The page lists the runs, newest first, each with what `ls` says of
 it, and for a run shows its summary, a lane for each sandbox over time, who talks to whom, and its
 log, which it follows while the run is live. Each caller that used a model has a trace: its requests
-as threads of steps, each with what it added and the model's answer.
+as threads of steps, each with what it added and the model's answer. The page's colours follow the
+browser's light or dark setting. The choice in its header overrides that, and the browser keeps
+it. `&scheme=light`, `&scheme=dark` or `&scheme=system` after the token picks one in the address.
 
 The page listens on 127.0.0.1 alone and asks for the token in its address, so neither another
-machine, another user of this one nor another site's page can read the runs. Its only change to a
-run is a cancel, which runs `pumpkin cancel`.
+machine, another user of this one nor another site's page can read the runs. It answers only a
+request that names this machine as its host. Its only change to a run is a cancel, which runs
+`pumpkin cancel --runs <dir> <run>`, or `pumpkin cancel <run>` for a controller's run, and shows
+what that says.
 
 `pumpkin view --export <dir>` writes the runs' data as files that a static copy of the page reads,
-with a stand-in for each sandbox's id, the machine's home and user, and each string of a provider's
-report, as `pumpkin view --help` says; a home, a user or a report's string shorter than 8 bytes is
-kept as it is. A controller deployed with a public page publishes its runs this way as their jobs
+with the page and a `robots.txt` that asks search engines to stay out. Each file that holds a
+reply is deflated, so a host serves it with `Content-Encoding: deflate`. In each reply, a stand-in
+replaces each sandbox's id, as `<sandbox of job-3>`. Another replaces the home and user of this
+machine and of the run's arguments, as `~` and `<user>`. A third replaces each string of a
+provider's report but its Docker engine's and its processors', as `<aws.account>`. A home, a user
+or a report's string shorter than 8 bytes is kept as it is. A file is written only if its bytes
+changed, and a run that had ended at the last export is read no further. The export says how many
+files it wrote. A controller deployed with a public page publishes its runs this way as their jobs
 run, to a page that a team reads at one address; [`deploy/aws`](../deploy/aws/README.md) says how to
 set it up and take a run down.
 

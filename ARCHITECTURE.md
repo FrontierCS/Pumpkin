@@ -456,7 +456,7 @@ that a log names is read only below its record; and it says of a run what the CL
 `progress`, so the page and `ls` never differ.
 
 **Architecture Invariant:** `view` serves the person who started it alone, and changes a run only
-by running `pumpkin cancel`, as `pumpkin view --help` says.
+by running `pumpkin cancel`, as [records](docs/record.md#the-page) says.
 
 **Architecture Invariant:** `view` reads a controller's records where they are, by the `pumpkin`
 of its own build there; the page's files, the token, the `Origin` check and the cancel stay on
@@ -686,7 +686,8 @@ left.
 ### Stop, cancel and reap
 
 A run stops short of its outcome by a signal or a failure (`Stopped`). The driver notes the
-signals that stop a run, which `pumpkin run --help` names (`stdx::signal`), and deletes the run's
+signals that stop a run, which [running](docs/running.md#stopping-runs-and-cleaning-up) names
+(`stdx::signal`), and deletes the run's
 sandboxes before it exits. `pumpkin cancel` signals the driver, waits for the run to end, and reaps
 it.
 

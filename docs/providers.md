@@ -63,7 +63,25 @@ address alone, so it is in the controller's VPC, or routed to it (by peering or 
 `[controller]` sends it each run, over ssh: `pumpkin run` sends the files of the task's
 repository that git lists and the task reaches, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
-with the same arguments, and `wait` copies an ended run's record back to the machine.
+with the same arguments, and `wait` copies an ended run's record back to the machine. A run whose
+copy there has ended needs no controller.
+
+A job of `run` or `build` builds once it takes one of the controller's build slots, one for every
+two of its CPUs. While every slot is taken, it waits. Once a prune has removed the images that no
+job holds, a job refuses to build while more than 85% of the controller's volume is used. `ls`
+says first how long the controller has been up, its jobs, how full its disk is, and whether its
+boot failed. It lists a job that has yet to start its run as `waiting` for a build slot or
+`building`, or as `unstarted` once it has ended without one. `cancel` stops a job whose run has
+yet to start. `cancel` and `reap` send this machine's Modal configuration file, which the boot
+lacks.
+
+`view` sends each of the page's requests for the runs' data over one `ssh` to
+`pumpkin controller serve`, a copy of this `pumpkin` that it installs on the controller if needed.
+It starts the controller if it is stopped. Once the connection has ended, the next request opens
+it again. While that fails, the page says so and asks again after 5 s, then after twice the wait
+before, up to a minute. When the controller has stopped, as an idle one does, the page offers a
+"Start it" button (`aws ec2 start-instances`). Until the controller answers, each request asks EC2
+whether it runs (`aws ec2 describe-instances`). `view --runs` serves the copies that `wait` made.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, what ls reads of each run, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to the view on the controller.](figures/controller-data.svg)
 

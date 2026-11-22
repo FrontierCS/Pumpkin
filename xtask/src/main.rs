@@ -70,35 +70,35 @@ mod flags {
             /// crates and pinned tools on first use.
             cmd ci {}
 
-            /// Writes the figures drawn from the workspace, which `ci` checks are up to date:
-            /// `docs/figures/crates.svg`, of how its crates depend on one another, from
-            /// `cargo metadata`.
+            /// Writes the figures drawn from the workspace, which `ci` checks are up to date. The
+            /// one figure, `docs/figures/crates.svg`, shows how the crates depend on one another.
+            /// It is drawn from `cargo metadata`.
             cmd figures {}
 
-            /// Rewrites the EC2 provider's table of AWS's identity certificates, in
-            /// `providers/ec2/src/identity/certificates.rs`, from AWS's page of them: the one
-            /// command that reaches the network to keep the table, which `ci` tests as it is.
+            /// Rewrites the EC2 provider's table of AWS's identity certificates from AWS's page of
+            /// them. The table is `providers/ec2/src/identity/certificates.rs`, which `ci` tests
+            /// without reaching the network.
             cmd aws-certificates {}
 
-            /// Runs the checks that reach a real environment, which `ci` leaves out: `docker`, the
-            /// tests that need a Docker engine, the static sandboxd or a server elsewhere, ignored
-            /// otherwise, through the Docker context `PUMPKIN_DOCKER_CONTEXT` names, or
-            /// `default`; `ec2` and `modal`, which cost money, a run of `examples/smoke` on that
-            /// provider through the controller that `~/.config/pumpkin/pumpkin.toml` names, with
-            /// Pumpkin at `HEAD`, built by `./pumpkin` in a task repository below the target
-            /// directory: every probe of a sandbox's confinement must pass, every sandbox be
-            /// deleted, and nothing tagged with the run be left on EC2, EventBridge Scheduler or
-            /// Modal, which `pumpkin cancel` then removes.
+            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker`
+            /// runs the ignored tests, which need a Docker engine, the static sandboxd or a server
+            /// elsewhere. They use the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
+            /// `ec2` and `modal` cost money. Each runs `examples/smoke` on that provider through
+            /// the controller that `~/.config/pumpkin/pumpkin.toml` names. `./pumpkin` builds
+            /// Pumpkin at `HEAD` for it in a task repository below the target directory. Every
+            /// probe of a sandbox's confinement must pass, and every sandbox must be deleted. If
+            /// anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
+            /// check fails and runs `pumpkin cancel` to remove it.
             cmd live {
                 /// `docker`, `ec2` or `modal`.
                 required target: String
                 /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
                 /// the smoke's GPU runner needs.
                 optional --gpu-model model: String
-                /// With `ec2` or `modal`, loses the run once the agent holds a lease of each
-                /// grant, by killing its job on the controller, and checks that each sandbox ends
-                /// by itself by the run's hard end, about 95 minutes after its start, and that
-                /// `pumpkin reap` then removes what is left: at most about $1 on EC2, $4 on Modal.
+                /// With `ec2` or `modal`, kills the run's job on the controller once the agent
+                /// holds a lease of each grant. Checks that each sandbox ends by itself at the
+                /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
+                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal.
                 optional --lost
             }
 
@@ -111,8 +111,8 @@ mod flags {
                 optional --caller name: String
             }
 
-            /// Builds the static sandboxd that every sandbox runs, and beside it the static
-            /// ec2-boot that the EC2 provider's image of it holds too, and prints sandboxd's path.
+            /// Builds the static sandboxd that every sandbox runs and prints its path. Also builds
+            /// the static ec2-boot beside it, which the EC2 provider's sandboxd image holds.
             cmd sandboxd {}
 
             /// Builds `pumpkin`, the static sandboxd and ec2-boot, and puts them in `<root>/bin`
@@ -136,10 +136,10 @@ mod flags {
                 optional --publish
             }
 
-            /// Runs cargo-mutants on the working tree's changes: each mutant it reports missed,
-            /// listed in `mutants.out`, is a finding to read, not a failure. Given paths whose
-            /// source the changes leave as it is, it mutates that source whole, and names the
-            /// mutants missed that the tests of the merge base catch.
+            /// Runs cargo-mutants on the working tree's changes. Each missed mutant, which
+            /// `mutants.out` lists, is a finding to read, not a failure. Given paths that the
+            /// changes leave as they are, it mutates their source whole. It then names the missed
+            /// mutants that the tests of the merge base catch.
             cmd mutants {
                 /// The paths whose changes alone are taken, if any are given.
                 repeated paths: PathBuf
@@ -149,8 +149,7 @@ mod flags {
             }
 
             /// Runs a package's tests with `UPDATE_EXPECT=1`, which rewrites each snapshot that
-            /// differs in this checkout, then prints `git diff --stat` of what changed, to read
-            /// before keeping it.
+            /// differs. Then prints `git diff --stat`, so you read the changes before keeping them.
             cmd refill {
                 /// The package whose tests run.
                 required -p, --package package: String

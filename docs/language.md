@@ -159,8 +159,23 @@ it. A body's call is an evaluation of its own, bounded the same.
 
 ## Formatting and the lint
 
-`pumpkin fmt` formats `.star` files in the one style the language's files are written in, and
-`pumpkin check` lints the files it reads: names loaded or bound but never used, statements never
-reached, a function that returns a value on some paths only, and a docstring for each file and
-each public function, which names its parameters under `Args:` and says what it returns under
-`Returns:`. `pumpkin check --help` lists every rule.
+`pumpkin fmt` formats `.star` files in the one style the language's files are written in. It runs
+the formatter that ships beside `pumpkin`, which reads no configuration, so every `.star` file is
+written alike.
+
+Once a task has no other problem, `pumpkin check` lints the files it read. The lint finds
+mistakes that evaluating them doesn't, since they may lie on paths that the args given don't run:
+
+- a name loaded but never used;
+- a name bound but never used, as a function's local, or a function or a global whose name starts
+  with `_`;
+- an expression whose value is never used;
+- a name used where a path to the use may not have bound it;
+- a statement never reached;
+- a function that returns a value on some paths but not on others;
+- what the language refuses once run, such as iterating over a string.
+
+It also holds each file to one convention: a docstring for the file and for each public function,
+which names its parameters under `Args:` and says what it returns under `Returns:`; names in
+`lower_snake_case`, constants in `UPPER_SNAKE_CASE`, and none of `l`, `I` or `O`. It runs the
+formatter as `pumpkin fmt` does.

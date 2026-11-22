@@ -3,9 +3,9 @@
 //! stands in for it, never a pattern, so that a text that merely looks like such a value, such
 //! as an id an agent wrote, is left as it is. The record itself is never changed.
 //!
-//! The exporter reads the values here, from the process and from each record, as `pumpkin view
-//! --help` says of `--export`; what only the machine that publishes knows, such as its own
-//! addresses, the publisher gives ([`Scrub::replace`]).
+//! The exporter reads the values here, from the process and from each record, as
+//! `docs/record.md` says of `--export`; what only the machine that publishes knows, such as its
+//! own addresses, the publisher gives ([`Scrub::replace`]).
 
 use std::path::Component;
 

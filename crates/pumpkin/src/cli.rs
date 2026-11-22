@@ -1,9 +1,11 @@
 //! `pumpkin`'s command line: [`parse`] reads it with clap into a [`Command`], each command a
 //! struct of its operands and flags.
 //!
-//! The help texts here are the home of what each command and option means. `-h` or `--help`
-//! before `--` prints the help of the command that the line names, as `pumpkin help` does, which
-//! also prints the topics, such as [`CONFIG`]. The commands that [`RARE`] names are hidden from
+//! The doc comments of the commands and their arguments are the help texts, as clap reads them:
+//! the first line is the summary. They say what each command and option means, and the guides in
+//! `docs/` say how the commands fit together. `-h` or `--help` before `--` prints the help of the
+//! command that the line names, as `pumpkin help` does, which also prints the topics, such as
+//! [`CONFIG`]. The commands that [`RARE`] names are hidden from
 //! clap's list and listed apart.
 //! What a command does is left to its own module.
 
@@ -33,14 +35,14 @@ use crate::member::Member;
 use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
-/// A command, as clap parses it.
+/// Run workflows of agents in sandboxes.
+///
+/// In each run, an agent works in a sandbox and a final call judges what it submits. The
+/// repository's `.pumpkin` directory holds the runs' records and the state of builds and
+/// providers. A command's `--runs` names another directory for the records.
 #[derive(Parser)]
 #[command(
     name = "pumpkin",
-    about = "\
-Run workflows: in each run, an agent works in a sandbox, and a final call judges
-what it submits. The repository's .pumpkin directory holds build and provider
-state and the runs' records, unless --runs names another directory.",
     disable_help_flag = true,
     disable_help_subcommand = true,
     disable_version_flag = true,
@@ -48,91 +50,109 @@ state and the runs' records, unless --runs names another directory.",
     subcommand_help_heading = "Commands"
 )]
 enum Parsed {
-    #[command(about = "Check tasks' sources, building and running nothing")]
-    #[command(long_about = "\
-Check each task's source: evaluate its entry file, and the files that it loads,
-with the args given, then check the recipe of each image that it declares, and
-its workflow, then lint those files, and say every problem found, in all the
-tasks.")]
+    /// Check tasks without building or running them.
+    ///
+    /// `check` evaluates each task's entry file and the files it loads with the `--arg`s given,
+    /// the same for every task. It then checks each image's recipe and the workflow, and lints
+    /// the files it read. It says every problem in every task, and prints nothing when it finds
+    /// none. It reads only files below each task's root. It reaches no Docker engine, network or
+    /// configuration, so an image's build can still fail.
     #[command(after_help = CHECK_NOTES)]
-    #[command(mut_arg(ARG, |arg| arg.help(CHECK_ARG)))]
     Check(Check),
-    #[command(about = "Format the workflow language's `.star` files")]
-    #[command(long_about = "\
-Format each `.star` file named, and each below a directory named, in place, in
-the one style that the workflow language's files are written in.")]
+    /// Format `.star` files.
+    ///
+    /// `fmt` rewrites each `.star` file in the one style of the workflow language. It formats the
+    /// files it is given and the `.star` files below the directories it is given. It skips names
+    /// that start with `.` and files that a symbolic link leads to. It prints nothing on success.
     #[command(after_help = FMT_NOTES)]
     Fmt(Fmt),
-    #[command(about = "Build a task's images, and start a run of it")]
-    #[command(long_about = "\
-Build a task as `pumpkin build` does, then start a run of its workflow, and print
-the run's id once it has started.")]
+    /// Build a task and start a run of it.
+    ///
+    /// `run` builds the task as `pumpkin build` does. It then starts a driver process, which places
+    /// each role on a provider and drives the run. `run` prints the run's id once the run has
+    /// started, and the run goes on without `run`.
+    ///
+    /// With `[controller]` in the configuration, `run` sends the task to the controller, which
+    /// builds and runs it. `--runs` and `--sandboxd` are then refused.
     #[command(after_help = RUN_NOTES)]
     Run(Run),
-    #[command(about = "Wait until a run has ended, and say how it ended")]
-    #[command(long_about = "Wait until a run has ended, then say how it ended.")]
+    /// Wait for a run to end and say how it ended.
+    ///
+    /// While the run goes on, `wait` says each of its milestones on the standard error. Once the
+    /// run has ended, `wait` says its summary and the command that runs it again. Ending `wait`
+    /// doesn't stop the run, but `pumpkin cancel` does.
+    ///
+    /// With `[controller]` in the configuration and no `--runs`, `wait` follows the run on the
+    /// controller. It then copies the record into the default runs directory.
     #[command(after_help = WAIT_NOTES)]
     Wait(Wait),
-    #[command(about = "List the runs and their states")]
-    #[command(long_about = "\
-List the runs in --runs, oldest first, a line for each, then a line of totals:
-without a prefix, those that are live or ended within the last day, and the
-line of totals says how many others there are, and how to list them. A live
-run's line gives its phase, how long it has been in it, the bound at which
-Pumpkin ends the phase, its task, and what it does; an ended run's, its state,
-how long it ran, its task, and the values its result shows.")]
+    /// List runs and their states.
+    ///
+    /// `ls` prints a line for each run, oldest first, then a line of totals. Without a prefix, it
+    /// lists the runs that are live or ended within the last day, and the totals say how to list
+    /// the others. A live run's line gives its phase and the bound on it. An ended run's line
+    /// gives its state, how long it ran and its result's values. If a run can't be listed, `ls`
+    /// says why and lists the others.
+    ///
+    /// With `[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs.
     #[command(after_help = LS_NOTES)]
     Ls(Ls),
-    #[command(about = "Stop a run, and remove what it left")]
-    #[command(long_about = "\
-Stop a run, wait until it has ended, remove what it left, and say how it ended.")]
+    /// Stop a run and remove what it left.
+    ///
+    /// `cancel` sends SIGTERM to a live run's driver and waits for the run to end. Ending `cancel`
+    /// doesn't end the stop. `cancel` then removes what the run left, as `pumpkin reap` does, and
+    /// says how the run ended. A run that has ended or is lost gets no signal.
+    ///
+    /// With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the
+    /// controller. It then copies the record here, as `pumpkin wait` does.
     #[command(after_help = CANCEL_NOTES)]
     Cancel(CancelRun),
-    #[command(about = "Serve the runs' records to this machine's browser")]
-    #[command(long_about = "\
-Serve the runs in --runs, or a controller's, to a browser on this machine, until
-it is stopped, and print the address to open: a page that lists the runs as
-`ls` does, newest first, and shows a run's summary, its sandboxes' lanes, who
-talks to whom, and its log, which it follows while the run is live.")]
+    /// Serve the runs to this machine's browser.
+    ///
+    /// `view` prints the address to open and serves until a signal stops it. The page lists the
+    /// runs as `ls` does. A run's page shows its summary, its sandboxes' lanes, who talks to whom
+    /// and its log. The page listens on 127.0.0.1 alone and asks for the token in its address. It
+    /// changes a run only by a cancel, which runs `pumpkin cancel`.
+    ///
+    /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
+    /// runs.
     #[command(after_help = VIEW_NOTES)]
     View(View),
-    #[command(about = "Print the help of a command or a topic")]
-    #[command(long_about = "\
-Print the help of a command or a topic, or `pumpkin --help` without one.")]
+    /// Print the help of a command or a topic.
+    ///
+    /// Without a command or a topic, `help` prints what `pumpkin --help` does.
     #[command(after_help = HELP_NOTES)]
     Help {
+        /// A command, or the topic `config`.
         #[arg(value_name = "topic")]
-        #[arg(help = "A command, or a topic: `config`, the machine's configuration.")]
         topic: Option<String>,
     },
-    #[command(
-        hide = true,
-        about = "Build a task's images, and print its workflow's IR"
-    )]
-    #[command(long_about = "\
-Build a task: check its source as `pumpkin check` does, then build each image
-that it declares on the machine's Docker engine, and print the IR of its
-workflow, which names each image by its ID.")]
-    #[command(after_help = BUILD_NOTES)]
+    /// Build a task's images and print its workflow's IR.
+    ///
+    /// `build` checks the task as `pumpkin check` does. It then builds each image the task
+    /// declares on the machine's Docker engine. It prints the workflow's IR, which names each
+    /// image by its ID, as a run's record keeps it in `ir.json`. The standard output holds only
+    /// the IR, and the builds' output goes to the standard error.
+    ///
+    /// With `[controller]` in the configuration, the controller builds the task.
+    #[command(hide = true, after_help = BUILD_NOTES)]
     Build(Build),
-    #[command(hide = true, about = "Remove what the runs that have ended left")]
-    #[command(long_about = "\
-Remove what ended or lost runs left and print the run ids reported as cleaned.")]
-    #[command(after_help = REAP_NOTES)]
+    /// Remove what ended runs left.
+    ///
+    /// For each run whose driver has ended, `reap` deletes the sandboxes that remain on each
+    /// provider it ran on. It removes the run's socket directories and records a lost run as
+    /// failed. It leaves a live run to its driver. If a run can't be reaped, `reap` says why and
+    /// reaps the others. It prints the ids of the runs it cleaned.
+    ///
+    /// With `[controller]` in the configuration and no `--runs`, `reap` reaps the controller's
+    /// runs that this build made.
+    #[command(hide = true, after_help = REAP_NOTES)]
     Reap(Reap),
-    #[command(
-        hide = true,
-        about = "The controller's own side of the controller target"
-    )]
-    #[command(long_about = "\
-On the controller: `job` runs a job of the controller target, which `pumpkin
-run` and `pumpkin build` start there in a unit of its own; `boot` reaps what
-lost runs left, at the controller's boot; `cancel` cancels a run for `pumpkin
-cancel`, on a client, which says the run's ending from its copy of the record;
-`serve` answers, on its standard input and output, the client that follows a
-job, lists the runs or views them; and `publish` uploads the runs to the bucket
-of the public page.")]
-    #[command(after_help = CONTROLLER_NOTES)]
+    /// Run the controller's side of a client's commands.
+    ///
+    /// These actions run on the controller. A client's commands start them over `ssh`, and the
+    /// controller's boot runs `boot`.
+    #[command(hide = true, after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
     Controller {
@@ -147,92 +167,77 @@ const RARE: [&str; 3] = ["build", "reap", "controller"];
 /// The actions of `pumpkin controller`.
 #[derive(Subcommand)]
 enum Action {
-    #[command(about = "Run a job of the controller target")]
+    /// Run a client's `run` or `build` as a job.
+    ///
+    /// `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`.
+    /// It then runs the command there in a unit of its own.
     Job {
+        /// The job's id, which its run takes.
         #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
-        #[arg(help = "The job's id, which its run takes.")]
         id: RunTag,
+        /// The controller's AWS region.
         #[arg(long, value_name = "region")]
         #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
-        #[arg(help = "The controller's AWS region.")]
         region: Region,
+        /// The SSM parameter that holds the controller's settings.
         #[arg(long, value_name = "name")]
         #[arg(value_parser = utf8(", as every SSM parameter's name is: name one that is"))]
-        #[arg(help = "The SSM parameter that holds the controller's settings.")]
         parameter: String,
+        /// The SHA-256 of the manifest of the job's tree in the controller's store.
         #[arg(long, value_name = "sha256")]
         #[arg(value_parser = tree)]
-        #[arg(help = "\
-The SHA-256 of the manifest of the job's tree, in the controller's store, from
-which the job makes the tree in its working directory, which is to be the tree's
-directory, trees/<repository>/<id> in the home, that the job's start made.")]
         tree: Sha256Digest,
+        /// `run` or `build` with its arguments, but not `--config`, which the job writes.
         #[arg(last = true, required = true, value_name = "command")]
-        #[arg(help = "\
-`run` or `build` and their arguments, but `--config`, which the job
-writes.")]
         command: Vec<OsString>,
     },
-    #[command(about = "Reap what lost runs left, at the controller's boot")]
+    /// Reap what lost runs left, at the controller's boot.
     Boot,
-    #[command(about = "Cancel a run for a client, which says its ending")]
+    /// Cancel a run for a client.
+    ///
+    /// The client then says how the run ended, from its copy of the record.
     Cancel(Cancel),
-    #[command(about = "Answer a client's link, on the standard input and output")]
+    /// Answer a client on the standard input and output.
+    ///
+    /// Each job that `serve` starts belongs to the member that the link acts for. `serve` refuses
+    /// to cancel another member's job unless the client asks for any member's.
     Serve {
+        /// The member that the controller's forced command names for the link (default: none).
         #[arg(long, value_name = "member")]
         #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
-        #[arg(help = "\
-The member that the link acts for, as the controller's forced command names
-them, which `serve` trusts: each job it starts is theirs, and it refuses to
-cancel another member's job unless asked to.
-Default: none, for a link that names no member")]
         member: Option<Member>,
     },
-    #[command(about = "Upload the runs to the bucket of the public page")]
-    #[command(long_about = PUBLISH_ABOUT, after_help = PUBLISH_NOTES)]
+    /// Upload the runs to the bucket of the public page.
+    ///
+    /// `publish` exports the runs into `public/` beside `--runs`, as `pumpkin view --export` does.
+    /// It leaves out runs that started before `--since`, and replaces each controller address.
+    /// It then uploads with `aws` what changed since the last publish that uploaded all it
+    /// planned. It deletes nothing, so its credentials need only list the bucket and put objects.
+    /// One publish runs at a time, and another waits for it.
+    #[command(after_help = PUBLISH_NOTES)]
     Publish(Publish),
 }
 
-const PUBLISH_ABOUT: &str = "\
-Upload the runs in --runs to an S3 bucket, from which a static copy of the
-view's page serves them: export them, as `pumpkin view --export` does, but those
-that started before --since, into public/ beside --runs, with each of the
-controller's addresses replaced too; then upload, with `aws`, AWS CLI v2, in
---region, what changed since the last publish that uploaded all it planned, in
-an order in which no file names one not uploaded yet.
-It deletes nothing, so the credentials that `aws` finds need only list the
-bucket and put objects there. One publish at a time: this one waits for another
-that runs. A run's job on the controller publishes every minute while its
-run is live, and once more as it ends, as [publish] in the controller's settings
-says (`pumpkin help config`).";
-
-/// What `pumpkin controller publish` is asked for, as its help says.
+// Its doc would become the help of `pumpkin controller publish`, which the variant's replaces.
 #[derive(Args)]
 pub(crate) struct Publish {
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
-The directory of the runs to publish.
-Default: runs/ in the repository's .pumpkin directory")]
+    /// The directory of the runs to publish (default: `.pumpkin/runs`).
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
-    #[arg(long, value_name = "name", help = "The S3 bucket to upload to.")]
+    /// The S3 bucket to upload to.
+    #[arg(long, value_name = "name")]
     #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
     pub(crate) bucket: Bucket,
-    #[arg(long, value_name = "region", help = "The bucket's AWS region.")]
+    /// The bucket's AWS region.
+    #[arg(long, value_name = "region")]
     #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
     pub(crate) region: Region,
+    /// Leave out the runs that started before this RFC 3339 instant, such as
+    /// 2026-11-15T00:00:00Z.
     #[arg(long, value_name = "instant", value_parser = |since: &str| since.parse::<Since>())]
-    #[arg(help = "\
-An instant, as RFC 3339 writes one, such as 2026-11-15T00:00:00Z: a run that
-started before it, as its id says, is not published.
-Default: every run")]
     pub(crate) since: Option<Since>,
-    #[arg(
-        long = "controller-address",
-        value_name = "ipv4",
-        help = "\
-An IPv4 address of the controller that ran the runs, which becomes
-<controller> in what is published; given once for each.
-Default: none"
-    )]
+    /// An IPv4 address of the controller, which becomes `<controller>` in what is published.
+    #[arg(long = "controller-address", value_name = "ipv4")]
     pub(crate) controller_addresses: Vec<Ipv4Addr>,
 }
 
@@ -258,11 +263,6 @@ pub(crate) enum Command {
 
 const ARG: &str = "arg";
 
-const CHECK_ARG: &str = "\
-The value of the arg that an arg() call declares as <name>, read as the
-type that it declares. Each arg is given at most once, and one with no
-default must be, for each task.";
-
 /// The `--arg` flag of the commands that evaluate a task, each value read as
 /// [`lang::Args::parse`] reads it.
 pub(crate) struct TaskArgs(pub(crate) lang::Args);
@@ -270,11 +270,8 @@ pub(crate) struct TaskArgs(pub(crate) lang::Args);
 impl Args for TaskArgs {
     fn augment_args(command: clap::Command) -> clap::Command {
         let arg = Arg::new(ARG).long(ARG).value_name("name>=<value");
-        let arg = arg.action(ArgAction::Append).help(
-            "\
-The value of the arg that an arg() call declares as <name>, as
-`pumpkin check` takes it.",
-        );
+        let arg = arg.action(ArgAction::Append);
+        let arg = arg.help("Set the arg that an `arg()` call declares as <name>");
         let utf8 = utf8(", as every arg's name and value is: give it in UTF-8");
         command.arg(arg.value_parser(utf8))
     }
@@ -310,11 +307,8 @@ const OUTCOME: &str = "outcome";
 impl Args for Printed {
     fn augment_args(command: clap::Command) -> clap::Command {
         let outcome = Arg::new(OUTCOME).long(OUTCOME).action(ArgAction::SetTrue);
-        command.arg(outcome.help(
-            "\
-Also print the run's outcome.json on the standard output once it has
-ended.",
-        ))
+        command
+            .arg(outcome.help("Print the run's outcome.json on the standard output once it ends"))
     }
 
     fn augment_args_for_update(command: clap::Command) -> clap::Command {
@@ -344,11 +338,8 @@ pub(crate) struct Waiting(pub(crate) Option<Printed>);
 
 impl Args for Waiting {
     fn augment_args(command: clap::Command) -> clap::Command {
-        let wait = Arg::new(WAIT).long(WAIT).action(ArgAction::SetTrue).help(
-            "\
-Follow the run to its end, as `pumpkin wait` does, rather than print
-its id.",
-        );
+        let wait = Arg::new(WAIT).long(WAIT).action(ArgAction::SetTrue);
+        let wait = wait.help("Follow the run to its end and exit as `pumpkin wait` does");
         let command = Printed::augment_args(command.arg(wait));
         command.mut_arg(OUTCOME, |outcome| outcome.requires(WAIT))
     }
@@ -396,25 +387,18 @@ fn entry() -> impl TypedValueParser<Value = Entry> {
 /// same files.
 #[derive(Args)]
 pub(crate) struct Run {
-    #[arg(value_name = "entry", value_parser = entry())]
-    #[arg(help = "The task's entry file, as `pumpkin check` takes it.")]
+    #[arg(value_name = "entry", value_parser = entry(), help = ENTRY_HELP)]
     pub(crate) entry: Entry,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "dir", value_parser = utf8(RECORDED), help = "\
-The directory runs are recorded in, each in <dir>/<id>.
-Default: runs/ in the repository's .pumpkin directory")]
+    /// The directory to record runs in, each in `<dir>/<id>` (default: `.pumpkin/runs`).
+    #[arg(long, value_name = "dir", value_parser = utf8(RECORDED))]
     pub(crate) runs: Option<String>,
-    #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = "\
-The machine's configuration; see `pumpkin help config`.
-Default: $HOME/.config/pumpkin/pumpkin.toml")]
+    #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = CONFIG_HELP)]
     pub(crate) config: Option<String>,
-    #[arg(long, value_name = "path", value_parser = utf8(RECORDED), help = "\
-The static sandboxd that every sandbox runs, as `cargo xtask sandboxd`
-builds it, with the static ec2-boot beside it, which an ec2 provider's
-instances boot with.
-Default: the one beside this pumpkin, where `cargo xtask build` puts
-both")]
+    /// The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:
+    /// the one beside `pumpkin`).
+    #[arg(long, value_name = "path", value_parser = utf8(RECORDED))]
     pub(crate) sandboxd: Option<String>,
     #[command(flatten)]
     pub(crate) wait: Waiting,
@@ -440,14 +424,10 @@ impl Run {
     }
 }
 
-const RUN_HELP: &str = "\
-The run: its id; a prefix of its id, or of the 8 hexadecimal digits that
-end it, that no other run in --runs shares; or its record's path, which
-has a `/`.";
+const RUN_HELP: &str = "The run's id, a prefix of the id or of its last 8 digits that no other \
+                        run shares, or its record's path with a `/`";
 
-const RUNS_HELP: &str = "\
-The directory that <run> is looked up in.
-Default: runs/ in the repository's .pumpkin directory";
+const RUNS_HELP: &str = "The directory to look the run up in (default: `.pumpkin/runs`)";
 
 /// Its paths are UTF-8, as those of `ls`, `cancel` and `reap` are, so that a command that names
 /// them names the same files.
@@ -461,55 +441,26 @@ pub(crate) struct Wait {
     pub(crate) printed: Printed,
 }
 
-/// What `pumpkin view` is asked for, as `pumpkin view --help` says.
 #[derive(Args)]
 pub(crate) struct View {
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
-The directory of the runs to serve.
-Default: runs/ in the repository's .pumpkin directory")]
+    /// The directory of the runs to serve (default: `.pumpkin/runs`).
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
-    #[arg(
-        long,
-        value_name = "port",
-        help = "\
-The port to serve at, on 127.0.0.1.
-Default: one that is free, which `view` says"
-    )]
+    /// The port on 127.0.0.1 to serve at (default: a free one).
+    #[arg(long, value_name = "port")]
     pub(crate) port: Option<u16>,
-    #[arg(
-        long,
-        value_name = "dir",
-        conflicts_with = "port",
-        help = "\
-Serve nothing: write into <dir> the runs' data as files that a static
-copy of the page reads, with the page, and a robots.txt that asks
-search engines to stay out. Each file that holds a reply that the page
-reads, as `pumpkin view` answers it, is deflated: a host
-serves it with `Content-Encoding: deflate`. In each reply, a stand-in
-replaces each sandbox's id, as `<sandbox of job-3>`; the home and user
-of this machine and of the run's arguments, as `~` and `<user>`; and
-each string of a provider's report but its Docker engine's and its
-processors', as `<aws.account>`; a home, user or report's string only if
-8 bytes or more. A file is written only if its bytes changed, one whose
-reply can't change only once, and a run that had ended at the last
-export is read no further. Says how many files it wrote.
-Default: serve the runs"
-    )]
+    /// Write the runs' data and a static copy of the page into `<dir>` instead of serving them.
+    #[arg(long, value_name = "dir", conflicts_with = "port")]
     pub(crate) export: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub(crate) struct Ls {
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
-The directory of the runs to list.
-Default: runs/ in the repository's .pumpkin directory")]
+    /// The directory of the runs to list (default: `.pumpkin/runs`).
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
-    /// The prefixes of the ids of the runs to list, or none for every run.
+    /// A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`.
     #[arg(value_name = "prefix", value_parser = utf8(", as every id is: name a prefix of an id"))]
-    #[arg(help = "\
-A prefix of the ids of the runs to list, such as a day's or an hour's,
-as ids start with the UTC time of their `pumpkin run`.
-Default: every run")]
     pub(crate) prefixes: Vec<String>,
 }
 
@@ -518,13 +469,8 @@ Default: every run")]
 pub(crate) struct CancelRun {
     #[command(flatten)]
     pub(crate) cancel: Cancel,
-    #[arg(
-        long,
-        help = "\
-Name the run among every member's runs on the controller. Without it, a
-prefix or an id is matched among this member's runs, and those that no member
-started, and a run of another member's is refused."
-    )]
+    /// Match the run among every member's runs on the controller, not only this member's.
+    #[arg(long)]
     pub(crate) any_member: bool,
 }
 
@@ -534,14 +480,8 @@ pub(crate) struct Cancel {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
-    #[arg(
-        long,
-        help = "\
-End the run's driver at once, by SIGKILL, rather than stop the run by
-SIGTERM; the run is then lost, and recorded as failed. A create that the
-driver had given up on may still make a sandbox after `cancel` has
-ended, which `pumpkin reap` removes."
-    )]
+    /// Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed.
+    #[arg(long)]
     pub(crate) force: bool,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
@@ -549,9 +489,8 @@ ended, which `pumpkin reap` removes."
 
 #[derive(Args)]
 pub(crate) struct Reap {
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = "\
-The directory of the runs to reap.
-Default: runs/ in the repository's .pumpkin directory")]
+    /// The directory of the runs to reap (default: `.pumpkin/runs`).
+    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
@@ -559,16 +498,12 @@ Default: runs/ in the repository's .pumpkin directory")]
 
 // Hidden: only the controller target gives `--modal-config`, as a job's Modal configuration
 // file goes with the job, and the client sends it again.
-const MODAL_CONFIG_HELP: &str = "\
-Modal's configuration file, read for each provider of kind modal in place of
-the one that the configuration of the run names.";
+const MODAL_CONFIG_HELP: &str = "Modal's configuration file, in place of the one that the run's \
+                                 configuration names";
 
 #[derive(Args)]
 pub(crate) struct Check {
-    #[arg(value_name = "entry", required = true, value_parser = entry(), help = "\
-A task's entry file, a .star file below the root of its repository: the
-nearest directory, at or above the entry's, that holds PUMPKIN.star.
-Each task is checked with the same args.")]
+    #[arg(value_name = "entry", required = true, value_parser = entry(), help = ENTRY_HELP)]
     pub(crate) entries: Vec<Entry>,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
@@ -576,35 +511,26 @@ Each task is checked with the same args.")]
 
 #[derive(Args)]
 pub(crate) struct Fmt {
-    /// The files and directories to format, as given; none for the working directory.
-    #[arg(value_name = "path", value_parser = utf8(NAMED_NEXT), help = "\
-A `.star` file, or a directory, each `.star` file below which is
-formatted, but those whose name, or that of a directory on the way to
-them, starts with `.`, and those that a symbolic link leads to.
-Default: the working directory")]
+    /// A `.star` file or a directory to format (default: the working directory).
+    #[arg(value_name = "path", value_parser = utf8(NAMED_NEXT))]
     pub(crate) paths: Vec<String>,
-    #[arg(
-        long,
-        help = "\
-Change no file: say each one that isn't formatted, and fail if one
-isn't."
-    )]
+    /// Name each file that isn't formatted, change none, and fail if there is one.
+    #[arg(long)]
     pub(crate) check: bool,
 }
 
-const BUILD_CONFIG: &str = "\
-The machine's configuration, whose [docker] names the engine; see
-`pumpkin help config`.
-Default: $HOME/.config/pumpkin/pumpkin.toml";
+const ENTRY_HELP: &str = "A task's entry file, below the nearest directory that holds PUMPKIN.star";
+
+const CONFIG_HELP: &str = "The machine's configuration, which `pumpkin help config` describes \
+                           (default: `$HOME/.config/pumpkin/pumpkin.toml`)";
 
 #[derive(Args)]
 pub(crate) struct Build {
-    #[arg(value_name = "entry", value_parser = entry())]
-    #[arg(help = "The task's entry file, as `pumpkin check` takes it.")]
+    #[arg(value_name = "entry", value_parser = entry(), help = ENTRY_HELP)]
     pub(crate) entry: Entry,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = BUILD_CONFIG)]
+    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = CONFIG_HELP)]
     pub(crate) config: Option<String>,
 }
 
@@ -816,11 +742,9 @@ fn command() -> clap::Command {
     // and `pumpkin help <command>` is said instead; `parse` answers `-h`, `--help`, `-V` and
     // `--version`.
     let help = Arg::new("help").short('h').long("help").global(true);
-    let help = help.action(ArgAction::SetTrue).help("Print this help.");
+    let help = help.action(ArgAction::SetTrue).help("Print help");
     let version = Arg::new("version").short('V').long("version");
-    let version = version
-        .action(ArgAction::SetTrue)
-        .help("Print the version.");
+    let version = version.action(ArgAction::SetTrue).help("Print version");
     let cli = Parsed::command()
         .arg(version)
         .arg(help.display_order(usize::MAX));
@@ -848,8 +772,15 @@ Rarely needed:
 Topics:
   {:width$}  The machine's configuration, pumpkin.toml
 
-`pumpkin help <command>` prints a command's help, as `pumpkin <command> --help`
-does, and `pumpkin help <topic>` a topic.",
+Exit status:
+  0  Success.
+  1  An error. A `pumpkin:` line on the standard error says why.
+  2  A usage error.
+  3  An outcome that the help of `wait`, `cancel` and `reap` says.
+
+`pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`
+prints a topic. The guide to running workflows is docs/running.md:
+https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md",
         "config"
     ))
 }

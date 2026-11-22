@@ -2,8 +2,9 @@
 
 This page is for the operator: whoever runs workflows with `pumpkin` and holds the machine's
 configuration and keys. It goes through how to configure the machine, check a task, run it,
-and follow, list, stop and clean up its runs. Each command's `--help` lists its arguments, output
-and exit status. This page says what each command is for and how they fit together.
+and follow, list, stop and clean up its runs. Each command's `--help` lists its arguments, with
+examples, and `pumpkin --help` gives the exit statuses. This page says what each command is for
+and how they fit together.
 
 ## Installing
 
@@ -48,10 +49,16 @@ $ ./pumpkin check tasks/bench/task.star --arg model=model-a
 $ ./pumpkin check tasks/*/task.star --arg model=model-a
 ```
 
-Each problem is said at its file, line and column, with the source line under it. A recipe must
-pin what it fetches: an image by its digest, a file by its checksum, a Git repository by its full
-commit; a stage that pins a step's downloads by checksum, as `ADD --checksum` does, satisfies it.
-`pumpkin fmt` formats `.star` files as the lint expects.
+Each problem is said at its file's path below the root, its line and its column, then its source
+line, with carets under what it is about. A recipe's problem is said at the `image()` call that
+declares it. Past 20 problems, `check` counts the rest. It reads only files below the root, with
+no symbolic link on the way to them. An image's build can still fail after a clean check, as when
+a recipe's step fails.
+
+A recipe must pin what it fetches: an image by its digest, a file by its checksum, a Git
+repository by its full commit; a stage that pins a step's downloads by checksum, as
+`ADD --checksum` does, satisfies it. `pumpkin fmt` formats `.star` files as the lint expects, and
+[the language](language.md#formatting-and-the-lint) lists the lint's rules.
 
 ## Running
 
@@ -79,6 +86,28 @@ pumpkin: to follow it: pumpkin wait 20261116-195228-234cd166
 pumpkin: to stop it: pumpkin cancel 20261116-195228-234cd166
 20261116-195228-234cd166
 ```
+
+Before it reaches the Docker engine, `run` checks the task and reads the configuration. It warns
+if the engine runs as root. It builds the task's images there, then reaches each provider that
+the configuration names, before anything starts. [Providers](providers.md#placing-a-run) says how
+it places each role. The driver writes what it says after the start to `driver.log` in the
+record. Whatever ends `run` before the start ends the driver too. After the start, the run goes on
+without `run`.
+
+`pumpkin build` builds a task's images and prints its workflow's IR, as `ir.json` keeps it, on
+the standard output. It tags each image by the digest of the build's inputs. The image goes in
+`pumpkin/<recipe's directory below the root>`, or for a recipe of the standard library in
+`pumpkin-library/<directory below @pumpkin//>`. An image that the engine already has under its
+tag isn't built again. Builds run at once, as many as the CPUs that `pumpkin` may run on, as
+Cargo's jobs do, each once the images it builds on are built. Each build's output is said whole
+as it ends, as `make --output-sync` does. A failed build is said at the `image()` call that
+declares its image. Once one has failed, no other build starts, and those already running are
+waited for.
+
+A run outlives a logout unless its engine stops then, as rootless Docker does without
+`loginctl enable-linger`, or logind kills the session's processes (`KillUserProcesses`). Then only
+a run under the user's manager outlives it: enable lingering, and start `run` under
+`systemd-run --user --scope`.
 
 A run's id is the UTC time it was asked for and eight random hexadecimal digits, such as
 `20261116-124728-51da8048`; any command that takes a run takes its id, or a prefix of the id or of
@@ -122,6 +151,13 @@ pumpkin: to run it again: pumpkin run /home/alice/tasks/examples/hello/task.star
 totals: a live run's phase and the bound at which Pumpkin ends it, an ended run's state, how long
 it ran, its cost and its result's values. `pumpkin ls 20261116` lists a day's runs.
 
+A live run's phase is `publishing` what its sandboxes run, `starting` its agents, `work`, `ending`
+the work phase, or `final call`. Under it, a line names each call, by function, and each lease, by
+its grant and state, that hasn't ended. A phase past its bound is a bug, which `ls` says. An ended
+run's state is `finished`, `failed`, `interrupted` by a signal, or `lost` if its driver ended
+without an `outcome.json`. Its task is its workflow's name, or `-` if its record has no `ir.json`
+yet. The default runs directory lists no runs until a run makes it.
+
 ```console
 $ ./pumpkin ls
 20261116-195228-234cd166 finished         2s  -               -  examples/hello: score=6 lines=1
@@ -139,8 +175,28 @@ says which signal ended it. A run whose driver died is lost; `cancel` removes wh
 and names those left to other builds. Every sandbox also ends by its run's hard end, which the
 workflow's bounds give, even if nothing reaps it.
 
+SIGTERM, SIGINT and SIGHUP to the driver stop the run. Its pid is in the record's `driver.pid`.
+The run removes its sandboxes, and its `outcome.json` says which signal interrupted it. A signal
+that was ignored as `run` started stays ignored. SIGKILL to the driver, as `cancel --force` sends,
+leaves the run lost with its sandboxes. A create that the driver gave up on can still make a
+sandbox after that.
+
+`reap`, and `cancel` after the stop, delete what a run left on each provider it ran on. On the
+Docker engine of the context that the record's `provider.json` names, that is the containers
+labelled `pumpkin.run=<id>`. On a provider of kind ec2 or modal, as the configuration that ran
+the run names it, that is the EC2 instances tagged `pumpkin:run=<id>` or the Modal sandboxes
+tagged `pumpkin-run=<id>`. The run's `--config`, as its `record.json` keeps it, picks that
+configuration, or else the default. A reap also removes the run's socket directories in
+`sockets/` and records a lost run as failed. It notes each sandbox it removes in `reaps.jsonl`,
+with the time. A sandbox that the record holds undeleted but that its provider no longer lists,
+as when the configuration now points to another region or profile, is said and noted there as
+gone. On a controller, `reap` reaps again if the reply is cut. The ids it prints may then omit
+runs that were cleaned before the cut.
+
 ## What a command prints next
 
 Every ending that `pumpkin` reports, of a run or of a refusal, ends with the commands to run next,
 each a line that a shell runs as it is: how to follow the run or stop it, how to run the task again
-with the arguments its record keeps, or how to remove what a lost run left.
+with the arguments its record keeps, or how to remove what a lost run left. Their paths are made
+absolute. The command that runs a task again builds it as its source is then. A failed `check`,
+`fmt` or `build` ends with the command that retries the entries or files that failed.

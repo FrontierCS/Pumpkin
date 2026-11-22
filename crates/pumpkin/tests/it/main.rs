@@ -224,6 +224,8 @@ impl Scratch {
         let home = self.0.join("home");
         fs::create_dir_all(&home).unwrap();
         command.env("HOME", home);
+        // clap wraps help at `COLUMNS` when no terminal is attached, and at 100 columns without it.
+        command.env_remove("COLUMNS");
         // So that no test reaches AWS with the machine's credentials: one that runs `aws` puts its
         // own first on the `PATH` it gives.
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -369,8 +371,10 @@ fn ran(mut command: Command, dir: &Path, rootful: bool) -> String {
 
 fn invocation(command: &Command) -> String {
     // The home and the `PATH` that `Scratch::program` gives each command, `<scratch>/home` and
-    // one that starts with its AWS guard, are the rule: they are not shown.
+    // one that starts with its AWS guard, and its unset `COLUMNS`, are the rule: they are not
+    // shown.
     let set = command.get_envs().filter_map(|(name, value)| match value {
+        None if name == "COLUMNS" => None,
         Some(value) if name == "HOME" && Path::new(value).ends_with("home") => None,
         Some(value)
             if name == "PATH"
