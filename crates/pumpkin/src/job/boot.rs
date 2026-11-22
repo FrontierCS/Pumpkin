@@ -1,5 +1,5 @@
-//! The controller's boot: the reap that `pumpkin-boot.service` runs of each build, and the state
-//! of that unit, as `systemctl` gives it.
+//! The controller's boot unit, `pumpkin-boot.service`. The unit runs each build's reap ([`boot`]).
+//! `systemctl` gives the unit's state.
 
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
@@ -54,10 +54,11 @@ pub(crate) fn state(home: &Path) -> Boot {
     }
 }
 
-/// The jobs' directory `jobs`, locked as a prune that removes what no job holds locks it
-/// (`super::open_jobs`), once the boot unit has ended since the machine booted, run to its end or
-/// skipped by its condition, with no job of it queued; `None` until then, or while `systemctl`
-/// can't say, as the boot's reap of an old build may need what such a prune would remove.
+/// Returns the jobs' directory `jobs`, locked as a prune locks it (`super::open_jobs`), once the
+/// boot unit has ended in this boot. The unit has ended when its run has exited or its condition
+/// has skipped it, and no job of it is queued. Returns `None` until then, and while `systemctl`
+/// can't say.
+// The boot's reap of an old build may need what the prune would remove.
 pub(super) fn after(jobs: &Path) -> Result<Option<File>, String> {
     let locked = super::open_jobs(jobs)?;
     locked.lock().context(super::jobs_named(jobs))?;
@@ -76,7 +77,8 @@ pub(super) fn after(jobs: &Path) -> Result<Option<File>, String> {
     Ok((ended && idle).then_some(locked))
 }
 
-/// The properties of the boot unit that `systemctl show` gives, none if it doesn't run or fails.
+/// The boot unit's properties, as `systemctl show` gives them. They are empty if `systemctl`
+/// doesn't run or fails.
 struct Shown(String);
 
 impl Shown {

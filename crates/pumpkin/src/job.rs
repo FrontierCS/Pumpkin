@@ -89,9 +89,9 @@ const BUILDING: &str = "building";
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
 
-// How long a job's tree and directory last, by the time in its id, and an install after a start
-// last handed it out. A run's record names its entry in its tree, to run it again, and a tree is
-// links into the store, so it holds no bytes of its own.
+// How long a job's tree and directory last, by the time in its id. An install lasts as long after
+// a start last handed it out. A run's record names its entry in its tree, to run it again. A tree
+// is links into the store, so it holds no bytes of its own.
 const KEPT: Duration = Duration::from_hours(14 * 24);
 
 // How long a manifest or a partial blob lasts in the store, and so what no tree links of the
@@ -504,12 +504,14 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// Prunes what the jobs keep on the controller's volume: removes each tree in `home` older than
-/// `KEPT`, then each install that no job in `jobs` runs nor a start handed out for as long
-/// (`installs::collect`), then what of its store no tree or install links nor needs
-/// (`collect_store`), and the directory of each run's job as old whose run has no record, which
-/// `ls` lists until then; then, once the volume is full, the images and the build cache of the
-/// engine of the configuration at `config` (`collect`), sparing what the jobs in `jobs` hold.
+/// Prunes what the jobs keep on the controller's volume. It removes, in this order:
+/// - each tree in `home` older than `KEPT`;
+/// - each install that `installs::collect` finds idle, given the jobs in `jobs`;
+/// - what of the store no tree or install links or needs (`collect_store`);
+/// - the directory of each run's job older than `KEPT` whose run has no record, which `ls` lists
+///   until then;
+/// - once the volume is full, the images and the build cache of the engine of the configuration
+///   at `config` (`collect`), sparing what the jobs in `jobs` hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
@@ -520,7 +522,7 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
             fs::remove_dir_all(&tree).context(tree.display())?;
         }
     }
-    // Before the store's, which then removes the blobs that only an install removed linked.
+    // Before the store's prune, so that it frees the blobs that only a removed install linked.
     if let Err(error) = installs::collect(home, jobs) {
         say(format_args!("pruning the installs failed: {error}"));
     }

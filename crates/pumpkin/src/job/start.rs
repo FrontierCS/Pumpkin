@@ -231,8 +231,8 @@ fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> 
 }
 
 /// Keeps the build that a job runs at the same location as a locally built install, under its
-/// own digest, and marks it as used now, as the prune of installs reads it. Older clients prune
-/// the serve installs after a day, even while its jobs still run.
+/// own digest. Marks the install as handed out now. Older clients prune the serve installs after a
+/// day, even while its jobs still run.
 fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
     let exe = workspace::exe("expected the build whose job is starting")?;
     if exe.parent().and_then(Path::file_name) != Some(install.hex().as_ref()) {

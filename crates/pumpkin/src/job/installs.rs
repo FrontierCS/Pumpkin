@@ -1,9 +1,8 @@
-//! The prune of the job installs, each build that a start keeps for its jobs in the controller's
-//! workspace, `<sha256>/`. An install is held by each job that runs it, or that started within
-//! `KEPT`, by its `OWN` link, and lasts `KEPT` after a start last handed it out, as `serve`'s
-//! installs last a day after a `serve` last used them: long enough to outlast its runs' hard ends
-//! and the boot after them, which runs each install's reap, though the controller stays stopped
-//! for days.
+//! The prune of the job installs. A start keeps the build that its jobs run as an install in the
+//! controller's workspace, `<sha256>/`. A job holds its install by its `OWN` link while it runs,
+//! and for `KEPT` after it started. An install also lasts `KEPT` after a start last handed it out.
+//! `KEPT` outlasts the hard ends of an install's runs and the boot after them, which runs each
+//! install's reap. It does so even when the controller stays stopped for days.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -18,15 +17,16 @@ use super::{JOBS, KEPT, OWN};
 use crate::workspace::{self, Workspace};
 use crate::{manifest, say};
 
-// The prefix of the directory below the workspace's `tmp/` that an install is moved into to be
+// The prefix of the directory below the workspace's `tmp/` that holds an install while it is
 // removed.
 const ASIDE: &str = "install.";
 
-/// Removes each install in the workspace in `home`, but this `pumpkin`'s, that no job runs, a job
-/// that runs having its directory in `jobs`, that no job started within `KEPT` ran, and that no
-/// start has handed out for as long, and what a removal cut short left; says which it removed, and
-/// why it couldn't remove one, going on past it. Removes none until the boot unit has ended
-/// (`boot::after`), nor while a job that runs or started within `KEPT` names no install.
+/// Removes each install in the workspace in `home` that no job holds and no start has handed out
+/// within `KEPT`. A job that runs has its directory in `jobs`. Keeps this `pumpkin`'s own install.
+/// Also removes what an earlier removal cut short. Says which installs it removed. Says why it
+/// couldn't remove an install, and goes on with the others. Removes none until the boot unit has
+/// ended (`boot::after`). Removes none while a job that runs or started within `KEPT` names no
+/// install.
 pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     let own = workspace::exe("expected it to keep its own install")?;
     let own = own
@@ -74,8 +74,9 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes the install at `path` if it is a directory that no start has handed out for `KEPT`,
-/// moving it into a directory of its own below `workspace`'s `tmp/` first; returns whether it did.
+/// Removes the install at `path` if it is a directory that no start has handed out within `KEPT`.
+/// Moves it into a directory of its own below `workspace`'s `tmp/` first. Returns whether it
+/// removed the install.
 fn idle_removed(workspace: &Workspace, path: &Path) -> Result<bool, String> {
     let metadata = fs::symlink_metadata(path).context(path.display())?;
     let modified = metadata.modified().context(path.display())?;
@@ -85,8 +86,8 @@ fn idle_removed(workspace: &Workspace, path: &Path) -> Result<bool, String> {
     if !metadata.is_dir() || unused <= KEPT {
         return Ok(false);
     }
-    // Aside first, so that a removal cut short leaves no install that a start takes as whole, as a
-    // start looks only for its `bin/pumpkin`.
+    // A start takes an install as whole once its `bin/pumpkin` is there. Moving it aside first
+    // keeps a removal cut short from leaving part of an install in place.
     let aside = workspace.scratch(ASIDE)?;
     let moved = aside.path().join(path.file_name().unwrap_or_default());
     fs::rename(path, &moved).context(path.display())?;
@@ -94,7 +95,7 @@ fn idle_removed(workspace: &Workspace, path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Removes each directory in `tmp` that a removal of an install left, saying why it couldn't.
+/// Removes each directory in `tmp` that an install's removal left. Says why it couldn't remove one.
 fn cleared(tmp: &Path) {
     let Ok(entries) = fs::read_dir(tmp) else {
         return;
@@ -111,12 +112,12 @@ fn cleared(tmp: &Path) {
     }
 }
 
-/// The installs of the jobs in `home` that run, as their directories in `jobs` say, or that
-/// started within `KEPT`, each named by the `OWN` link of its run's directory; `None`
-/// if one of those jobs has made no such link, as one that is starting, whose install it may be
-/// any of.
-// By the jobs' own links too, not only by the mark of each start: another build's start, as of
-// an older client, leaves the install it hands out unmarked.
+/// The installs that the jobs in `home` hold, each named by the `OWN` link of its run's
+/// directory. A job holds its install while it runs, as its directory in `jobs` shows, and
+/// within `KEPT` of its start. Returns `None` if one of those jobs has no `OWN` link yet. A job
+/// that is starting may run any install.
+// Another build's start, such as an older client's, leaves the install it hands out unmarked. So
+// the jobs' own links hold installs too, not only each start's mark.
 fn held(home: &Path, jobs: &Path) -> Result<Option<BTreeSet<Sha256Digest>>, String> {
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let mut held = BTreeSet::new();
