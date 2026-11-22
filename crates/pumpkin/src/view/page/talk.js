@@ -117,7 +117,7 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
   }
-  const [boxH, gapX, gapY, bow, stack] = [34, 64, 12, 28, 6];
+  const [boxH, gapX, gapY, bow, stack] = [34, 64, 18, 28, 6];
   const chipOf = (/** @type {string} */ name) => ((had.get(name) ?? 0) > 1 ? "×" + had.get(name) : "");
   const placeOf = (/** @type {Role} */ n) => {
     const now = n.kind === "agent" ? 0 : (running.get(n.name) ?? 0);
@@ -213,13 +213,13 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
     const box = svg(
       "g",
       { class: ["node", n.kind, n.name === picked ? "on" : "", none ? "idle" : "", dim ? "dim" : ""].join(" "), transform: "translate(" + n.x + "," + n.y + ")", onclick: () => pick(n.name) },
-      many ? svg("rect", { class: "stack", x: stack, y: stack, width: n.w, height: boxH, rx: 6 }) : null,
-      many ? svg("rect", { class: "stack", x: stack / 2, y: stack / 2, width: n.w, height: boxH, rx: 6 }) : null,
-      svg("rect", { width: n.w, height: boxH, rx: 6 }),
+      many ? svg("rect", { class: "stack", x: stack, y: stack, width: n.w, height: boxH, rx: 2 }) : null,
+      many ? svg("rect", { class: "stack", x: stack / 2, y: stack / 2, width: n.w, height: boxH, rx: 2 }) : null,
+      svg("rect", { width: n.w, height: boxH, rx: 2 }),
       n.final_target ? svg("rect", { class: "final", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
       svg("text", { x: n.final_target ? 20 : 6, y: 14 }, n.name),
       svg("text", { x: 6, y: 27, class: "place" }, placeOf(n)),
-      chip ? svg("rect", { class: "chip", x: n.w - chip.length * 6.5 - 14, y: 4, width: chip.length * 6.5 + 8, height: 14, rx: 7 }) : null,
+      chip ? svg("rect", { class: "chip", x: n.w - chip.length * 6.5 - 14, y: 4, width: chip.length * 6.5 + 8, height: 14, rx: 2 }) : null,
       chip ? svg("text", { class: "chip", x: n.w - chip.length * 3.25 - 10, y: 14.5, "text-anchor": "middle" }, chip) : null,
     );
     // The role's card: where it is, and what passed on each line that joins it.

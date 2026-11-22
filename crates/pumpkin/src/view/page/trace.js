@@ -137,12 +137,12 @@ export async function traceView(id, caller) {
   /** @type {Record<View, HTMLElement>} */
   const tabButtons = { trace: tabButton("trace", "Steps"), stats: tabButton("stats", "Statistics"), log: tabButton("log", "Log") };
   const tabs = h("div", { class: "tabs", role: "tablist" }, Object.values(tabButtons), callers);
-  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Search the trace  ( / )", title: "Search every entry's text (/ to type, Enter and Shift-Enter for the next and previous match, Esc to leave)", value: query.get("q") || "" }));
+  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Search trace", title: "Search every entry's text (/ to type, Enter and Shift-Enter for the next and previous match, Esc to leave)", value: query.get("q") || "" }));
   const found = h("span", { class: "counted" });
   const prev = h("button", { title: "The previous match (Shift-Enter)", onclick: () => goHit(-1) }, "↑");
   const next = h("button", { title: "The next match (Enter)", onclick: () => goHit(1) }, "↓");
   const folds = h("span", { class: "folds" });
-  const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the entries of one kind" }, h("option", { value: "" }, "Every kind"), KINDS.map((kind) => h("option", { value: kind }, kind))));
+  const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the entries of one kind" }, h("option", { value: "" }, "All kinds"), KINDS.map((kind) => h("option", { value: kind }, kind))));
   kinds.value = shape.kind;
   const threads = /** @type {HTMLSelectElement} */ (h("select", { title: "Show one thread" }));
   const status = h("span", { class: "counted status" }, "Reading the steps of " + caller.replace("-", " ") + "…");
@@ -403,7 +403,7 @@ export async function traceView(id, caller) {
     threads.hidden = steps.threads.size < 2;
     if (threads.hidden) return;
     const options = [...steps.threads].map(([root, of]) => h("option", { value: String(root) }, (root === IN_FLIGHT ? "In flight" : "Thread " + root) + " · " + plural(of.length, "step")));
-    fill(threads, h("option", { value: "" }, "Every thread"), options);
+    fill(threads, h("option", { value: "" }, "All threads"), options);
     threads.value = shape.thread === null ? "" : String(shape.thread);
   };
 

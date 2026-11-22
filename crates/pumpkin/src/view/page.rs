@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use super::http::{self, Response};
 
 /// The page's files, by the path each is served at, with its type.
-const FILES: [(&str, &str, &[u8]); 24] = [
+const FILES: [(&str, &str, &[u8]); 25] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -74,6 +74,11 @@ const FILES: [(&str, &str, &[u8]); 24] = [
         "/records.js",
         "text/javascript; charset=utf-8",
         include_bytes!("page/records.js"),
+    ),
+    (
+        "/returned.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("page/returned.js"),
     ),
     (
         "/rows.js",

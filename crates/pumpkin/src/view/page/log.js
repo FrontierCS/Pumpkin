@@ -22,7 +22,7 @@ export function logView(ctx) {
   /** @type {{ records: LogRecord[], cursor: number, at: number, epoch: number | null, open: Set<number>, kinds: string, shown: LogRecord[] }} */
   const state = { records: [], cursor: 0, at: 0, epoch: null, open: new Set(), kinds: "", shown: [] };
   const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
-  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text", value: query.get("lq") || "" }));
+  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Filter records", title: "Keep the records that hold this text", value: query.get("lq") || "" }));
   const counted = h("span", { class: "counted" });
   const record = h("div", { class: "inspector panel" });
   // The step that a record of one of the caller's model requests is of.

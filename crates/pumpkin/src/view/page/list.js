@@ -3,6 +3,7 @@
 // so that a selection of a row's text stays.
 
 import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, tone, typing } from "./h.js";
+import { returnedView } from "./returned.js";
 
 /**
  * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null }} Runs
@@ -68,6 +69,21 @@ export async function runsView() {
   /** @type {Map<string, HTMLTableRowElement>} */
   const rows = new Map();
   const open = (/** @type {string} */ id) => (location.hash = "#/run/" + encodeURIComponent(id));
+  // The runs whose result is open under their row, each with that row, which is made once and
+  // filled when the run's page has been read.
+  /** @type {Map<string, HTMLTableRowElement>} */
+  const opened = new Map();
+  const toggle = (/** @type {string} */ id) => {
+    if (!opened.delete(id)) {
+      const cell = h("td", { class: "detail" }, h("span", { class: "empty" }, "Reading the result…"));
+      opened.set(id, /** @type {HTMLTableRowElement} */ (h("tr", { class: "detail" }, cell)));
+      get("/api/runs/" + encodeURIComponent(id)).then(
+        (run) => fill(cell, run.result ? returnedView(run.result) : h("span", { class: "empty" }, "The run returned nothing.")),
+        (error) => fill(cell, h("span", { class: "error" }, "Reading it failed: " + (error instanceof Error ? error.message : String(error)))),
+      );
+    }
+    draw();
+  };
   // Whether a run's page can be opened: not for one whose record can't be read, or is another
   // build's.
   const opens = (/** @type {ListedRun | Unlisted} */ run) => run.error === undefined && run.state !== "unread";
@@ -102,7 +118,9 @@ export async function runsView() {
       { cls: faded("num", number(listed.requests)), title: listed.requests === null ? noLog : null, text: number(listed.requests) },
       { cls: faded("num", number(tokens && tokens.input)), title: counted(tokens && tokens.input), text: number(tokens && tokens.input) },
       { cls: faded("num", number(tokens && tokens.output)), title: counted(tokens && tokens.output), text: number(tokens && tokens.output) },
-      { cls: "rest", title: said || null, text: said },
+      // A run with a result says so, in a word that opens the result under its row; any other run
+      // says what it is doing, or how it ended.
+      listed.has_result ? { cls: "rest toggle", title: "Show or hide what the run returned", text: (opened.has(listed.id) ? "▾" : "▸") + " Result" } : { cls: "rest", title: said || null, text: said },
     ]);
   };
   // Sets `value` as `node`'s attribute `name`, null removing it, only where it differs.
@@ -115,7 +133,9 @@ export async function runsView() {
     const want = cells(run);
     let tr = rows.get(run.id);
     if (!tr || tr.children.length !== want.length) {
-      tr = /** @type {HTMLTableRowElement} */ (h("tr", { onclick: () => opens(run) && open(run.id) }));
+      tr = /** @type {HTMLTableRowElement} */ (
+        h("tr", { onclick: (/** @type {MouseEvent} */ event) => (event.target instanceof Element && event.target.closest("td.toggle") ? toggle(run.id) : opens(run) && open(run.id)) })
+      );
       for (const cell of want) tr.append(h("td", {}, cell.mark !== undefined ? h("span") : null, ""));
       rows.set(run.id, tr);
     }
@@ -141,7 +161,12 @@ export async function runsView() {
       membered = members;
       head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
     }
-    const shown = runs.map(row);
+    // Each run's row, and under it the row of its result, if that is open.
+    const shown = runs.flatMap((run, index) => {
+      const detail = opened.get(run.id);
+      if (detail) /** @type {HTMLTableCellElement} */ (detail.firstElementChild).colSpan = columns().length;
+      return detail ? [row(run, index), detail] : [row(run, index)];
+    });
     // Rows are moved only where the order changed, and the rows of unlisted runs removed.
     shown.forEach((tr, index) => {
       if (body.children[index] !== tr) body.insertBefore(tr, body.children[index] || null);
@@ -149,13 +174,14 @@ export async function runsView() {
     while (body.children.length > shown.length) /** @type {Element} */ (body.lastElementChild).remove();
     const ids = new Set(runs.map((run) => run.id));
     for (const id of rows.keys()) if (!ids.has(id)) rows.delete(id);
+    for (const id of opened.keys()) if (!ids.has(id)) opened.delete(id);
     fill(
       more,
       h("span", { class: "empty" }, plural(runs.length, "run") + (state.next ? " shown, the newest; older ones left out " : "")),
       state.next ? h("button", { title: "Read the next page of runs, those older than the last one shown", onclick: older }, "Older runs") : null,
     );
     if (!table.isConnected) show(table, more);
-    body.children[state.cursor]?.scrollIntoView({ block: "nearest" });
+    rows.get(runs[state.cursor]?.id)?.scrollIntoView({ block: "nearest" });
   };
   const older = async () => {
     const last = state.older.length ? state.older[state.older.length - 1] : state.first[state.first.length - 1];

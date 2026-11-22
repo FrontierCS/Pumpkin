@@ -499,6 +499,7 @@ fn serves_runs() {
             model: {"dropped_headers":["x-stainless-lang","x-title"],"failed":[{"code":"rate_limit_exceeded","count":1}],"first_token":{"count":2,"median":1.375},"in_flight":[],"more_dropped_headers":false,"not_2xx":0,"requests":4,"tokens":{"cached":2600,"input":3500,"output":350},"took":{"count":3,"median":5.0}}
             other_build: null
             result: {"values":[{"name":"score","value":49.36},{"name":"metrics","value":{"solved":3}}]}
+            stage: null
             state: "finished"
             summary: "<as `wait` says it>"
             talk: {"edges":[{"back_bytes":null,"bytes":null,"count":1,"from":"scorer","kind":"model request","to":"model"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"command","to":"cpu"},{"back_bytes":null,"bytes":null,"count":1,"from":"solver","kind":"lease","to":"cpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"command","to":"gpu"},{"back_bytes":null,"bytes":null,"count":2,"from":"solver","kind":"lease","to":"gpu"},{"back_bytes":null,"bytes":null,"count":3,"from":"solver","kind":"model request","to":"model"},{"back_bytes":null,"bytes":3,"count":1,"from":"solver","kind":"final call","to":"scorer"},{"back_bytes":null,"bytes":12,"count":4,"from":"solver","kind":"job call","to":"trainer"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"command","to":"box"},{"back_bytes":null,"bytes":null,"count":1,"from":"trainer","kind":"lease","to":"box"},{"back_bytes":null,"bytes":1,"count":1,"from":"trainer","kind":"tree","to":"box"}],"grants":[{"from":"solver","kind":"job","to":"trainer"},{"from":"solver","kind":"lease","to":"gpu"},{"from":"solver","kind":"lease","to":"cpu"},{"from":"trainer","kind":"lease","to":"box"},{"from":"solver","kind":"final","to":"scorer"}],"roles":[{"final_target":false,"kind":"agent","name":"solver","place":"aws/judge","routed":true,"routes":[{"api":"responses","models":{"model-a":"vendor/model-a"},"upstream":"gateway"}]},{"final_target":false,"kind":"target","lifetime":"call","name":"trainer","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":true,"kind":"target","lifetime":"call","name":"scorer","place":"modal/a100_80","routed":true,"routes":[{"api":"responses","models":{"model-b":"vendor/model-b"},"upstream":"gateway"}]},{"final_target":false,"kind":"runner","name":"gpu","place":"modal/a100_80","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"cpu","place":"aws/judge","routed":false,"routes":[]},{"final_target":false,"kind":"runner","name":"box","place":"aws/box","routed":false,"routes":[]}]}
@@ -1348,6 +1349,7 @@ fn serves_the_page() {
             head: <link rel="modulepreload" href="/<digest>/log.js">
             head: <link rel="modulepreload" href="/<digest>/payload.js">
             head: <link rel="modulepreload" href="/<digest>/records.js">
+            head: <link rel="modulepreload" href="/<digest>/returned.js">
             head: <link rel="modulepreload" href="/<digest>/rows.js">
             head: <link rel="modulepreload" href="/<digest>/run.js">
             head: <link rel="modulepreload" href="/<digest>/search.js">
@@ -1368,6 +1370,7 @@ fn serves_the_page() {
             /<digest>/log.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/payload.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/records.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
+            /<digest>/returned.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/rows.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/run.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/search.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable

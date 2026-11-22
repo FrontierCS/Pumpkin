@@ -175,6 +175,14 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
             )
         }
     };
+    // The stage of a run that goes on, as `ls` shows it in its columns: the stage's name, how
+    // long it has lasted, and ` of ` how long it may, or nothing where it has no bound.
+    let phase = held.ending.is_none().then(|| {
+        let progress::Columns {
+            state, time, bound, ..
+        } = &row.cells;
+        json!({ "name": state, "time": time, "bound": bound })
+    });
     let state = match (&held.ending, &progress) {
         (None, None) => "publishing",
         (Some(_), _) | (None, Some(_)) => row.state().name(),
@@ -208,6 +216,7 @@ pub(super) fn run_json(held: &Held, named: Option<&str>, again: bool) -> Value {
         "state": state,
         "has_result": row.has_result(),
         "verdict": verdict,
+        "stage": phase,
         "result": result_json(held.ending.as_ref()),
         "failure": failure,
         "failures": held.failures.json(),

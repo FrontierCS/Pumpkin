@@ -167,7 +167,7 @@ export function drawKinds(select, state, kind) {
   const key = names.map((name) => name + counts.get(name)).join(" ") + "/" + kind;
   if (key === state.kinds) return;
   state.kinds = key;
-  select.replaceChildren(h("option", { value: "" }, "Every kind"), ...names.map((name) => h("option", { value: name }, name + " (" + counts.get(name).toLocaleString("en-US") + ")")));
+  select.replaceChildren(h("option", { value: "" }, "All kinds"), ...names.map((name) => h("option", { value: name }, name + " (" + counts.get(name).toLocaleString("en-US") + ")")));
   select.value = kind || "";
 }
 

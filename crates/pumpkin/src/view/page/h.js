@@ -121,7 +121,8 @@ function showCard(target) {
   const content = of && cards.get(of);
   if (!of || !content) return;
   const node = h("div", { class: "card", role: "tooltip" }, content());
-  if (!node.hasChildNodes()) return;
+  // A card whose every row is empty has nothing to show.
+  if (!node.textContent) return;
   document.body.append(node);
   const [at, box, gap] = [of.getBoundingClientRect(), node.getBoundingClientRect(), 6];
   const left = Math.max(8, Math.min(at.left, innerWidth - box.width - 8));

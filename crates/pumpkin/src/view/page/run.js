@@ -10,35 +10,9 @@
 // poll, and the log's last window is read again from the byte it starts at, its records past the
 // last read taken.
 
-import {
-  POLL_MS,
-  Refused,
-  STATIC,
-  bytes,
-  byId,
-  card,
-  cardRows,
-  clock,
-  count,
-  fill,
-  follow,
-  get,
-  grip,
-  h,
-  plural,
-  post,
-  route,
-  sentence,
-  setKeys,
-  setQuery,
-  show,
-  span,
-  svg,
-  tone,
-  typing,
-  utc,
-} from "./h.js";
+import { byId, bytes, card, cardRows, clock, count, fill, follow, get, grip, h, plural, POLL_MS, post, Refused, route, sentence, setKeys, setQuery, show, span, span as lasted, STATIC, tone, typing, utc } from "./h.js";
 import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf, windowAt } from "./records.js";
+import { drawResult } from "./returned.js";
 import { RowList } from "./rows.js";
 import { jsonText, payloadLink, payloadOf } from "./payload.js";
 import { drawTalk, laneRole } from "./talk.js";
@@ -52,6 +26,7 @@ import { failureBox, failureParts, laneMark } from "./failure.js";
  * @property {string} state
  * @property {boolean} has_result
  * @property {string} verdict
+ * @property {{ name: string, time: string, bound: string } | null} [stage] the stage of a run that goes on, as `ls` shows it: its name, how long it has lasted, and ` of ` how long it may, or nothing
  * @property {{ values: { name: string, value: any }[] } | null} result the values a run that finished with a result shows, in the order the body returned them
  * @property {Failure | null} failure how a run that ended without a result ended; null for a run with a result, one that is live, and one that is lost
  * @property {Failure[]} failures each failure the log states, of a call, an agent, a lease, a shared sandbox or a model request
@@ -119,6 +94,8 @@ import { failureBox, failureParts, laneMark } from "./failure.js";
 // turns into `--label` in its monospace.
 const LABEL_MIN_CHARS = 18;
 const LABEL_MAX_CHARS = 48;
+// The bounds of the log's columns of who and of kind, in characters.
+const [WHO_MIN_CHARS, WHO_MAX_CHARS, KIND_MIN_CHARS, KIND_MAX_CHARS] = [8, 28, 8, 32];
 // How many records the log's list is drawn again after while the log is read from its start.
 const DRAW_EVERY_RECORDS = 2000;
 // How often a cancel under way is read.
@@ -143,7 +120,7 @@ export async function runView(id) {
   const counted = h("span", { class: "counted" });
   const all = h("span", {});
   const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
-  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
+  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Filter records", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
   const verdict = h("div", { class: "verdict" });
   const result = h("div", { class: "result" });
   const failed = h("div", { class: "failure" });
@@ -155,9 +132,7 @@ export async function runView(id) {
   const startedOver = h("p", { class: "empty" });
   const lanes = h("div", { class: "lanes panel" });
   const talk = h("div", { class: "talk" });
-  // How to select, which matters less than what is selected: the card of a mark in the filter.
-  const keys = card(h("span", { class: "keys", tabindex: 0 }, "?"), () => "Select a record (j and k step), a lane or a role, or drag across the lanes to keep the records of a stretch of time; Esc clears them.");
-  const filter = h("div", { class: "filter" }, kinds, search, counted, all, keys);
+  const filter = h("div", { class: "filter" }, kinds, search, counted, all);
   const inspector = h("div", { class: "inspector panel" });
   const callList = h("details", {});
   /** @type {RowList<Item>} */
@@ -181,9 +156,9 @@ export async function runView(id) {
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
   // The diagram of who talks to whom, on a panel of its own above the inspector.
-  const diagram = h("section", { class: "roles panel" }, h("div", { class: "name" }, "Who talks to whom"), talk, grips.talk);
-  fill(split, h("div", { class: "left" }, lanes, grips.lanes, h("section", { class: "log panel" }, filter, list.node)), grips.side, h("div", { class: "right" }, diagram, inspector));
-  show(h("section", { class: "head panel" }, h("div", { class: "headline" }, verdict, traces, again, cancelBox), facts, failed, result, unread), startedOver, split);
+  const diagram = h("section", { class: "roles panel" }, talk, grips.talk);
+  fill(split, h("div", { class: "left" }, lanes, grips.lanes, h("section", { class: "log panel" }, filter, list.node)), grips.side, h("div", { class: "right" }, diagram, result, inspector));
+  show(h("section", { class: "head panel" }, h("div", { class: "headline" }, verdict, traces, again, cancelBox), facts, failed, unread), startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -317,6 +292,7 @@ export async function runView(id) {
     // one the run ended with.
     const picked = data.failures.find((failure) => String(failure.mark.record) === selected) ?? (data.lanes || []).find((l) => l.lane === lane)?.failure ?? data.failure;
     const items = folded(shown, state.open);
+    fitColumns();
     list.set(items, holder ? items.indexOf(holder) : -1);
     drawTalk(talk, data, lit, role, picked, (name) => {
       const off = name === null || name === role;
@@ -327,6 +303,21 @@ export async function runView(id) {
     });
     if (selected !== state.selected) lanes.querySelector(".lane.lit")?.scrollIntoView({ block: "nearest" });
     state.selected = selected;
+  };
+
+  // The log's columns of who and of kind are as wide as the longest of each in the whole log, within
+  // bounds, so that no kind is cut short while the text beside it has room. Each record is
+  // measured once, as the log is read.
+  const fit = { seen: 0, who: WHO_MIN_CHARS, kind: KIND_MIN_CHARS };
+  const fitColumns = () => {
+    if (state.records.length < fit.seen) Object.assign(fit, { seen: 0, who: WHO_MIN_CHARS, kind: KIND_MIN_CHARS });
+    for (; fit.seen < state.records.length; fit.seen++) {
+      const record = state.records[fit.seen];
+      fit.kind = Math.max(fit.kind, saidOf(record)[0].length);
+      fit.who = Math.max(fit.who, [...lanesOf(record)].join(" ").length);
+    }
+    list.node.style.setProperty("--who-chars", String(Math.min(WHO_MAX_CHARS, fit.who)));
+    list.node.style.setProperty("--kind-chars", String(Math.min(KIND_MAX_CHARS, fit.kind)));
   };
 
   // Draws the run's verdict and facts, which change with its clock.
@@ -447,7 +438,7 @@ export async function runView(id) {
     const live = !!state.data && state.data.live;
     const said = cancel.said ? h("pre", {}, cancel.said) : null;
     const to = (/** @type {typeof cancel.phase} */ phase) => () => ((cancel.phase = phase), drawCancel());
-    const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run…");
+    const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run");
     if (cancel.phase === "idle") return fill(cancelBox, live && !STATIC ? ask : null);
     if (cancel.phase === "confirm") {
       return fill(
@@ -456,7 +447,7 @@ export async function runView(id) {
           "div",
           { class: "sure" },
           h("p", {}, "Cancel run ", h("code", {}, id), "? It stops the run, waits until it has ended, removes what it left, and writes its outcome.json. This ends a real run and can't be undone."),
-          h("button", { class: "danger", title: "Send the cancel now", onclick: startCancel }, "Cancel run"),
+          h("button", { class: "danger", title: "Send the cancel now", onclick: startCancel }, "Yes, cancel"),
           h("button", { title: "Leave the run as it is", onclick: to("idle") }, "Keep it running"),
         ),
       );
@@ -466,7 +457,7 @@ export async function runView(id) {
     if (cancel.phase === "done") return fill(cancelBox, h("div", { class: "sure" }, h("p", {}, how), said, h("button", { title: "Close this", onclick: to("idle") }, "OK")));
     return fill(
       cancelBox,
-      h("div", { class: "sure" }, h("p", { class: "error" }, cancel.error), live ? h("button", { class: "danger", title: "Ask to cancel again", onclick: to("confirm") }, "Cancel run…") : null, h("button", { title: "Close this", onclick: to("idle") }, "OK")),
+      h("div", { class: "sure" }, h("p", { class: "error" }, cancel.error), live ? h("button", { class: "danger", title: "Ask to cancel again", onclick: to("confirm") }, "Cancel run") : null, h("button", { title: "Close this", onclick: to("idle") }, "OK")),
     );
   };
 
@@ -631,38 +622,17 @@ function drawOnce(node, key, draw) {
   draw();
 }
 
-// A number as `pumpkin ls` shows one: two decimals from 1 up, four below, no trailing zeros.
-/** @param {number} number */
-function shownNumber(number) {
-  const shown = number.toFixed(Math.abs(number) >= 1 ? 2 : 4).replace(/0+$/, "").replace(/\.$/, "");
-  return shown === "-0" ? "0" : shown;
+// How long a run ran, with its units, as the list of runs and the run's state write it: `42s`,
+// `8m24s`, `1h08m`. A
+// time on the axis or in the log is a place since the run's start, and keeps the clock's form.
+/** @param {number | null | undefined} seconds */
+function lastedFor(seconds) {
+  if (seconds === null || seconds === undefined) return "–";
+  const whole = Math.floor(seconds);
+  const [hours, minutes, secs] = [Math.floor(whole / 3600), Math.floor((whole % 3600) / 60), whole % 60];
+  if (hours) return hours + "h" + String(minutes).padStart(2, "0") + "m";
+  return minutes ? minutes + "m" + String(secs).padStart(2, "0") + "s" : secs + "s";
 }
-
-// The page displays objects and lists as folded JSON. The workflow gives the values meaning.
-/** @param {HTMLElement} node @param {Run["result"]} result */
-function drawResult(node, result) {
-  if (!result) return fill(node);
-  const scalar = (/** @type {any} */ value) => value === null || typeof value !== "object";
-  const values = result.values.filter(({ value }) => scalar(value));
-  const objects = result.values.filter(({ value }) => !scalar(value));
-  fill(
-    node,
-    values.length
-      ? h(
-          "div",
-          { class: "values answer" },
-          values.map(({ name, value }) =>
-            h("div", { class: "kv tile" }, h("span", { class: typeof value === "number" ? "v num" : "v" }, typeof value === "number" ? shownNumber(value) : typeof value === "string" ? value : String(value)), h("span", { class: "k l" }, name)),
-          ),
-        )
-      : null,
-    objects.map(({ name, value }) => {
-      const fields = Array.isArray(value) ? plural(value.length, "item") : plural(Object.keys(value).length, "field");
-      return h("details", { class: "object" }, h("summary", {}, h("span", { class: "mono" }, name), h("span", { class: "hint" }, fields)), h("pre", { class: "json" }, jsonText(value)));
-    }),
-  );
-}
-
 
 function drawFacts(facts, data) {
   const times = data.times;
@@ -673,6 +643,7 @@ function drawFacts(facts, data) {
   const fact = (name, value, rows, small = "", tone = "") =>
     card(h("div", { class: "tile fact", tabindex: 0 }, h("div", { class: "v" }, value, small ? h("small", { class: tone }, small) : null), h("div", { class: "l" }, name)), () => cardRows(rows));
   const ran = times && (times.end ?? times.now ?? times.last);
+  const stage = data.live ? data.stage : null;
   const failed = model ? model.failed.reduce((sum, f) => sum + f.count, 0) : 0;
   // How long each request in flight has gone unanswered, to now, or to the end of a run that ended.
   const at = times ? (times.now ?? times.end ?? times.last) : 0;
@@ -682,10 +653,19 @@ function drawFacts(facts, data) {
   const dropped = model && model.dropped_headers.length ? model.dropped_headers.join(", ") + (model.more_dropped_headers ? ", and more" : "") : null;
   fill(
     facts,
-    fact("Ran", clock(ran), [
-      ["Hard end", clock(times && times.hard_end)],
-      ["Used", times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null],
-    ]),
+    // The first figure is the time that matters now: of a run that goes on, how long its stage has
+    // lasted, of how long it may, under the stage's name, as `ls` shows them; of a run that ended,
+    // how long it ran. The card has the rest.
+    fact(
+      stage ? sentence(stage.name) : "Ran",
+      stage ? stage.time : lastedFor(ran),
+      [
+        ["Run", stage && times ? lastedFor(ran) + " so far" : null],
+        ["Hard end", clock(times && times.hard_end)],
+        ["Used", times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null],
+      ],
+      stage ? stage.bound : "",
+    ),
     times ? fact("Started", utc(times.started_unix, 0).slice(5, 16), [["Started", utc(times.started_unix, 0).slice(0, 19) + " UTC"]], "UTC") : null,
     model
       ? fact(
@@ -749,12 +729,14 @@ function drawTraces(node, data) {
   const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
   fill(
     node,
-    callers.length ? h("span", { class: "name" }, "Traces") : null,
+    // Each says what it opens, and looks like what it is: a link to that caller's trace.
     callers.map((lane) =>
       h(
         "a",
         { href: "#/run/" + encodeURIComponent(data.id) + "/trace?caller=" + encodeURIComponent(lane.caller ?? ""), class: "kind " + lane.kind, title: "What " + lane.lane + " and the model said to each other: " + plural(lane.answers?.count ?? 0, "answer") },
-        lane.kind === "agent" && lane.role ? lane.role : lane.lane,
+        h("span", { class: "mark" }),
+        "Trace of " + (lane.kind === "agent" && lane.role ? lane.role : lane.lane),
+        h("span", { class: "go" }, "→"),
       ),
     ),
   );
@@ -805,15 +787,29 @@ function drawLanes(node, data, jobs, view, picked, change, pick, pickFailure) {
     const { asked, started, gone } = lane.sandbox;
     const end = gone ?? known;
     const parts = [];
+    // What a bar's card says first: whose lane it is, and where it runs.
+    /** @type {Array<[string, string]>} */
+    const where = [
+      ["Lane", labels[index].name],
+      ["On", lane.sandbox.place],
+    ];
     if (started !== null) {
-      parts.push(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }));
-      parts.push(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) }, title: lane.said }));
+      parts.push(card(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }), () => cardRows([...where, ["Asked for", clock(asked)], ["Starting", lasted(started - asked)]])));
+      parts.push(
+        card(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) } }), () =>
+          cardRows([...where, ["Started", clock(started)], [gone === null ? "Running" : "Ran", lasted(end - started)], gone === null ? null : ["Gone", clock(gone)], ["", lane.said]]),
+        ),
+      );
     } else {
-      parts.push(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) }, title: lane.said }));
+      parts.push(
+        card(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) } }), () =>
+          cardRows([...where, ["Asked for", clock(asked)], [gone === null ? "Starting" : "Never started", lasted(end - asked)], ["", lane.said]]),
+        ),
+      );
     }
     for (const work of lane.work || []) {
       const failed = work.end && (work.end.failed || (work.end.exited && work.end.exited.code !== 0) || typeof work.end === "string");
-      parts.push(h("div", { class: "work" + (failed ? " failed" : ""), style: { left: at(work.from), width: width(work.from, work.to ?? known) }, title: work.kind + " " + work.label }));
+      parts.push(card(h("div", { class: "work" + (failed ? " failed" : ""), style: { left: at(work.from), width: width(work.from, work.to ?? known) } }), () => cardRows([[work.kind, work.label], ["From", clock(work.from)], [work.to == null ? "So far" : "Took", lasted((work.to ?? known) - work.from)]])));
     }
     const callsHere = jobs.get(lane.lane) || [];
     for (const job of callsHere) {
