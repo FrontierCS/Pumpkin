@@ -517,11 +517,12 @@ among them the checks of Rust files, of documents and their figures (`tidy`), of
 files it needs beside it. `release` packages and checks that build and publishes its archive,
 launcher and pin on GitHub. `tools` pins the contributor tools.
 
-### `deploy/pumpkin`
+### `dist`
 
-The consumer entry, a POSIX shell script that a release ships as `pumpkin`. It verifies
-the release archive pinned by `.pumpkinversion` and unpacks it into a per-user cache keyed by
-checksum. It gives the binary the repository's `.pumpkin` as its workspace. A controller job
+The files that a release ships as they are in the repository: `buildifier-LICENSE`, the
+formatter's notice, which the archive holds, and `pumpkin`, the consumer entry, a POSIX shell
+script that the release ships beside the archive. The entry verifies the release archive pinned
+by `.pumpkinversion` and unpacks it into a per-user cache keyed by checksum. It gives the binary the repository's `.pumpkin` as its workspace. A controller job
 runs the same install, uploaded by the client.
 
 **Architecture Invariant:** `xtask` builds the binaries and lays out `bin` for releases and

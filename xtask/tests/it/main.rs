@@ -1,5 +1,5 @@
 //! Tests of xtask's modules, on scratch Git repositories where they use Git, and of the consumer
-//! entry `deploy/pumpkin`. xtask is a binary, so its test binary compiles their modules itself.
+//! entry `dist/pumpkin`. xtask is a binary, so its test binary compiles their modules itself.
 
 #![expect(
     clippy::unwrap_used,

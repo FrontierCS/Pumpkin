@@ -11,7 +11,7 @@ use expect_test::{Expect, expect};
 use test_support::TestDir;
 use xshell::Shell;
 
-const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/pumpkin");
+const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../dist/pumpkin");
 const RELEASES: &str = "https://github.com/FrontierCS/Pumpkin/releases/download";
 const COMMIT: &str = "1234567890123456789012345678901234567890";
 const WRONG_COMMIT: &str = "1234567890123456789012345678901234567891";
