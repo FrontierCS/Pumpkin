@@ -105,7 +105,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     })?;
     let settings = Settings::parse(&text, &config, provider, gpu_model)?;
     reached(&settings)?;
-    let (branch, commit) = head()?;
+    let commit = head_commit()?;
     let repo = task_repository()?;
     if lost {
         return self::lost(&settings, &repo, again);
@@ -116,7 +116,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
     }
     run.arg("smoke/task.star");
-    eprintln!("xtask: running examples/smoke at {commit} ({branch}) through the controller");
+    eprintln!("xtask: running examples/smoke at {commit} through the controller");
     let (id, status) = followed(run)?;
     let mut failed = Vec::new();
     if !status.success() {
@@ -375,13 +375,9 @@ fn refused(failure: &Failure, expected: Option<&str>) -> String {
     }
 }
 
-/// The branch and the commit of `HEAD`. Fails if `HEAD` is detached or the working tree differs
-/// from it in a tracked file.
-fn head() -> Result<(String, String)> {
+/// The commit that a live run builds and tests, `HEAD`. Fails if a tracked file differs from it.
+fn head_commit() -> Result<String> {
     let repo = Repo { root: root() };
-    let branch = repo
-        .git(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .map_err(|_| "HEAD is detached: check out a branch that names the commit to check")?;
     let commit = repo.git(["rev-parse", "HEAD"])?;
     let changed = repo.git(["status", "--porcelain", "--untracked-files=no"])?;
     if !changed.is_empty() {
@@ -391,7 +387,7 @@ fn head() -> Result<(String, String)> {
         )
         .into());
     }
-    Ok((branch, commit))
+    Ok(commit)
 }
 
 /// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
