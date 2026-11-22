@@ -8,7 +8,7 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | What | Why |
 | --- | --- |
 | the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
-| the controller's security group: in from the sandboxes on the ephemeral ports, and from `ssh_from`, none by default, on port 22; out to HTTPS | the gateway, and `sshd` for the members' machines alone |
+| the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to HTTPS | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone |
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
 | a launch template per class: the AMI, the type, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on; the provider's launch sets the metadata options |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
@@ -75,7 +75,6 @@ module "pumpkin" {
   vpc_id          = "vpc-…"
   subnet_id       = "subnet-…"
   modal_workspace = "ac-…"
-  ssh_from        = ["10.0.1.23/32", "10.0.1.24/32"] # the members' machines' private addresses
   members = {
     alice = ["ssh-ed25519 AAAA… alice-laptop", "ssh-ed25519 AAAA… alice-desk"]
     bob   = ["ssh-ed25519 AAAA… bob"]
@@ -89,9 +88,11 @@ output "client_config" {
 ```
 
 Give an `output` likewise for each other output that "What the outputs feed" or "Versions" names
-and the admin reads. `pumpkin` reaches the controller at its private address, so each member's
-machine is in the controller's VPC, or routed to it, and `ssh_from` admits it. A team of one lists
-its own key.
+and the admin reads. `pumpkin` reaches the controller at its private address. Machines in the
+controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
+lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
+addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
+key.
 
 Then, in that directory:
 
@@ -171,7 +172,7 @@ an `output` of its own.
   needs. The team's root attaches it to the machine's role or user, or an administrator attaches it
   by hand, as `aws iam attach-role-policy --role-name <role> --policy-arn <arn>` (or
   `attach-user-policy`). `policies/client.json.tftpl` says what it allows. The machine reaches
-  port 22 at the controller's private address from a network in `ssh_from`.
+  port 22 at the controller's private address from the controller's VPC.
 - `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
   machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
   `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin

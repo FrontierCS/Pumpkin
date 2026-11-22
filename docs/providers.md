@@ -58,9 +58,9 @@ The controller is the same `pumpkin`, on an EC2 instance of the operator's own, 
 `pumpkin controller`. Only the instance that `deploy/aws` makes can be one: its jobs read their
 settings, such as the EC2 provider's launch templates, from the module's SSM parameter, and the
 machine finds and starts it through EC2. It admits only the keys that the module's `members`
-lists. It names each member's jobs. The machine reaches it at its private address alone, so it is
-in the controller's VPC, or routed to it (by peering or a VPN, say), and `deploy/aws`'s `ssh_from`
-admits it. A machine whose configuration names
+lists. It names each member's jobs. The machine reaches it at its private address alone. It is
+in the controller's VPC, or reaches it through a VPN that translates its addresses into the VPC's.
+A machine whose configuration names
 `[controller]` sends it each run, over ssh: `pumpkin run` sends the files of the task's
 repository that git lists and the task reaches, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs

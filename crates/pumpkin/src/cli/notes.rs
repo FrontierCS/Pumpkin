@@ -750,12 +750,12 @@ the controller's tmpfs, which the run's end removes. The job runs the client's
 install with the module's settings and [controller.modal].
 The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the
 task's files and starts its job over SSH to the controller's private address.
-It uses up to four connections for large task uploads. The machine needs a
-route there, and deploy/aws's `ssh_from` must admit it. The first command
-creates a key. The controller admits the key once its admin lists it under the
-person's name in deploy/aws's `members`. Until then, each command is refused
-with the line to send the admin. The client keeps that key and the pinned host
-key in $HOME/.config/pumpkin/ssh/.
+It uses up to four connections for large task uploads. The machine is in the
+controller's VPC, or reaches it through a VPN that translates its addresses
+into the VPC's. The first command creates a key. The controller admits the key
+once its admin lists it under the person's name in deploy/aws's `members`.
+Until then, each command is refused with the line to send the admin. The client
+keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.
   name          The `name` that deploy/aws was applied with.
   region        The region it was applied in.
 

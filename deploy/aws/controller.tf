@@ -1,5 +1,5 @@
 # The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
-# Its members reach it over ssh from `ssh_from`, each with a key that `members` lists. It stops
+# Its members reach it over ssh from its VPC, each with a key that `members` lists. It stops
 # itself when idle, by a unit that `pumpkin-admin install` sets up, so it costs only its volume
 # between runs.
 
