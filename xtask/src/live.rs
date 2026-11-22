@@ -652,9 +652,6 @@ fn modal_python(
         .args(["python", "-I", "-c", script])
         .args(args)
         .env("MODAL_PROFILE", &modal.profile);
-    if let Some(config) = &modal.config {
-        python.env("MODAL_CONFIG_PATH", config);
-    }
     let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named("uv run python");
     let output = process::run(&mut python, how).map_err(|failure| refused(&failure, expected))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())

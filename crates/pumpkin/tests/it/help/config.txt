@@ -186,8 +186,6 @@ key and the pinned host key in $HOME/.config/pumpkin/ssh/.
 roles on, if any. It takes the settings of a provider of kind modal, but
 `images`, which the module's settings give, and `dials_from`, which each run
 sets:
-  profile       As modal's.
-  config        Modal's configuration file, below this file's directory unless
-                the path is absolute. Without it, the file is ~/.modal.toml, if
-                it exists.
+  profile       As modal's. The profile is in Modal's configuration file,
+                ~/.modal.toml. Each run is sent that file if it is there.
   classes       As modal's.

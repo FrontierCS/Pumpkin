@@ -15,7 +15,6 @@ region = "us-west-1"
 
 [controller.modal]
 profile = "alice"
-config = "modal.toml"
 classes.a100 = { gpu = "A100-40GB", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
 classes.a100_2 = { gpu = "A100-40GB:2", gpu_model = "NVIDIA A100-SXM4-40GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
 classes.h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 }
@@ -62,7 +61,7 @@ fn settings() {
         .collect();
     expect![[r#"
         ec2: Settings { name: "alice", region: "us-west-1", modal: None }
-        modal: Settings { name: "alice", region: "us-west-1", modal: Some(Modal { profile: "alice", config: Some("/home/alice/.config/pumpkin/modal.toml"), gpu_model: "NVIDIA A100-SXM4-40GB" }) }
+        modal: Settings { name: "alice", region: "us-west-1", modal: Some(Modal { profile: "alice", gpu_model: "NVIDIA A100-SXM4-40GB" }) }
         modal without a GPU: a live run on Modal needs the model of a GPU that a class of `[controller.modal]` has, the cheapest best: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3` with `--gpu-model`
         modal with a GPU no class has: no class of /home/alice/.config/pumpkin/pumpkin.toml's `[controller.modal]` has the GPU `NVIDIA B200`: give one of `NVIDIA A100-SXM4-40GB`, `NVIDIA H100 80GB HBM3`
         modal without [controller.modal]: /home/alice/.config/pumpkin/pumpkin.toml names no `[controller.modal]`, which a live run on Modal needs: name the workspace's profile and classes there, as the README says

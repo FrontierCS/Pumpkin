@@ -62,7 +62,6 @@ pub(crate) struct Controller {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientModal {
-    config: Option<PathBuf>,
     profile: String,
     classes: BTreeMap<Name, modal::SandboxClass>,
 }
@@ -388,7 +387,7 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
     for upstream in upstreams.0.values_mut() {
         upstream.key_file = dir.join(&upstream.key_file);
     }
-    if let Some(mut controller) = controller {
+    if let Some(controller) = controller {
         let beside: Vec<&str> = [
             ("`[docker]`", docker.is_some()),
             ("`[providers]`", providers.is_some()),
@@ -405,9 +404,6 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
                 path.display(),
                 beside.join(" and ")
             ));
-        }
-        if let Some(modal) = &mut controller.modal {
-            modal.config = modal.config.take().map(|config| dir.join(config));
         }
         return Ok(Target::Controller(Client {
             controller,
@@ -445,11 +441,7 @@ impl Client {
             ));
         }
         let modal = (self.controller.modal.as_ref()).map(|modal| {
-            let ClientModal {
-                config: _,
-                profile,
-                classes,
-            } = modal;
+            let ClientModal { profile, classes } = modal;
             SentModal {
                 profile: profile.clone(),
                 classes: classes.clone(),
@@ -458,27 +450,19 @@ impl Client {
         (Sent { upstreams, modal }, keys)
     }
 
-    /// The contents of Modal's configuration file, or `None` if `[controller.modal]` is absent or
-    /// names no file and `~/.modal.toml` doesn't exist.
+    /// The contents of Modal's configuration file, `~/.modal.toml`, or `None` if
+    /// `[controller.modal]` is absent or the file doesn't exist.
     pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
-        let Some(modal) = &self.controller.modal else {
+        if self.controller.modal.is_none() {
             return Ok(None);
-        };
-        let path = if let Some(config) = &modal.config {
-            config.clone()
-        } else {
-            let home =
-                crate::home("name Modal's configuration file in `[controller.modal] config`")?;
-            let default = home.join(".modal.toml");
-            if !default.try_exists().context(default.display())? {
-                return Ok(None);
-            }
-            default
-        };
+        }
+        let path = crate::home("remove `[controller.modal]`")?.join(".modal.toml");
+        if !path.try_exists().context(path.display())? {
+            return Ok(None);
+        }
         let read = fs::read(&path).map_err(|error| {
             format!(
-                "Modal's configuration file {} can't be read ({error}): put it there, or name \
-                 another in `[controller.modal] config`",
+                "Modal's configuration file {} can't be read ({error}): let this user read it",
                 path.display()
             )
         })?;
