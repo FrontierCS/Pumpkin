@@ -7,14 +7,13 @@
 //! killed if it hasn't ended by the deadline its caller gives.
 
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use schema::sandbox::RegistrationGrant;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use stdx::process::Environment;
+use stdx::process::{Bound, Echo, Environment, Failure, Run};
 use stdx::{Context as _, Deadline};
 
 use crate::Gpu;
@@ -33,10 +32,6 @@ pub(crate) const ASK_TIMEOUT: Duration = Duration::from_mins(2);
 // Modal pulls the image and builds it within the call, which takes minutes for a large image and
 // about half an hour for one that holds a task's weights.
 pub(crate) const IMPORT_TIMEOUT: Duration = Duration::from_mins(45);
-
-// How much of the end of a failed helper's standard error its error carries: the end, where a
-// Python traceback says what failed.
-const REPORTED_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 // The name of a profile in Modal's configuration file, which Modal refuses if the file lacks it.
@@ -169,40 +164,21 @@ impl Helper {
         // Runs the lock file beside the script as it is, and reads no `uv` configuration.
         uv.args(["run", "--frozen", "--quiet", "--no-config", "--script"]);
         uv.arg(&self.script);
-        let output = match stdx::process::fed(&mut uv, input.to_string().as_bytes(), by) {
-            Ok(Some(output)) => output,
-            Ok(None) => {
-                return Err(format!(
-                    "the Modal helper's `{call}` hadn't ended by its deadline, so it was killed, \
-                     if it had started: expected Modal to answer by then"
-                ));
-            }
-            // A spawn fails so when it finds no `uv`, or one it can't execute.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::NotFound | ErrorKind::PermissionDenied
-                ) =>
-            {
-                return Err(format!("`uv` didn't run: {error}: install uv on `PATH`"));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "running the Modal helper's `{call}` failed: {error}"
-                ));
-            }
-        };
-        if !output.status.success() {
-            let stderr = &output.stderr;
-            let tail = &stderr[stderr.len().saturating_sub(REPORTED_BYTES)..];
-            let reported = String::from_utf8_lossy(tail);
-            return Err(format!(
-                "the Modal helper `{}`'s `{call}` failed with {}: {}: fix what it reports",
-                self.script.display(),
-                output.status,
-                reported.trim()
-            ));
-        }
+        let input = input.to_string();
+        let how = Run::new(Bound::By(by), Echo::Silent).input(input.as_bytes());
+        let output = stdx::process::run(&mut uv, how).map_err(|failure| {
+            let failed = match failure {
+                Failure::Unended { started: true, .. } => {
+                    format!("{}: expected Modal to answer by then", failure.unadvised())
+                }
+                // Only the caller, which chose the deadline, can say what to do.
+                Failure::Unended { started: false, .. } => failure.unadvised(),
+                Failure::Unstarted { .. } | Failure::Unwatched { .. } | Failure::Exited { .. } => {
+                    failure.to_string()
+                }
+            };
+            format!("the Modal helper's `{call}`: {failed}")
+        })?;
         match serde_json::from_slice::<Answer<T>>(&output.stdout) {
             Ok(Answer::Ok(answer)) => Ok(answer),
             // Modal's messages may end with a period, which the error's own punctuation follows.
