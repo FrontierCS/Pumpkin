@@ -818,7 +818,12 @@ checksum too.
 A panic is a bug, and it ends the whole process: release builds abort, and each binary that runs
 threads installs `stdx::abort_on_panic` first. Clippy's configuration bans `catch_unwind`, and it
 bans `Command::new` in favour of `stdx::process::command`, so every child gets only the environment
-that its caller states.
+that its caller states. It bans std's `Command::output`, `Command::status`, `Command::spawn` and
+`Child::wait_with_output` outside `stdx::process`, so every child either runs by
+`stdx::process::run` within a bound its caller states, or starts by `stdx::process::spawn`, which
+makes its caller state each stream. Each test crate that runs a child through those methods, and
+`test-support`, expects `clippy::disallowed_methods` once, as nextest bounds each test. That lifts
+the bans on `Command::new` and `catch_unwind` there too.
 
 ### What Pumpkin writes on a machine
 

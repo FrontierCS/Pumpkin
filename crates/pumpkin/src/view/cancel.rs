@@ -113,8 +113,7 @@ impl Cancels {
             command.args(["--runs", runs]);
         }
         command.arg(id.as_str());
-        let child = (command.stdin(Stdio::null()).stdout(said).stderr(also)).spawn();
-        let child = child.context("running `pumpkin cancel` failed")?;
+        let child = stdx::process::spawn(&mut command, Stdio::null(), said.into(), also.into())?;
         let cancel = Cancel {
             child,
             ended: None,

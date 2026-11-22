@@ -7,6 +7,7 @@
     clippy::print_stderr,
     reason = "a failed test shows its containers' logs"
 )]
+#![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;

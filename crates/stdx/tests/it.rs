@@ -14,7 +14,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, io, thread};
+use std::{env, thread};
 
 use expect_test::{Expect, expect};
 use rustix::net::sockopt;
@@ -615,48 +615,6 @@ fn printed() {
     ];
     let shown = format!("{shown:?}");
     expect![[r#"[Ok("two\nlines\n"), Ok("crlf"), Ok("none"), Err("the standard output isn't UTF-8: invalid utf-8 sequence of 1 bytes from index 4: expected text")]"#]].assert_eq(&shown);
-}
-
-fn unchecked(ran: io::Result<Option<Output>>) -> String {
-    match ran {
-        Ok(Some(output)) => format!("{}, with {} bytes", output.status, output.stdout.len()),
-        Ok(None) => "none".to_owned(),
-        Err(error) => format!("an error: {error}"),
-    }
-}
-
-#[test]
-fn output_exited() {
-    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
-    command.args(["-c", "echo it; exit 3"]);
-    let ran = stdx::process::output(&mut command, Deadline::after(Duration::from_mins(1)));
-    expect!["exit status: 3, with 3 bytes"].assert_eq(&unchecked(ran));
-}
-
-#[test]
-fn output_unstarted() {
-    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
-    command.args(["-c", "exit 3"]);
-    let late = stdx::process::output(&mut command, Deadline::after(Duration::ZERO));
-    let mut absent = stdx::process::command("pumpkin-absent", Environment::Only(&["PATH"]));
-    let absent = stdx::process::output(&mut absent, Deadline::after(Duration::from_mins(1)));
-    let shown = format!("late: {}\nabsent: {}", unchecked(late), unchecked(absent));
-    expect![[r#"
-        late: none
-        absent: an error: No such file or directory (os error 2)"#]]
-    .assert_eq(&shown);
-}
-
-#[test]
-fn fed_exited() {
-    let mut command = stdx::process::command("sh", Environment::Only(&["PATH"]));
-    command.args(["-c", "cat; exit 2"]);
-    let by = Deadline::after(Duration::from_mins(1));
-    expect!["exit status: 2, with 3 bytes"].assert_eq(&unchecked(stdx::process::fed(
-        &mut command,
-        b"fed",
-        by,
-    )));
 }
 
 #[test]

@@ -26,7 +26,6 @@ use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use stdx::Context as _;
 
 use crate::progress::Listing;
 use crate::{config, manifest, workspace};
@@ -681,8 +680,9 @@ impl Link {
     /// Runs `ssh`, an `ssh` that runs [`command`], and reads its hello: `None` if it is
     /// [`Hello::Absent`].
     pub(crate) fn open(mut ssh: Command) -> Result<Option<Self>, Unanswered> {
-        let child = ssh.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
-        let mut child = (child.context("running `ssh` failed")).map_err(Unanswered::Failed)?;
+        let child =
+            stdx::process::spawn(&mut ssh, Stdio::piped(), Stdio::piped(), Stdio::inherit());
+        let mut child = child.map_err(Unanswered::Failed)?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             unreachable!(
                 "the child's standard input or output is missing, though both are piped just above"

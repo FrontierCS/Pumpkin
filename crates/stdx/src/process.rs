@@ -13,9 +13,9 @@ mod run;
 mod watch;
 
 pub use children::{kill_group, spawn, wait_any};
-pub use command::{Environment, cargo_package_vars, command, shown};
+pub use command::{Environment, command, shown};
 pub use failure::Failure;
-pub use run::{Bound, Echo, Run, Stream, fed, output, printed, run};
+pub use run::{Bound, Echo, Run, Stream, printed, run};
 
 const FIRST_PAUSE: Duration = Duration::from_millis(1);
 

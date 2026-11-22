@@ -9,6 +9,7 @@
     clippy::print_stderr,
     reason = "a test prints the image tags it can't remove"
 )]
+#![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;

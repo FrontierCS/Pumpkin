@@ -7,6 +7,7 @@
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
+#![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;

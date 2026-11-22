@@ -11,6 +11,7 @@
     clippy::panic,
     reason = "a test helper fails the test that calls it"
 )]
+#![expect(clippy::disallowed_methods, reason = "nextest bounds each test")]
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -639,7 +640,7 @@ fn full_sandbox() {
             lines
         },
         &expect![[r#"
-            start: `sh` didn't start in $ROOT/home: Resource temporarily unavailable (os error 11)
+            start: `sh` didn't start: Resource temporarily unavailable (os error 11): fix what the error says
             exited when frozen: Some(Signal(9))
             out/kept: kept
             then Ended { reason: "the owner dropped the session" }
@@ -658,6 +659,16 @@ fn refusals() {
             missing.argv = Argv::try_from(vec!["/nonexistent/program".to_owned()]).unwrap();
             let started = sandbox.session.start(missing, hung()).map(|_| ());
             lines.push(format!("missing program: {}", show_error(sandbox, started)));
+            // Its name quotes its long first argument, each quote five bytes, which the reply cuts.
+            let mut long = sandbox.sh("", &[]);
+            let word = "'".repeat(20 << 10);
+            long.argv = Argv::try_from(vec!["/nonexistent/program".to_owned(), word]).unwrap();
+            let started = sandbox.session.start(long, hung()).map(|_| ());
+            let said = show_error(sandbox, started);
+            lines.push(format!(
+                "missing program, a long word: {} bytes",
+                said.len()
+            ));
             // The role's code can put anything at a command's output paths, such as a link to
             // `sandboxd`'s own standard error, or a FIFO that nothing reads.
             let link = sandbox.sh("echo leaked", &[]);
@@ -701,10 +712,11 @@ fn refusals() {
             lines
         },
         &expect![[r#"
-            missing program: `/nonexistent/program` didn't start in $ROOT/home: No such file or directory (os error 2)
-            stdout a link: $ROOT/log/2.stdout: Too many levels of symbolic links (os error 40)
-            stdout a FIFO: $ROOT/log/3.stdout: No such device or address (os error 6)
-            missing program by name, 1000 times: ["`no-such-program` didn't start in $ROOT/home: No such file or directory (os error 2)"]
+            missing program: `/nonexistent/program` didn't start: No such file or directory (os error 2): expected a program at `/nonexistent/program`
+            missing program, a long word: 3072 bytes
+            stdout a link: $ROOT/log/3.stdout: Too many levels of symbolic links (os error 40)
+            stdout a FIFO: $ROOT/log/4.stdout: No such device or address (os error 6)
+            missing program by name, 1000 times: ["`no-such-program` didn't start: No such file or directory (os error 2): install `no-such-program` on `PATH`"]
             same file twice: in/file: File exists (os error 17)
             link: $ROOT/out/link is neither a directory nor a regular file: collect only those
             missing: $ROOT/missing: No such file or directory (os error 2)

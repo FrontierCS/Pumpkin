@@ -2,7 +2,7 @@
 //! is shown, which leaves the environment out.
 
 use std::borrow::Cow;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::process::Command;
 use std::{env, iter};
 
@@ -11,8 +11,9 @@ pub enum Environment {
     /// Only the variables named, those that are set.
     Only(&'static [&'static str]),
     Inherited,
-    /// All but the variables that cargo sets for the package it builds, runs or tests
-    /// ([`cargo_package_vars`]), for a `cargo` that this process runs.
+    /// For a `cargo` that this process runs: all but the variables that cargo sets for the
+    /// package it builds, runs or tests. Those are `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and
+    /// `CARGO_PKG_*`.
     Cargo,
 }
 
@@ -35,30 +36,21 @@ pub fn command(program: impl AsRef<OsStr>, environment: Environment) -> Command 
         }
         Environment::Inherited => {}
         Environment::Cargo => {
-            for name in cargo_package_vars() {
+            // Some build scripts, such as ring's, rerun when one of these changes. A nested build
+            // with another package's would rebuild such a crate, and every crate that depends on
+            // it, and the next build outside it would again.
+            let package = env::vars_os().map(|(name, _)| name).filter(|name| {
+                name.to_str().is_some_and(|name| {
+                    name.starts_with("CARGO_PKG_")
+                        || matches!(name, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")
+                })
+            });
+            for name in package {
                 command.env_remove(name);
             }
         }
     }
     command
-}
-
-/// The names of the variables of this process's environment that cargo sets for the package it
-/// builds, runs or tests: `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH` and `CARGO_PKG_*`.
-///
-/// A `cargo` that this process runs is to get none of them: some build scripts, such as ring's,
-/// rerun when one of them changes, so a nested build with another package's would rebuild such a
-/// crate, and every crate that depends on it, and the next build outside it would again.
-pub fn cargo_package_vars() -> Vec<OsString> {
-    env::vars_os()
-        .map(|(name, _)| name)
-        .filter(|name| {
-            name.to_str().is_some_and(|name| {
-                name.starts_with("CARGO_PKG_")
-                    || matches!(name, "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")
-            })
-        })
-        .collect()
 }
 
 /// `command`'s program and arguments as one line, each word quoted as `sh` reads it.

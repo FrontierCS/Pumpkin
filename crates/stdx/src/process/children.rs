@@ -24,6 +24,10 @@ pub fn spawn(
     stdout: Stdio,
     stderr: Stdio,
 ) -> Result<Child, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the start that `clippy.toml` names, which makes its caller state each stream"
+    )]
     let spawned = command.stdin(stdin).stdout(stdout).stderr(stderr).spawn();
     spawned.map_err(|error| Failure::unstarted(command, name(command), error).to_string())
 }

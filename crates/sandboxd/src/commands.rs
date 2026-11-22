@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::{env, io, thread};
 
 use schema::ir::Env;
+use schema::sandbox::op::REASON_BYTES;
 use schema::sandbox::{
     ExitStatus, FromSandbox, Launch, SANDBOXCTL_PATH, SANDBOXD_ATTESTATION, SANDBOXD_GRANT,
 };
@@ -206,14 +207,14 @@ fn spawn(launch: &Launch, serve_ops: bool) -> Result<i32, String> {
     if serve_ops {
         command.env("PATH", ops_path(env));
     }
-    let child = command
-        .current_dir(cwd.as_str())
-        .stdin(stdin)
-        .stdout(stdout)
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .context(format_args!("`{program}` didn't start in {cwd}"))?;
+    command.current_dir(cwd.as_str()).process_group(0);
+    let child = stdx::process::spawn(&mut command, stdin, stdout.into(), stderr.into());
+    let child = child.map_err(|mut message| {
+        // The message names the command by words of its own, which have no bound but the frame's
+        // that brought them. It says no more than a reason may, so that its reply fits a frame.
+        message.truncate(message.floor_char_boundary(REASON_BYTES));
+        message
+    })?;
     // The reaper waits for it, so its handle is dropped without waiting. The standard library
     // casts the child's pid_t to the u32 it returns, which `cast_signed` undoes.
     Ok(child.id().cast_signed())

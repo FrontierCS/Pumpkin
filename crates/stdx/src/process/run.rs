@@ -151,11 +151,7 @@ pub fn run(command: &mut Command, how: Run<'_>) -> Result<Output, Failure> {
             expected,
         });
     }
-    let stdin = if input.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    };
+    let stdin = input.map_or_else(Stdio::null, |_| Stdio::piped());
     command
         .stdin(stdin)
         .stdout(stdio(stdout))
@@ -169,6 +165,10 @@ pub fn run(command: &mut Command, how: Run<'_>) -> Result<Output, Failure> {
         command.process_group(0);
         Group::Own
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the start that `watched` follows to its end"
+    )]
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return Err(Failure::unstarted(command, name, error)),
@@ -218,28 +218,4 @@ pub fn printed(output: Output) -> Result<String, String> {
         }
     }
     Ok(printed)
-}
-
-/// Runs `command` as [`run`] does, silently, with no standard input and both outputs captured,
-/// until `by`, and gives its output however it exited.
-///
-/// `None` if it hasn't ended, exited with its output closed, by then, and never started if `by`
-/// has passed. An error if it didn't start or couldn't be followed to its end.
-pub fn output(command: &mut Command, by: Deadline) -> io::Result<Option<Output>> {
-    unchecked(run(command, Run::new(Bound::By(by), Echo::Silent)))
-}
-
-/// Runs `command` as [`output`] does, but with `input` on its standard input, which then closes,
-/// though the command may read none of it.
-pub fn fed(command: &mut Command, input: &[u8], by: Deadline) -> io::Result<Option<Output>> {
-    let how = Run::new(Bound::By(by), Echo::Silent).input(input);
-    unchecked(run(command, how))
-}
-
-fn unchecked(ran: Result<Output, Failure>) -> io::Result<Option<Output>> {
-    match ran {
-        Ok(output) | Err(Failure::Exited { output, .. }) => Ok(Some(output)),
-        Err(Failure::Unended { .. }) => Ok(None),
-        Err(Failure::Unstarted { error, .. } | Failure::Unwatched { error, .. }) => Err(error),
-    }
 }
