@@ -370,9 +370,9 @@
 </tspan>
     <tspan x="10px" y="3196px"><tspan>it in its log. A minor adds only keys that an older release may safely ignore.</tspan>
 </tspan>
-    <tspan x="10px" y="3214px"><tspan>With `draining = true`, which the admin sets for a cutover, the settings refuse</tspan>
+    <tspan x="10px" y="3214px"><tspan>The admin sets `draining = true` for a cutover. Each job is then refused as it</tspan>
 </tspan>
-    <tspan x="10px" y="3232px"><tspan>each job as it starts, and leave the jobs that run to end.</tspan>
+    <tspan x="10px" y="3232px"><tspan>starts, and the jobs that run go on to their ends.</tspan>
 </tspan>
     <tspan x="10px" y="3250px">
 </tspan>

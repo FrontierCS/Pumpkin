@@ -144,7 +144,7 @@ variable "client_users" {
 }
 
 variable "draining" {
-  description = "Whether the controller's settings say `draining = true`, so that each job that starts is refused while those that run end, for a cutover."
+  description = "Whether the controller's settings say `draining = true`, for a cutover. Each job that starts is then refused, and those that run go on to their ends."
   type        = bool
   default     = false
 }

@@ -455,8 +455,8 @@ and the client install that `send` transfers by content. Its `store` admits comp
 their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
 and keeps the install that its unit runs. Its `settings` checks the envelope that made the
 controller's settings and refuses a job while they drain. `job` also holds the prune and the
-slots that admit its builds and publishes (`Admission`). `progress` is what `ls` shows. `next` makes the commands to run
-next. `style` runs the formatter. `view` serves the runs' records to a browser. Its `json` holds the
+slots that admit its builds and publishes (`Admission`). `progress` is what `ls` shows. `next`
+makes the commands to run next. `style` runs the formatter. `view` serves the runs' records to a browser. Its `json` holds the
 JSON forms of its answers, and its `Answering` is the view that `serve` keeps to answer a client.
 `Workspace` is the `.pumpkin` directory.
 
