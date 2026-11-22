@@ -251,7 +251,7 @@ fn reached() -> &'static Result<Engine, String> {
 
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
-    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, None))
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
 }
 
 // Shared by every run of the tests, as a machine's runs share their workspace's.
@@ -325,8 +325,8 @@ fn image() -> Image {
     let id = ID.get_or_init(|| {
         // `/workspace` is world-writable, as a role's user needs, since the writable layer is the
         // workspace, and so is `/volume`, for which Docker makes each container an anonymous
-        // volume. The engine builds it as `pumpkin build` does, and finds a build of the same
-        // inputs by its tag, so that test processes that run at once share the image.
+        // volume. The engine builds it as `pumpkin run` does. It finds a build of the same inputs
+        // by its tag, so test processes that run at once share the image.
         let recipe =
             format!("FROM {BUSYBOX}\nRUN mkdir --mode=1777 /workspace /volume\nVOLUME /volume\n");
         let context = BuildContext::default();
@@ -785,7 +785,7 @@ struct Platform;
 
 impl Subject for Platform {
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
-        Ok(Box::new(Docker::connect(engine(), None)?))
+        Ok(Box::new(Docker::connect(engine())?))
     }
 
     fn locals(&self, dir: &Path) -> Locals {

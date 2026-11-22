@@ -1,8 +1,8 @@
 Build a task and start a run of it.
 
-`run` starts a driver process, which builds the task as `pumpkin build` does, places each role on a
-provider and drives the run. `run` prints the run's id once the run has started, and the run goes on
-without `run`.
+`run` starts a driver process, which builds the task's images, places each role on a provider and
+drives the run. `run` prints the run's id once the run has started, and the run goes on without
+`run`.
 
 With `[controller]` in the configuration, `run` sends the task to the controller, which builds and
 runs it. `run` then prints the id at once and returns before the build. `pumpkin wait` follows the

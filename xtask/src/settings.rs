@@ -1,9 +1,9 @@
-//! What `cargo xtask live` reads of a configuration that sends runs to the person's controller,
-//! `pumpkin`'s, for a smoke run on one of its providers: the controller's region, and, for Modal,
-//! the profile and configuration file that reach the workspace and the GPU of a class there.
+//! What `cargo xtask live` reads of `pumpkin`'s configuration when it sends runs to the person's
+//! controller. A smoke run on one of its providers reads the controller's region. A run on Modal
+//! also reads the profile that reaches the workspace, and the GPU of a class there.
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Provider {
@@ -17,8 +17,8 @@ pub(crate) struct Settings {
     pub(crate) name: String,
     /// The controller's region, which its EC2 sandboxes and their timers are in.
     pub(crate) region: String,
-    /// For a run on Modal, the workspace's profile, the configuration file that holds it, if the
-    /// configuration names one, and the model of the GPU that the smoke's GPU runner needs.
+    /// For a run on Modal: the workspace's profile, and the model of the GPU that the smoke's GPU
+    /// runner needs.
     pub(crate) modal: Option<Modal>,
 }
 
@@ -26,7 +26,6 @@ pub(crate) struct Settings {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Modal {
     pub(crate) profile: String,
-    pub(crate) config: Option<PathBuf>,
     pub(crate) gpu_model: String,
 }
 
@@ -90,10 +89,6 @@ impl Modal {
         };
         let profile = text(modal, "profile")
             .ok_or_else(|| format!("{shown}'s `[controller.modal]` names no `profile`: name it"))?;
-        let config = text(modal, "config").map(|config| {
-            let dir = path.parent().unwrap_or(Path::new(""));
-            dir.join(config)
-        });
         let classes = modal.get("classes").and_then(toml::Value::as_table);
         let mut models: Vec<String> = (classes.into_iter().flatten())
             .filter_map(|(_, class)| class.as_table().and_then(|class| text(class, "gpu_model")))
@@ -118,7 +113,6 @@ impl Modal {
         }
         Ok(Self {
             profile,
-            config,
             gpu_model: gpu_model.to_owned(),
         })
     }

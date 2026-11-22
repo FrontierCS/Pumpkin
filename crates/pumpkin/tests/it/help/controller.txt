@@ -1,16 +1,15 @@
 Run the controller's own commands.
 
 These actions run on the controller. `serve` answers a client's `ssh` link and starts each `job` in
-a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
+a unit of its own. The controller's boot runs `boot`.
 
 Usage: pumpkin controller <action>
 
 Actions:
-  job      Run a client's `run` or `build` as a job
-  boot     Reap what lost runs left, at the controller's boot
-  cancel   Cancel a run for a client
-  serve    Answer a client on the standard input and output
-  publish  Upload the runs to the bucket of the public page
+  job     Run a client's `run` as a job
+  boot    Reap what lost runs left, at the controller's boot
+  cancel  Cancel a run for a client
+  serve   Answer a client on the standard input and output
 
 Options:
   -h, --help

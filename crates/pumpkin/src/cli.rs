@@ -13,7 +13,6 @@ mod notes;
 
 use std::ffi::OsString;
 use std::iter;
-use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
@@ -27,12 +26,11 @@ use provider::RunTag;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
-    BUILD_NOTES, CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES,
-    HELP_NOTES, LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
+    LS_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
 use crate::member::Member;
-use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
 /// Run workflows of agents in sandboxes.
@@ -70,8 +68,8 @@ enum Parsed {
     Fmt(Fmt),
     /// Build a task and start a run of it.
     ///
-    /// `run` starts a driver process, which builds the task as `pumpkin build` does, places each
-    /// role on a provider and drives the run. `run` prints the run's id once the run has started,
+    /// `run` starts a driver process, which builds the task's images, places each role on a
+    /// provider and drives the run. `run` prints the run's id once the run has started,
     /// and the run goes on without `run`.
     ///
     /// With `[controller]` in the configuration, `run` sends the task to the controller, which
@@ -116,7 +114,7 @@ enum Parsed {
     /// each as `ls` says it. A run's page shows its summary, its sandboxes' lanes, who talks to
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
-    /// runs. `--export` always writes this machine's runs.
+    /// runs.
     #[command(after_help = VIEW_NOTES)]
     View(View),
     /// Print the help of a command or a topic.
@@ -128,17 +126,6 @@ enum Parsed {
         #[arg(value_name = "topic")]
         topic: Option<String>,
     },
-    /// Build a task's images and print its workflow's IR.
-    ///
-    /// `build` checks the task as `pumpkin check` does. It then builds each image the task
-    /// declares on the machine's Docker engine. It prints the workflow's IR, which names each
-    /// image by its ID, as a run's record keeps it in `ir.json`. The standard output holds only
-    /// the IR, and the builds' output goes to the standard error.
-    ///
-    /// With `[controller]` in the configuration, the controller builds the task, and `build`
-    /// prints the IR.
-    #[command(hide = true, after_help = BUILD_NOTES)]
-    Build(Build),
     /// Remove what ended runs left.
     ///
     /// For each run whose driver has ended, `reap` deletes the sandboxes that remain on each
@@ -153,7 +140,7 @@ enum Parsed {
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
-    /// `job` in a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
+    /// `job` in a unit of its own. The controller's boot runs `boot`.
     #[command(hide = true, after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -164,12 +151,12 @@ enum Parsed {
 }
 
 // Hidden from clap's list of commands, so `command` lists them apart.
-const RARE: [&str; 3] = ["build", "reap", "controller"];
+const RARE: [&str; 2] = ["reap", "controller"];
 
 /// The actions of `pumpkin controller`.
 #[derive(Subcommand)]
 enum Action {
-    /// Run a client's `run` or `build` as a job.
+    /// Run a client's `run` as a job.
     ///
     /// `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`.
     /// It then runs the command there.
@@ -189,7 +176,7 @@ enum Action {
         #[arg(long, value_name = "sha256")]
         #[arg(value_parser = tree)]
         tree: Sha256Digest,
-        /// `run` or `build` with its arguments, but not `--config`, which the job writes.
+        /// `run` with its arguments, but not `--config`, which the job writes.
         #[arg(last = true, required = true, value_name = "command")]
         command: Vec<OsString>,
     },
@@ -210,38 +197,6 @@ enum Action {
         #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
         member: Option<Member>,
     },
-    /// Upload the runs to the bucket of the public page.
-    ///
-    /// `publish` exports the runs into `public/` beside `--runs`, as `pumpkin view --export` does.
-    /// It leaves out runs that started before `--since`, and replaces each controller address.
-    /// It then uploads with `aws` what changed since the last publish that uploaded all it
-    /// planned. It deletes nothing, so its credentials need only list the bucket and put objects.
-    /// One publish runs at a time, and another waits for it.
-    #[command(after_help = PUBLISH_NOTES)]
-    Publish(Publish),
-}
-
-// Its doc would become the help of `pumpkin controller publish`, which the variant's replaces.
-#[derive(Args)]
-pub(crate) struct Publish {
-    /// The directory of the runs to publish (default: `runs` in the repository's `.pumpkin`).
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
-    pub(crate) runs: Option<String>,
-    /// The S3 bucket to upload to.
-    #[arg(long, value_name = "name")]
-    #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
-    pub(crate) bucket: Bucket,
-    /// The bucket's AWS region.
-    #[arg(long, value_name = "region")]
-    #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
-    pub(crate) region: Region,
-    /// Leave out the runs that started before this RFC 3339 instant, such as
-    /// 2026-11-15T00:00:00Z.
-    #[arg(long, value_name = "instant", value_parser = |since: &str| since.parse::<Since>())]
-    pub(crate) since: Option<Since>,
-    /// An IPv4 address of the controller, which becomes `<controller>` in what is published.
-    #[arg(long = "controller-address", value_name = "ipv4")]
-    pub(crate) controller_addresses: Vec<Ipv4Addr>,
 }
 
 /// What a command line asks for. `Job` and the variants after it are the controller's own side,
@@ -254,13 +209,11 @@ pub(crate) enum Command {
     Reap(Reap),
     Check(Check),
     Fmt(Fmt),
-    Build(Build),
     View(View),
     Job(Job),
     Boot,
     CancelFor(Cancel),
     Serve(Option<Member>),
-    Publish(Publish),
     Print(String),
 }
 
@@ -455,9 +408,6 @@ pub(crate) struct View {
     /// The port on 127.0.0.1 to serve at (default: a free one).
     #[arg(long, value_name = "port")]
     pub(crate) port: Option<u16>,
-    /// Write the runs' data and a static copy of the page into `<dir>` instead of serving them.
-    #[arg(long, value_name = "dir", conflicts_with = "port")]
-    pub(crate) export: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -487,9 +437,6 @@ pub(crate) struct Cancel {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
-    /// Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed.
-    #[arg(long)]
-    pub(crate) force: bool,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
 }
@@ -531,27 +478,12 @@ const ENTRY_HELP: &str = "A task's entry file, below the nearest directory that 
 const CONFIG_HELP: &str = "The machine's configuration, which `pumpkin help config` describes \
                            (default: `$HOME/.config/pumpkin/pumpkin.toml`)";
 
-#[derive(Args)]
-pub(crate) struct Build {
-    #[arg(value_name = "entry", value_parser = entry(), help = ENTRY_HELP)]
-    pub(crate) entry: Entry,
-    #[command(flatten)]
-    pub(crate) args: TaskArgs,
-    #[arg(long, value_name = "file", value_parser = utf8(NAMED_NEXT), help = CONFIG_HELP)]
-    pub(crate) config: Option<String>,
-}
-
 pub(crate) struct Job {
     pub(crate) id: RunTag,
     pub(crate) region: Region,
     pub(crate) parameter: String,
     pub(crate) tree: Sha256Digest,
-    pub(crate) command: JobCommand,
-}
-
-pub(crate) enum JobCommand {
-    Run(Run),
-    Build(Build),
+    pub(crate) run: Run,
 }
 
 #[derive(Clone)]
@@ -651,7 +583,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
         Parsed::Reap(reap) => Command::Reap(reap),
         Parsed::Check(check) => Command::Check(check),
         Parsed::Fmt(fmt) => Command::Fmt(fmt),
-        Parsed::Build(build) => Command::Build(build),
         Parsed::View(view) => Command::View(view),
         Parsed::Controller {
             action: Action::Boot,
@@ -662,9 +593,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
         Parsed::Controller {
             action: Action::Serve { member },
         } => Command::Serve(member),
-        Parsed::Controller {
-            action: Action::Publish(publish),
-        } => Command::Publish(publish),
         Parsed::Controller {
             action:
                 Action::Job {
@@ -679,17 +607,16 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             region,
             parameter,
             tree,
-            command: job_command(cli, command)?,
+            run: job_run(cli, command)?,
         }),
         Parsed::Help { topic } => return help_of(cli, topic.as_deref()),
     })
 }
 
-fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCommand, clap::Error> {
+fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap::Error> {
     // The job's command is a whole command line of its own, so it is parsed as one.
     match parse(command).map_err(|refusal| refusal.error)? {
-        Command::Run(run) => Ok(JobCommand::Run(run)),
-        Command::Build(build) => Ok(JobCommand::Build(build)),
+        Command::Run(run) => Ok(run),
         Command::Wait(_)
         | Command::Ls(_)
         | Command::Cancel(_)
@@ -701,9 +628,8 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Boot
         | Command::CancelFor(_)
         | Command::Serve(_)
-        | Command::Publish(_)
         | Command::Print(_) => {
-            let problem = "the job's command is neither `run` nor `build`: give one";
+            let problem = "the job's command isn't `run`: give one";
             let controller = cli.find_subcommand_mut("controller");
             Err(
                 match controller.and_then(|it| it.find_subcommand_mut("job")) {

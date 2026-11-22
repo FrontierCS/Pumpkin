@@ -37,18 +37,18 @@ an EC2 instance that runs the runs a machine sends it.
 ## Entry points
 
 `pumpkin` (`crates/pumpkin`) is the operator's command line. `check` evaluates and checks a task
-without reaching an engine, `fmt` formats `.star` files, `build` builds a task's images and prints
-its IR, and `run` builds them and starts the run in a driver process. `wait`, `ls`, `cancel` and
-`reap` read runs, and end them, through their records, and `view` shows them in a browser.
-`main.rs` dispatches the commands, and `run`'s path through the driver is the one to read first.
+without reaching an engine. `fmt` formats `.star` files. `run` builds a task's images and starts the
+run in a driver process. `wait`, `ls`, `cancel` and `reap` read runs through their records, and end
+them. `view` shows the runs in a browser. `main.rs` dispatches the commands. Read `run`'s path
+through the driver first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
-`deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` and `build`
-there over `ssh` to its private address, and follows, lists, stops, reaps and views the runs
-there. The client's `controller serve` receives the files by content, starts jobs, streams
-their output, copies ended records and handles commands that inspect or stop runs. Each job runs
-in its own systemd unit. A job install publishes its `bin/pumpkin-boot` link with the build.
-On boot, systemd runs these entries so each build reaps the records it wrote.
+`deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` there over `ssh`
+to its private address. It follows, lists, stops, reaps and views the runs there. The client's
+`controller serve` receives the files by content and starts jobs. It streams their output, copies
+ended records, and handles the commands that inspect or stop runs. Each job runs in its own systemd
+unit. A job install publishes its `bin/pumpkin-boot` link with the build. On boot, systemd runs
+these entries, so each build reaps the records it wrote.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -424,31 +424,29 @@ sandboxes left, or fails.
 
 ### `crates/pumpkin`
 
-The command line and the controller's own side. `cli` parses the command line, `config` reads the
-machine's configuration (`Config`, or `Client` for a machine whose runs go to a controller), `star`
-reads a task's source below its root (`Root`) and serves the standard library's, and `driver`
-starts the driver process. `run` starts a run and drives it in that process, `ending` follows a run
-and says how it ended, and `reaping` stops runs and removes what they left. `controller` reaches
-the controller, which its `aws` finds, starts and enrols this machine's key with, over a direct SSH
-connection a command keeps for its requests (`Reached`). The workspace saves its address and
-serialises repairs. Its `send` sends a run's or a build's job, sharing large task uploads by digest
-across up to four connections before starting the job on the first. Its `copy` receives an ended record
-file by file, with `record.json` last, its
-`listing` lists the runs there for `ls` and its `viewing` carries `view`'s requests there (`Viewing`), each over a `Link` that its
-`linking` opens, its `follow` follows a job, and its `commands` stop and reap runs; `link` is the protocol of a
-client's `Link` to `serve`, the controller's end, which starts and cancels jobs, answers `ls` and `view`,
-lists the jobs, each with its member (`member`), that `wait` and `cancel` find a run among, streams a job's log and its milestones or its build IR,
-and is of the client's own build, installed there
-whole, its executable and the files beside it, by a SHA-256 of theirs;
-`manifest` describes the task tree and the client install that `send` transfers by content, and
-its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
-`start` starts each id once under the jobs' lock and keeps the install its unit runs, with the
-prune and the slots that admit its builds and publishes
-(`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
-their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
-the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
-answers with, its `Answering` the view that `serve` keeps to answer a client's, and `Workspace` is
-the `.pumpkin` directory.
+The command line and the controller's own side. `cli` parses the command line. `config` reads the
+machine's configuration: `Config`, or `Client` for a machine whose runs go to a controller. `star`
+reads a task's source below its root (`Root`) and serves the standard library's. `driver` starts the
+driver process. `run` starts a run and drives it in that process. `ending` follows a run and says
+how it ended. `reaping` stops runs and removes what they left. `controller` reaches the controller,
+which its `aws` finds and starts and enrols this machine's key with. A command keeps one direct SSH
+connection for its requests (`Reached`). The workspace saves the controller's address and serialises
+repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
+to four connections, then starts the job on the first. Its `copy` receives an ended record file by
+file, `record.json` last. Its `listing` lists the runs there for `ls`. Its `viewing` carries
+`view`'s requests there (`Viewing`). Each goes over a `Link` that its `linking` opens. Its `follow`
+follows a job, and its `commands` stop and reap runs. `link` is the protocol of a client's `Link` to
+`serve`, the controller's end. `serve` starts and cancels jobs and answers `ls` and `view`. It lists
+the jobs, each with its member (`member`), for `wait` and `cancel` to find a run among. It streams a
+job's log and its milestones. It is of the client's own build, which the client installs there
+whole: its executable and the files beside it, by their SHA-256. `manifest` describes the task tree
+and the client install that `send` transfers by content. Its `store` admits complete uploads by
+their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
+and keeps the install that its unit runs. `job` also holds the prune and the slots that admit its
+builds and publishes (`Admission`). `progress` is what `ls` shows. `next` makes the commands to run
+next. `style` runs the formatter. `view` serves the runs' records to a browser. Its `json` holds the
+JSON forms of its answers, and its `Answering` is the view that `serve` keeps to answer a client.
+`Workspace` is the `.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
 readers (`Record`, `LogFold`), so a record's files are laid out in `runtime` alone, and a path

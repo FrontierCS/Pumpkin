@@ -48,11 +48,11 @@ const ONLINE: &str = "/sys/devices/system/cpu/online";
 
 const CPUINFO: &str = "/proc/cpuinfo";
 
-/// A set of CPUs, which is written as Linux does: `0-3,8`. One read from configuration names at
+/// A set of CPUs, written as Linux writes one: `0-3,8`. One read from a ledger's entry names at
 /// least one CPU.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
-pub struct CpuList(BTreeSet<u32>);
+pub(crate) struct CpuList(BTreeSet<u32>);
 
 impl TryFrom<String> for CpuList {
     type Error = String;
@@ -124,7 +124,7 @@ pub(crate) struct Cpus {
 }
 
 impl Cpus {
-    pub(crate) fn of_machine(engine: &str, given: Option<&CpuList>) -> Result<Self, String> {
+    pub(crate) fn of_machine(engine: &str) -> Result<Self, String> {
         // The ID is a directory's name in the ledgers.
         let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | '_');
         if engine.is_empty() || !engine.chars().all(named) {
@@ -138,17 +138,7 @@ impl Cpus {
             let list = fs::read_to_string(path).context(path.display())?;
             CpuList::parse(&list).context(path.display())
         };
-        let mut online = read(Path::new(ONLINE))?;
-        if let Some(given) = given {
-            let offline = CpuList(given.0.difference(&online.0).copied().collect());
-            if !offline.0.is_empty() {
-                return Err(format!(
-                    "the CPUs to give sandboxes, {given}, name {offline}, which aren't online: \
-                     name only CPUs of {online}"
-                ));
-            }
-            online = given.clone();
-        }
+        let online = read(Path::new(ONLINE))?;
         let count = u64::try_from(online.0.len()).unwrap_or(u64::MAX);
         let Some(cpu_millis) = NonZeroU64::new(count.saturating_mul(MILLIS_PER_CPU)) else {
             return Err(format!(

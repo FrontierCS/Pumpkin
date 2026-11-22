@@ -1,20 +1,14 @@
-// What the page's views share: making elements, the address, reading the server or the files of
-// an export, following a live run, the units numbers and times are shown in, and the grips that
-// size the panes, whose lengths this browser keeps. Text from a record is only ever set as text,
-// by `h` and `svg`, never as markup.
+// What the page's views share: making elements, the address, reading the server, following a live
+// run, the units of numbers and times, and the grips that size the panes. This browser keeps the
+// panes' lengths. Text from a record is only ever set as text, by `h` and `svg`, never as markup.
 //
 // Every word or phrase of the interface (a tab, a button, a menu's option, a column's head, a
 // field's name, a state, a title, a hover's text) is in sentence case: its first letter a capital,
 // the rest in lower case. A name from the records or the code keeps its spelling: a run's id, a
 // caller, a role, a record's kind, a tool, a unit (`tok/s`), an acronym (`TTFT`, `API`).
 
-// Whether the page reads the files that `pumpkin view --export` writes, from a host that serves
-// them as they are, in place of a server's replies: its `index.html` says so.
-export const STATIC = document.documentElement.dataset.source === "static";
-
-// How long after a read's reply the next poll of a live run goes. In the static mode it is the
-// lifetime that a host caches a changing file for, which `crates/pumpkin/src/publish.rs` sets.
-export const POLL_MS = STATIC ? 30000 : 1500;
+// How long after a read's reply the next poll of a live run goes.
+export const POLL_MS = 1500;
 
 // How long after a read that failed to arrive the next goes, and the most that each wait doubles
 // to while reads go on failing. Each read through a lost controller opens a connection to it
@@ -194,27 +188,6 @@ function unarrived(path, error) {
 // arrive whole. `signal` aborts the read.
 /** @param {string} path @param {AbortSignal} [signal] @returns {Promise<any>} */
 export async function get(path, signal) {
-  if (STATIC) {
-    const key = fileOf(path);
-    const response = await readFile(key, signal);
-    // A file cut short, whose JSON doesn't parse, didn't arrive whole.
-    const body = await response.json().catch((error) => {
-      throw unarrived(key, error);
-    });
-    if (key === "runs.json") {
-      noteHead(response, body.runs.some((/** @type {any} */ run) => run.error === undefined && run.live));
-    } else if (/^runs\/[^/]+\/run\.json$/.test(key)) {
-      // Exports keep an ended run's JSON when publishing a newer page.
-      for (const item of [...(body.lanes || []), ...(body.talk?.roles || [])]) {
-        if (item.kind === "shared") {
-          item.kind = "target";
-          item.lifetime = "work";
-        }
-      }
-      noteHead(response, body.live);
-    }
-    return body;
-  }
   const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN }, signal }).catch((error) => {
     throw unarrived(path, error);
   });
@@ -231,18 +204,15 @@ export async function get(path, signal) {
 // The bytes at `path` as text, as the server keeps them; a `Refused` if it refuses them.
 /** @param {string} path @returns {Promise<string>} */
 export async function getText(path) {
-  if (STATIC) return (await readFile(fileOf(path))).text();
   const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN } });
   const text = await response.text();
   if (!response.ok) throw new Refused(response.status, response.status + " " + response.statusText);
   return text;
 }
 
-// The bytes at `path`, as the server keeps them; a `Refused` if it refuses them, or in an export,
-// which keeps no payloads.
+// The bytes at `path`, as the server keeps them; a `Refused` if it refuses them.
 /** @param {string} path @returns {Promise<Uint8Array>} */
 export async function getBytes(path) {
-  if (STATIC) throw new Refused(404, "An export of the view keeps no payloads");
   const response = await fetch(path, { cache: "no-store", headers: { "X-Pumpkin-Token": TOKEN } }).catch((error) => {
     throw unarrived(path, error);
   });
@@ -272,99 +242,15 @@ function unauthorized() {
   );
 }
 
-// ---- the files of an export, which the page reads in its static mode
-
-// The file of an export that holds the reply to `path`, a request of the server's API, by the
-// keys that the module doc of `crates/pumpkin/src/view/export.rs` lists: their one home.
-/** @param {string} path @returns {string} */
-function fileOf(path) {
-  const url = new URL(path, location.origin);
-  const q = url.searchParams;
-  const [api, runs, id, ...rest] = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  const what = rest.join("/");
-  if (api === "api" && runs === "runs") {
-    if (id === undefined && !q.has("before")) return "runs.json";
-    const run = "runs/" + id + "/";
-    if (what === "") return run + "run.json";
-    if (what === "log") return run + "log/" + q.get("at") + ".json";
-    if (what === "diff") return run + "diff/" + q.get("a") + "-" + q.get("b") + "-" + q.get("part") + ".json";
-    if (rest[0] === "item" && rest.length === 2) return run + "kept/items/" + rest[1];
-    if (rest[0] === "exchange" && rest.length === 2) return run + "exchange/" + rest[1] + ".json";
-    if (rest[0] === "exchange" && rest[2] === "response") return run + "kept/" + rest[1] + ".response";
-    if (rest[0] === "exchange" && rest[2] === "request") return run + "kept/" + rest[1] + ".request";
-    const trace = run + "trace/" + rest[1] + "/";
-    if (rest[0] === "trace" && rest.length === 3) {
-      if ((rest[2] === "steps" && !q.has("since")) || rest[2] === "ops") return trace + rest[2] + ".json";
-      if (rest[2] === "stats") return trace + "stats-" + q.get("by") + ".json";
-      if (rest[2] === "entry") return trace + "entry/" + q.get("at") + ".json";
-      if (rest[2] === "entries" && q.get("from") === q.get("to") && !q.has("kind") && !q.has("thread")) return trace + "entries/" + q.get("from") + "-" + (q.get("entry") || "0") + ".json";
-    }
-  }
-  throw new Error("No file of the export answers " + path);
-}
-
-// The export's file at `key`, as its host serves it, inflated by the browser; a `Refused` (404)
-// where the host has none, which it answers by 403 or 404: a file not yet published, or not yet
-// in the cache the page reads through; an `Unarrived` if the host can't be reached. A file that is
-// never rewritten is read from the browser's cache; any other is asked again of the host, which
-// answers "not modified" if it is.
-/** @param {string} key @param {AbortSignal} [signal] */
-export async function readFile(key, signal) {
-  const immutable = /^runs\/[^/]+\/(exchange|diff|kept)\//.test(key);
-  const response = await fetch(key, { cache: immutable ? "default" : "no-cache", signal }).catch((error) => {
-    throw unarrived(key, error);
-  });
-  if (response.status === 403 || response.status === 404) throw new Refused(404, "Not published yet");
-  if (!response.ok) throw new Refused(response.status, response.status + " " + response.statusText);
-  return response;
-}
-
-// The view's head, `runs.json` or a run's `run.json`, as last read: when it was published, and
-// whether a run it shows is live.
-/** @type {{ at: number, live: boolean } | null} */
-let head = null;
-// A live run is published at the interval that `crates/pumpkin/src/publish.rs` sets: a head older
-// than three of them says that the publisher may have stopped.
-const STALE_MS = 3 * 60 * 1000;
-// Whether a head read at `now`, in ms of the Unix clock, is of a publisher that may have stopped.
-/** @param {{ at: number, live: boolean }} head @param {number} now */
-const stale = (head, now) => head.live && now - head.at > STALE_MS;
-
-/** @param {Response} response @param {boolean} live */
-function noteHead(response, live) {
-  const modified = response.headers.get("Last-Modified");
-  head = modified ? { at: Date.parse(modified), live } : null;
-  drawHead();
-}
-
-// A time ago in its largest whole unit: `40 s`, `7 min`, `3 h`.
-/** @param {number} ms */
-function ago(ms) {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? seconds + " s" : seconds < 3600 ? Math.floor(seconds / 60) + " min" : Math.floor(seconds / 3600) + " h";
-}
-
-// The line in the bar that says when what the view shows was published, kept current.
-function drawHead() {
-  const line = byId("published");
-  if (!head) return line.replaceChildren();
-  const now = Date.now();
-  const when = new Date(head.at).toISOString().slice(11, 19);
-  const late = stale(head, now) ? h("span", { class: "warn" }, ": nothing since, so the controller may have stopped, and what shows as live may have ended") : null;
-  fill(line, late ? h("span", { class: "mark warn" }) : null, "Published at " + when + " UTC, " + ago(now - head.at) + " ago", late);
-}
-if (STATIC) setInterval(drawHead, 1000);
-
 // ---- following
 
-// What the page says of `error`, a read's, if a later read may well arrive, which it then makes:
-// a reply that didn't arrive whole; a 502, which the server answers alone for a controller that it
-// can't reach, and a host for a store behind it that it can't; or a 503, which the server answers
-// for a controller that doesn't run. Null for an answer, such as a refusal of a run that doesn't
-// exist, which the page shows.
+// What the page says of `error`, a read's, if a later read may well arrive. The page then makes
+// that read. Such an error is a reply that didn't arrive whole, or a 502 or a 503. The server
+// answers a 502 alone, for a controller that it can't reach, and a 503 for a controller that
+// doesn't run. Null for an answer, such as a refusal of a run that doesn't exist, which the page
+// shows.
 /** @param {unknown} error @returns {string | null} */
 function unreached(error) {
-  if (STATIC) return error instanceof Unarrived || (error instanceof Refused && error.status === 502) ? "This page couldn't be reached, so it shows what it read last." : null;
   if (error instanceof Unarrived) return "A reply of this pumpkin view's was cut short or never came, so this page shows what it read last.";
   if (error instanceof Refused && error.status === 502) return "Can't reach the controller, so this page shows what it read last.";
   if (error instanceof Refused && error.status === 503) return "The controller can't answer now, so this page shows what it read last.";
@@ -382,9 +268,6 @@ let following = null;
 export function follow(read) {
   const mine = {};
   following = mine;
-  if (STATIC) (head = null), drawHead();
-  // Whether a read of this view has ended without failing.
-  let drawn = false;
   const current = () => following === mine;
   // The wait after the next read that fails to arrive.
   let againMs = AGAIN_FIRST_MS;
@@ -428,7 +311,6 @@ export function follow(read) {
       wait = await read(current);
       notice.hidden = true;
       againMs = AGAIN_FIRST_MS;
-      drawn = true;
     } catch (error) {
       const said = unreached(error);
       if (current() && said !== null) {
@@ -440,14 +322,6 @@ export function follow(read) {
         notice.classList.add("error");
         fill(notice, said + " It tries again in " + wait / 1000 + " s. " + sentence(error instanceof Error ? error.message : String(error)), button ? [" ", button] : null);
         notice.hidden = false;
-      } else if (STATIC && error instanceof Refused && error.status === 404) {
-        // A run not yet published, or a file that a newer file names and the cache doesn't hold
-        // yet: read again at the next poll, the view as it was until then. The host answered, so
-        // a notice that it couldn't be reached goes.
-        notice.hidden = true;
-        againMs = AGAIN_FIRST_MS;
-        if (current() && !drawn) show(h("p", { class: "empty" }, "Not published yet: read again every " + POLL_MS / 1000 + " s."));
-        wait = POLL_MS;
       } else if (current()) show(error instanceof Refused && error.status === 401 ? unauthorized() : h("p", { class: "error" }, "Reading the record failed: " + (error instanceof Error ? error.message : String(error))));
     }
     if (current() && wait !== null) timer = setTimeout(again, wait);

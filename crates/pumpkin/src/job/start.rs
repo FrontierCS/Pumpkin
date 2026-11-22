@@ -11,8 +11,8 @@ use schema::ir::Sha256Digest;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-use super::{BUILDS, JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
-use crate::link::{JobKind, JobStart, StartAnswer};
+use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
+use crate::link::{JobStart, StartAnswer};
 use crate::member::Member;
 use crate::{manifest, workspace};
 
@@ -22,7 +22,7 @@ const START_TIMEOUT: Duration = Duration::from_mins(10);
 // In the job's persistent directory once systemd has confirmed the start.
 const STARTED: &str = "started";
 
-/// Starts the job of `start`, with the credentials in `body`, as `member`'s if it is a run's.
+/// Starts the job of `start`, with the credentials in `body`, as `member`'s.
 pub(crate) fn start(
     home: &Path,
     start: JobStart,
@@ -40,19 +40,17 @@ pub(crate) fn start(
         .context(jobs.display())?;
     let lock = File::open(&jobs).context(jobs.display())?;
     lock.lock().context(jobs.display())?;
-    for kind in [JOBS, BUILDS] {
-        let dir = home.join(kind).join(id);
-        if dir.try_exists().context(dir.display())? {
-            // The job itself makes OWN, including one whose start wasn't recorded.
-            if dir.join(STARTED).is_file() || dir.join(OWN).is_symlink() {
-                return Ok(StartAnswer::AlreadyStarted);
-            }
-            return Ok(unconfirmed(
-                &name,
-                &jobs.join(id),
-                "a previous start reserved this job id",
-            ));
+    let dir = home.join(JOBS).join(id);
+    if dir.try_exists().context(dir.display())? {
+        // The job itself makes OWN, including one whose start wasn't recorded.
+        if dir.join(STARTED).is_file() || dir.join(OWN).is_symlink() {
+            return Ok(StartAnswer::AlreadyStarted);
         }
+        return Ok(unconfirmed(
+            &name,
+            &jobs.join(id),
+            "a previous start reserved this job id",
+        ));
     }
     if Path::new(&start.repo).file_name() != Some(start.repo.as_ref()) {
         return Err("a job's repository name must be a single directory name".to_owned());
@@ -62,29 +60,16 @@ pub(crate) fn start(
     }
     manifest::store::required(&home.join(super::STORE), &start.tree)?;
     let pumpkin = installed(home, &start.install)?;
-    let (kind, command) = match start.kind {
-        JobKind::Run => (JOBS, "run"),
-        JobKind::Build => (BUILDS, "build"),
-    };
-    let job = new_job_dir(&home.join(kind), id, 0o755)?;
+    let job = new_job_dir(&home.join(JOBS), id, 0o755)?;
     let sent = new_job_dir(&jobs, id, 0o700)?;
     let tree = new_job_dir(&home.join(TREES).join(&start.repo), id, 0o755)?;
     let workspace = home.join(workspace::DIR);
     symlink(&workspace, tree.path().join(workspace::DIR)).context(tree.path().display())?;
     write_sent(&start, sent.path(), body)?;
-    // Only a run's job is listed with its member.
-    if let (JobKind::Run, Some(member)) = (start.kind, member) {
+    if let Some(member) = member {
         super::write_member(job.path(), member)?;
     }
-    let answer = launch(
-        &pumpkin,
-        &name,
-        start,
-        command,
-        tree.path(),
-        sent.path(),
-        job.path(),
-    )?;
+    let answer = launch(&pumpkin, &name, start, tree.path(), sent.path(), job.path())?;
     let job = job.keep();
     drop((sent.keep(), tree.keep()));
     if matches!(answer, StartAnswer::Started) {
@@ -121,7 +106,6 @@ fn launch(
     pumpkin: &Path,
     name: &str,
     start: JobStart,
-    command: &str,
     tree: &Path,
     sent: &Path,
     job: &Path,
@@ -156,7 +140,7 @@ fn launch(
             "--tree",
             start.tree.hex(),
             "--",
-            command,
+            "run",
         ])
         .args(start.words);
     let (problem, exited) = match stdx::process::output(&mut unit, Deadline::after(START_TIMEOUT)) {

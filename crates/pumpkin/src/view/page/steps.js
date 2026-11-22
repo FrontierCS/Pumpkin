@@ -121,23 +121,6 @@ export class Steps {
     for (const root of roots) this.threads.set(root, /** @type {number[]} */ (threads.get(root)));
   }
 
-  // `reply`, a whole `steps` reply, cut to the rows that are new or differ from those held, as a
-  // `since` reply would send them.
-  /** @param {StepsReply} reply @returns {StepsReply} */
-  since(reply) {
-    const cols = reply.steps;
-    const columns = /** @type {Array<keyof Columns>} */ (Object.keys(cols));
-    /** @param {any} a @param {any} b */
-    const same = (a, b) => a === b || (typeof a === "object" && typeof b === "object" && JSON.stringify(a) === JSON.stringify(b));
-    const rows = cols.request.flatMap((request, at) => {
-      const row = this.rows.get(request);
-      const held = row !== undefined && columns.every((column) => same(/** @type {any[]} */ (cols[column])[at] ?? null, /** @type {any[]} */ (this.cols[column] || [])[row] ?? null));
-      return held ? [] : [at];
-    });
-    const steps = /** @type {Columns} */ (Object.fromEntries(columns.map((column) => [column, rows.map((at) => /** @type {any[]} */ (cols[column])[at])])));
-    return { ...reply, steps };
-  }
-
   // Takes a `since` reply's rows: a request already held has its row replaced, a new one is
   // placed by its request. Returns the requests whose rows came.
   /** @param {StepsReply} reply @returns {number[]} */

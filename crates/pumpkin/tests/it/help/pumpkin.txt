@@ -24,7 +24,6 @@ Options:
           Print help
 
 Rarely needed:
-  build       Build a task's images and print its workflow's IR
   reap        Remove what ended runs left
   controller  Run the controller's own commands
 

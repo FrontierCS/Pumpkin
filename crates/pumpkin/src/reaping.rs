@@ -32,7 +32,7 @@ pub(crate) fn cancel(flags: cli::CancelRun) -> Result<ExitCode, String> {
     if let (cli::RunName::Prefix(prefix), None) = (&flags.run, &flags.runs)
         && let Some(client) = config::client(None)?
     {
-        return controller::cancel(&client, prefix, flags.force, any_member);
+        return controller::cancel(&client, prefix, any_member);
     }
     let Cancelled {
         record,
@@ -67,23 +67,11 @@ pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled,
     let cli::Cancel {
         run,
         runs,
-        force,
         modal_config,
     } = flags;
     let (record, named) = found(run, runs)?;
     let (id, dir) = (record.id(), record.dir().display());
     if let Some(pid) = record.driver()? {
-        // A driver that SIGTERM stops deletes the run's sandboxes before it writes the outcome,
-        // which takes a while on a provider whose sandboxes are instances.
-        let (signal, doing, until) = if force {
-            (Signal::KILL, "killing the driver of run", "")
-        } else {
-            (
-                Signal::TERM,
-                "stopping run",
-                ": it ends once its sandboxes are deleted",
-            )
-        };
         // `kill` reads 0 as this process's group, -1 as every process it may signal, and 1 is
         // init: none is a driver's.
         let driver = i32::try_from(pid).ok().filter(|pid| *pid > 1);
@@ -93,13 +81,18 @@ pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled,
                  above 1"
             ));
         };
-        let sent = rustix::process::kill_process(driver, signal);
+        let sent = rustix::process::kill_process(driver, Signal::TERM);
         sent.context(format_args!(
             "signalling run {id}'s driver, process {pid}, failed"
         ))?;
+        // A driver that SIGTERM stops deletes the run's sandboxes before it writes the outcome.
+        // That takes a while on a provider whose sandboxes are instances.
+        let until = "it ends once its sandboxes are deleted";
         match reader {
-            Reader::Operator => say(format_args!("{doing} {id}, recorded in {dir}{until}")),
-            Reader::Follower => say(format_args!("{doing} {id}{until}")),
+            Reader::Operator => say(format_args!(
+                "stopping run {id}, recorded in {dir}: {until}"
+            )),
+            Reader::Follower => say(format_args!("stopping run {id}: {until}")),
         }
     }
     // Its provider is known for certain only once it has ended: a driver yet to start the run

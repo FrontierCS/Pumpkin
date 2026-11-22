@@ -163,7 +163,7 @@ def final_call(target: Target, submissions):
 
 /// A task's entry file, which the library writes the workflow of, with `cpu_millis` for its
 /// agent.
-pub(super) fn task(cpu_millis: u32) -> String {
+fn task(cpu_millis: u32) -> String {
     format!(
         r#""""A neutral task, whose workflow the library writes from its values."""
 
@@ -185,7 +185,7 @@ bench_task(
 /// Writes into `scratch`'s directory `dir` a repository of tasks: its root's marker, the
 /// library, the directory that every recipe copies, and the task `tasks/bench`, with its
 /// recipes.
-pub(super) fn write_repository(scratch: &Scratch, dir: &str) {
+fn write_repository(scratch: &Scratch, dir: &str) {
     let write = |name: &str, contents: &str| scratch.write(&format!("{dir}{name}"), contents);
     write(
         "PUMPKIN.star",
@@ -201,12 +201,17 @@ pub(super) fn write_repository(scratch: &Scratch, dir: &str) {
     write("tasks/bench/judge/run", "#!/bin/sh\n");
 }
 
-/// Writes into `scratch` the repository of [`write_repository`], with its trainer's and judge's
-/// images two stages of one recipe, `train` and `eval`, and its agent's image built on the
-/// tools' image, from a recipe whose `FROM` is the arg `base`, and which keeps the arg `note` as
-/// a label, with the toolchain's `/usr/local/go` copied in, a stage `go` of its recipe, which a
-/// later stage that fails follows, as the arg `toolchain` names it; each image labelled `label`.
-pub(super) fn write_variants(scratch: &Scratch, label: &str) {
+/// Writes into `scratch` the repository of [`write_repository`], with three changes:
+///
+/// - the trainer's and judge's images are two stages of one recipe, `train` and `eval`;
+/// - the agent's image builds on the tools' image. The tools' recipe's `FROM` is the arg `base`,
+///   and it keeps the arg `note` as a label;
+/// - the agent's image copies in the toolchain's `/usr/local/go`. The arg `toolchain` names that
+///   stage, `go`, which a later stage that fails follows.
+///
+/// Each image is labelled `pumpkin.test=unbuilt`.
+fn write_variants(scratch: &Scratch) {
+    let label = "pumpkin.test=unbuilt";
     write_repository(scratch, "");
     let library = fs::read_to_string(scratch.0.join("lib/bench.star")).unwrap();
     let library = library
@@ -529,7 +534,7 @@ def _helper():
 #[test]
 fn variants() {
     let scratch = Scratch::new();
-    write_variants(&scratch, "pumpkin.test=unbuilt");
+    write_variants(&scratch);
     let bench = |args: &[&str]| {
         let mut command = scratch.pumpkin(&["check", "tasks/bench/task.star", "--arg", "model=m"]);
         command.args(args);

@@ -75,13 +75,3 @@ output "client_policy_arn" {
   description = "The managed IAM policy that the person's machine needs to reach the controller, which the apply attaches to `client_roles` and `client_users`, and an account whose roles live elsewhere attaches by hand."
   value       = aws_iam_policy.client.arn
 }
-
-output "public_page" {
-  description = "The public page's address, if `public_page`."
-  value       = one([for distribution in aws_cloudfront_distribution.public : "https://${distribution.domain_name}/"])
-}
-
-output "public_bucket" {
-  description = "The bucket that holds the public page's files, if `public_page`."
-  value       = one(aws_s3_bucket.public[*].bucket)
-}

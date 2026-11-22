@@ -632,7 +632,7 @@ impl Record {
 
     /// The `sandbox.json` of each sandbox that has one, with its directory below the record, in
     /// order.
-    pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
+    fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
         let mut dirs = Vec::new();
         for of in ["agents", "shared", "jobs", "leases"] {
             let path = self.dir.join(of);
@@ -1034,8 +1034,7 @@ pub(super) fn provided(
     })
 }
 
-/// The workflow's IR as a run's `ir.json` holds it: the IR's one encoding as text, so an IR printed
-/// elsewhere is byte for byte what a run of it records.
+/// The workflow's IR as a run's `ir.json` holds it: the IR's one encoding as text.
 pub fn ir_json(workflow: &Workflow) -> String {
     // Not through a `Value`, which sorts an object's keys, so that the text keeps the IR's order.
     let Ok(ir) = serde_json::to_string_pretty(workflow.ir()) else {

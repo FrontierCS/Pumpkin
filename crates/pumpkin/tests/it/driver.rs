@@ -9,8 +9,8 @@ use serde_json::Value;
 use test_support::{docker_context, sandboxd};
 
 use super::{
-    Scratch, Step, build_first, check, containers, engine, files, invocation, machine, poll, ran,
-    record, report, sandboxes, signal, with_room, workflow,
+    Scratch, Step, check, containers, engine, files, invocation, machine, poll, ran, record,
+    report, sandboxes, signal, with_room, workflow,
 };
 
 struct Cleanup<'a> {
@@ -70,7 +70,6 @@ fn lost_on_docker() {
     let containers = containers(&context);
     scratch.write_task("sleeps", &workflow("", &["sleep", "300"]));
     scratch.write("pumpkin.toml", &machine(&context));
-    build_first(&scratch, "sleeps", "pumpkin.toml");
     let _cleanup = Cleanup {
         containers: &containers,
         runs: scratch.0.join("runs"),
@@ -186,7 +185,6 @@ fn signaled_on_docker() {
     let deadline = Duration::from_secs(deadline.unwrap());
     scratch.write_task("sleeps", &ir);
     scratch.write("pumpkin.toml", &machine(&context));
-    build_first(&scratch, "sleeps", "pumpkin.toml");
     let _cleanup = Cleanup {
         containers: &containers,
         runs: scratch.0.join("runs"),

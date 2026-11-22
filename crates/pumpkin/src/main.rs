@@ -33,7 +33,6 @@ mod manifest;
 mod member;
 mod next;
 mod progress;
-mod publish;
 mod reaping;
 mod run;
 mod sandboxd;
@@ -79,13 +78,11 @@ fn main() -> ExitCode {
         Ok(cli::Command::Reap(flags)) => reap(flags, Reaper::Command),
         Ok(cli::Command::Check(flags)) => check(flags),
         Ok(cli::Command::Fmt(flags)) => style::fmt(flags),
-        Ok(cli::Command::Build(flags)) => build(flags, Reader::Operator),
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Serve(member)) => serve::serve(member.as_ref()),
-        Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -113,8 +110,8 @@ fn finish(done: Result<ExitCode, String>) -> ExitCode {
     }
 }
 
-/// Who reads what a command says of a run or a build: the operator, at this machine, or a
-/// follower of a controller's job, at a client, who follows the run already, and can neither open
+/// Who reads what a command says of a run. The operator reads it at this machine. A follower of
+/// a controller's job reads it at a client: they follow the run already, and can neither open
 /// this machine's paths nor change its setup.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reader {
@@ -333,56 +330,17 @@ fn check(flags: cli::Check) -> Result<ExitCode, String> {
     if failed.is_empty() {
         return Ok(ExitCode::SUCCESS);
     }
-    let again = source_again("check", &failed, &args, None)?;
+    let again = source_again("check", &failed, &args)?;
     let them = if failed.len() == 1 { "it" } else { "them" };
     Err(format!("to check {them} again: {again}"))
-}
-
-fn build(flags: cli::Build, reader: Reader) -> Result<ExitCode, String> {
-    if let Some(client) = config::client(flags.config.as_deref())? {
-        return controller::build(&client, flags);
-    }
-    let cli::Build {
-        entry,
-        args: cli::TaskArgs(args),
-        config,
-    } = flags;
-    let again = source_again("build", &[&entry], &args, config.as_deref())?;
-    match built(&entry, &args, config, reader) {
-        Ok(()) => Ok(ExitCode::SUCCESS),
-        Err(error) => {
-            say(error);
-            Err(format!("to build it again: {again}"))
-        }
-    }
-}
-
-fn built(
-    entry: &star::Entry,
-    args: &lang::Args,
-    config: Option<String>,
-    reader: Reader,
-) -> Result<(), String> {
-    let built = star::checked(entry, args, |task| {
-        let engine = configured_engine(&config_path(config)?, reader)?;
-        Ok(task.build(&engine, &mut ()))
-    })?;
-    let (workflow, _, _) = built.map_err(|problems| task_problems(entry, &problems))?;
-    let ir = runtime::ir_json(&workflow);
-    print(ir.as_bytes()).context("printing the IR failed")
 }
 
 fn source_again(
     command: &str,
     entries: &[&star::Entry],
     args: &lang::Args,
-    config: Option<&str>,
 ) -> Result<String, String> {
-    let mut flags = arg_flags(args).collect::<Vec<String>>();
-    if let Some(config) = config {
-        let config = absolute_utf8(config, "the configuration")?;
-        flags.extend(["--config".to_owned(), config]);
-    }
+    let flags = arg_flags(args).collect::<Vec<String>>();
     let entries: Result<Vec<String>, String> = (entries.iter())
         .map(|entry| absolute_utf8(entry.path(), "the entry"))
         .collect();
@@ -436,11 +394,10 @@ fn config_path(given: Option<String>) -> Result<PathBuf, String> {
 
 fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
     let config::Config {
-        docker: config::Docker { context, cpus: _ },
+        docker: config::Docker { context },
         providers: _,
         gateway: _,
         upstreams: _,
-        publish: _,
     } = config::read(path)?;
     engine(context, reader)
 }

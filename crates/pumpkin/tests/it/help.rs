@@ -63,11 +63,6 @@ fn help_help() {
 }
 
 #[test]
-fn build_help() {
-    check(&["build", "--help"], &expect_file!["help/build.txt"]);
-}
-
-#[test]
 fn reap_help() {
     check(&["reap", "--help"], &expect_file!["help/reap.txt"]);
 }
@@ -102,12 +97,6 @@ fn controller_cancel_help() {
 fn controller_serve_help() {
     let expect = expect_file!["help/controller_serve.txt"];
     check(&["controller", "serve", "--help"], &expect);
-}
-
-#[test]
-fn controller_publish_help() {
-    let expect = expect_file!["help/controller_publish.txt"];
-    check(&["controller", "publish", "--help"], &expect);
 }
 
 #[test]

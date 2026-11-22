@@ -1,4 +1,4 @@
-//! A job's log while it builds, then the run's milestones or the completed build's IR.
+//! A job's log while it builds, then the run's milestones.
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Seek as _, SeekFrom, Write};
@@ -13,8 +13,8 @@ use stdx::Context as _;
 
 use super::exists;
 use crate::ending::{Polls, milestones};
-use crate::job::{self, BUILDS, JOBS};
-use crate::link::{self, Followed, Part};
+use crate::job::{self, JOBS};
+use crate::link::{self, Followed};
 
 pub(super) fn answer(
     output: &mut impl Write,
@@ -38,13 +38,7 @@ fn follow(
 ) -> Result<(), String> {
     let id = RunTag::try_from(id)?;
     let id = id.as_str();
-    let job = home.join(JOBS).join(id);
-    let is_run = exists(&job)?;
-    let dir = if is_run {
-        job
-    } else {
-        home.join(BUILDS).join(id)
-    };
+    let dir = home.join(JOBS).join(id);
     if !exists(&dir)? {
         return Err(format!("there is no job {id} here"));
     }
@@ -55,11 +49,11 @@ fn follow(
     loop {
         // Check first, so the last read includes what the job wrote just before it ended.
         let ended = !exists(&active)?;
-        let ready = ended || (is_run && size(&out)? > 0);
+        let ready = ended || size(&out)? > 0;
         if let Some(mut file) = open(&log)? {
             file.seek(SeekFrom::Start(log_from_bytes))
                 .context(log.display())?;
-            let read_bytes = parts(output, file, &Followed::Logged, &log)?;
+            let read_bytes = logged(output, file, &log)?;
             if read_bytes > 0 {
                 polls.restart();
             }
@@ -70,9 +64,6 @@ fn follow(
         }
         wait(polls.pause())?;
     }
-    if !is_run {
-        return built(output, &out);
-    }
     ran(
         output,
         &home.join(job::runs()).join(id),
@@ -80,18 +71,6 @@ fn follow(
         &active,
         after_cut,
     )
-}
-
-fn built(output: &mut impl Write, out: &Path) -> Result<(), String> {
-    let written = "writing the build's IR failed";
-    let size = size(out)?;
-    if size == 0 {
-        return frame::write(output, &Followed::Unbuilt, &[]).context(written);
-    }
-    let file = File::open(out).context(out.display())?;
-    frame::write(output, &Followed::Built { body_bytes: size }, &[]).context(written)?;
-    parts(output, file, &Part, out)?;
-    Ok(())
 }
 
 fn ran(
@@ -186,12 +165,7 @@ fn size(path: &Path) -> Result<u64, String> {
     }
 }
 
-fn parts(
-    output: &mut impl Write,
-    file: File,
-    head: &impl serde::Serialize,
-    path: &Path,
-) -> Result<u64, String> {
+fn logged(output: &mut impl Write, file: File, path: &Path) -> Result<u64, String> {
     let mut reader = BufReader::new(file);
     let mut total = 0;
     loop {
@@ -200,7 +174,7 @@ fn parts(
             return Ok(total);
         }
         let count = bytes.len().min(frame::MAX_BODY_BYTES);
-        frame::write(output, head, &bytes[..count])
+        frame::write(output, &Followed::Logged, &bytes[..count])
             .context("writing a part of the job's output failed")?;
         total += count as u64;
         reader.consume(count);

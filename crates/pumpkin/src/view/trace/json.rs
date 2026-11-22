@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use route::read::{self, Item};
-use runtime::{KeptPart, KeptRequest, Record};
+use runtime::Record;
 use schema::ir::Api;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -24,13 +24,6 @@ const SEARCH_HITS: usize = 1000;
 
 /// The bytes of text on each side of a hit that `search_json` gives.
 const SEARCH_CONTEXT_BYTES: usize = 80;
-
-/// How many steps' entries one chunk of searchable text holds.
-///
-/// A page searches a static copy of a trace by reading every chunk once, so fewer, larger chunks
-/// cost fewer requests; a live run's copy rewrites only its last chunk as it grows, so smaller ones
-/// cost fewer bytes.
-const SEARCH_CHUNK_STEPS: usize = 256;
 
 /// The columns of the steps reply, which holds one array for each, in this order: row `i` of each
 /// is step `i`.
@@ -334,29 +327,6 @@ impl Trace {
         json!({ "count": count, "hits": hits })
     }
 
-    /// Chunk `chunk` of the text that a search reads: the entries of [`SEARCH_CHUNK_STEPS`] steps,
-    /// each as `[index, at, kind, text]` with the text in its [`searchable`] form and an entry with
-    /// no text left out, and the next chunk, if there is one. [`Self::search_json`] finds a query
-    /// in an entry where it is a substring of that text, at the same byte.
-    pub(super) fn search_chunk_json(&self, chunk: usize) -> Value {
-        let first = chunk.saturating_mul(SEARCH_CHUNK_STEPS);
-        let chunked = self.at.values().skip(first).take(SEARCH_CHUNK_STEPS);
-        let steps: Vec<Value> = chunked
-            .map(|&index| {
-                let step = &self.steps[index];
-                let entries: Vec<Value> = (self.searched(step))
-                    .filter(|(.., text)| !text.is_empty())
-                    .map(|(at, address, kind, text)| {
-                        json!([at, address.of(step.request), kind, searchable(&text)])
-                    })
-                    .collect();
-                json!({ "request": step.request, "thread": step.thread, "entries": entries })
-            })
-            .collect();
-        let more = self.at.len() > first.saturating_add(SEARCH_CHUNK_STEPS);
-        json!({ "steps": steps, "next": more.then_some(chunk + 1) })
-    }
-
     /// The entries of the requests `from` to `to`, starting at entry `entry` of the first, with
     /// each string cut ([`cut`]).
     pub(super) fn entries_json(
@@ -452,7 +422,7 @@ impl Trace {
 /// The form of `text` that a search matches in, and of the query that it matches: its ASCII
 /// letters lower-cased, so that a query matches letters of either case, each byte where it is in
 /// `text`.
-pub(in crate::view) fn searchable(text: &str) -> String {
+fn searchable(text: &str) -> String {
     text.to_ascii_lowercase()
 }
 
@@ -513,31 +483,6 @@ fn item_json(item: &Item) -> Value {
         }
         Item::Other { json } => json!({ "text": json.to_string() }),
     }
-}
-
-/// A request as the record kept it: its conversation's items and its other fields, each by its
-/// digest or as sent. `conversation` is `null` if the record kept no items apart.
-pub(super) fn kept_json(kept: KeptRequest) -> Value {
-    let KeptRequest {
-        conversation,
-        fields,
-    } = kept;
-    let part = |part: KeptPart| match part {
-        KeptPart::Kept(digest) => json!({ "item": digest.hex() }),
-        KeptPart::Sent(value) => json!({ "sent": value }),
-    };
-    let conversation = conversation.map(|(field, items)| {
-        let items: Vec<Value> = items.into_iter().map(part).collect();
-        json!({ "field": field, "items": items })
-    });
-    let fields: Vec<Value> = (fields.into_iter())
-        .map(|(name, kept)| {
-            let mut field = part(kept);
-            field["name"] = json!(name);
-            field
-        })
-        .collect();
-    json!({ "conversation": conversation, "fields": fields })
 }
 
 /// What the log says of request `request`, and its configuration read from the record.

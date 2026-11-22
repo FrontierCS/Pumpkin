@@ -10,8 +10,6 @@ use crate::link::{Ask, Followed, Link, Unanswered};
 pub(super) enum Finished {
     Ran { writer: Option<String> },
     Unstarted,
-    Built(Vec<u8>),
-    Unbuilt,
 }
 
 pub(super) fn job(reached: &mut Reached, build: &Build, id: &str) -> Result<Finished, String> {
@@ -88,8 +86,6 @@ impl Shown {
                 }
                 Followed::Ran { writer } => Finished::Ran { writer },
                 Followed::Unstarted => Finished::Unstarted,
-                Followed::Built { body_bytes } => Finished::Built(link.body(body_bytes)?),
-                Followed::Unbuilt => Finished::Unbuilt,
             };
             return Ok(Ok(end));
         }

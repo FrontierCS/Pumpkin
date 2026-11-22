@@ -6,7 +6,7 @@
 // shown.
 
 import { bytes, fill, get, h, plural, route, setQuery } from "./h.js";
-import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, windowAt } from "./records.js";
+import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow } from "./records.js";
 import { RowList } from "./rows.js";
 
 /**
@@ -19,8 +19,8 @@ import { RowList } from "./rows.js";
 export function logView(ctx) {
   const lane = ctx.caller.replace("-", " ");
   const { query } = route();
-  /** @type {{ records: LogRecord[], cursor: number, at: number, epoch: number | null, open: Set<number>, kinds: string, shown: LogRecord[] }} */
-  const state = { records: [], cursor: 0, at: 0, epoch: null, open: new Set(), kinds: "", shown: [] };
+  /** @type {{ records: LogRecord[], cursor: number, epoch: number | null, open: Set<number>, kinds: string, shown: LogRecord[] }} */
+  const state = { records: [], cursor: 0, epoch: null, open: new Set(), kinds: "", shown: [] };
   const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
   const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Filter records", title: "Keep the records that hold this text", value: query.get("lq") || "" }));
   const counted = h("span", { class: "counted" });
@@ -85,13 +85,12 @@ export function logView(ctx) {
   const read = async () => {
     try {
       const run = await get(ctx.base);
-      if (state.epoch !== run.log_epoch) Object.assign(state, { records: [], cursor: 0, at: 0, epoch: run.log_epoch });
+      if (state.epoch !== run.log_epoch) Object.assign(state, { records: [], cursor: 0, epoch: run.log_epoch });
       while (state.cursor < run.end) {
         counted.textContent = "Reading the log: " + bytes(state.cursor) + " of " + bytes(run.end);
-        const at = windowAt(state);
         /** @type {Window} */
-        const window = await get(ctx.base + "/log?at=" + at + "&log_epoch=" + run.log_epoch);
-        state.records.push(...pastWindow(window, state, at).filter((r) => lanesOf(r).has(lane)));
+        const window = await get(ctx.base + "/log?at=" + state.cursor + "&log_epoch=" + run.log_epoch);
+        state.records.push(...pastWindow(window, state).filter((r) => lanesOf(r).has(lane)));
       }
     } catch (error) {
       counted.textContent = "Reading the log failed: " + (error instanceof Error ? error.message : String(error));

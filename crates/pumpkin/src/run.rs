@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::time::SystemTime;
 
-use docker::{CpuList, Docker};
+use docker::Docker;
 use ec2::Ec2;
 use engine::Engine;
 use gateway::{Dialer, Listener};
@@ -279,11 +279,10 @@ fn prepared<'e>(
     reader: Reader,
 ) -> Result<Result<Prepared<'e>, lang::Problems>, String> {
     let config::Config {
-        docker: config::Docker { context, cpus },
+        docker: config::Docker { context },
         providers,
         gateway,
         upstreams,
-        publish: _,
     } = config::read(config)?;
     let servings = task
         .workflow()
@@ -296,8 +295,7 @@ fn prepared<'e>(
     let engine = &*engine.insert(crate::engine(context, reader)?);
     // Each provider is connected before any image is built, so that an engine that can't run
     // sandboxes is refused first.
-    let providers =
-        providers.connect(|name, kind| Connected::new(name, kind, engine, cpus.as_ref()))?;
+    let providers = providers.connect(|name, kind| Connected::new(name, kind, engine))?;
     Ok(task
         .build(engine, &mut ())
         .map(|(workflow, _, sources)| Prepared {
@@ -318,16 +316,9 @@ enum Connected<'e> {
 }
 
 impl<'e> Connected<'e> {
-    fn new(
-        name: &Name,
-        kind: config::Kind,
-        engine: &'e Engine,
-        cpus: Option<&CpuList>,
-    ) -> Result<Self, String> {
+    fn new(name: &Name, kind: config::Kind, engine: &'e Engine) -> Result<Self, String> {
         let connected = match kind {
-            config::Kind::Docker(config::Empty {}) => {
-                Docker::connect(engine, cpus).map(Self::Docker)
-            }
+            config::Kind::Docker(config::Empty {}) => Docker::connect(engine).map(Self::Docker),
             config::Kind::Ec2(settings) => Workspace::find()
                 .and_then(|workspace| Ec2::connect(&settings, engine.pusher()?, &workspace.ec2()))
                 .map(Self::Ec2),

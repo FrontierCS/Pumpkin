@@ -107,7 +107,7 @@ fn job_refusals() {
         let settings = ["/pumpkin-alice/settings", "--tree", tree];
         let mut job = scratch.program(
             controllers(&scratch),
-            &[&args[..], &settings, &["--", "build", "stand-in/task.star"]].concat(),
+            &[&args[..], &settings, &["--", "run", "stand-in/task.star"]].concat(),
         );
         job.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
         job
@@ -138,13 +138,13 @@ fn job_refusals() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-            $ env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            $ env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
-            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- build stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: <scratch>/home/store/manifests/<tree of .pumpkin/runs/planted/record>: the manifest's line `f <blob> 8 .pumpkin/runs/planted/record` is refused: `.pumpkin/runs/planted/record` can't be sent to the controller, where a job's `.pumpkin` is the controller's own workspace: leave it out of the task
-            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- build stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: the job's working directory, <scratch>, isn't its tree, <scratch>/home/trees/<repository>/<id>, which its start makes: run the job there, as its unit does
             made the file outside a job's tree: false"#]],
@@ -559,7 +559,7 @@ fn start_head(body_bytes: usize, credential_bytes: usize) -> serde_json::Value {
 
 fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
     json!({
-        "id": id, "kind": "build", "repo": "tasks",
+        "id": id, "repo": "tasks",
         "tree": format!("sha256:{EMPTY_TREE}"), "install": format!("sha256:{EMPTY_TREE}"),
         "words": ["--", "task.star"],
         "region": "us-west-1", "parameter": "/pumpkin-alice/settings",
@@ -1470,14 +1470,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
     let pumpkin = install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
     let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
     symlink(pumpkin, &own).unwrap();
-    let args = [
-        "controller",
-        "cancel",
-        "--force",
-        "--modal-config",
-        "modal.toml",
-        &id,
-    ];
+    let args = ["controller", "cancel", "--modal-config", "modal.toml", &id];
     let mut cancel = scratch.program(own, &args);
     let invoked = invocation(&cancel);
     let output = cancel.output().unwrap();
@@ -1486,7 +1479,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
         &report(invoked, &output, &scratch.0, false),
         &[(&id, "<id>")],
         &expect![[r#"
-            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --force --modal-config modal.toml <id>
+            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --modal-config modal.toml <id>
             exit status: Some(102)"#]],
     );
 }
@@ -1506,7 +1499,7 @@ echo "$*" >> "${0%/*}/units"
     scratch.write_executable("bin/systemctl", ctl.as_bytes());
     let mut lines = Vec::new();
     for _ in 0..2 {
-        let cancel = on_client(&scratch, &client, &["cancel", "--force", &id])
+        let cancel = on_client(&scratch, &client, &["cancel", &id])
             .output()
             .unwrap();
         lines.push(format!(
@@ -1522,10 +1515,9 @@ echo "$*" >> "${0%/*}/units"
         &lines.join("\n"),
         &[(&id, "<id>")],
         &expect![[r#"
-        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
-        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
-        --user kill --signal=KILL pumpkin-job-<id>
-        --user stop pumpkin-job-<id>"#]],
+            exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+            exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+            --user stop pumpkin-job-<id>"#]],
     );
 }
 
@@ -1723,7 +1715,7 @@ fn follow_carries_on() {
 fn silent_build_loses_its_follower() {
     let scratch = Scratch::new();
     let id = id_ago(0, "0f000007");
-    let log = format!("home/builds/{id}/log");
+    let log = format!("home/jobs/{id}/log");
     scratch.write(&log, "building\n");
     let active = scratch.0.join("run/pumpkin").join(&id);
     fs::create_dir_all(&active).unwrap();
@@ -1828,68 +1820,6 @@ fn follow_repeats_no_milestone() {
             pumpkin:    0:01 solver started on aws/judge
             pumpkin: controller `alice` didn't answer: ended within the answer: following job <id> again now, attempt 2 of 7
             pumpkin:    0:02 the work phase ended"#]],
-    );
-}
-
-#[test]
-fn build_carries_on_inside_the_ir() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let ir = r#"{"workflow":"whole IR"}"#;
-    let log = "building the images\n";
-    let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
-    let logged = frame_bytes(&json!({ "type": "logged" }), log.as_bytes());
-    let head = frame_bytes(&json!({ "type": "built", "body_bytes": ir.len() }), &[]);
-    let part = frame_bytes(&serde_json::Value::Null, ir.as_bytes());
-    // The warmed store answers the two Lacks with empty lists, then starts the build on this link.
-    let (_, warm) = start(&scratch, &client);
-    assert!(warm.contains("exit status: Some(0)"), "{warm}");
-    let missing = frame_bytes(&json!({"type":"missing","body_bytes":2}), &[])
-        + frame_bytes(&serde_json::Value::Null, b"[]");
-    let started = frame_bytes(&json!({"type":"started"}), &[]);
-    let cut = hello + 2 * missing + started + logged + head + part - 1;
-    scratch.write("bin/cut-out", &cut.to_string());
-    let mut build = on_client(&scratch, &client, &["build", "stand-in/task.star"])
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let dir = poll(|| {
-        fs::read_dir(scratch.0.join("home/builds"))
-            .ok()?
-            .next()?
-            .ok()
-    });
-    let id = dir.file_name();
-    let id = id.to_str().unwrap();
-    scratch.write(&format!("home/builds/{id}/log"), log);
-    // A build's out can already hold bytes while its job still runs.
-    scratch.write(&format!("home/builds/{id}/out"), "{");
-    let mut stderr = BufReader::new(build.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.ends_with(log) && stderr.read_line(&mut said).unwrap() > 0 {}
-    scratch.write(&format!("home/builds/{id}/out"), ir);
-    fs::remove_dir_all(scratch.0.join("run/pumpkin").join(id)).unwrap();
-    let output = ended(build, stderr, said);
-    assert!(output.status.success(), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let logged = stderr
-        .lines()
-        .filter(|line| *line == log.trim_end())
-        .count();
-    let again = stderr.matches("attempt 2 of 7").count();
-    check(
-        &scratch,
-        &format!(
-            "job's log shown {logged} time(s), {again} immediate retries\nIR on stdout: {}",
-            String::from_utf8(output.stdout).unwrap()
-        ),
-        &[],
-        &expect![[r#"
-            job's log shown 1 time(s), 1 immediate retries
-            IR on stdout: {"workflow":"whole IR"}"#]],
     );
 }
 
@@ -2714,7 +2644,7 @@ fn cancel_full_id_refused() {
     let args = ["cancel", &id];
     let by_bob = ran_by(&scratch, on_repo(&scratch, "repo-bob", &bob, &args), &args);
     // As a build of Bob's that skips its own check asks it.
-    let cancel = json!({ "type": "cancel", "id": id, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel = json!({ "type": "cancel", "id": id, "any_member": false, "modal_bytes": null });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     let served = serve_fed_for(&scratch, &["--member", "bob"], &asked);
@@ -2850,7 +2780,8 @@ fn member_unread() {
         on_repo(&scratch, "repo-bob", &bob, &args),
         &args,
     ));
-    let cancel = json!({ "type": "cancel", "id": unread, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel =
+        json!({ "type": "cancel", "id": unread, "any_member": false, "modal_bytes": null });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     lines.push(serve_fed_for(&scratch, &["--member", "bob"], &asked));
