@@ -27,15 +27,15 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use expect_test::{Expect, expect};
-use gateway::{Arrival, Dialer, GatewayAddress, GrantListener, Process, Put, Session, Sockets};
+use gateway::{Arrival, Dialer, GatewayAddress, Listener, Process, Put, Session, Sockets};
 use schema::frame;
 use schema::frame::MAX_BODY_BYTES;
 use schema::ir::{AbsolutePath, Argv, Env, EnvVar, Mode, Name};
 use schema::sandbox::tree::Limits;
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HELLO_TIMEOUT, HelloReply, Launch, Listening,
-    PROTOCOL_VERSION, RegistrationGrant, RelativePath, Root, SANDBOXD_GRANT, SOCKET_NAME,
-    SocketDial, TcpDial, ToSandbox, dir_mode, file_mode,
+    MAX_ATTESTATION_BYTES, PROTOCOL_VERSION, PrivateDial, RegistrationGrant, RelativePath, Root,
+    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, SOCKET_NAME, SocketDial, ToSandbox, dir_mode, file_mode,
 };
 use serde_json::{Value, json};
 use stdx::process::Environment;
@@ -46,10 +46,13 @@ const PATH_ONLY: Environment = Environment::Only(&["PATH"]);
 // A registration grant that no gateway of the tests issues.
 const GRANT: &str = "00112233445566778899aabbccddeeff";
 
+// The attestation of the sandbox that dials over TCP, which its registration's check admits.
+const ATTESTATION: &str = "the sandbox's attestation";
+
 #[derive(Clone, Copy)]
 enum Meeting {
-    // `sandboxd` gets `GRANT` in its environment all the same, which a command shows it doesn't
-    // get.
+    // `sandboxd` gets `GRANT` and `ATTESTATION` in its environment all the same, which a command
+    // shows it doesn't get.
     Socket,
     Tcp,
     Listen,
@@ -61,7 +64,7 @@ enum Meeting {
 )]
 enum Gateway {
     Sockets(Sockets),
-    Tcp(GrantListener, SocketAddr),
+    Tcp(Listener, SocketAddr),
     Listen(SocketAddr),
 }
 
@@ -76,19 +79,16 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    fn start(meeting: Meeting, nvidia_smi: Option<&str>) -> Self {
+    fn start(meeting: Meeting) -> Self {
         let sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
-        Self::start_with(meeting, nvidia_smi, sandboxd)
+        Self::start_with(meeting, sandboxd)
     }
 
-    fn start_with(meeting: Meeting, nvidia_smi: Option<&str>, mut sandboxd: Command) -> Self {
+    fn start_with(meeting: Meeting, mut sandboxd: Command) -> Self {
         let dir = TestDir::new();
         // Without symbolic links, as the kernel names the working directories that `processes`
         // finds the sandbox's processes by.
         let root = fs::canonicalize(dir.path()).unwrap();
-        if let Some(script) = nvidia_smi {
-            sandboxd.env("PATH", stand_in(&root, script));
-        }
         let (gateway, registration) = match meeting {
             Meeting::Socket => {
                 let sockets = Sockets::create(root.join("sockets")).unwrap();
@@ -96,17 +96,23 @@ impl Sandbox {
                 let (SocketDial { dir }, registration) = sockets.issue(&name).unwrap();
                 sandboxd
                     .arg(dir.join(SOCKET_NAME))
-                    .env(SANDBOXD_GRANT, GRANT);
+                    .env(SANDBOXD_GRANT, GRANT)
+                    .env(SANDBOXD_ATTESTATION, ATTESTATION);
                 (Gateway::Sockets(sockets), registration)
             }
             Meeting::Tcp => {
                 let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
                 let address = GatewayAddress::try_from(loopback).unwrap();
-                let listener = GrantListener::bind(&address, HELLO_TIMEOUT).unwrap();
-                let (TcpDial { gateway, grant }, registration) = listener.issue().unwrap();
+                let listener = Listener::bind(&address, HELLO_TIMEOUT).unwrap();
+                let (PrivateDial { gateway }, unattested) = listener.issue(hung());
+                let registration = unattested.admitting(|attestation, peer| {
+                    let ours = attestation.bytes() == ATTESTATION.as_bytes() && peer.is_loopback();
+                    ours.then_some(())
+                        .ok_or_else(|| "it isn't the sandbox's".to_owned())
+                });
                 sandboxd
                     .arg(gateway.to_string())
-                    .env(SANDBOXD_GRANT, grant.digits());
+                    .env(SANDBOXD_ATTESTATION, ATTESTATION);
                 (Gateway::Tcp(listener, gateway), registration)
             }
             Meeting::Listen => {
@@ -236,14 +242,6 @@ fn umask() -> u32 {
     u32::from_str_radix(line.unwrap().trim(), 8).unwrap()
 }
 
-fn stand_in(root: &Path, script: &str) -> String {
-    let bin = root.join("bin");
-    fs::create_dir(&bin).unwrap();
-    fs::write(bin.join("nvidia-smi"), format!("#!/bin/sh\n{script}\n")).unwrap();
-    fs::set_permissions(bin.join("nvidia-smi"), fs::Permissions::from_mode(0o755)).unwrap();
-    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
-}
-
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from(path.to_str().unwrap().to_owned()).unwrap()
 }
@@ -299,7 +297,7 @@ fn exited(sandboxd: &mut Child) -> std::process::ExitStatus {
 }
 
 fn check(meeting: Meeting, scenario: impl FnOnce(&mut Sandbox) -> Vec<String>, expect: &Expect) {
-    let mut sandbox = Sandbox::start(meeting, None);
+    let mut sandbox = Sandbox::start(meeting);
     let mut lines = scenario(&mut sandbox);
     lines.extend(sandbox.end());
     expect.assert_eq(&lines.join("\n"));
@@ -343,51 +341,6 @@ impl Sandbox {
 }
 
 #[test]
-fn gpus() {
-    // A stand-in that names two GPUs, as `nvidia-smi` does, if asked as `sandboxd` asks, without
-    // the grant.
-    let named = r#"[ "$*" = "--query-gpu=name --format=csv,noheader" ] && [ -z "$SANDBOXD_GRANT" ] || exit 1
-printf 'NVIDIA A100-SXM4-80GB\nNVIDIA A100 80GB PCIe\n'"#;
-    let long = format!(
-        "for i in $(seq 12); do echo 'NVIDIA {}'; done",
-        "X".repeat(100)
-    );
-    let cases = [
-        ("named, at a socket", Meeting::Socket, Some(named)),
-        ("named, over TCP", Meeting::Tcp, Some(named)),
-        ("named, listening", Meeting::Listen, Some(named)),
-        ("none on PATH", Meeting::Socket, None),
-        (
-            "failing",
-            Meeting::Socket,
-            Some("echo 'No devices were found'; exit 6"),
-        ),
-        ("naming none", Meeting::Socket, Some("true")),
-        (
-            "naming more than a hello holds",
-            Meeting::Socket,
-            Some(&long),
-        ),
-    ];
-    let lines = cases.map(|(case, meeting, nvidia_smi)| {
-        let sandbox = Sandbox::start(meeting, nvidia_smi);
-        let gpus = format!("{case}: {:?}", sandbox.session.gpus());
-        let ended = sandbox.end();
-        assert_eq!(ended.last().map(String::as_str), Some("left running: 0"));
-        gpus
-    });
-    let expected = expect![[r#"
-        named, at a socket: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        named, over TCP: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        named, listening: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA A100 80GB PCIe")])
-        none on PATH: None
-        failing: None
-        naming none: None
-        naming more than a hello holds: None"#]];
-    expected.assert_eq(&lines.join("\n"));
-}
-
-#[test]
 fn puts_runs_and_collects() {
     check(
         Meeting::Socket,
@@ -399,7 +352,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -414,7 +367,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -429,7 +382,7 @@ fn puts_runs_and_collects() {
             out/result.json: {"bytes": 2109497}
             payload collected intact: true
             log/1.stderr: warning
-            log/1.stdout: home=/pumpkin/home mode=train grant=unset path=/usr/bin:/bin in $ROOT/home
+            log/1.stdout: home=/pumpkin/home mode=train grant=unset attestation=unset path=/usr/bin:/bin in $ROOT/home
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -450,7 +403,7 @@ fn put_run_collect(sandbox: &mut Sandbox) -> Vec<String> {
         printf '{"bytes": %s}' "$(wc --bytes < ../in/payload/raw)" > ../out/result.json
         mkdir ../out/evidence && cp ../in/payload/raw ../out/evidence/payload
         mkdir ../out/empty
-        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} path=$PATH in $(pwd)"
+        echo "home=$HOME mode=$MODE grant=${SANDBOXD_GRANT-unset} attestation=${SANDBOXD_ATTESTATION-unset} path=$PATH in $(pwd)"
         echo warning >&2
         exit 3"#;
     let launch = sandbox.sh(
@@ -580,7 +533,7 @@ fn inherited_ignored_child_signal() {
     // Linux reaps children itself when their parent explicitly ignores SIGCHLD.
     let mut command = stdx::process::command("env", PATH_ONLY);
     command.args(["--ignore-signal=CHLD", env!("CARGO_BIN_EXE_sandboxd")]);
-    let mut sandbox = Sandbox::start_with(Meeting::Socket, None, command);
+    let mut sandbox = Sandbox::start_with(Meeting::Socket, command);
     let launch = sandbox.sh("exit 0", &[]);
     sandbox.session.start(launch, hung()).unwrap();
     let status = exited(&mut sandbox.sandboxd);
@@ -882,7 +835,7 @@ fn hello_answers() {
             ]
         },
         &expect![[r#"
-            its hello: {"version":2}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 3
+            its hello: {"version":3}; refused: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/refused.sock failed: it refused the session: a stand-in for sandbox protocol 4
             unanswered: exit status: 1: sandboxd: opening the session with the gateway at $ROOT/unanswered.sock failed: it closed the connection before it answered the hello: expected it to accept or refuse the session
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
@@ -898,12 +851,20 @@ fn over_tcp() {
             let Gateway::Tcp(_, address) = sandbox.gateway else {
                 panic!("the sandbox was to meet the gateway over TCP");
             };
-            let unissued = sandboxd(&[address.to_string().as_ref()], Some(OsStr::new(GRANT)));
-            let refused = ended(unissued).replace(&address.to_string(), "$GATEWAY");
-            vec![format!("a grant the gateway didn't issue: {refused}")]
+            let foreign = [(SANDBOXD_ATTESTATION, OsStr::new("another"))];
+            let unadmitted = sandboxd(&[address.to_string().as_ref()], &foreign);
+            let refused = ended(unadmitted).replace(&address.to_string(), "$GATEWAY");
+            let again = [(SANDBOXD_ATTESTATION, OsStr::new(ATTESTATION))];
+            let replayed = sandboxd(&[address.to_string().as_ref()], &again);
+            let replayed = ended(replayed).replace(&address.to_string(), "$GATEWAY");
+            vec![
+                format!("an attestation that no check admits: {refused}"),
+                format!("the sandbox's attestation, again: {replayed}"),
+            ]
         },
         &expect![[r#"
-            a grant the gateway didn't issue: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the registration grant opens no session: expected one the gateway issued for a sandbox whose start waits, presented once
+            an attestation that no check admits: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation opens no session, as no sandbox's start waits: expected the attestation of a sandbox whose start waits, presented once
+            the sandbox's attestation, again: exit status: 1: sandboxd: opening the session with the gateway at $GATEWAY failed: it refused the session: the attestation opens no session, as no sandbox's start waits: expected the attestation of a sandbox whose start waits, presented once
             then Ended { reason: "the owner dropped the session" }
             sandboxd: exit status: 0
             left running: 0"#]],
@@ -928,27 +889,27 @@ fn listening() {
             lines.push(trickled());
             let by = unix_seconds(3600);
             let with_socket = ["/run/gateway.sock", "--listen", "--by", &by].map(OsStr::new);
-            let refused = ended(sandboxd(&with_socket, Some(OsStr::new(GRANT))));
+            let refused = ended(sandboxd(&with_socket, &grant()));
             lines.push(format!("--listen with a socket: {refused}"));
             let unbounded = ["127.0.0.1:7434", "--listen"].map(OsStr::new);
-            let refused = ended(sandboxd(&unbounded, Some(OsStr::new(GRANT))));
+            let refused = ended(sandboxd(&unbounded, &grant()));
             lines.push(format!("--listen without --by: {refused}"));
             lines
         },
         &expect![[r#"
             a second peer, once the session is open: Err(ConnectionRefused)
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(2)}), then closed
-            Accepted { grant: None }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 0" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 1" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 2" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 3" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 4" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 5" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 6" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 7" }: its hello Some(Object {"version": Number(2)}), then closed
-            Refused { message: "why 8" }: its hello Some(Object {"version": Number(2)}), then closed
-            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(2)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(3)}), then closed
+            Accepted { grant: None }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 0" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 1" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 2" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 3" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 4" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 5" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 6" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 7" }: its hello Some(Object {"version": Number(3)}), then closed
+            Refused { message: "why 8" }: its hello Some(Object {"version": Number(3)}), then closed
+            Accepted { grant: Some(RegistrationGrant(..)) }: its hello Some(Object {"version": Number(3)}), then served: {"message":"/nonexistent: No such file or directory (os error 2)","stream":1,"type":"failed"}
             then, its session ended: exit status: 0: sandboxd: turned away the peer at $PEER0: it presented another registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER1: it presented no registration grant: expected the sandbox's
             sandboxd: turned away the peer at $PEER2: it refused the session: why 0
@@ -975,7 +936,7 @@ fn listening_apart() -> Vec<String> {
     let apart_text = apart.to_string();
     let by = unix_seconds(3600);
     let listen = ["--listen", &apart_text, "--by", &by].map(OsStr::new);
-    let listening = sandboxd(&listen, Some(OsStr::new(GRANT)));
+    let listening = sandboxd(&listen, &grant());
     let mut lines = Vec::new();
     let mut peers = Vec::new();
     let other = RegistrationGrant::from([0xab; 16]);
@@ -1026,7 +987,7 @@ fn trickled() -> String {
     // One to two seconds from now, with the minute that `sandboxd` waits past it.
     let by = unix_seconds(-58);
     let listen = ["--listen", &address_text, "--by", &by].map(OsStr::new);
-    let listening = sandboxd(&listen, Some(OsStr::new(GRANT)));
+    let listening = sandboxd(&listen, &grant());
     let (peer, trickled) = trickling(address);
     let said = ended(listening).replace(&peer, "$PEER");
     format!("a peer that trickles its answer: {trickled}; then: {said}")
@@ -1095,7 +1056,7 @@ fn unclaimed() {
             let address = unlistened().to_string();
             // A minute ago, so that with the slack the deadline has just passed.
             let by = unix_seconds(-60);
-            let grant = Some(OsStr::new(GRANT));
+            let grant = &grant();
             let listening = [&address, "--listen", "--by", &by].map(OsStr::new);
             let dialing = [&address, "--by", &by].map(OsStr::new);
             vec![
@@ -1150,6 +1111,39 @@ fn wait_at_a_full_control_socket() {
 }
 
 #[test]
+fn refused_grants() {
+    check(
+        Meeting::Socket,
+        |_| {
+            let (closed, by) = (unlistened().to_string(), unix_seconds(3600));
+            let listening = [&closed, "--listen", "--by", &by].map(OsStr::new);
+            let (short, not_utf8) = (OsStr::new("0123456789abcdef"), OsStr::from_bytes(b"\xff"));
+            let grants = [
+                ("listening with no grant", Vec::new()),
+                (
+                    "listening with a grant too short",
+                    vec![(SANDBOXD_GRANT, short)],
+                ),
+                (
+                    "listening with a grant not UTF-8",
+                    vec![(SANDBOXD_GRANT, not_utf8)],
+                ),
+            ];
+            (grants.into_iter())
+                .map(|(case, env)| format!("{case}: {}", ended(sandboxd(&listening, &env))))
+                .collect()
+        },
+        &expect![[r#"
+            listening with no grant: exit status: 1: sandboxd: SANDBOXD_GRANT is not set: set it to the registration grant issued for the sandbox, which the gateway that dials a sandboxd that listens presents
+            listening with a grant too short: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            listening with a grant not UTF-8: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            then Ended { reason: "the owner dropped the session" }
+            sandboxd: exit status: 0
+            left running: 0"#]],
+    );
+}
+
+#[test]
 fn refused_before_the_session() {
     check(
         Meeting::Socket,
@@ -1158,18 +1152,24 @@ fn refused_before_the_session() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let at = listener.local_addr().unwrap().to_string();
             let closed = unlistened().to_string();
-            let (short, not_utf8) = (OsStr::new("0123456789abcdef"), OsStr::from_bytes(b"\xff"));
+            let long = "a".repeat(MAX_ATTESTATION_BYTES + 1);
+            let attesting = |attestation| vec![(SANDBOXD_ATTESTATION, attestation)];
             let cases = [
-                ("a relative socket path", "gateway.sock", None),
-                ("a host's name", "localhost:7433", None),
-                ("no grant", &at, None),
-                ("a grant too short", &at, Some(short)),
-                ("a grant not UTF-8", &at, Some(not_utf8)),
-                ("nothing listening", &closed, Some(OsStr::new(GRANT))),
+                ("a relative socket path", "gateway.sock", Vec::new()),
+                ("a host's name", "localhost:7433", Vec::new()),
+                ("no attestation", &at, Vec::new()),
+                ("only a grant", &at, grant().to_vec()),
+                ("an empty attestation", &at, attesting(OsStr::new(""))),
+                ("an attestation too long", &at, attesting(OsStr::new(&long))),
+                (
+                    "nothing listening",
+                    &closed,
+                    attesting(OsStr::new(ATTESTATION)),
+                ),
             ];
             let mut lines: Vec<String> = (cases.into_iter())
-                .map(|(case, gateway, grant)| {
-                    let ended = ended(sandboxd(&[gateway.as_ref()], grant));
+                .map(|(case, gateway, env)| {
+                    let ended = ended(sandboxd(&[gateway.as_ref()], &env));
                     format!("{case}: {}", ended.replace(&closed, "$CLOSED"))
                 })
                 .collect();
@@ -1177,7 +1177,7 @@ fn refused_before_the_session() {
             // that isn't root.
             for user in ["0:1000", "1000", "a:b", "1234:1235"] {
                 let args = [&closed, "--user", user].map(OsStr::new);
-                let ended = ended(sandboxd(&args, Some(OsStr::new(GRANT))));
+                let ended = ended(sandboxd(&args, &grant()));
                 lines.push(format!("--user {user}: {ended}"));
             }
             listener.set_nonblocking(true).unwrap();
@@ -1187,9 +1187,10 @@ fn refused_before_the_session() {
         &expect![[r#"
             a relative socket path: exit status: 1: sandboxd: can't parse `gateway`, `gateway.sock` is neither a Unix socket's absolute path nor a TCP address: give one, such as `/run/gateway.sock` or `192.0.2.1:7433`: see `sandboxd --help`
             a host's name: exit status: 1: sandboxd: can't parse `gateway`, `localhost:7433` is neither a Unix socket's absolute path nor a TCP address: give one, such as `/run/gateway.sock` or `192.0.2.1:7433`: see `sandboxd --help`
-            no grant: exit status: 1: sandboxd: SANDBOXD_GRANT is not set: set it to the registration grant issued for the sandbox, which a sandboxd that meets its gateway over TCP presents
-            a grant too short: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            a grant not UTF-8: exit status: 1: sandboxd: SANDBOXD_GRANT: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            no attestation: exit status: 1: sandboxd: SANDBOXD_ATTESTATION is not set: set it to the sandbox's attestation, which a sandboxd that dials its gateway over TCP presents
+            only a grant: exit status: 1: sandboxd: SANDBOXD_ATTESTATION is not set: set it to the sandbox's attestation, which a sandboxd that dials its gateway over TCP presents
+            an empty attestation: exit status: 1: sandboxd: SANDBOXD_ATTESTATION: the attestation is 0 bytes: expected 1 to 4096
+            an attestation too long: exit status: 1: sandboxd: SANDBOXD_ATTESTATION: the attestation is 4097 bytes: expected 1 to 4096
             nothing listening: exit status: 1: sandboxd: connecting to the gateway at $CLOSED failed: Connection refused (os error 111)
             --user 0:1000: exit status: 1: sandboxd: can't parse `--user`, `0:1000` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`: see `sandboxd --help`
             --user 1000: exit status: 1: sandboxd: can't parse `--user`, `1000` is not a user's `uid:gid`: give two numbers but 0, such as `1000:1000`: see `sandboxd --help`
@@ -1338,7 +1339,7 @@ fn accepting_gateway(socket: &Path) -> (UnixStream, Child) {
 fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     let gateway = UnixListener::bind(socket).unwrap();
     gateway.set_nonblocking(true).unwrap();
-    let sandboxd = sandboxd(&[socket.as_ref()], None);
+    let sandboxd = sandboxd(&[socket.as_ref()], &[]);
     // A `sandboxd` that never connects fails the test rather than hang it.
     let by = hung();
     let mut connection = loop {
@@ -1361,13 +1362,15 @@ fn fake_gateway(socket: &Path) -> (UnixStream, Child, Value) {
     (connection, sandboxd, hello)
 }
 
-fn sandboxd(args: &[&OsStr], grant: Option<&OsStr>) -> Child {
+fn sandboxd(args: &[&OsStr], env: &[(&str, &OsStr)]) -> Child {
     let mut sandboxd = stdx::process::command(env!("CARGO_BIN_EXE_sandboxd"), PATH_ONLY);
-    sandboxd.args(args).stderr(Stdio::piped());
-    if let Some(grant) = grant {
-        sandboxd.env(SANDBOXD_GRANT, grant);
-    }
-    sandboxd.spawn().unwrap()
+    sandboxd.args(args).envs(env.iter().copied());
+    sandboxd.stderr(Stdio::piped()).spawn().unwrap()
+}
+
+// A grant that no gateway of the tests issues, in the variable that holds it.
+fn grant() -> [(&'static str, &'static OsStr); 1] {
+    [(SANDBOXD_GRANT, OsStr::new(GRANT))]
 }
 
 fn ended(mut sandboxd: Child) -> String {

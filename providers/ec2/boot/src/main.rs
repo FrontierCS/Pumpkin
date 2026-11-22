@@ -1,8 +1,9 @@
 //! Boots a sandbox on its instance: reads the `Start` in the user data ([`USER_DATA_FILE`]),
-//! locks the instance's network down, pulls the role's image and runs its container with
-//! `sandboxd` in it, until the container exits, then exits itself, with a failure if the boot
-//! failed. Whatever happens, it reports on its standard output, which its unit connects to the
-//! serial console, each line behind [`CONSOLE_PREFIX`] and none holding the grant. The `Start`'s
+//! locks the instance's network down, fetches the instance's identity document, pulls the role's
+//! image and runs its container with `sandboxd` in it, which presents the document as its
+//! attestation, until the container exits, then exits itself, with a failure if the boot failed.
+//! Whatever happens, it reports on its standard output, which its unit connects to the serial
+//! console, each line behind [`CONSOLE_PREFIX`] and none holding the document. The `Start`'s
 //! deadlines say what bounds it. Its files are at their paths below the directory it runs in,
 //! which its unit makes `/`.
 
@@ -22,13 +23,28 @@ use std::time::Duration;
 use std::{env, fmt};
 
 use schema::ec2_boot::{
-    CONSOLE_PREFIX, GRANT_DIR, SANDBOXD_IN_IMAGE, Start, USER_DATA_FILE, start_in,
+    ATTESTATION_DIR, CONSOLE_PREFIX, Identity, SANDBOXD_IN_IMAGE, Start, USER_DATA_FILE, start_in,
 };
-use schema::sandbox::{RegistrationGrant, SANDBOXCTL_PATH, SANDBOXD_GRANT, SANDBOXD_PATH};
+use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_ATTESTATION, SANDBOXD_PATH};
 use stdx::process::{self, Bound, Echo, Environment, Failure, Run, command, printed};
 use stdx::{Context as _, Deadline};
 
-const GRANT_FILE: &str = "grant.env";
+const ATTESTATION_FILE: &str = "attestation.env";
+
+// The instance's metadata service, which the instance reaches, and its container doesn't
+// (`lock_down`):
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
+const METADATA: &str = "http://169.254.169.254/latest";
+
+// How long the metadata service's token lasts, in seconds: it is spent at once, on the two reads
+// that follow.
+const TOKEN_TTL_SECONDS: u32 = 60;
+
+// How long each request to the metadata service may take, in seconds, so that one that hangs fails
+// the boot at once rather than at the start's deadline: the service is on the instance's own
+// link, and botocore gives a request to it 1 s, which this leaves room past:
+// https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/utils.py#L100
+const METADATA_TIMEOUT_SECONDS: u32 = 10;
 
 // Where the instance keeps `sandboxd`, copied out of its image, to be mounted read-only.
 const HOST_DIR: &str = "opt/pumpkin";
@@ -75,13 +91,13 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
         sandboxd_image,
         confinement,
         gateway,
-        grant,
         ops,
         model,
     } = read_start()?;
     let hard_end = Deadline::at_unix(Duration::from_secs(hard_end_unix_seconds));
     let pulls_by = Deadline::at_unix(Duration::from_secs(pulls_by_unix_seconds));
     lock_down(gateway, pulls_by)?;
+    let identity = identity(pulls_by)?;
     check_docker(pulls_by)?;
     pull(&role_image, &sandboxd_image, pulls_by)?;
     copy_sandboxd(&sandboxd_image, pulls_by)?;
@@ -95,7 +111,7 @@ fn start(container: &mut Option<String>) -> Result<(), String> {
     run.extend(["--".to_owned(), role_image, gateway.to_string()]);
     run.extend(ops.then(|| "--ops".to_owned()));
     run.extend(model.then(|| "--model".to_owned()));
-    let container = container.insert(run_granted(&run, &grant, pulls_by)?);
+    let container = container.insert(run_attested(&run, &identity, pulls_by)?);
     say(format_args!("container {container} started"));
     // The start's deadline, which the unit scheduled, would power the instance off under the
     // running container: the hard end bounds it from here on.
@@ -147,10 +163,10 @@ fn end(container: Option<&str>, started: &Result<(), String>) -> ExitCode {
     }
 }
 
-// Makes the grant's directory, root's alone, then reads the start out of cloud-init's copy of the
-// user data, which it leaves.
+// Makes the attestation's directory, root's alone, then reads the start out of cloud-init's copy of
+// the user data, which it leaves.
 fn read_start() -> Result<Start, String> {
-    let dir = Path::new(GRANT_DIR.trim_start_matches('/'));
+    let dir = Path::new(ATTESTATION_DIR.trim_start_matches('/'));
     let made = DirBuilder::new().mode(0o700).create(dir);
     made.context(format_args!("making {} failed", dir.display()))?;
     let file = Path::new(USER_DATA_FILE.trim_start_matches('/'));
@@ -203,6 +219,51 @@ fn lock_down(gateway: SocketAddrV4, by: Deadline) -> Result<(), String> {
     let mut nft = command("nft", Environment::Inherited);
     let loaded = silently(by).input(rules.as_bytes());
     stdout(nft.args(["--file", "-"]), loaded).map(drop)
+}
+
+// The instance's identity document and its signature, as its metadata serves them, by IMDSv2, the
+// only version that the envelope's templates serve.
+fn identity(by: Deadline) -> Result<Identity, String> {
+    let max_time = METADATA_TIMEOUT_SECONDS.to_string();
+    let curl = |args: &[&str]| {
+        let mut curl = command("curl", Environment::Inherited);
+        let options = [
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            &max_time,
+        ];
+        curl.args(options).args(args);
+        // As it was served, byte for byte, which the signature signs.
+        let output = process::run(&mut curl, silently(by).named("curl"));
+        let output = output.map_err(|failure| failure.to_string())?;
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("`curl` printed what isn't UTF-8: {}", error.utf8_error()))
+    };
+    let ttl = format!("X-aws-ec2-metadata-token-ttl-seconds: {TOKEN_TTL_SECONDS}");
+    let token = curl(&[
+        "--request",
+        "PUT",
+        "--header",
+        &ttl,
+        &format!("{METADATA}/api/token"),
+    ]);
+    let token = token.context("getting the instance metadata's token failed")?;
+    let header = format!("X-aws-ec2-metadata-token: {token}");
+    let read = |name: &str, what: &str| {
+        let url = format!("{METADATA}/dynamic/instance-identity/{name}");
+        let read = curl(&["--header", &header, &url]);
+        read.context(format_args!(
+            "reading the instance's identity {what} failed"
+        ))
+    };
+    let identity = Identity {
+        document: read("document", "document")?,
+        signature: read("signature", "document's signature")?,
+    };
+    say("read the instance's identity document");
+    Ok(identity)
 }
 
 fn check_docker(by: Deadline) -> Result<(), String> {
@@ -286,7 +347,7 @@ fn instance_options(ops: bool) -> Result<Vec<String>, String> {
         format!("--dns={DNS}"),
         // The instance's search domains would otherwise reach the container's resolver.
         "--dns-search=.".to_owned(),
-        format!("--env-file={}", absolute(&grant_file())?.display()),
+        format!("--env-file={}", absolute(&attestation_file())?.display()),
         mount(SANDBOXD_PATH),
     ];
     if ops {
@@ -296,15 +357,18 @@ fn instance_options(ops: bool) -> Result<Vec<String>, String> {
     Ok(options)
 }
 
-fn run_granted(run: &[String], grant: &RegistrationGrant, by: Deadline) -> Result<String, String> {
-    // The grant reaches the container by a file that only this user reads, not by an argument that
-    // `ps` shows, and the file lasts no longer than `docker run`. Nothing else of it is mounted
-    // into the container. Its `sandboxd` is its first process, and this starts nothing else in
-    // it, so nothing runs there as the role's user before the hello that spends the grant.
-    let digits = grant.digits();
-    let file = grant_file();
+fn run_attested(run: &[String], identity: &Identity, by: Deadline) -> Result<String, String> {
+    // The attestation reaches the container by a file, which lasts no longer than `docker run`,
+    // not by an argument that `ps` shows. Nothing else of it is mounted into the container. Its
+    // `sandboxd` is its first process, and this starts nothing else in it, so nothing runs there as
+    // the role's user before the hello that spends the attestation. Compact JSON holds no line
+    // break, which would end the variable's line.
+    let Ok(json) = serde_json::to_string(identity) else {
+        unreachable!("an identity can't be written as JSON, though it holds only strings")
+    };
+    let file = attestation_file();
     let opened = (OpenOptions::new().write(true).create_new(true).mode(0o600)).open(&file);
-    let written = opened.and_then(|mut file| writeln!(file, "{SANDBOXD_GRANT}={digits}"));
+    let written = opened.and_then(|mut file| writeln!(file, "{SANDBOXD_ATTESTATION}={json}"));
     let written = written.context(format_args!("writing {} failed", file.display()));
     let started = written.and_then(|()| {
         let mut docker = command("docker", Environment::Inherited);
@@ -321,8 +385,8 @@ fn host_sandboxd() -> PathBuf {
     Path::new(HOST_DIR).join("sandboxd")
 }
 
-fn grant_file() -> PathBuf {
-    Path::new(GRANT_DIR.trim_start_matches('/')).join(GRANT_FILE)
+fn attestation_file() -> PathBuf {
+    Path::new(ATTESTATION_DIR.trim_start_matches('/')).join(ATTESTATION_FILE)
 }
 
 // Docker takes the source of a bind mount as an absolute path.

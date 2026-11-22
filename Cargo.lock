@@ -171,9 +171,12 @@ name = "ec2"
 version = "0.0.0"
 dependencies = [
  "aws",
+ "base64",
  "engine",
+ "expect-test",
  "jiff",
  "provider",
+ "ring",
  "schema",
  "serde",
  "serde_json",

@@ -1,12 +1,12 @@
-//! The sandbox protocol, v1: what the gateway and `sandboxd` say to each other over a session, and
-//! the contract of the sandbox that a role's commands run in.
+//! The sandbox protocol: what the gateway and `sandboxd` say to each other over a session, and the
+//! contract of the sandbox that a role's commands run in.
 //!
 //! A session is one connection, which lasts as long as its sandbox and identifies it: to a socket
-//! of the sandbox's own, by a hello that presents its [`RegistrationGrant`], or the gateway's to
-//! its endpoint ([`Listening`]). `sandboxd` sends a [`Hello`] first, and the gateway answers with a
+//! of the sandbox's own, by a hello that presents its [`Attestation`], or the gateway's to its
+//! endpoint ([`Listening`]). `sandboxd` sends a [`Hello`] first, and the gateway answers with a
 //! [`HelloReply`], accepting its own [`PROTOCOL_VERSION`] alone. Every version keeps that order,
-//! the [`frame`] encoding, a hello's `version` and size ([`MAX_HELLO_BYTES`]), a reply's `type` and
-//! a refusal's `message`.
+//! the [`frame`] encoding, a hello's `version` and the size of its message ([`MAX_HELLO_BYTES`]),
+//! read before its body, a reply's `type` and a refusal's `message`.
 //!
 //! Both sides send [`frame`]s: [`ToSandbox`] from the gateway, [`FromSandbox`] from `sandboxd`; a
 //! reply names its request's stream, a number the gateway uses once. Files move as trees of
@@ -220,10 +220,11 @@ pub fn model_url() -> String {
 }
 
 /// The version of the protocol that both ends of a session speak, which its [`Hello`] gives.
-pub const PROTOCOL_VERSION: u32 = 2;
+// `examples/smoke/probe.py` states it too, for the hello that it forges.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The most bytes a [`Hello`]'s message holds, at any version ([the protocol](crate::sandbox)); its
-/// body holds none.
+/// body holds its [`Attestation`], if any.
 // Room for the names of 8 GPUs, the most that any provider gives one sandbox, each of fewer than
 // the 96 bytes that `nvidia-smi` names a device in, quoted and followed by a comma, beside the rest
 // of the hello, which takes under 128.
@@ -237,13 +238,17 @@ const _: () = assert!(8 * (96 + 3) + 128 <= MAX_HELLO_BYTES);
 // retransmission timeout, 1 s, and then at twice the wait before each time.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Reads a [`Hello`], the frame that opens a session, or `None` if the connection ended cleanly
-/// before it.
+/// Reads a [`Hello`], the frame that opens a session, with the [`Attestation`] in its body, if
+/// any, or `None` if the connection ended cleanly before it.
 ///
-/// It refuses a frame longer than [`MAX_HELLO_BYTES`] from its lengths alone, one with a body, and
-/// a message that isn't JSON or is no hello.
-pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<Hello>> {
-    frame::read_bodiless(reader, MAX_HELLO_BYTES, ["the hello", "a hello"])
+/// It refuses, from its length alone, a message longer than [`MAX_HELLO_BYTES`]; then a message
+/// that isn't JSON or is no hello, such as one of another version; then, from its length alone, a
+/// body longer than [`MAX_ATTESTATION_BYTES`].
+pub fn read_hello(reader: &mut impl Read) -> io::Result<Option<(Hello, Option<Attestation>)>> {
+    let names = ["the hello", "a hello"];
+    let read = frame::read_capped(reader, MAX_HELLO_BYTES, MAX_ATTESTATION_BYTES, names)?;
+    // An empty body presents nothing, as a hello without an attestation has.
+    Ok(read.map(|(hello, body)| (hello, (!body.is_empty()).then_some(Attestation(body)))))
 }
 
 /// Reads a [`HelloReply`], the answer to a hello, or `None` if the connection ended cleanly before
@@ -259,20 +264,18 @@ pub fn read_hello_reply(reader: &mut impl Read) -> io::Result<Option<HelloReply>
     )
 }
 
-/// What `sandboxd` sends first on every session; [`read_hello`] reads one.
+/// The message that `sandboxd` sends first on every session; [`read_hello`] reads one.
 ///
-/// Its body is empty, and its message `{"version":v}`, with `v` its [`PROTOCOL_VERSION`], and
-/// `"grant":"…"` where it presents a grant, and `"gpus":[…]` where it saw GPUs.
+/// Its message is `{"version":v}`, with `v` its [`PROTOCOL_VERSION`], and `"gpus":[…]` where it
+/// saw GPUs. The frame's body is the sandbox's [`Attestation`] where it dials an address that
+/// several sandboxes share, and empty elsewhere.
 ///
 /// Its `Deserialize` refuses a hello of another version for its version, whatever else it holds,
-/// then a field that this version's form lacks, a grant that isn't one or a GPU's model that isn't
-/// one, and a frame that gives no version.
+/// then a field that this version's form lacks or a GPU's model that isn't one, and a frame that
+/// gives no version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(into = "HelloJson", try_from = "Value")]
 pub struct Hello {
-    /// The grant the sandbox presents where it dials an address that several sandboxes share; none
-    /// on a socket of its own.
-    pub grant: Option<RegistrationGrant>,
     /// The GPUs that `sandboxd` saw as it started, each by its model as `nvidia-smi` names it; none
     /// where it couldn't tell, as in a sandbox without a GPU, or where their names would make the
     /// hello longer than [`MAX_HELLO_BYTES`].
@@ -284,16 +287,13 @@ pub struct Hello {
 struct HelloJson {
     version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    grant: Option<RegistrationGrant>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     gpus: Option<Vec<GpuModel>>,
 }
 
 impl From<Hello> for HelloJson {
-    fn from(Hello { grant, gpus }: Hello) -> Self {
+    fn from(Hello { gpus }: Hello) -> Self {
         Self {
             version: PROTOCOL_VERSION,
-            grant,
             gpus,
         }
     }
@@ -319,22 +319,57 @@ impl TryFrom<Value> for Hello {
                  this gateway speaks, as a sandboxd built from the same Pumpkin does"
             ));
         }
-        let HelloJson {
-            version: _,
-            grant,
-            gpus,
-        } = HelloJson::deserialize(json).map_err(|error| {
+        let HelloJson { version: _, gpus } = HelloJson::deserialize(json).map_err(|error| {
             format!("the hello isn't of sandbox protocol {PROTOCOL_VERSION}'s form: {error}")
         })?;
-        Ok(Self { grant, gpus })
+        Ok(Self { gpus })
     }
 }
 
-/// A registration grant: the secret by which a sandbox that dials an address several sandboxes
-/// share tells the gateway which it is.
+/// What proves which sandbox a hello is from, where several sandboxes dial one address.
 ///
-/// The gateway issues each, of random bytes, for one sandbox's start, and accepts it once, in that
-/// sandbox's [`Hello`], while the start waits: it opens one session. It is
+/// It is in the hello's body: bytes that the protocol leaves opaque, 1 to
+/// [`MAX_ATTESTATION_BYTES`] of them, which the sandbox's provider makes and checks. It may name
+/// the sandbox's host, so its `Debug` shows none of its bytes.
+#[derive(Clone)]
+pub struct Attestation(Vec<u8>);
+
+/// The most bytes an [`Attestation`] holds.
+// An EC2 instance's identity document and its signature take under 1 KiB as JSON; four times that
+// leaves room for the fields that AWS adds to the document.
+pub const MAX_ATTESTATION_BYTES: usize = 4096;
+
+impl TryFrom<Vec<u8>> for Attestation {
+    type Error = String;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        if bytes.is_empty() || bytes.len() > MAX_ATTESTATION_BYTES {
+            return Err(format!(
+                "the attestation is {} bytes: expected 1 to {MAX_ATTESTATION_BYTES}",
+                bytes.len()
+            ));
+        }
+        Ok(Self(bytes))
+    }
+}
+
+impl Attestation {
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Attestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Attestation(..)")
+    }
+}
+
+/// A registration grant: the secret by which the gateway that dials a sandbox's `sandboxd` tells
+/// it that it is the gateway ([`Listening`]).
+///
+/// The gateway issues each, of random bytes, for one sandbox's start, and presents it in its answer
+/// to that sandbox's [`Hello`] ([`HelloReply::Accepted`]). It is
 /// [`REGISTRATION_GRANT_BYTES`] bytes, written as twice as many lowercase hexadecimal digits. Its
 /// `==` takes the same time whichever of its bytes differ. Its `Debug` shows none of them, it has
 /// no `Display`, and the error that refuses digits quotes none.
@@ -397,7 +432,7 @@ impl Serialize for RegistrationGrant {
 impl PartialEq for RegistrationGrant {
     fn eq(&self, other: &Self) -> bool {
         // Every byte is compared, without a branch on any, so that a peer that presents grants
-        // learns nothing of an issued one from how long the gateway takes to refuse its own.
+        // learns nothing of an issued one from how long `sandboxd` takes to refuse its own.
         // `black_box` keeps the optimizer from compiling the fold to an equality that stops at the
         // first byte that differs.
         let differ = (self.0.iter().zip(&other.0)).fold(0, |differ, (a, b)| differ | (a ^ b));
@@ -425,25 +460,25 @@ pub struct SocketDial {
     pub dir: PathBuf,
 }
 
-/// Where a sandbox's `sandboxd` dials the gateway on a private network, `gateway`, and the grant
-/// its hello presents there, issued for this sandbox alone (`gateway::GrantListener`).
+/// Where a sandbox's `sandboxd` dials the gateway on a private network: `gateway`, which every
+/// sandbox of the run there dials (`gateway::Listener`).
 ///
-/// The gateway listens before the create, and `sandboxd` dials once as it starts: `gateway` its
-/// argument, `grant`'s digits in [`SANDBOXD_GRANT`]. The grant opens the session for the first
-/// hello that presents it, so the provider shows it to this `sandboxd` alone: in its environment,
-/// never in an argument, a log or the console, nothing else running as the role's user until the
-/// session opens. The session is cleartext, so `gateway` is on a private network of the run's.
+/// The gateway listens before the create, and `sandboxd` dials once as it starts, `gateway` its
+/// argument, with the [`Attestation`] in [`SANDBOXD_ATTESTATION`], which the provider makes on the
+/// sandbox's host. The session opens for the first hello whose attestation, and the address it
+/// comes from, the provider's check admits as this sandbox's, so the provider starts nothing else
+/// as the role's user before `sandboxd`. The session is cleartext, so `gateway` is on a private
+/// network of the run's.
 #[derive(Debug)]
-pub struct TcpDial {
+pub struct PrivateDial {
     pub gateway: SocketAddr,
-    pub grant: RegistrationGrant,
 }
 
 /// What a sandbox whose `sandboxd` listens is given: the grant that the gateway's answer to its
 /// hello presents.
 ///
 /// `sandboxd` listens, with `--listen` and an address of the sandbox's own, and `--by` the start's
-/// deadline, `grant`'s digits kept as for a [`TcpDial`], and the gateway dials it after the create,
+/// deadline, `grant`'s digits in [`SANDBOXD_GRANT`], and the gateway dials it after the create,
 /// until that deadline, at the [`Endpoint`] the create gives, behind TLS that the provider ends
 /// with a Web PKI certificate for the endpoint's name. `sandboxd` opens the session with the first
 /// peer whose answer to its hello presents `grant` ([`HelloReply`]), and TLS keeps the grant from
@@ -516,18 +551,27 @@ impl fmt::Display for Endpoint {
 pub const SOCKET_NAME: &str = "s";
 
 /// The environment variable that holds, as its digits, the [`RegistrationGrant`] that a `sandboxd`
-/// presents in its hello where it dials its gateway at a TCP address.
+/// that listens expects the gateway's answer to its hello to present.
 ///
-/// A provider that starts `sandboxd` for a [`TcpDial`] or [`Listening`] sets it, and `sandboxd`
-/// keeps it from every command it starts.
+/// A provider that starts `sandboxd` for a [`Listening`] sets it, and `sandboxd` keeps it from
+/// every command it starts.
 // The environment, not `argv`, which every process may read through `/proc`: a process's
 // environment is open only to those that may trace it. The role's code runs as `sandboxd`'s user,
 // which may until `sandboxd` is non-dumpable, and may keep a handle opened by then, so what keeps
-// the grant from that code is that none of it runs before the hello, which spends the grant:
-// `sandboxd` starts each command after it, and before it only the image's `nvidia-smi`, to name the
-// sandbox's GPUs, without this variable, once it is non-dumpable; and the provider starts nothing
-// else as the role's user before it (`TcpDial`, `Listening`).
+// the grant from that code is that none of it runs before the session opens, which spends the
+// grant: `sandboxd` starts each command after it, and before it only the image's `nvidia-smi`, to
+// name the sandbox's GPUs, without this variable, once it is non-dumpable; and the provider starts
+// nothing else as the role's user before it (`Listening`).
 pub const SANDBOXD_GRANT: &str = "SANDBOXD_GRANT";
+
+/// The environment variable that holds, as its bytes, the [`Attestation`] that a `sandboxd`
+/// presents in its hello where it dials its gateway at a TCP address.
+///
+/// A provider that starts `sandboxd` for a [`PrivateDial`] sets it, and `sandboxd` keeps it from
+/// every command it starts.
+// Kept as `SANDBOXD_GRANT` is, for the same reason: a role's code that ran before the hello could
+// present it first, from the sandbox's own address.
+pub const SANDBOXD_ATTESTATION: &str = "SANDBOXD_ATTESTATION";
 
 /// The gateway's answer to the session's first frame, with an empty body: `{"type":"accepted"}`, or
 /// `{"type":"accepted","grant":"…"}` where the gateway dialed, or a refusal.

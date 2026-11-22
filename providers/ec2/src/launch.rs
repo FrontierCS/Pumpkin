@@ -11,11 +11,10 @@ use aws::Bound;
 use engine::confinement;
 use jiff::Timestamp;
 use provider::{
-    Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, Undeleted, UnixTime,
+    Admits, Console, Create, Created, Listed, Role, RunTag, SandboxId, Sweep, Undeleted, UnixTime,
 };
 use schema::ec2_boot::{Start, boot_lines};
 use schema::ir::Name;
-use schema::sandbox::TcpDial;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stdx::{Context as _, Deadline};
@@ -41,8 +40,9 @@ const TERMINATED_TIMEOUT: Duration = Duration::from_mins(10);
 const DESCRIBE_EVERY: Duration = Duration::from_secs(5);
 
 impl Ec2<'_> {
-    /// Creates `create`'s sandbox on an instance of its own, with its timer, and returns once its
-    /// run's list finds it.
+    /// Creates `create`'s sandbox on an instance of its own, whose container dials `gateway`, with
+    /// its timer, and returns once its run's list finds it, with the check that admits its hello
+    /// alone.
     ///
     /// # Errors
     ///
@@ -51,8 +51,8 @@ impl Ec2<'_> {
     pub(crate) fn create_instance(
         &self,
         create: &Create,
-        dial: TcpDial,
-    ) -> Result<Created, String> {
+        gateway: SocketAddr,
+    ) -> Result<(Created, Admits), String> {
         let Create {
             run,
             name,
@@ -67,7 +67,6 @@ impl Ec2<'_> {
             hard_end,
             by,
         } = create;
-        let TcpDial { gateway, grant } = dial;
         let SocketAddr::V4(gateway) = gateway else {
             // Docker's default bridge, which the container is on, has no IPv6.
             return Err(format!(
@@ -94,7 +93,6 @@ impl Ec2<'_> {
             sandboxd_image: sandboxd.as_str().to_owned(),
             confinement: confinement(*user, *resources),
             gateway,
-            grant,
             ops: *ops,
             model: *model,
         };
@@ -106,9 +104,11 @@ impl Ec2<'_> {
         let id = self.launch(class, run, name, &tags, &user_data, by)?;
         self.set_timer(run, &id, hard_end, by)?;
         self.listed(run, &id, by)?;
-        Ok(Created {
+        let admits = self.documents.clone().admits(id.0.clone());
+        let created = Created {
             id: SandboxId::from(id.0),
-        })
+        };
+        Ok((created, admits))
     }
 
     fn launch(
@@ -120,9 +120,9 @@ impl Ec2<'_> {
         user_data: &str,
         by: Deadline,
     ) -> Result<InstanceId, String> {
-        // The user data holds the grant, so it reaches `aws` in a file only this user can read,
-        // never on its command line, which every process can read. Neither a run's tag nor a name
-        // holds a `+`, so no other launch of this process names the file.
+        // The user data reaches `aws` in a file, as it may be longer than a command line holds.
+        // Neither a run's tag nor a name holds a `+`, so no other launch of this process names
+        // the file.
         let file = self.dir.join(format!(
             "pumpkin-user-data-{}-{}+{name}",
             process::id(),
@@ -152,8 +152,7 @@ impl Ec2<'_> {
         ];
         let launched = write_private(&self.dir, &file, user_data)
             .and_then(|()| self.reached.cli.json::<Launched>(&args, Bound::Create(by)));
-        // A file left behind holds a grant that only this user can read, and that expires with its
-        // registration.
+        // A file left behind holds no secret, as the user data holds none.
         let _ = fs::remove_file(&file);
         let Launched {
             instances: [LaunchedInstance { instance_id }],

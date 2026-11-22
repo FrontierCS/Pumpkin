@@ -1,58 +1,27 @@
-//! `ec2-boot`, against [`STAND_IN`], a stand-in for the commands an instance runs it with,
-//! `docker`, `nft` and `busctl`, which records each call, so these tests need no instance.
-//! Each runs `ec2-boot start` in a directory of its own, below which it keeps its files, as it
-//! keeps them below `/` on an instance.
+//! `ec2-boot`, which refuses user data it can't read before it runs a command. What it runs on
+//! an instance, `docker`, `nft`, `busctl` and the metadata's `curl`, is left to `cargo xtask live
+//! ec2`, as each EC2 sandbox boots by it. The test runs `ec2-boot start` in a directory of its
+//! own, below which it keeps its files, as it keeps them below `/` on an instance.
 
 #![expect(
     clippy::unwrap_used,
     reason = "a test helper fails the test that calls it"
 )]
 
+use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::Stdio;
-use std::{env, fs, iter};
 
 use expect_test::{Expect, expect};
 use schema::ec2_boot::{Start, USER_DATA_FILE, user_data};
-use schema::sandbox::RegistrationGrant;
 use stdx::process::Environment;
 use test_support::TestDir;
 
 /// A time far past every test, in seconds since the Unix epoch.
 const LATER: u64 = 4_102_444_800;
 
-/// The stand-in for `docker`, `nft` and `busctl`, which a boot runs through links to it, each
-/// named as its command, in `bin`: it answers as each would on an instance whose Docker is 29.1.3
-/// and supports every limit, and records each call in `calls`, its command and then its
-/// arguments, a line each, the call ended by an empty line. `nft` keeps what it reads in
-/// `nft-rules`; `docker cp` writes the path it copies from to the file it copies to; `docker run`
-/// writes, to `env-file`, the mode and the text of the file that its `--env-file` names.
-const STAND_IN: &str = r#"#!/bin/sh
-dir=${0%/*}
-name=${0##*/}
-{ echo "$name"; printf '%s\n' "$@"; echo; } >> "$dir/calls"
-case "$name $1" in
-    "nft "*) cat > "$dir/nft-rules" ;;
-    "busctl "*|"docker pull") ;;
-    "docker info") echo true true true true ;;
-    "docker version") echo 29.1.3 ;;
-    # The reference by digest that the image was pulled by.
-    "docker image") for last; do :; done; echo "$last" ;;
-    "docker create") echo c0ffee ;;
-    "docker cp") echo "copied from $2" > "$3" ;;
-    "docker rm") echo "$2" ;;
-    "docker run")
-        for arg; do case $arg in --env-file=*) file=${arg#--env-file=} ;; esac; done
-        { printf 'mode 0%s: ' "$(stat --format=%a -- "$file")"; cat -- "$file"; } > "$dir/env-file"
-        echo 5f3c ;;
-    "docker wait") echo 0 ;;
-    "docker logs") echo 'a line on standard error' >&2; echo 'a line on standard output' ;;
-    *) echo "the stand-in doesn't know \`$name $*\`" >&2; exit 1 ;;
-esac
-"#;
-
-/// A directory of one boot's own: `bin`, which holds links to the stand-in, each named as a
-/// command, and the files it writes, and `root`, which the boot runs in.
+/// A directory of one boot's own: `bin`, empty, the boot's whole `PATH`, so that no command it
+/// runs is found, and `root`, which the boot runs in.
 struct Instance {
     dir: TestDir,
 }
@@ -64,12 +33,6 @@ impl Instance {
         // As cloud-init makes it, before `ec2-boot` runs.
         fs::create_dir_all(dir.path().join("root/var/lib/cloud/instance")).unwrap();
         fs::create_dir_all(dir.path().join("root/run")).unwrap();
-        let stand_in = dir.path().join("stand-in");
-        fs::write(&stand_in, STAND_IN).unwrap();
-        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
-        for command in ["docker", "nft", "busctl"] {
-            std::os::unix::fs::symlink(&stand_in, dir.path().join("bin").join(command)).unwrap();
-        }
         Self { dir }
     }
 
@@ -77,12 +40,10 @@ impl Instance {
     /// and what it printed to the console.
     fn boot(&self, user_data: &str) -> Vec<String> {
         fs::write(self.root(USER_DATA_FILE), user_data).unwrap();
-        let path = env::var_os("PATH").unwrap_or_default();
-        let path = iter::once(self.dir.path().join("bin")).chain(env::split_paths(&path));
         let boot = env!("CARGO_BIN_EXE_ec2-boot");
         let mut boot = stdx::process::command(boot, Environment::Inherited);
         boot.arg("start").current_dir(self.dir.path().join("root"));
-        boot.env("PATH", env::join_paths(path).unwrap());
+        boot.env("PATH", self.dir.path().join("bin"));
         let output = (boot.stdin(Stdio::null()).stdout(Stdio::piped()))
             .output()
             .unwrap();
@@ -94,15 +55,6 @@ impl Instance {
                 .map(|line| format!("  {}", self.shown(line))),
         );
         lines
-    }
-
-    /// The calls the stand-in recorded, in the order made, each on a line.
-    fn calls(&self) -> Vec<String> {
-        let recorded = fs::read_to_string(self.dir.path().join("bin/calls")).unwrap_or_default();
-        let calls = recorded.split_terminator("\n\n");
-        calls
-            .map(|call| self.shown(&call.lines().collect::<Vec<_>>().join(" ")))
-            .collect()
     }
 
     /// The text of the file at `path`, below the directory, or that it is missing.
@@ -125,21 +77,14 @@ impl Instance {
     }
 }
 
-/// Boots with `user_data`, and compares the console, the calls and the files left with `expect`.
-/// Whatever the user data holds, the boot makes the grant's directory root's alone, and shows no
-/// grant.
+/// Boots with `user_data`, and compares the console and the files left with `expect`.
+/// Whatever the user data holds, the boot makes the attestation's directory root's alone.
 fn check(user_data: &str, expect: &Expect) {
     let instance = Instance::new();
     let mut lines = instance.boot(user_data);
-    let grant_dir = fs::metadata(instance.root("/run/pumpkin")).unwrap();
-    assert_eq!(grant_dir.permissions().mode() & 0o777, 0o700);
-    let grant = start().grant.digits();
-    assert!(!lines.iter().any(|line| line.contains(&grant)));
-    lines.push("calls:".to_owned());
-    lines.extend(instance.calls().iter().map(|call| format!("  {call}")));
-    lines.push(instance.file("bin/nft-rules"));
-    lines.push(instance.file("bin/env-file"));
-    lines.push(instance.file("root/run/pumpkin/grant.env"));
+    let attestation_dir = fs::metadata(instance.root("/run/pumpkin")).unwrap();
+    assert_eq!(attestation_dir.permissions().mode() & 0o777, 0o700);
+    lines.push(instance.file("root/run/pumpkin/attestation.env"));
     lines.push(instance.file("root/opt/pumpkin/sandboxd"));
     expect.assert_eq(&lines.join("\n"));
 }
@@ -158,64 +103,15 @@ fn start() -> Start {
             .to_owned(),
         confinement: vec!["--user=4242:4243".to_owned(), "--cap-drop=ALL".to_owned()],
         gateway: "172.31.0.10:7433".parse().unwrap(),
-        grant: RegistrationGrant::from([0x5a; 16]),
         ops: true,
         model: true,
     }
 }
 
 #[test]
-fn boots() {
-    check(
-        &user_data(CLOUD_CONFIG, &start()).unwrap(),
-        &expect![[r#"
-            exit status: Some(0)
-              pumpkin-ec2: docker 29.1.3
-              pumpkin-ec2: pulled 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa: 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa
-              pumpkin-ec2: pulled 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb: 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb
-              pumpkin-ec2: container 5f3c started
-              pumpkin-ec2: container 5f3c exited with status 0
-              pumpkin-ec2: the boot ended
-              pumpkin-ec2: sandboxd: a line on standard output
-              pumpkin-ec2: sandboxd: a line on standard error
-            calls:
-              nft --file -
-              docker info --format {{.MemoryLimit}} {{.SwapLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}
-              docker version --format {{.Server.Version}}
-              docker pull --quiet 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa
-              docker image inspect --format {{index .RepoDigests 0}} 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa
-              docker image inspect --format {{index .RepoDigests 0}} 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb
-              docker create --entrypoint=/ 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb
-              docker cp c0ffee:/sandboxd opt/pumpkin/sandboxd
-              docker rm c0ffee
-              docker run --detach --name=pumpkin-sandbox --user=4242:4243 --cap-drop=ALL --cgroupns=private --network=bridge --dns=127.0.0.1 --dns-search=. --env-file=<dir>/root/run/pumpkin/grant.env --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/sandboxd,readonly --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/bin/sandboxctl,readonly --entrypoint=/.pumpkin/sandboxd -- 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa 172.31.0.10:7433 --ops --model
-              busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ScheduleShutdown st poweroff 4102444800000000
-              docker wait 5f3c
-              docker logs --tail 20 5f3c
-            bin/nft-rules: table inet pumpkin {
-                chain forward {
-                    type filter hook forward priority filter - 10; policy accept;
-                    iifname "docker0" ip daddr 172.31.0.10 tcp dport 7433 accept
-                    iifname "docker0" drop
-                }
-                chain input {
-                    type filter hook input priority filter - 10; policy accept;
-                    iifname "docker0" drop
-                }
-            }
-
-            bin/env-file: mode 0600: SANDBOXD_GRANT=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
-
-            root/run/pumpkin/grant.env: missing
-            root/opt/pumpkin/sandboxd: copied from c0ffee:/sandboxd
-        "#]],
-    );
-}
-
-#[test]
 fn refuses_a_start_it_cant_read() {
     // A start that doesn't parse, which fails the boot before it runs a command, with its directory
-    // root's alone and no grant on the console.
+    // root's alone.
     let user_data = user_data(CLOUD_CONFIG, &start()).unwrap();
     let unread = user_data.replacen("{\"hard_end", "{\"registry\":\"\",\"hard_end", 1);
     check(
@@ -223,10 +119,7 @@ fn refuses_a_start_it_cant_read() {
         &expect![[r#"
             exit status: Some(1)
               pumpkin-ec2: the boot failed: the user data in var/lib/cloud/instance/user-data.txt can't be read: its start can't be read, at line 1 of the start, column 11: expected a start's JSON, as the provider writes it
-            calls:
-            bin/nft-rules: missing
-            bin/env-file: missing
-            root/run/pumpkin/grant.env: missing
+            root/run/pumpkin/attestation.env: missing
             root/opt/pumpkin/sandboxd: missing"#]],
     );
 }

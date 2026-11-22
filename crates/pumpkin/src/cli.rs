@@ -4,7 +4,7 @@
 //! The help texts here are the home of what each command and option means. `-h` or `--help`
 //! before `--` prints the help of the command that the line names, as `pumpkin help` does, which
 //! also prints the topics, such as [`CONFIG`]. The commands that [`RARE`] names are hidden from
-//! clap's list and listed apart; the controller's own side is listed nowhere.
+//! clap's list and listed apart.
 //! What a command does is left to its own module.
 
 mod notes;
@@ -126,10 +126,11 @@ Remove what ended or lost runs left and print the run ids reported as cleaned.")
     )]
     #[command(long_about = "\
 On the controller: `job` runs a job of the controller target, which `pumpkin
-run` and `pumpkin build` start there in a unit of its own; `boot` reaps what lost
-runs left, at the controller's boot; `cancel` cancels a run for `pumpkin cancel`, on a client, which says the run's
-ending from its copy of the record; `serve` answers, on its standard input and
-output, the client that follows a job, lists the runs or views them; and `publish` uploads the runs to the bucket
+run` and `pumpkin build` start there in a unit of its own; `boot` reaps what
+lost runs left, at the controller's boot; `cancel` cancels a run for `pumpkin
+cancel`, on a client, which says the run's ending from its copy of the record;
+`serve` answers, on its standard input and output, the client that follows a
+job, lists the runs or views them; and `publish` uploads the runs to the bucket
 of the public page.")]
     #[command(after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
@@ -141,7 +142,7 @@ of the public page.")]
 }
 
 // Hidden from clap's list of commands, so `command` lists them apart.
-const RARE: [&str; 2] = ["build", "reap"];
+const RARE: [&str; 3] = ["build", "reap", "controller"];
 
 /// The actions of `pumpkin controller`.
 #[derive(Subcommand)]

@@ -12,14 +12,14 @@ bucket of the account, so no laptop can lose it.
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
 | a launch template per class: the AMI, the type, IMDSv2 within one hop, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
-| the timer: a schedule group and a role that terminates run instances | a kill bound outside each guest |
+| the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
-| the controller's role and instance profile: access to its jobs' settings parameter and the EC2 provider's resources | the runs' launches, timers, sweeps and pushes, from the controller |
+| the controller's role and instance profile: access to its jobs' settings parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive; the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session, and one that runs each registered build's reap at boot | builds with the containerd image store; jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier): the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
-| with `public_page`: a private bucket `pumpkin-<name>-public-…` that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
+| with `public_page`: a private bucket `pumpkin-<name>-public-…`, reached over TLS alone, that a CloudFront distribution alone reads, and the controller's right to list it and upload to it | the public page, below |
 
 `ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
 of its envelope is that crate's module doc, "The envelope".

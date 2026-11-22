@@ -14,9 +14,10 @@ The rules for writing Pumpkin's tests and their snapshots.
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
   small one in the test; CHECK IN only data a third party wrote, such as a vendored suite
 - PREFER one integration test binary per crate; add modules, not files under `tests/`
-- RUN `cargo xtask install-tools` before running tests by any command, a plain `cargo test` or
-  `cargo nextest run` too: pumpkin's tests run the pinned formatter that it links at
-  `bin/buildifier`, which `.cargo/config.toml` names
+- RUN `cargo xtask install-tools`, or an xtask command that runs tests such as `cargo xtask ci`,
+  before a plain `cargo test` or `cargo nextest run` in a new checkout. `pumpkin`'s tests run the
+  pinned formatter from `bin/buildifier`, which `.cargo/config.toml` names. Each of those
+  commands links it there from the cache that checkouts share, and fetches it on first use
 - ASSUME that each test runs alone, in a process of its own, as cargo-nextest runs it in
   `cargo xtask ci`: tests share no per-process state
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once
@@ -32,6 +33,11 @@ The rules for writing Pumpkin's tests and their snapshots.
 - KEEP `cargo xtask ci` pure: its tests reach no Docker engine, network or cloud; temporary
   files, Pumpkin's own processes and loopback sockets are fine. IGNORE each test that needs a Docker engine, the static `sandboxd` or
   a server elsewhere (`#[ignore = "…: run cargo xtask live docker"]`)
+- REFRESH the EC2 provider's table of AWS's identity certificates, when AWS rotates one or adds
+  a region, with `cargo xtask aws-certificates`, which fetches AWS's page and rewrites the table
+  in place: it is the one command that reaches the network for it, and `cargo xtask ci` only
+  tests the table committed. Read the diff, and refill the `identity_certificates` snapshot of
+  `providers/ec2` with `cargo xtask refill --package ec2 identity_certificates`
 - SET each bound that a test chooses at its floor, and script the clock (`SimHost`) for a case
   past a bound; wait on the real clock only for a bound that production states in whole seconds
 - NEVER test against an invented model of a cloud or a service, which pins what the model answers,

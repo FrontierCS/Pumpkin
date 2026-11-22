@@ -38,8 +38,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::frame;
 use schema::ir::{AbsolutePath, Argv, CpuModel, Image, Mode, Name, Sha256Digest};
@@ -48,7 +48,7 @@ use schema::sandbox::op::{
 };
 use schema::sandbox::{
     Endpoint, Entry, ExitStatus, FromSandbox, HelloReply, Launch, Listening, PROTOCOL_VERSION,
-    RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial, TcpDial,
+    PrivateDial, RESULT_MAX_BYTES, RegistrationGrant, RelativePath, Root, SOCKET_NAME, SocketDial,
     ToSandbox, dir_mode, file_mode, log_dir, out_dir, pumpkin_dir,
 };
 use schema::workflow::{Class, Offers, UsdPerHour};
@@ -626,14 +626,24 @@ impl Provider for Sim {
 impl Creator<SocketDial> for Sim {
     fn create(&self, create: &Create, dial: SocketDial) -> Result<Created, String> {
         let gateway = Gateway::Socket(dial.dir.join(SOCKET_NAME));
-        self.made(create, (gateway, None, None))
+        self.made(create, (gateway, Vec::new(), None))
     }
 }
 
-impl Creator<TcpDial> for Sim {
-    fn create(&self, create: &Create, dial: TcpDial) -> Result<Created, String> {
-        let TcpDial { gateway, grant } = dial;
-        self.made(create, (Gateway::Tcp(gateway), Some(grant), None))
+impl Creator<PrivateDial, (Created, Admits)> for Sim {
+    fn create(&self, create: &Create, dial: PrivateDial) -> Result<(Created, Admits), String> {
+        let PrivateDial { gateway } = dial;
+        // The sandbox's name, which no other sandbox of the run has, from the loopback.
+        let attestation = format!("the simulated sandbox {}", create.name).into_bytes();
+        let ours = attestation.clone();
+        let admits: Admits = Box::new(move |presented, peer| {
+            let admitted = presented.bytes() == ours.as_slice() && peer.is_loopback();
+            admitted
+                .then_some(())
+                .ok_or_else(|| "it attests another sandbox".to_owned())
+        });
+        let created = self.made(create, (Gateway::Tcp(gateway), attestation, None))?;
+        Ok((created, admits))
     }
 }
 
@@ -645,7 +655,7 @@ impl Creator<Listening, (Created, Endpoint)> for Sim {
         let port = loopback.local_addr().unwrap().port();
         let endpoint = Endpoint::new(test_support::edge::NAME.to_owned(), port).unwrap();
         let gateway = Gateway::Listen(loopback, Deadline::at_unix(create.by.since_epoch()));
-        let created = self.made(create, (gateway, None, Some(dial.grant)))?;
+        let created = self.made(create, (gateway, Vec::new(), Some(dial.grant)))?;
         Ok((created, endpoint))
     }
 }
@@ -676,7 +686,7 @@ impl Sim {
             freezing,
         } = Faults::of(|fault: &str| path == fault || digest == image(fault).as_str());
         let (mute, hung) = dialing.silent();
-        let hello = json!({ "version": PROTOCOL_VERSION, "grant": presented });
+        let hello = (json!({ "version": PROTOCOL_VERSION }), presented);
         let mode = gateway.mode();
         let record = self.state().record.clone();
         let shared = Arc::new(Mutex::new(Status::new(self.journal.clone(), record)));
@@ -746,11 +756,12 @@ enum Gateway {
     Listen(TcpListener, Deadline),
 }
 
-type Met = (
-    Gateway,
-    Option<RegistrationGrant>,
-    Option<RegistrationGrant>,
-);
+// Where the sandbox dials, the attestation its hello's body presents, and the grant that the
+// gateway's answer must present.
+type Met = (Gateway, Vec<u8>, Option<RegistrationGrant>);
+
+// A hello's message and its body.
+type Hello = (Value, Vec<u8>);
 
 impl Gateway {
     fn mode(&self) -> Option<u32> {
@@ -1026,7 +1037,7 @@ fn sandboxd(
     gateway: &Gateway,
     mute: bool,
     hung: bool,
-    hello: (&Value, Option<RegistrationGrant>),
+    hello: (&Hello, Option<RegistrationGrant>),
     model: bool,
     shared: &Mutex<Status>,
 ) {
@@ -1045,7 +1056,7 @@ fn sandboxd(
 
 fn dial(
     gateway: &Gateway,
-    (hello, awaited): (&Value, Option<RegistrationGrant>),
+    (hello, awaited): (&Hello, Option<RegistrationGrant>),
     model: bool,
     shared: &Mutex<Status>,
 ) {
@@ -1076,8 +1087,12 @@ fn dial(
     }
 }
 
-fn open(connection: &mut Connection, hello: &Value, awaited: Option<&RegistrationGrant>) -> bool {
-    let sent = frame::write(connection, hello, &[]);
+fn open(
+    connection: &mut Connection,
+    (hello, body): &Hello,
+    awaited: Option<&RegistrationGrant>,
+) -> bool {
+    let sent = frame::write(connection, hello, body);
     let answer = sent.and_then(|()| frame::read::<HelloReply>(connection));
     // Unlike `sandboxd`, it prints no refusal: a run reads the console of a start that failed as
     // soon as the refusal is sent, so what it found would depend on a race. A connection may also

@@ -3,6 +3,7 @@
 use std::fs::{self, File, TryLockError};
 use std::io::{self, BufRead as _, BufReader, Seek as _, SeekFrom, Write};
 use std::path::Path;
+use std::time::Duration;
 
 use provider::RunTag;
 use runtime::{ReadError, Record, Writer};
@@ -11,7 +12,7 @@ use schema::frame;
 use stdx::Context as _;
 
 use super::exists;
-use crate::ending::{FOLLOW_POLL, milestones};
+use crate::ending::{Polls, milestones};
 use crate::job::{self, BUILDS, JOBS};
 use crate::link::{self, Followed, Part};
 
@@ -50,6 +51,7 @@ fn follow(
     let active = job::jobs()?.join(id);
     let log = dir.join("log");
     let out = dir.join("out");
+    let mut polls = Polls::new();
     loop {
         // Check first, so the last read includes what the job wrote just before it ended.
         let ended = !exists(&active)?;
@@ -57,12 +59,16 @@ fn follow(
         if let Some(mut file) = open(&log)? {
             file.seek(SeekFrom::Start(log_from_bytes))
                 .context(log.display())?;
-            log_from_bytes += parts(output, file, &Followed::Logged, &log)?;
+            let read_bytes = parts(output, file, &Followed::Logged, &log)?;
+            if read_bytes > 0 {
+                polls.restart();
+            }
+            log_from_bytes += read_bytes;
         }
         if ready {
             break;
         }
-        wait()?;
+        wait(polls.pause())?;
     }
     if !is_run {
         return built(output, &out);
@@ -120,18 +126,20 @@ fn ran(
             milestones(&record, |message| say(output, &message.to_string()), wait)?;
         }
     } else {
+        let mut polls = Polls::new();
         while exists(active)? {
-            wait()?;
+            wait(polls.pause())?;
         }
     }
     // Its outcome may already be written while its driver still holds the last write lock.
     // Wait for that lock before telling the client to copy, even for a record we can't read.
     let path = dir.join("driver.pid");
     if let Some(driver) = open(&path)? {
+        let mut polls = Polls::new();
         loop {
             match driver.try_lock_shared() {
                 Ok(()) => break,
-                Err(TryLockError::WouldBlock) => wait()?,
+                Err(TryLockError::WouldBlock) => wait(polls.pause())?,
                 Err(TryLockError::Error(error)) => return Err(error).context(path.display()),
             }
         }
@@ -145,8 +153,8 @@ fn ran(
 
 // A quiet job can outlive its follower. Watch the reader of stdout as journalctl --follow does.
 // <https://github.com/systemd/systemd/blob/ca78951bd398e191ebc4550710e33ef34190514e/src/journal/journalctl-show.c#L468-L489>
-fn wait() -> Result<(), String> {
-    let closed = super::ready(&io::stdout(), PollFlags::ERR | PollFlags::HUP, FOLLOW_POLL)
+fn wait(pause: Duration) -> Result<(), String> {
+    let closed = super::ready(&io::stdout(), PollFlags::ERR | PollFlags::HUP, pause)
         .context("polling the standard output failed")?;
     if closed {
         return Err("the client closed its output".to_owned());

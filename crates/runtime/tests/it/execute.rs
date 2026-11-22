@@ -18,7 +18,7 @@ use std::{fs, iter};
 
 use decision::{Outcome, lasts};
 use expect_test::{Expect, expect};
-use gateway::{Dialer, GatewayAddress, GrantListener};
+use gateway::{Dialer, GatewayAddress, Listener};
 use provider::{
     Console, Create, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation, Role,
     RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
@@ -200,7 +200,7 @@ fn interrupted_at(
     let private = listen.then(|| {
         let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         let address = GatewayAddress::try_from(loopback).unwrap();
-        GrantListener::bind(&address, HELLO_TIMEOUT).unwrap()
+        Listener::bind(&address, HELLO_TIMEOUT).unwrap()
     });
     let waited = Deadline::after(Duration::from_secs(WAITED));
     let mut ran = false;
@@ -1807,7 +1807,7 @@ fn missing_private_listener() {
         &[Also::WithoutListener, Also::Listing],
     );
     expect![[r#"
-        failed: private provider `simulated` has no grant listener: bind one for its sandboxes to dial
+        failed: private provider `simulated` has no private listener: bind one for its sandboxes to dial
         record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json
         log.jsonl:"#]].assert_eq(&shown);
 }
@@ -2084,7 +2084,7 @@ fn spans_providers() {
     let mut ir = ops_workflow(&argv, 30);
     ir["roles"][1]["needs"]["cpu_model"] = json!(BRIEF);
     ir["roles"][0]["image"] = ir["roles"][1]["image"].clone();
-    // `there` is private, so its sandboxes dial the run's grant listener, or it listens, so the
+    // `there` is private, so its sandboxes dial the run's private listener, or it listens, so the
     // run dials them, and `here`'s dial their sockets, alike either way.
     for reach in [Sim::private, Sim::listening] {
         let (here, there) = (Sim::new().named("here"), there(reach(Sim::new())));
