@@ -23,3 +23,22 @@ output "client_policy_arn" {
   description = "The managed IAM policy that each member's machine needs to reach the controller, which the team's root or an administrator attaches to the machine's role or user."
   value       = aws_iam_policy.client.arn
 }
+
+# What a contributor's machine needs for `cargo xtask live`: the client's, what `pumpkin-admin
+# check` reads, and the list of the timer's schedules that a run left. The team's root attaches
+# it to the contributors.
+resource "aws_iam_policy" "contributor" {
+  name        = "${local.prefix}-contributor"
+  description = "What the machine of a contributor needs to run the live checks on its Pumpkin controller"
+  policy = templatefile("${path.module}/policies/contributor.json.tftpl", {
+    controller_instance_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
+    members_parameter_arn   = aws_ssm_parameter.members.arn
+    sandbox_profile_arn     = aws_iam_instance_profile.sandbox.arn
+    settings_parameter_arn  = aws_ssm_parameter.settings.arn
+  })
+}
+
+output "contributor_policy_arn" {
+  description = "The managed IAM policy that each contributor's machine needs for `cargo xtask live`, which the team's root attaches."
+  value       = aws_iam_policy.contributor.arn
+}

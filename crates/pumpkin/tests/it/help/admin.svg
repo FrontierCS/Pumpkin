@@ -1,4 +1,4 @@
-<svg width="852px" height="632px" xmlns="http://www.w3.org/2000/svg">
+<svg width="835px" height="704px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -24,69 +24,77 @@
 </tspan>
     <tspan x="10px" y="46px">
 </tspan>
-    <tspan x="10px" y="64px"><tspan>The controller's admin runs `install` as root, from the release they pin. The admin runs `policy`</tspan>
+    <tspan x="10px" y="64px"><tspan>The controller's admin runs `install` as root, from the release they pin. The admin runs `check`,</tspan>
 </tspan>
-    <tspan x="10px" y="82px"><tspan>and `check-members` anywhere. The units that `install` writes run `boot-all`, `idle` and `members`.</tspan>
+    <tspan x="10px" y="82px"><tspan>`check-members` and `policy` anywhere. The units that `install` writes run `boot-all`, `idle` and</tspan>
 </tspan>
-    <tspan x="10px" y="100px">
+    <tspan x="10px" y="100px"><tspan>`members`.</tspan>
 </tspan>
-    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;command&gt;</tspan>
+    <tspan x="10px" y="118px">
 </tspan>
-    <tspan x="10px" y="136px">
+    <tspan x="10px" y="136px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;command&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="154px"><tspan class="fg-bright-green bold">Commands:</tspan>
+    <tspan x="10px" y="154px">
 </tspan>
-    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">install</tspan><tspan>        Install the controller host's software, as root</tspan>
+    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Commands:</tspan>
 </tspan>
-    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">policy</tspan><tspan>         Print the IAM policy of a principal of the controller's deployment</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">install</tspan><tspan>        Install the controller host's software, as root</tspan>
 </tspan>
-    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">boot-all</tspan><tspan>       Run each installed build's boot</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">check</tspan><tspan>          Check the controller's deployment, with read-only calls on AWS</tspan>
 </tspan>
-    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">idle</tspan><tspan>           Stop the controller once it has been idle for 30 minutes</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">policy</tspan><tspan>         Print the IAM policy of a principal of the controller's deployment</tspan>
 </tspan>
-    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">members</tspan><tspan>        Copy the members' keys, which sshd admits, from SSM</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">boot-all</tspan><tspan>       Run each installed build's boot</tspan>
 </tspan>
-    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">check-members</tspan><tspan>  Check a directory of the members' keys, as a team's repository keeps them</tspan>
+    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">idle</tspan><tspan>           Stop the controller once it has been idle for 30 minutes</tspan>
 </tspan>
-    <tspan x="10px" y="280px">
+    <tspan x="10px" y="280px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">members</tspan><tspan>        Copy the members' keys, which sshd admits, from SSM</tspan>
 </tspan>
-    <tspan x="10px" y="298px"><tspan class="fg-bright-green bold">Options:</tspan>
+    <tspan x="10px" y="298px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">check-members</tspan><tspan>  Check a directory of the members' keys, as a team's repository keeps them</tspan>
 </tspan>
-    <tspan x="10px" y="316px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-V</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--version</tspan>
+    <tspan x="10px" y="316px">
 </tspan>
-    <tspan x="10px" y="334px"><tspan>          Print version</tspan>
+    <tspan x="10px" y="334px"><tspan class="fg-bright-green bold">Options:</tspan>
 </tspan>
-    <tspan x="10px" y="352px">
+    <tspan x="10px" y="352px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-V</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--version</tspan>
 </tspan>
-    <tspan x="10px" y="370px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="370px"><tspan>          Print version</tspan>
 </tspan>
-    <tspan x="10px" y="388px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="388px">
 </tspan>
-    <tspan x="10px" y="406px">
+    <tspan x="10px" y="406px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="424px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="442px"><tspan>  sudo ./pumpkin/bin/pumpkin-admin install \</tspan>
+    <tspan x="10px" y="442px">
 </tspan>
-    <tspan x="10px" y="460px"><tspan>    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
+    <tspan x="10px" y="460px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>  pumpkin-admin policy controller</tspan>
+    <tspan x="10px" y="478px"><tspan>  sudo ./pumpkin/bin/pumpkin-admin install \</tspan>
 </tspan>
-    <tspan x="10px" y="496px">
+    <tspan x="10px" y="496px"><tspan>    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+    <tspan x="10px" y="514px"><tspan>  pumpkin-admin check \</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Success.</tspan>
+    <tspan x="10px" y="532px"><tspan>    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">1</tspan><tspan>  An error. A `pumpkin:` line on the standard error says why.</tspan>
+    <tspan x="10px" y="550px"><tspan>  pumpkin-admin policy controller</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">2</tspan><tspan>  A usage error.</tspan>
+    <tspan x="10px" y="568px">
 </tspan>
-    <tspan x="10px" y="586px">
+    <tspan x="10px" y="586px"><tspan class="fg-bright-green bold">Exit status:</tspan>
 </tspan>
-    <tspan x="10px" y="604px"><tspan>`pumpkin-admin &lt;command&gt; --help` prints a command's help.</tspan>
+    <tspan x="10px" y="604px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Success.</tspan>
 </tspan>
-    <tspan x="10px" y="622px">
+    <tspan x="10px" y="622px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">1</tspan><tspan>  An error. A `pumpkin:` line on the standard error says why.</tspan>
+</tspan>
+    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">2</tspan><tspan>  A usage error.</tspan>
+</tspan>
+    <tspan x="10px" y="658px">
+</tspan>
+    <tspan x="10px" y="676px"><tspan>`pumpkin-admin &lt;command&gt; --help` prints a command's help.</tspan>
+</tspan>
+    <tspan x="10px" y="694px">
 </tspan>
   </text>
 

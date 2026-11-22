@@ -21,22 +21,37 @@ pub(crate) enum Principal {
     ModalPull,
     /// What a machine whose configuration names `[controller]` needs.
     Client,
+    /// What `pumpkin-admin check` needs to read the deployment.
+    Check,
+    /// What a contributor's `cargo xtask live` needs: the client's, the check's and
+    /// `scheduler:ListSchedules`.
+    Contributor,
 }
 
-const SETTINGS: Placeholder = Placeholder::new(
+pub(crate) const SETTINGS: Placeholder = Placeholder::new(
     "settings_parameter_arn",
     "the ARN of the SSM parameter of the controller's settings",
 );
 
-const CONTROLLER: Placeholder = Placeholder::new(
+pub(crate) const CONTROLLER: Placeholder = Placeholder::new(
     "controller_instance_arn",
     "the ARN of the controller's instance",
 );
 
-const MEMBERS: Placeholder = Placeholder::new(
+pub(crate) const MEMBERS: Placeholder = Placeholder::new(
     "members_parameter_arn",
     "the ARN of the SSM parameter of the controller's members",
 );
+
+impl Principal {
+    /// Its name, as `pumpkin-admin policy` takes it.
+    pub(crate) fn name(self) -> String {
+        let Some(name) = self.to_possible_value() else {
+            unreachable!("every principal is a value of the command line's");
+        };
+        name.get_name().to_owned()
+    }
+}
 
 /// The calls of a job of its own.
 pub(crate) struct Job {
@@ -60,11 +75,10 @@ pub(crate) struct Host {
 
 pub(crate) const HOST: Host = Host {
     settings: Call::new(["ssm", "get-parameter"], READ_SETTINGS),
-    members: Call::new(
-        ["ssm", "get-parameter"],
-        Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&MEMBERS)]),
-    ),
+    members: Call::new(["ssm", "get-parameter"], READ_MEMBERS),
 };
+
+const READ_MEMBERS: Allow = Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&MEMBERS)]);
 
 /// The calls of a client on its controller's instance.
 pub(crate) struct Client {
@@ -83,11 +97,47 @@ pub(crate) const CLIENT: Client = Client {
     ),
 };
 
+/// The calls that `pumpkin-admin check` makes of its own. Each is a read.
+pub(crate) struct Check {
+    pub(crate) settings: Call,
+    pub(crate) members: Call,
+    /// Finds the controller's instance by its tag.
+    pub(crate) instances: Call,
+    /// Reads the controller's instance profile, for its role.
+    pub(crate) profile: Call,
+    /// Simulates a principal's policy.
+    pub(crate) simulate: Call,
+}
+
+pub(crate) const CHECK: Check = Check {
+    settings: Call::new(["ssm", "get-parameter"], READ_SETTINGS),
+    members: Call::new(["ssm", "get-parameter"], READ_MEMBERS),
+    instances: Call::new(
+        ["ec2", "describe-instances"],
+        Allow::new(&["ec2:DescribeInstances"], &[Resource::Any]),
+    ),
+    // On any profile and any principal. The controller's instance names its profile, and so its
+    // role, and no placeholder stands for either.
+    profile: Call::new(
+        ["iam", "get-instance-profile"],
+        Allow::new(&["iam:GetInstanceProfile"], &[Resource::Any]),
+    ),
+    simulate: Call::new(
+        ["iam", "simulate-principal-policy"],
+        Allow::new(&["iam:SimulatePrincipalPolicy"], &[Resource::Any]),
+    ),
+};
+
+/// What `cargo xtask live` allows itself beyond the client's calls and the check's: it lists the
+/// schedules of the timer that a run left, as `aws scheduler list-schedules` does, which
+/// `xtask` runs itself.
+const LIST_SCHEDULES: Allow = Allow::new(&["scheduler:ListSchedules"], &[Resource::Any]);
+
 /// What IAM must allow `principal`.
 // A call that its crate declares but lists in no principal's statements compiles all the same.
 // IAM then refuses it. `cargo xtask live ec2` and `cargo xtask live modal` show that as AWS's
 // `AccessDenied` once a deployment applies these policies.
-fn allows(principal: Principal) -> Vec<&'static Allow> {
+pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
     match principal {
         Principal::Controller => {
             let Job { settings } = &JOB;
@@ -111,6 +161,26 @@ fn allows(principal: Principal) -> Vec<&'static Allow> {
                 .into_iter()
                 .flat_map(Call::allows)
                 .collect()
+        }
+        Principal::Check => {
+            let Check {
+                settings,
+                members,
+                instances,
+                profile,
+                simulate,
+            } = &CHECK;
+            [settings, members, instances, profile, simulate]
+                .into_iter()
+                .flat_map(Call::allows)
+                .chain(ec2::iam::checker())
+                .collect()
+        }
+        Principal::Contributor => {
+            let mut allows = self::allows(Principal::Client);
+            allows.extend(self::allows(Principal::Check));
+            allows.push(&LIST_SCHEDULES);
+            allows
         }
     }
 }
@@ -144,13 +214,10 @@ pub(crate) fn placeholders() -> String {
     lines.push(String::new());
     lines.push("Each principal's placeholders:".to_owned());
     for principal in principals {
-        let Some(name) = principal.to_possible_value() else {
-            unreachable!("every principal is a value of the command line's");
-        };
         let names: Vec<&str> = iam::placeholders(&allows(*principal)).into_keys().collect();
         let joined = names.join(", ");
         lines.extend(wrapped(
-            &format!("  {}:", name.get_name()),
+            &format!("  {}:", principal.name()),
             joined.split(' '),
         ));
     }

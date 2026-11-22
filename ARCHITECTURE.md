@@ -53,9 +53,10 @@ the records it wrote.
 `pumpkin-admin` is the same executable again. An install holds it as a hard link to `pumpkin`, and
 `main.rs` dispatches by its name. The controller's admin runs its `install` from the release they
 pin. The install writes the units and the rest of what the host's Pumpkin relies on. The admin also
-runs its `policy`, which prints each principal's IAM policy, and its `check-members`, which checks
-a team's directory of members' keys as the controller parses them. The units run its `boot-all`,
-`idle` and `members`. A member's `pumpkin` lists none of these.
+runs its `check`, which checks the deployment from its settings' ARN with read-only calls, its
+`check-members`, which checks a team's directory of members' keys as the controller parses them,
+and its `policy`, which prints each principal's IAM policy. The units run its `boot-all`, `idle`
+and `members`. A member's `pumpkin` lists none of these.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -360,16 +361,17 @@ unless a stage that pins each download by its checksum, with `ADD --checksum`, s
 AWS's command line as Pumpkin runs it, `Cli`, in one region. It works with ECR's repositories, and
 pushes an image from the operator's engine, named by its digest (`Cli::publish`). `RoleArn` is an
 IAM role that settings name. `ParameterArn` is an SSM parameter, named by its ARN. A call on a
-parameter is made in the region of its ARN. `iam` states what IAM must allow of each call
-(`Call`), ECR's among them (`Ecr`). It composes a principal's policy from what its calls need
-(`iam::policy`).
+parameter is made in the region of its ARN. A `Problem` is what a check of a deployment finds
+wrong. `iam` states what IAM must allow of each call (`Call`), ECR's among them (`Ecr`). It
+composes a principal's policy from what its calls need (`iam::policy`).
 
 **Architecture Invariant:** a principal's policy is what the calls of the shipped binaries state.
 `Cli` runs only a `Call`, which names what IAM must allow of it: its actions, resources and
 conditions, as AWS's Service Authorization Reference gives them. Each crate that makes calls
 declares them in its `iam` module. That module lists each call in the policy of the principal that
 makes it. `pumpkin-admin policy` prints each policy. `xtask`'s own `aws` commands are a
-contributor's, and in no policy.
+contributor's. Of them, `pumpkin`'s `iam` states the one that no call of the client's or the
+check's covers, in the contributor's policy.
 
 **Architecture Invariant:** every call that `Cli` makes is in its region, with no variable of this
 process's environment but those that find `aws`'s own configuration, so nothing steers it to
@@ -394,7 +396,8 @@ that reserved it, so the kernel frees a run's cores however that process ends.
 `Ec2`, the provider whose sandboxes are containers on EC2 instances of their own, launched in the
 envelope the operator made on AWS, which its `Settings` name. It pushes what its sandboxes pull to
 the envelope's repositories, and schedules each instance's termination at the run's hard end
-(`Timer`). `Ec2::reach` gives a `Reached` for a reap.
+(`Timer`). `Ec2::reach` gives a `Reached` for a reap, and `envelope` reads, with read-only calls,
+what of the envelope fills the placeholders of the provider's policies.
 
 **Architecture Invariant:** it reaches AWS only through `aws::Cli`. An instance's Docker holds no
 registry login: ECR's credential helper gets a token with the instance's role for each pull, and
@@ -424,8 +427,9 @@ small and static, and the provider's values reach it only as a `Start`.
 
 `Modal`, the provider whose sandboxes are sandboxes in a Modal workspace, in Pumpkin's one App,
 under gVisor, each with its `sandboxd` listening behind Modal's TLS tunnel. Modal imports a role's
-image from ECR with a role that it assumes by its own identity. `Modal::reach` gives a `Reached`
-for a reap.
+image from ECR with a role that it assumes by its own identity, which the settings name, and
+`envelope` fills the placeholders of the provider's policies from them. `Modal::reach` gives a
+`Reached` for a reap.
 
 **Architecture Invariant:** it reaches Modal only through its helper, `pumpkin-modal.py` (`Helper`),
 which gets of this process's environment only `HOME`, `PATH`, the profile and the configuration
@@ -493,10 +497,13 @@ slots that admit its builds and publishes (`Admission`). `host` is the host's so
 the members' keys from the parameter that the settings' `[deployment]` names. Each key gets the
 forced command that `members` renders. `host`'s `file` is the host file,
 `/etc/pumpkin/controller.toml`. It names the settings' parameter to the units and to each job.
-`keydir` reads a team's directory of `<member>.pub` files into `Members`. `whole` replaces a file
-whole. `progress` is what `ls` shows. `next` makes the commands to run next. `style` runs the
-formatter. `view` serves the runs' records to a browser. Its `json` holds the JSON forms of its
-answers, and its `Answering` is the view that `serve` keeps to answer a client.
+`deployment` is `pumpkin-admin check`. It runs every check of a deployment, each a read, and says
+each `Problem` it finds. It checks what an apply of `deploy/aws` doesn't make by construction. Its
+`instance` decides what is wrong with the controller's instance. `keydir` reads a team's directory
+of `<member>.pub` files into `Members`. `whole` replaces a file whole. `progress` is what `ls`
+shows. `next` makes the commands to run next. `style` runs the formatter. `view` serves the runs'
+records to a browser. Its `json` holds the JSON forms of its answers, and its `Answering` is the
+view that `serve` keeps to answer a client.
 `Workspace` is the `.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
@@ -553,6 +560,12 @@ A job leaves the settings' `[deployment]` out unread, as the table is the host's
 `config` tells the keys apart through `serde_ignored`, so no table that the settings hold has
 `deny_unknown_fields`.
 
+**Architecture Invariant:** each placeholder of each role's policy stands for a value that
+`pumpkin-admin check` reaches from the settings' ARN alone. The value is a setting, a resource that
+a setting names, or the instance that carries the controller's tag. So the check fills each
+statement of the roles' policies, and IAM's policy simulator decides it. The check says which statements it leaves
+without a value, and so unchecked.
+
 **Architecture Invariant:** each `pumpkin` process adds 022 to its umask as it starts (`main`), so
 nothing it makes, a run's record included, is writable by another user.
 
@@ -603,7 +616,8 @@ No crate depends on the module. Its outputs feed a machine's configuration, and 
 
 **Architecture Invariant:** the permission policy of each principal that `pumpkin-admin policy`
 names is the one it prints. `deploy/aws/policies` keeps it, and `pumpkin`'s tests hold the two
-equal. The roles' trust policies and the AMI build's AWS-managed policies are the module's own.
+equal. The tests also hold `deploy/aws/gateway_ports.json` equal to the ports that `host` gives
+the gateway. The roles' trust policies and the AMI build's AWS-managed policies are the module's own.
 
 ### `examples`
 

@@ -59,7 +59,7 @@ pub(crate) use boot::{BOOT_LOG, BOOT_UNIT, boot, state as boot_state};
 pub(crate) use member::{member, run_member, write_member};
 pub(crate) use parameter::parameter_value;
 pub(crate) use records::mark_copied;
-pub(crate) use settings::{Deployment, deployment, tables as settings_tables};
+pub(crate) use settings::{Deployment, Taken, deployment, tables as settings_tables, take};
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
@@ -328,27 +328,26 @@ fn point(link: &Path, staged: &Path) -> Result<(), String> {
 }
 
 /// A job's configuration, as TOML. It holds the controller's settings, which `cli` reads from SSM
-/// parameter `settings`, with `[gateway] private` set to the controller's private IPv4 address and
-/// port 0. It holds each Modal provider as the client sent it, with the settings' `images`,
-/// `dials_from` at the controller's public IPv4 address, and `config`, the client's Modal file in
-/// `sent`, if any. It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
+/// parameter `settings`, as [`configuration`] makes them one, with the gateway at the controller's
+/// private IPv4 address. It holds each Modal provider as the client sent it, with `dials_from` at
+/// the controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any.
+/// It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
 ///
-/// Fails if the settings set `gateway` or `upstreams`, which each job sets.
+/// Fails if the settings drain.
 fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, String> {
     let value = parameter_value(cli, &JOB.settings, settings.as_str())?;
     let named = format!("the controller's settings, SSM parameter `{settings}`,");
     let mut tables = settings::tables(&value, &named)?;
-    let envelope = settings::take(&mut tables, &named)?;
-    let (private, public) = addresses()?;
-    for key in ["gateway", "upstreams"] {
-        if tables.contains_key(key) {
-            return Err(format!(
-                "{named} hold `[{key}]`, which each job sets: remove it from them"
-            ));
-        }
+    // The job reads none of the host's `[deployment]`.
+    let Taken {
+        version: envelope,
+        deployment: _,
+        draining,
+    } = settings::take(&mut tables, &named)?;
+    if draining {
+        return Err(settings::drained(&named));
     }
-    let gateway = toml::Table::from_iter([("private".to_owned(), format!("{private}:0").into())]);
-    tables.insert("gateway".to_owned(), gateway.into());
+    let (private, public) = addresses()?;
     let config = sent.join(SENT_CONFIG);
     let text = match fs::read_to_string(&config) {
         Ok(text) => text,
@@ -365,11 +364,10 @@ fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, S
             error.trim_end()
         )
     })?;
-    let written = |error: toml::ser::Error| format!("writing the job's configuration: {error}");
     let mut modal = modal
         .map(toml::Table::try_from)
         .transpose()
-        .map_err(written)?;
+        .map_err(|error| written(&error))?;
     let modal_config = sent.join(SENT_MODAL);
     let modal_config = modal_config
         .try_exists()
@@ -381,12 +379,43 @@ fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, S
             modal.insert("config".to_owned(), config.into());
         }
     }
-    take_modal(&mut tables, modal.as_ref(), &named)?;
     upstreams.keys_in(sent);
-    let upstreams = toml::Value::try_from(upstreams).map_err(written)?;
+    let upstreams = toml::Value::try_from(upstreams).map_err(|error| written(&error))?;
+    configuration(tables, &named, envelope, private, modal.as_ref(), upstreams)
+}
+
+/// A job's configuration, as TOML. It holds `tables`, the controller's settings named as `named`,
+/// of envelope `envelope`, as [`settings::take`] takes them. `[gateway] private` is set to
+/// `private`, port 0. Each Modal provider is set as `modal` says ([`take_modal`]). `upstreams` are
+/// the client's.
+///
+/// Fails if the settings set `gateway` or `upstreams`, which each job sets. Fails too if the result
+/// isn't a configuration.
+pub(crate) fn configuration(
+    mut tables: toml::Table,
+    named: &str,
+    envelope: settings::Version,
+    private: Ipv4Addr,
+    modal: Option<&toml::Table>,
+    upstreams: toml::Value,
+) -> Result<String, String> {
+    for key in ["gateway", "upstreams"] {
+        if tables.contains_key(key) {
+            return Err(format!(
+                "{named} hold `[{key}]`, which each job sets: remove it from them"
+            ));
+        }
+    }
+    let gateway = toml::Table::from_iter([("private".to_owned(), format!("{private}:0").into())]);
+    tables.insert("gateway".to_owned(), gateway.into());
+    take_modal(&mut tables, modal, named)?;
     tables.insert("upstreams".to_owned(), upstreams);
-    settings::remove_unknown(&mut tables, &named, envelope)?;
-    toml::to_string(&tables).map_err(written)
+    settings::remove_unknown(&mut tables, named, envelope)?;
+    toml::to_string(&tables).map_err(|error| written(&error))
+}
+
+fn written(error: &toml::ser::Error) -> String {
+    format!("writing the job's configuration: {error}")
 }
 
 /// Makes each Modal provider of the controller's settings, `tables`, the one that the client sent,

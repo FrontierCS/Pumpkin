@@ -2,7 +2,7 @@
 //! AWS state it. A deployment's review reads it. `deploy/aws` renders each policy from
 //! `deploy/aws/policies/<principal>.json.tftpl`, which these tests keep equal to it.
 
-use expect_test::{ExpectFile, expect_file};
+use expect_test::{ExpectFile, expect, expect_file};
 
 use super::Scratch;
 
@@ -58,4 +58,63 @@ fn client() {
         "client",
         &expect_file!["../../../../deploy/aws/policies/client.json.tftpl"],
     );
+}
+
+#[test]
+fn contributor() {
+    check(
+        "contributor",
+        &expect_file!["../../../../deploy/aws/policies/contributor.json.tftpl"],
+    );
+}
+
+#[test]
+fn check_principal() {
+    expect![[r#"
+        {
+          "Statement": [
+            {
+              "Action": [
+                "ssm:GetParameter"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${members_parameter_arn}"
+              ]
+            },
+            {
+              "Action": [
+                "iam:GetInstanceProfile"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${sandbox_profile_arn}"
+              ]
+            },
+            {
+              "Action": [
+                "ssm:GetParameter"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${settings_parameter_arn}"
+              ]
+            },
+            {
+              "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeLaunchTemplateVersions",
+                "iam:GetInstanceProfile",
+                "iam:SimulatePrincipalPolicy"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "*"
+              ]
+            }
+          ],
+          "Version": "2012-10-17"
+        }
+    "#]]
+    .assert_eq(&output("check"));
 }

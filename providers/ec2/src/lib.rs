@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 
 use crate::iam::{CALLS, ECR};
 
+pub mod envelope;
 pub mod iam;
 mod identity;
 mod launch;

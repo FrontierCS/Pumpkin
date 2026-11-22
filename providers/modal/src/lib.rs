@@ -42,6 +42,7 @@ use stdx::Deadline;
 use crate::helper::{ASK_TIMEOUT, ConfigFile, Helper, IMPORT_TIMEOUT, Profile, Request};
 use crate::iam::ECR;
 
+pub mod envelope;
 mod helper;
 pub mod iam;
 mod sandboxes;

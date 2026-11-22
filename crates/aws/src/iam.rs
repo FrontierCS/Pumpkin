@@ -8,18 +8,22 @@
 //! call whose operation needs more than its own action states each action, as a launch that tags
 //! what it launches does. A value that only a deployment knows, such as the account, is a
 //! [`Placeholder`], or a [`List`] of values. A policy leaves them for Terraform's `templatefile` to
-//! fill.
+//! fill. A deployment's check fills them to simulate the policy ([`Simulation`]).
 
 pub use self::policy::{Fill, placeholders, policy};
+pub use self::simulate::{Filling, Simulation, Unallowed, simulate};
 
 mod policy;
+mod simulate;
 
-pub const PARTITION: Placeholder =
+pub(crate) const PARTITION: Placeholder =
     Placeholder::new("partition", "the AWS partition, such as `aws`");
 
-pub const REGION: Placeholder = Placeholder::new("region", "the AWS region of the deployment");
+pub(crate) const REGION: Placeholder =
+    Placeholder::new("region", "the AWS region of the deployment");
 
-pub const ACCOUNT: Placeholder = Placeholder::new("account", "the ID of the deployment's account");
+pub(crate) const ACCOUNT: Placeholder =
+    Placeholder::new("account", "the ID of the deployment's account");
 
 /// A string that a deployment fills in, named `name`, which `about` describes.
 #[derive(Debug)]

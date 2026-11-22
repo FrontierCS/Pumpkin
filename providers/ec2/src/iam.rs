@@ -2,44 +2,46 @@
 //!
 //! The provider's calls are made with the credentials of the process that runs it ([`caller`]).
 //! Its sandboxes rely on the timer's role ([`timer`]) and the sandbox instances' ([`sandbox`]).
+//! A check of the envelope reads it with calls of its own ([`checker`]).
 
 use aws::iam::{Allow, Call, Condition, Ecr, Key, List, Part, Placeholder, Resource, Test, Values};
 
 use crate::launch::RUN_TAG;
 
 /// The envelope's launch templates, the only ones a create launches from.
-const LAUNCH_TEMPLATES: List = List::new(
+pub(crate) const LAUNCH_TEMPLATES: List = List::new(
     "launch_template_arns",
     "the ARNs of the envelope's launch templates",
 );
 
 /// The instance types of the envelope's launch templates, the only ones a create launches.
-const INSTANCE_TYPES: List = List::new(
+pub(crate) const INSTANCE_TYPES: List = List::new(
     "instance_types",
     "the instance types of the envelope's launch templates",
 );
 
 /// The role of the instance profile of the envelope's launch templates.
-const SANDBOX_ROLE: Placeholder =
+pub const SANDBOX_ROLE: Placeholder =
     Placeholder::new("sandbox_role_arn", "the ARN of the sandbox instances' role");
 
 /// The instance profile of the envelope's launch templates.
-const SANDBOX_PROFILE: Placeholder = Placeholder::new(
+pub(crate) const SANDBOX_PROFILE: Placeholder = Placeholder::new(
     "sandbox_profile_arn",
     "the ARN of the sandbox instances' instance profile",
 );
 
-const TIMER_ROLE: Placeholder = Placeholder::new("timer_role_arn", "the ARN of the timer's role");
+pub const TIMER_ROLE: Placeholder =
+    Placeholder::new("timer_role_arn", "the ARN of the timer's role");
 
-const TIMER_GROUP: Placeholder =
+pub(crate) const TIMER_GROUP: Placeholder =
     Placeholder::new("timer_group", "the name of the timer's schedule group");
 
-const ROLES_REPOSITORY: Placeholder = Placeholder::new(
+pub(crate) const ROLES_REPOSITORY: Placeholder = Placeholder::new(
     "roles_repository_arn",
     "the ARN of the roles' images' repository",
 );
 
-const SANDBOXD_REPOSITORY: Placeholder = Placeholder::new(
+pub(crate) const SANDBOXD_REPOSITORY: Placeholder = Placeholder::new(
     "sandboxd_repository_arn",
     "the ARN of the repository of the images of `sandboxd`",
 );
@@ -168,6 +170,32 @@ const TIMER_SCHEDULES: &[Resource] = &[Resource::In(
         Part::Text("/*"),
     ],
 )];
+
+/// The calls that [`crate::envelope`] makes to read the envelope. Each is a read.
+pub(crate) struct Checks {
+    pub(crate) templates: Call,
+    pub(crate) profile: Call,
+}
+
+pub(crate) const CHECKS: Checks = Checks {
+    templates: Call::new(
+        ["ec2", "describe-launch-template-versions"],
+        Allow::new(&["ec2:DescribeLaunchTemplateVersions"], &[Resource::Any]),
+    ),
+    profile: Call::new(
+        ["iam", "get-instance-profile"],
+        Allow::new(
+            &["iam:GetInstanceProfile"],
+            &[Resource::Arn(&SANDBOX_PROFILE)],
+        ),
+    ),
+};
+
+/// What IAM must allow the credentials that read the envelope for a check of it.
+pub fn checker() -> impl Iterator<Item = &'static Allow> {
+    let Checks { templates, profile } = &CHECKS;
+    [templates, profile].into_iter().flat_map(Call::allows)
+}
 
 /// What IAM must allow the credentials of a process that runs the provider.
 pub fn caller() -> impl Iterator<Item = &'static Allow> {

@@ -131,6 +131,12 @@ fn admin_install_help() {
 }
 
 #[test]
+fn admin_check_help() {
+    let expect = expect_file!["help/admin_check.svg"];
+    admin(&["check", "--help"], &expect);
+}
+
+#[test]
 fn admin_policy_help() {
     let expect = expect_file!["help/admin_policy.svg"];
     admin(&["policy", "--help"], &expect);

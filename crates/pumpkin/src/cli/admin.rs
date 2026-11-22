@@ -26,8 +26,8 @@ pub(crate) const NAME: &str = install::File::PumpkinAdmin.name();
 /// Administer a Pumpkin controller.
 ///
 /// The controller's admin runs `install` as root, from the release they pin. The admin runs
-/// `policy` and `check-members` anywhere. The units that `install` writes run `boot-all`, `idle`
-/// and `members`.
+/// `check`, `check-members` and `policy` anywhere. The units that `install` writes run
+/// `boot-all`, `idle` and `members`.
 #[derive(Parser)]
 #[command(
     name = NAME,
@@ -52,6 +52,21 @@ enum Parsed {
     Install {
         /// The ARN of the SSM parameter that holds the controller's settings. The host file names
         /// it.
+        #[arg(long, value_name = "arn")]
+        #[arg(value_parser = |arn: &str| ParameterArn::try_from(arn.to_owned()))]
+        settings: ParameterArn,
+    },
+    /// Check the controller's deployment, with read-only calls on AWS.
+    ///
+    /// `check` reads the settings that the ARN names, what they name, and the controller's
+    /// instance. It asks IAM's policy simulator about the policy of each role that `pumpkin-admin
+    /// policy` prints. It runs every check, and says each problem on a line of its own: the
+    /// resource, what is wrong, and what to fix. It says nothing if there is none, and
+    /// exits with 1 if there is one. It starts nothing, so it leaves unchecked what only a running
+    /// controller shows, and says so.
+    #[command(after_help = check_notes())]
+    Check {
+        /// The ARN of the SSM parameter of the controller's settings.
         #[arg(long, value_name = "arn")]
         #[arg(value_parser = |arn: &str| ParameterArn::try_from(arn.to_owned()))]
         settings: ParameterArn,
@@ -94,6 +109,8 @@ fn notes() -> String {
 {HEADER}Examples:{HEADER:#}
   sudo ./pumpkin/bin/pumpkin-admin install \\
     --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
+  pumpkin-admin check \\
+    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
   pumpkin-admin policy controller
 
 {HEADER}Exit status:{HEADER:#}
@@ -116,6 +133,15 @@ refused whole.
 
 {HEADER}Examples:{HEADER:#}
   sudo ./pumpkin/bin/pumpkin-admin install \\
+    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings"
+    )
+}
+
+fn check_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
+  pumpkin-admin check \\
     --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings"
     )
 }
@@ -152,6 +178,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     let parsed = parsed.map_err(|error| refusal(error.format(&mut cli)))?;
     Ok(match parsed {
         Parsed::Install { settings } => Command::Install(settings),
+        Parsed::Check { settings } => Command::CheckDeployment(settings),
         Parsed::Policy { principal } => Command::Print(iam::policy(principal).into()),
         Parsed::BootAll => Command::BootAll,
         Parsed::Idle => Command::Idle,

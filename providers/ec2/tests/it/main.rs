@@ -1,7 +1,8 @@
 //! What the EC2 provider decides without an instance: whether a hello's attestation is the identity
 //! document of the instance that a create launched, from that instance's address (`identity`,
-//! which this binary compiles itself, as the crate keeps it private), and the certificates of
-//! AWS's keys that it holds.
+//! which this binary compiles itself, as the crate keeps it private), the certificates of AWS's
+//! keys that it holds, and what the read of an envelope takes of its launch templates
+//! (`envelope`).
 
 #![expect(
     clippy::unwrap_used,
@@ -20,7 +21,8 @@ use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use schema::ec2_boot::Identity;
 use schema::sandbox::Attestation;
 
-#[path = "../src/identity.rs"]
+mod envelope;
+#[path = "../../src/identity.rs"]
 mod identity;
 
 // A key pair made for these tests alone, by `openssl req -x509 -newkey rsa:2048`: its private key,

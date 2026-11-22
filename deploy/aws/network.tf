@@ -3,8 +3,10 @@
 # metadata go to link-local addresses that security groups don't filter.
 
 # The ephemeral port range of the controller's kernel, Linux's default, where port 0's pick falls.
+# `pumpkin`'s tests write the file from `host::GATEWAY_PORTS`, which `pumpkin-admin install`
+# requires of the host.
 locals {
-  gateway_ports = { from = 32768, to = 60999 }
+  gateway_ports = jsondecode(file("${path.module}/gateway_ports.json"))
 }
 
 resource "aws_security_group" "sandbox" {

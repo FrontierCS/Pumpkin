@@ -88,29 +88,43 @@ pub(crate) fn deployment(
     Ok((version, deployment))
 }
 
+/// What [`take`] removes from a controller's settings.
+pub(crate) struct Taken {
+    pub(crate) version: Version,
+    /// The host's table, which a job reads none of.
+    pub(crate) deployment: Deployment,
+    /// Whether the settings drain.
+    pub(crate) draining: bool,
+}
+
 /// Removes the version of the envelope, `[deployment]` and `draining` from `settings`, a
-/// controller's settings named as `named`, and returns the version. Fails as [`deployment`] does.
-/// Fails too if `draining` isn't a boolean, or is `true`.
-pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
-    // The table is the host's alone, and a job reads none of it.
-    let (version, _) = deployment(settings, named)?;
+/// controller's settings named as `named`, and returns them. Fails as [`deployment`] does. Fails
+/// too if `draining` isn't a boolean.
+pub(crate) fn take(settings: &mut toml::Table, named: &str) -> Result<Taken, String> {
+    let (version, deployment) = deployment(settings, named)?;
     let draining = match settings.remove("draining") {
         None => false,
         Some(value) => value.as_bool().ok_or_else(|| {
             format!("{named} hold `draining = {value}`: expected `true` or `false`")
         })?,
     };
-    // A drain takes no new job and leaves those that run to end. Buildkite's agent stops
-    // gracefully this way:
-    // https://github.com/buildkite/agent/blob/13f7c6aba3164116caab64a84332676403d724a4/agent/agent_worker.go#L424-L428
-    if draining {
-        return Err(format!(
-            "{named} hold `draining = true`: the controller's admin is draining it for a \
-             cutover, so it starts no job while the jobs it runs end: run this one again once \
-             the admin has set `draining = false`"
-        ));
-    }
-    Ok(version)
+    Ok(Taken {
+        version,
+        deployment,
+        draining,
+    })
+}
+
+/// Why a job is refused while `named`, a controller's settings, drain.
+// A drain takes no new job and leaves those that run to end. Buildkite's agent stops gracefully
+// this way:
+// https://github.com/buildkite/agent/blob/13f7c6aba3164116caab64a84332676403d724a4/agent/agent_worker.go#L424-L428
+pub(super) fn drained(named: &str) -> String {
+    format!(
+        "{named} hold `draining = true`: the controller's admin is draining it for a cutover, so \
+         it starts no job while the jobs it runs end: run this one again once the admin has set \
+         `draining = false`"
+    )
 }
 
 fn envelope(settings: &mut toml::Table, named: &str) -> Result<Version, String> {

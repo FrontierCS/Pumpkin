@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, io, thread};
 
+use aws::iam::Call;
 use aws::{Bound, Cli, Region};
 use jiff::Timestamp;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
@@ -34,14 +36,14 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Reservations {
-    reservations: Vec<Reservation>,
+struct Reservations<T> {
+    reservations: Vec<Reservation<T>>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct Reservation {
-    instances: Vec<Instance>,
+struct Reservation<T> {
+    instances: Vec<T>,
 }
 
 #[derive(Deserialize)]
@@ -116,11 +118,9 @@ pub(super) fn kept() -> Result<PathBuf, String> {
 /// `sshd` answers, and returns where it is.
 pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
     let cli = Cli::connect(region.clone())?;
-    let tag = format!("Name=tag:{TAG},Values={name}");
-    let live = |instance: &Instance| {
-        !matches!(instance.state.name.as_str(), "shutting-down" | "terminated")
-    };
-    let mut instances = instances(&cli, &tag)?.into_iter().filter(live);
+    let live = |instance: &Instance| live(&instance.state.name);
+    let found: Vec<Instance> = instances(&cli, &CLIENT.describe, &tagged(name))?;
+    let mut instances = found.into_iter().filter(live);
     let (Some(instance), None) = (instances.next(), instances.next()) else {
         return Err(format!(
             "no one instance in {} carries the tag {TAG}={name}: name the controller that \
@@ -131,8 +131,31 @@ pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
     ready(&cli, name, &instance.id)
 }
 
-fn instances(cli: &Cli, filter: &str) -> Result<Vec<Instance>, String> {
-    let found: Reservations = cli.json(&CLIENT.describe, &["--filters", filter], Bound::Call)?;
+/// The filter of `aws ec2 describe-instances` that matches the instances of controller `name` by
+/// their tag. It matches terminated instances too.
+pub(crate) fn tagged(name: &Name) -> String {
+    format!("Name=tag:{TAG},Values={name}")
+}
+
+/// The tag of controller `name`'s instance, as `key=value`.
+pub(crate) fn tag(name: &Name) -> String {
+    format!("{TAG}={name}")
+}
+
+/// Whether an instance in `state`, as EC2 names it, is live. An instance is live unless it is
+/// `shutting-down` or `terminated`.
+pub(crate) fn live(state: &str) -> bool {
+    !matches!(state, "shutting-down" | "terminated")
+}
+
+/// The instances that `filter` matches, each as `T` reads what `aws ec2 describe-instances` prints
+/// of it, by `call`.
+pub(crate) fn instances<T: DeserializeOwned>(
+    cli: &Cli,
+    call: &'static Call,
+    filter: &str,
+) -> Result<Vec<T>, String> {
+    let found: Reservations<T> = cli.json(call, &["--filters", filter], Bound::Call)?;
     Ok(found
         .reservations
         .into_iter()
@@ -187,7 +210,8 @@ pub(super) fn start(cli: &Cli, id: &str) -> Result<(), String> {
 }
 
 fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
-    let found = instances(cli, &format!("Name=instance-id,Values={id}"))?;
+    let filter = format!("Name=instance-id,Values={id}");
+    let found: Vec<Instance> = instances(cli, &CLIENT.describe, &filter)?;
     found.into_iter().next().ok_or_else(|| {
         format!("controller `{name}`, {id}, is no longer there: run the command again")
     })
