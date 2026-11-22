@@ -1,4 +1,4 @@
-<svg width="852px" height="452px" xmlns="http://www.w3.org/2000/svg">
+<svg width="852px" height="506px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -62,11 +62,17 @@
 </tspan>
     <tspan x="10px" y="388px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="406px"><tspan>  pumpkin fmt</tspan>
+    <tspan x="10px" y="406px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin fmt</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan>  pumpkin fmt --check lib tasks/bench/task.star</tspan>
+    <tspan x="10px" y="424px"><tspan>          Format every `.star` file below the working directory</tspan>
 </tspan>
     <tspan x="10px" y="442px">
+</tspan>
+    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin fmt --check lib tasks/bench/task.star</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>          Check that `lib` and a task's entry are formatted, and change nothing</tspan>
+</tspan>
+    <tspan x="10px" y="496px">
 </tspan>
   </text>
 

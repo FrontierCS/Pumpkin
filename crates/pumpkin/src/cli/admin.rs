@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use aws::ParameterArn;
 use clap::{CommandFactory as _, FromArgMatches as _, Parser};
 
-use super::{Command, HEADER, LITERAL, Refusal, first_word, flagged, help, printed};
+use super::notes::ADMIN;
+use super::{Command, Program, Refusal, first_word, flagged, noted, printed};
 use crate::iam::{self, Principal};
 
 /// The name that makes `pumpkin` run as `pumpkin-admin`. An install holds a link to `pumpkin` by
@@ -35,8 +36,7 @@ pub(crate) const NAME: &str = install::File::PumpkinAdmin.name();
     disable_help_subcommand = true,
     disable_version_flag = true,
     subcommand_value_name = "command",
-    subcommand_help_heading = "Commands",
-    after_help = notes()
+    subcommand_help_heading = "Commands"
 )]
 enum Parsed {
     /// Install the controller host's software, as root.
@@ -48,7 +48,6 @@ enum Parsed {
     /// It copies the members' keys first, and changes nothing else if the copy fails. It needs
     /// Docker and AWS CLI v2 installed first. It writes a file only where it differs, reloads only
     /// what changed, and says each change, so a second run says nothing.
-    #[command(after_help = install_notes())]
     Install {
         /// The ARN of the SSM parameter that holds the controller's settings. The host file names
         /// it.
@@ -61,10 +60,8 @@ enum Parsed {
     /// `check` reads the settings that the ARN names, what they name, and the controller's
     /// instance. It asks IAM's policy simulator about the policy of each role that `pumpkin-admin
     /// policy` prints. It runs every check, and says each problem on a line of its own: the
-    /// resource, what is wrong, and what to fix. It says nothing if there is none, and
-    /// exits with 1 if there is one. It starts nothing, so it leaves unchecked what only a running
-    /// controller shows, and says so.
-    #[command(after_help = check_notes())]
+    /// resource, what is wrong, and what to fix. It says nothing if there is none. It starts
+    /// nothing, so it leaves unchecked what only a running controller shows, and says so.
     Check {
         /// The ARN of the SSM parameter of the controller's settings.
         #[arg(long, value_name = "arn")]
@@ -95,7 +92,7 @@ enum Parsed {
     /// of the member's keys, as the member's ~/.config/pumpkin/ssh/key.pub holds it. Blank lines
     /// are skipped. It refuses a name or a key that the controller refuses, and says where it is.
     /// It refuses a file of no key, and a directory of no file, as deploy/aws does.
-    #[command(name = "check-members", after_help = check_members_notes())]
+    #[command(name = "check-members")]
     CheckMembers {
         /// The directory of the members' files.
         #[arg(value_name = "dir")]
@@ -103,66 +100,18 @@ enum Parsed {
     },
 }
 
-fn notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  sudo ./pumpkin/bin/pumpkin-admin install \\
-    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
-  pumpkin-admin check \\
-    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
-  pumpkin-admin policy controller
-
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}0{LITERAL:#}  Success.
-  {LITERAL}1{LITERAL:#}  An error. A `pumpkin:` line on the standard error says why.
-  {LITERAL}2{LITERAL:#}  A usage error.
-
-`pumpkin-admin <command> --help` prints a command's help."
-    )
-}
-
-fn install_notes() -> String {
-    format!(
-        "\
-The settings name the members' list in their `[deployment] members`. The list
-holds a line `<member> <key>` for each key. A member's name is 1 to 32 of a-z,
-0-9 and `-`, and starts with a letter. The key is the line of the member's
-~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is
-refused whole.
-
-{HEADER}Examples:{HEADER:#}
-  sudo ./pumpkin/bin/pumpkin-admin install \\
-    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings"
-    )
-}
-
-fn check_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin-admin check \\
-    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings"
-    )
-}
-
-fn check_members_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin-admin check-members members"
-    )
+/// The admin's command line, with the examples and statuses that end each help.
+pub(super) fn command() -> clap::Command {
+    noted(flagged(Parsed::command()), ADMIN)
 }
 
 /// Reads `args` into the admin's command that they ask for, as [`super::parse`] does for
 /// `pumpkin`. `args` leave out the program's name.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
-    let mut cli = flagged(Parsed::command());
+    let mut cli = command();
     let (first, named) = first_word(&cli, &args);
-    if let Some(print) = printed(NAME, &args, first, || {
-        help(&mut cli, named.as_deref(), None)
-    }) {
+    if let Some(print) = printed(Program::Admin, &args, first, named.as_deref(), None) {
         return Ok(print);
     }
     let refusal = |error| Refusal {

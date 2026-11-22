@@ -1,132 +1,568 @@
-//! The examples that end each command's help, below its options, with the exit statuses of the
-//! commands that depart from those of `pumpkin --help`, and the topics that `pumpkin help` prints.
-//! Each heading has clap's header style. Each exit status has the literal style, as in rustup's
-//! help:
-//! <https://github.com/rust-lang/rustup/blob/08f60b0a9f445bf25153692139700a2cbc1a869b/src/cli/help.rs#L219-L226>.
+//! What ends each command's help, below its options. [`NOTES`] lists the examples, the exit
+//! statuses and a line or two more of each of `pumpkin`'s commands, and [`ADMIN`] those of
+//! `pumpkin-admin`'s. [`section`] lays out each list as clap lays out its own, in clap's styles.
+//! The module also holds the topics that `pumpkin help` prints.
 
-use super::{HEADER, LITERAL};
+use std::ffi::OsString;
 
-pub(super) fn check_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin check tasks/bench/task.star --arg model=model-a
-  pumpkin check tasks/*/task.star --arg model=model-a
+use super::{Exit, HEADER, LITERAL, Program};
 
-The lint's rules: https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint"
-    )
+/// What ends the help of the command that `command` names, the words after the program's name,
+/// or of the program itself, if there are none.
+pub(super) struct Notes {
+    pub(super) command: &'static [&'static str],
+    examples: &'static [Example],
+    statuses: &'static [Status],
+    /// Prose that ends the help, or nothing.
+    more: &'static str,
 }
 
-pub(super) fn fmt_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin fmt
-  pumpkin fmt --check lib tasks/bench/task.star"
-    )
+/// A command line that the help shows as a person types it in a shell. The program parses the
+/// part that it gets.
+pub(super) struct Example {
+    /// What the shell runs before the program, such as `cd <dir> && `, or nothing.
+    before: &'static str,
+    /// The program's name and its arguments. A space or a line break comes between two arguments,
+    /// and the help breaks the line at a line break. The line holds no syntax of the shell but a
+    /// glob, which is checked as written.
+    line: &'static str,
+    /// What the shell does with the program's output, such as ` > outcome.json`, or nothing.
+    after: &'static str,
+    about: &'static str,
 }
 
-pub(super) fn run_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin run tasks/bench/task.star --arg model=model-a
-  pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome \\
-    > outcome.json
+// An example that is the program's command line alone.
+const ALONE: Example = Example {
+    before: "",
+    line: "",
+    after: "",
+    about: "",
+};
 
-How a run is placed and how it outlives a logout:
-https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running"
-    )
+// The characters of the shell's syntax that `line` holds none of, so that shell text can't slip
+// into the part that the check parses.
+const SHELL: [char; 9] = ['>', '<', '|', '&', ';', '$', '`', '\'', '"'];
+
+/// An exit status of a command, with what it means for that command.
+pub(super) struct Status {
+    exit: Exit,
+    about: &'static str,
 }
 
-pub(super) fn wait_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin wait 20261108-000905-126a21e9
-  pumpkin wait 126a
-  pumpkin wait runs/20261108-000905-126a21e9
-  pumpkin wait --outcome 126a > outcome.json
+// The statuses that both programs share, which each program's own help lists. A command's help
+// lists the others.
+const SUCCESS: Status = Status {
+    exit: Exit::Success,
+    about: "Success.",
+};
+const FAILURE: Status = Status {
+    exit: Exit::Failure,
+    about: "An error. A `pumpkin:` line on the standard error says why.",
+};
+const USAGE: Status = Status {
+    exit: Exit::Usage,
+    about: "A usage error.",
+};
 
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}0{LITERAL:#}  The run finished with a result.
-  {LITERAL}1{LITERAL:#}  The run failed, was interrupted or was lost, or another error.
-  {LITERAL}3{LITERAL:#}  The run finished without a result."
-    )
+// One table for each program that the help is made from and that the check of its examples reads,
+// as ripgrep's `FLAGS` is the one list that its parser and its help read:
+// https://github.com/BurntSushi/ripgrep/blob/91f5d22ef48bde459d90a8c7dbeab416e97d0f2b/crates/core/flags/defs.rs#L39-L44
+// https://github.com/BurntSushi/ripgrep/blob/91f5d22ef48bde459d90a8c7dbeab416e97d0f2b/crates/core/flags/doc/help.rs#L111-L113
+pub(super) const NOTES: &[Notes] = &[
+    Notes {
+        command: &[],
+        examples: &[],
+        statuses: &[
+            SUCCESS,
+            FAILURE,
+            USAGE,
+            Status {
+                exit: Exit::Partial,
+                about: "An outcome short of success, which the command's help says.",
+            },
+        ],
+        more: "`pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`\n\
+               prints a topic. The guide to running workflows is docs/running.md:\n\
+               https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md",
+    },
+    Notes {
+        command: &["check"],
+        examples: &[
+            Example {
+                line: "pumpkin check tasks/bench/task.star --arg model=model-a",
+                about: "Check a task with its arg `model` set to `model-a`",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin check tasks/*/task.star --arg model=model-a",
+                about: "Check every task in `tasks`, each with the same arg",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "The lint's rules:\n\
+               https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint",
+    },
+    Notes {
+        command: &["fmt"],
+        examples: &[
+            Example {
+                line: "pumpkin fmt",
+                about: "Format every `.star` file below the working directory",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin fmt --check lib tasks/bench/task.star",
+                about: "Check that `lib` and a task's entry are formatted, and change nothing",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "",
+    },
+    Notes {
+        command: &["run"],
+        examples: &[
+            Example {
+                line: "pumpkin run tasks/bench/task.star --arg model=model-a",
+                about: "Start a run of a task, and print its id",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome",
+                after: "\n> outcome.json",
+                about: "Start a run, follow it to its end, and save its outcome.json",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "How a run is placed and how it outlives a logout:\n\
+               https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running",
+    },
+    Notes {
+        command: &["wait"],
+        examples: &[
+            Example {
+                line: "pumpkin wait 20261108-000905-126a21e9",
+                about: "Wait for the run with this id",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin wait 126a",
+                about: "Wait for the one run whose id's last 8 digits start with `126a`",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin wait runs/20261108-000905-126a21e9",
+                about: "Wait for the run that this record holds",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin wait --outcome 126a",
+                after: " > outcome.json",
+                about: "Wait for a run, and save its outcome.json once it ends",
+                ..ALONE
+            },
+        ],
+        statuses: &[
+            Status {
+                exit: Exit::Success,
+                about: "The run finished with a result.",
+            },
+            Status {
+                exit: Exit::Failure,
+                about: "The run failed, was interrupted or was lost, or `wait` failed.",
+            },
+            Status {
+                exit: Exit::Partial,
+                about: "The run finished without a result.",
+            },
+        ],
+        more: "",
+    },
+    Notes {
+        command: &["ls"],
+        examples: &[
+            Example {
+                line: "pumpkin ls",
+                about: "List the runs that are live or ended within the last day",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin ls 20261110-1",
+                about: "List the runs whose ids start with `20261110-1`",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin ls --runs runs",
+                about: "List the runs recorded in `runs`",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "The phases and states:\n\
+               https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs",
+    },
+    Notes {
+        command: &["cancel"],
+        examples: &[Example {
+            line: "pumpkin cancel 126a",
+            about: "Stop the one run whose id's last 8 digits start with `126a`",
+            ..ALONE
+        }],
+        statuses: &[
+            Status {
+                exit: Exit::Success,
+                about: "The run has ended, and nothing that it left remains.",
+            },
+            Status {
+                exit: Exit::Partial,
+                about: "The run has ended, but one of its providers can't be reached. What the \
+                        run left there may remain.",
+            },
+        ],
+        more: "",
+    },
+    Notes {
+        command: &["view"],
+        examples: &[
+            Example {
+                line: "pumpkin view",
+                about: "Serve the runs in the repository's `.pumpkin`",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin view --runs runs --port 8080",
+                about: "Serve the runs recorded in `runs` at port 8080",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "`view` serves until a signal stops it, so it never exits 0.\n\n\
+               What the page shows:\n\
+               https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page",
+    },
+    Notes {
+        command: &["help"],
+        examples: &[
+            Example {
+                line: "pumpkin help run",
+                about: "Print the help of `run`",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin help config",
+                about: "Print the topic `config`, which describes pumpkin.toml",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "",
+    },
+    Notes {
+        command: &["reap"],
+        examples: &[
+            Example {
+                line: "pumpkin reap",
+                about: "Remove what the ended runs in the repository's `.pumpkin` left",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin reap --runs runs",
+                about: "Remove what the ended runs recorded in `runs` left",
+                ..ALONE
+            },
+        ],
+        statuses: &[
+            Status {
+                exit: Exit::Success,
+                about: "Nothing that the runs left remains.",
+            },
+            Status {
+                exit: Exit::Partial,
+                about: "`reap` can't reach a provider of a run, which it names, and nothing else \
+                        failed. What the run left there may remain. The provider's Docker context \
+                        may be gone, or the configuration may no longer name the provider.",
+            },
+        ],
+        more: "",
+    },
+    Notes {
+        command: &["controller"],
+        examples: &[
+            Example {
+                before: "cd ~/trees/tasks/20261108-000905-126a21e9 &&\n",
+                line: "pumpkin controller job 20261108-000905-126a21e9\n\
+                       --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3\n\
+                       -- run tasks/bench/task.star --arg model=model-a",
+                about: "Run a job in its tree, as its unit does",
+                ..ALONE
+            },
+            Example {
+                line: "pumpkin controller boot",
+                about: "Reap what lost runs left, as the controller's boot does",
+                ..ALONE
+            },
+        ],
+        statuses: &[],
+        more: "",
+    },
+];
+
+const INSTALL: Example = Example {
+    before: "sudo ./pumpkin/bin/",
+    line: "pumpkin-admin install --settings\n\
+           arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings",
+    after: "",
+    about: "Install this release on the controller host, as root",
+};
+const CHECK: Example = Example {
+    line: "pumpkin-admin check --settings\n\
+           arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings",
+    about: "Check the deployment whose settings the ARN names",
+    ..ALONE
+};
+
+pub(super) const ADMIN: &[Notes] = &[
+    Notes {
+        command: &[],
+        examples: &[
+            INSTALL,
+            CHECK,
+            Example {
+                line: "pumpkin-admin policy controller",
+                about: "Print the IAM policy of the controller's role",
+                ..ALONE
+            },
+        ],
+        statuses: &[SUCCESS, FAILURE, USAGE],
+        more: "`pumpkin-admin <command> --help` prints a command's help.",
+    },
+    Notes {
+        command: &["install"],
+        examples: &[INSTALL],
+        statuses: &[],
+        more: "The settings name the members' list in their `[deployment] members`. The list\n\
+               holds a line `<member> <key>` for each key. A member's name is 1 to 32 of a-z,\n\
+               0-9 and `-`, and starts with a letter. The key is the line of the member's\n\
+               ~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is\n\
+               refused whole.",
+    },
+    Notes {
+        command: &["check"],
+        examples: &[CHECK],
+        statuses: &[
+            Status {
+                exit: Exit::Success,
+                about: "`check` found no problem.",
+            },
+            Status {
+                exit: Exit::Failure,
+                about: "`check` found a problem, or failed.",
+            },
+        ],
+        more: "",
+    },
+    Notes {
+        command: &["check-members"],
+        examples: &[Example {
+            line: "pumpkin-admin check-members members",
+            about: "Check the key files of the members in the directory `members`",
+            ..ALONE
+        }],
+        statuses: &[],
+        more: "",
+    },
+];
+
+impl Notes {
+    /// The text that ends the command's help, its sections apart by a blank line.
+    pub(super) fn render(&self) -> String {
+        let Self {
+            command: _,
+            examples,
+            statuses,
+            more,
+        } = self;
+        let typed: Vec<String> = (examples.iter())
+            .map(|example| {
+                let Example {
+                    before,
+                    line,
+                    after,
+                    about: _,
+                } = example;
+                format!("{before}{line}{after}")
+            })
+            .collect();
+        let examples: Vec<(&str, &str)> = (typed.iter().zip(*examples))
+            .map(|(typed, example)| (typed.as_str(), example.about))
+            .collect();
+        let sections = [
+            section("Examples", &examples, Layout::NextLine),
+            statuses_section(statuses),
+            (*more).to_owned(),
+        ];
+        let sections: Vec<String> = (sections.into_iter())
+            .filter(|section| !section.is_empty())
+            .collect();
+        sections.join("\n\n")
+    }
 }
 
-pub(super) fn ls_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin ls
-  pumpkin ls 20261110-1
-  pumpkin ls --runs runs
-
-The phases and states: https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs"
-    )
+/// The section of `statuses`, or nothing without one.
+fn statuses_section(statuses: &[Status]) -> String {
+    let codes: Vec<String> = (statuses.iter())
+        .map(|Status { exit, about: _ }| exit.code().to_string())
+        .collect();
+    let rows: Vec<(&str, &str)> = (codes.iter().zip(statuses))
+        .map(|(code, Status { exit: _, about })| (code.as_str(), *about))
+        .collect();
+    section("Exit status", &rows, Layout::Columns)
 }
 
-pub(super) fn cancel_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin cancel 126a
-
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}0{LITERAL:#}  The run has ended, and nothing that it left remains.
-  {LITERAL}3{LITERAL:#}  The run has ended, but one of its providers can't be reached.
-     What the run left there may remain."
-    )
+/// Asserts that each program's `parse` takes each of its examples' lines, and that a help lists
+/// each exit status.
+pub(super) fn check() {
+    for program in Program::ALL {
+        for notes in program.notes() {
+            for example in notes.examples {
+                let refused = refused(program, notes, example);
+                assert!(
+                    refused.is_none(),
+                    "the example `{}` is refused: {}",
+                    example.line,
+                    refused.unwrap_or_default()
+                );
+            }
+        }
+    }
+    for exit in Exit::ALL {
+        let mut listed = (Program::ALL.into_iter())
+            .flat_map(Program::notes)
+            .flat_map(|notes| notes.statuses);
+        assert!(
+            listed.any(|status| status.exit == *exit),
+            "no help lists the exit status {}",
+            exit.code()
+        );
+    }
 }
 
-pub(super) fn view_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin view
-  pumpkin view --runs runs --port 8080
-
-`view` serves until a signal stops it, so it never exits 0.
-
-What the page shows: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page"
-    )
+/// Why `example`, of the entry `notes` of `program`, can't be shown, or nothing if it can.
+fn refused(program: Program, notes: &Notes, example: &Example) -> Option<String> {
+    let Example {
+        before,
+        line,
+        after,
+        about,
+    } = example;
+    let prefix = format!("{} ", program.name());
+    let Some(args) = line.strip_prefix(&prefix) else {
+        return Some(format!("it doesn't start with `{prefix}`"));
+    };
+    let args: Vec<&str> = args.split_whitespace().collect();
+    let around = [before, after].map(|text| text.split_whitespace());
+    if line.contains(SHELL) {
+        Some("it holds the shell's syntax".to_owned())
+    } else if !args.starts_with(notes.command) {
+        Some("it isn't a line of the command that its entry names".to_owned())
+    } else if around
+        .into_iter()
+        .flatten()
+        .any(|word| word.starts_with('-'))
+    {
+        Some("its `before` or `after` holds an option, which nothing parses".to_owned())
+    } else if about.is_empty() {
+        Some("it has no description".to_owned())
+    } else {
+        (program.parse(args.into_iter().map(OsString::from)).err())
+            .map(|refusal| refusal.error.render().to_string())
+    }
 }
 
-pub(super) fn help_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin help run
-  pumpkin help config"
-    )
+/// How a section lays out its rows. `Columns` lays them out as clap lays out its commands. Each
+/// row's text is in a column after the longest literal. `NextLine` lays them out as clap's long
+/// help lays out its arguments. Each row's text is on the line below its literal, and a blank line
+/// comes between two rows.
+#[derive(Clone, Copy)]
+pub(super) enum Layout {
+    Columns,
+    NextLine,
 }
 
-pub(super) fn reap_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  pumpkin reap
-  pumpkin reap --runs runs
+// clap's indent of a row, and its further indent of a long help's text below its argument.
+// https://github.com/clap-rs/clap/blob/13f2db5072d600c11d8d6298e4e9ba53ffc6c1ab/clap_builder/src/output/mod.rs#L21
+// https://github.com/clap-rs/clap/blob/13f2db5072d600c11d8d6298e4e9ba53ffc6c1ab/clap_builder/src/output/help_template.rs#L1088
+const TAB: &str = "  ";
+const NEXT_LINE_INDENT: &str = "        ";
 
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}0{LITERAL:#}  Nothing that the runs left remains.
-  {LITERAL}3{LITERAL:#}  `reap` can't reach a provider of a run, which it names, and nothing else
-     failed. What the run left there may remain. The provider's Docker context
-     may be gone, or the configuration may no longer name the provider."
-    )
+// clap wraps the text after a help again, at the terminal's width, and a line that it wraps loses
+// its indent. So each line fits 80 columns, a terminal's common width.
+// https://github.com/clap-rs/clap/blob/13f2db5072d600c11d8d6298e4e9ba53ffc6c1ab/clap_builder/src/output/help_template.rs#L360-L365
+const WIDTH: usize = 80;
+
+// A row's literal has the literal style, as rustup styles its exit statuses:
+// https://github.com/rust-lang/rustup/blob/08f60b0a9f445bf25153692139700a2cbc1a869b/src/cli/help.rs#L219-L226
+/// The `rows` under `heading`, each a literal, such as a command, and what it means, or nothing
+/// without a row. Each row's text is wrapped to 80 columns, at the indent of its first line.
+pub(super) fn section(heading: &str, rows: &[(&str, &str)], layout: Layout) -> String {
+    let Some(longest) = rows.iter().map(|(literal, _)| width(literal)).max() else {
+        return String::new();
+    };
+    let rows: Vec<String> = (rows.iter())
+        .map(|(literal, about)| match layout {
+            Layout::Columns => {
+                // The padding is unstyled, as in clap's list.
+                let pad = " ".repeat(longest - width(literal));
+                let indent = " ".repeat(TAB.len() + longest + TAB.len());
+                let about = wrapped(about, WIDTH - indent.len()).join(&format!("\n{indent}"));
+                format!("{TAB}{LITERAL}{literal}{LITERAL:#}{pad}{TAB}{about}")
+            }
+            Layout::NextLine => {
+                let lines: Vec<String> = (literal.lines())
+                    .map(|line| {
+                        let room = WIDTH - TAB.len() * 2 - " \\".len();
+                        assert!(
+                            width(line) <= room,
+                            "the line `{line}` is over {room} columns"
+                        );
+                        format!("{LITERAL}{line}{LITERAL:#}")
+                    })
+                    .collect();
+                // A line that goes on below ends in ` \`, as in a shell, and the next is indented
+                // further.
+                let literal = lines.join(&format!(" \\\n{TAB}{TAB}"));
+                let indent = format!("{TAB}{NEXT_LINE_INDENT}");
+                let about = wrapped(about, WIDTH - indent.len()).join(&format!("\n{indent}"));
+                format!("{TAB}{literal}\n{indent}{about}")
+            }
+        })
+        .collect();
+    let between = match layout {
+        Layout::Columns => "\n",
+        Layout::NextLine => "\n\n",
+    };
+    format!("{HEADER}{heading}:{HEADER:#}\n{}", rows.join(between))
 }
 
-pub(super) fn controller_notes() -> String {
-    format!(
-        "\
-{HEADER}Examples:{HEADER:#}
-  cd ~/trees/tasks/20261108-000905-126a21e9 && \\
-    pumpkin controller job 20261108-000905-126a21e9 \\
-    --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 \\
-    -- run tasks/bench/task.star --arg model=model-a
-  pumpkin controller boot"
-    )
+/// The words of `text` in lines of at most `width` columns, each longer word on a line of its own.
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if self::width(line) + 1 + self::width(word) <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
+
+fn width(text: &str) -> usize {
+    text.chars().count()
 }
 
 pub(super) const CONFIG: &str = "\

@@ -3,7 +3,6 @@
 //! the records are, and `ls` adds the rows of the copies of its runs here that it lacks.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::time::Duration;
 
 use provider::UnixTime;
@@ -12,6 +11,7 @@ use tempfile::TempDir;
 
 use super::linking::Build;
 use super::{Name, Reached};
+use crate::cli::Exit;
 use crate::link::{Boot, Health, HealthRequest, ListRequest, Listed};
 use crate::progress::{Entry, Listing};
 use crate::workspace::Workspace;
@@ -31,7 +31,7 @@ pub(crate) fn scratch() -> Result<TempDir, String> {
 /// and the jobs yet to start a run, as `waiting` for a build slot, `building`, or `unstarted` once
 /// they have ended, with the copies here of the runs that the controller lacks. Fails, after
 /// listing the rest, if a run can't be listed.
-pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCode, String> {
+pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let now = crate::unix_now();
     let since = crate::progress::listed_since(prefixes, now);
@@ -62,7 +62,7 @@ pub(crate) fn ls(client: &config::Client, prefixes: &[String]) -> Result<ExitCod
         let runs = crate::counted(unlisted, "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// What the controller's `serve` answers, as [`Reached::asked`] asks it.

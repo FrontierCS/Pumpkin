@@ -8,7 +8,6 @@
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
@@ -22,6 +21,8 @@ use rustix::fs::Mode;
 use rustix::process::umask;
 use stdx::Context;
 use workspace::Workspace;
+
+use crate::cli::Exit;
 
 mod bodies;
 mod cli;
@@ -49,7 +50,7 @@ mod whole;
 mod workspace;
 
 use ending::{end, follow};
-use reaping::{Reaper, UNREACHED, cancel, cancelled, reap};
+use reaping::{Reaper, cancel, cancelled, reap};
 use run::{driver_run, run, start};
 
 // musl's allocator is much slower than glibc's at reading a run's records, as ripgrep found of its
@@ -59,7 +60,7 @@ use run::{driver_run, run, start};
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn main() -> ExitCode {
+fn main() -> Exit {
     stdx::abort_on_panic();
     // A run reads back what its record holds, such as a payload or a call's result, and the
     // operator trusts the outcome there; a umask such as 002 would leave all of it writable by a
@@ -106,31 +107,35 @@ fn main() -> ExitCode {
         Ok(cli::Command::BootAll) => host::boot_all(),
         Ok(cli::Command::Idle) => host::idle(),
         Ok(cli::Command::Serve(member)) => serve::serve(&member),
-        // clap's own printing writes the help in many pieces. `head` can close the pipe between two
-        // of them, and the next write fails. `print` writes the help in one `write_all`.
-        Ok(cli::Command::Print(text)) => print(styled(&text).as_bytes())
-            .context("printing to the standard output failed")
-            .map(|()| ExitCode::SUCCESS),
+        Ok(cli::Command::Help(help)) => printed(&help.render()),
+        Ok(cli::Command::Print(text)) => printed(&text),
         Err(refusal) => return usage_error(refusal),
     };
     finish(done)
 }
 
+fn printed(text: &StyledStr) -> Result<Exit, String> {
+    // clap's own printing writes the help in many pieces. `head` can close the pipe between two of
+    // them, and the next write fails. `print` writes the help in one `write_all`.
+    print(styled(text).as_bytes()).context("printing to the standard output failed")?;
+    Ok(Exit::Success)
+}
+
 /// Says `refusal` as clap words it, then the command that prints the help it breaks, and returns
-/// 2, clap's exit status for a usage error.
-fn usage_error(refusal: cli::Refusal) -> ExitCode {
+/// [`Exit::Usage`], whose code is clap's for a usage error.
+fn usage_error(refusal: cli::Refusal) -> Exit {
     let cli::Refusal { error, help } = refusal;
     to_stderr(error.render().to_string().as_bytes());
     say(format_args!("to read how to use it: {help}"));
-    ExitCode::from(2)
+    Exit::Usage
 }
 
-fn finish(done: Result<ExitCode, String>) -> ExitCode {
+fn finish(done: Result<Exit, String>) -> Exit {
     match done {
         Ok(exit) => exit,
         Err(message) => {
             say(message);
-            ExitCode::FAILURE
+            Exit::Failure
         }
     }
 }
@@ -190,7 +195,7 @@ fn not_utf8(what: &str, path: &str, absolute: &Path) -> String {
     )
 }
 
-fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
+fn wait(flags: cli::Wait) -> Result<Exit, String> {
     let cli::Wait { run, runs, printed } = flags;
     if let (cli::RunName::Prefix(prefix), None) = (&run, &runs)
         && let Some(client) = config::client(None)?
@@ -208,7 +213,7 @@ fn wait(flags: cli::Wait) -> Result<ExitCode, String> {
     follow(&record, "wait", named.as_deref(), printed)
 }
 
-fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
+fn ls(flags: cli::Ls) -> Result<Exit, String> {
     let cli::Ls { runs, prefixes } = flags;
     if runs.is_none()
         && let Some(client) = config::client(None)?
@@ -225,7 +230,7 @@ fn ls(flags: cli::Ls) -> Result<ExitCode, String> {
         let runs = counted(unlisted, "run");
         return Err(format!("{runs} can't be listed, as said above"));
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// The time `since_epoch` after the Unix epoch, or the latest time jiff holds if that is past it.
@@ -336,7 +341,7 @@ fn found(run: cli::RunName, runs: Option<String>) -> Result<(Record, Option<Stri
     }
 }
 
-fn check(flags: cli::Check) -> Result<ExitCode, String> {
+fn check(flags: cli::Check) -> Result<Exit, String> {
     let cli::Check {
         entries,
         args: cli::TaskArgs(args),
@@ -353,7 +358,7 @@ fn check(flags: cli::Check) -> Result<ExitCode, String> {
         failed.push(entry);
     }
     if failed.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     let again = source_again("check", &failed, &args)?;
     let them = if failed.len() == 1 { "it" } else { "them" };

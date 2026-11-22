@@ -1,4 +1,4 @@
-<svg width="740px" height="344px" xmlns="http://www.w3.org/2000/svg">
+<svg width="740px" height="398px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -50,11 +50,17 @@
 </tspan>
     <tspan x="10px" y="280px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="298px"><tspan>  pumpkin help run</tspan>
+    <tspan x="10px" y="298px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin help run</tspan>
 </tspan>
-    <tspan x="10px" y="316px"><tspan>  pumpkin help config</tspan>
+    <tspan x="10px" y="316px"><tspan>          Print the help of `run`</tspan>
 </tspan>
     <tspan x="10px" y="334px">
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin help config</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>          Print the topic `config`, which describes pumpkin.toml</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
 </tspan>
   </text>
 

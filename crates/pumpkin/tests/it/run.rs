@@ -145,13 +145,13 @@ fn usage() {
               controller  Run the controller's own commands
 
             Topics:
-              config      The machine's configuration, pumpkin.toml
+              config  The machine's configuration, pumpkin.toml
 
             Exit status:
               0  Success.
               1  An error. A `pumpkin:` line on the standard error says why.
               2  A usage error.
-              3  An outcome that the help of `wait`, `cancel` and `reap` says.
+              3  An outcome short of success, which the command's help says.
 
             `pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`
             prints a topic. The guide to running workflows is docs/running.md:
@@ -277,8 +277,8 @@ fn usage() {
               `check` reads the settings that the ARN names, what they name, and the controller's instance. It
               asks IAM's policy simulator about the policy of each role that `pumpkin-admin policy` prints. It
               runs every check, and says each problem on a line of its own: the resource, what is wrong, and what
-              to fix. It says nothing if there is none, and exits with 1 if there is one. It starts nothing, so it
-              leaves unchecked what only a running controller shows, and says so.
+              to fix. It says nothing if there is none. It starts nothing, so it leaves unchecked what only a
+              running controller shows, and says so.
 
               Usage: pumpkin-admin check --settings <arn>
 
@@ -290,8 +290,13 @@ fn usage() {
                         Print help
 
               Examples:
-                pumpkin-admin check \
-                  --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
+                pumpkin-admin check --settings \
+                  arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
+                        Check the deployment whose settings the ARN names
+
+              Exit status:
+                0  `check` found no problem.
+                1  `check` found a problem, or failed.
             $ pumpkin-admin run a.star
             exit status: Some(2)
             error: unrecognized subcommand 'run'

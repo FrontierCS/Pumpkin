@@ -5,7 +5,6 @@
 //! runs directory, and says its ending there.
 
 use std::path::PathBuf;
-use std::process::ExitCode;
 use std::time::SystemTime;
 
 use retention::KEPT_DAYS;
@@ -15,6 +14,7 @@ use super::Reached;
 use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
+use crate::cli::Exit;
 use crate::ending::Printed;
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
@@ -44,7 +44,7 @@ fn unsendable(client: &config::Client, flags: &[(&str, bool)]) -> Result<(), Str
 /// Sends the task to the controller as a job that builds and runs it there. Without `--wait`
 /// it prints the run's id and the commands that follow and stop it; with, it follows the run
 /// as [`wait`] does.
-pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, String> {
+pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<Exit, String> {
     let cli::Run {
         entry,
         args: cli::TaskArgs(args),
@@ -84,17 +84,13 @@ pub(crate) fn run(client: &config::Client, flags: cli::Run) -> Result<ExitCode, 
     crate::advise("stop it", &next::of_run("cancel", None, id));
     crate::print(format!("{id}\n").as_bytes())
         .context(format_args!("run {id} is sent, but printing its id failed"))?;
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// Follows the run that `run` names on the controller to its end, copies its record here, and
 /// ends as the run ended, having printed what `printed` asks for. A connection that ends
 /// meanwhile is opened again, and the log goes on where it stopped.
-pub(crate) fn wait(
-    client: &config::Client,
-    run: &str,
-    printed: Printed,
-) -> Result<ExitCode, String> {
+pub(crate) fn wait(client: &config::Client, run: &str, printed: Printed) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let (build, id) = job_id(&mut reached, run, Among::Every)?;
     follow(&mut reached, &build, &id, None, printed)
@@ -180,7 +176,7 @@ fn follow(
     id: &str,
     config: Option<&str>,
     printed: Printed,
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     let finished = follow::job(reached, build, id)?;
     let name = &reached.name;
     match finished {
@@ -204,7 +200,7 @@ fn said_here(
     writer: Option<String>,
     config: Option<&str>,
     printed: Printed,
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     let writer = reached.copy(build, id)?.or(writer);
     let dir = PathBuf::from(crate::default_runs()?).join(id);
     if let Some(writer) = writer {
@@ -261,11 +257,7 @@ pub(crate) fn here(record: &runtime::Record, config: Option<&str>) -> Result<Vec
 
 /// Stops the run that `run` names on the controller and copies its record once it has ended.
 /// Unless `any_member`, `run` is named among the member's own runs, as [`Among::Own`] says.
-pub(crate) fn cancel(
-    client: &config::Client,
-    run: &str,
-    any_member: bool,
-) -> Result<ExitCode, String> {
+pub(crate) fn cancel(client: &config::Client, run: &str, any_member: bool) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let among = if any_member { Among::Every } else { Among::Own };
     let (build, id) = job_id(&mut reached, run, among)?;
@@ -312,15 +304,15 @@ pub(crate) fn cancel(
                     "remove what it left once its provider can be reached",
                     &next::reap(None),
                 );
-                return Ok(ExitCode::from(crate::UNREACHED));
+                return Ok(Exit::Partial);
             }
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// Removes on the controller what runs left, as `pumpkin reap` does there.
-pub(crate) fn reap(client: &config::Client) -> Result<ExitCode, String> {
+pub(crate) fn reap(client: &config::Client) -> Result<Exit, String> {
     let mut reached = Reached::reach(&client.controller)?;
     let build = Build::of_this("expected to send it to the controller, to reap the runs there")?;
     let modal = client.modal_file()?;

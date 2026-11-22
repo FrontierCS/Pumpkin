@@ -1,4 +1,4 @@
-<svg width="860px" height="542px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="596px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -60,23 +60,29 @@
 </tspan>
     <tspan x="10px" y="370px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="388px"><tspan>  pumpkin reap</tspan>
+    <tspan x="10px" y="388px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin reap</tspan>
 </tspan>
-    <tspan x="10px" y="406px"><tspan>  pumpkin reap --runs runs</tspan>
+    <tspan x="10px" y="406px"><tspan>          Remove what the ended runs in the repository's `.pumpkin` left</tspan>
 </tspan>
     <tspan x="10px" y="424px">
 </tspan>
-    <tspan x="10px" y="442px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+    <tspan x="10px" y="442px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin reap --runs runs</tspan>
 </tspan>
-    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Nothing that the runs left remains.</tspan>
+    <tspan x="10px" y="460px"><tspan>          Remove what the ended runs recorded in `runs` left</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  `reap` can't reach a provider of a run, which it names, and nothing else</tspan>
+    <tspan x="10px" y="478px">
 </tspan>
-    <tspan x="10px" y="496px"><tspan>     failed. What the run left there may remain. The provider's Docker context</tspan>
+    <tspan x="10px" y="496px"><tspan class="fg-bright-green bold">Exit status:</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan>     may be gone, or the configuration may no longer name the provider.</tspan>
+    <tspan x="10px" y="514px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Nothing that the runs left remains.</tspan>
 </tspan>
-    <tspan x="10px" y="532px">
+    <tspan x="10px" y="532px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  `reap` can't reach a provider of a run, which it names, and nothing else</tspan>
+</tspan>
+    <tspan x="10px" y="550px"><tspan>     failed. What the run left there may remain. The provider's Docker context</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>     may be gone, or the configuration may no longer name the provider.</tspan>
+</tspan>
+    <tspan x="10px" y="586px">
 </tspan>
   </text>
 

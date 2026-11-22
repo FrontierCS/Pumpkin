@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, ExitStatus};
+use std::process::ExitStatus;
 use std::time::SystemTime;
 
 use docker::Docker;
@@ -22,6 +22,7 @@ use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
 use stdx::Context;
 
 use crate::bodies::{Bodies, Sources};
+use crate::cli::Exit;
 use crate::driver::{ARGV0, Driver, Handoff};
 use crate::ending::{Printed, closing, end, follow, followed, following};
 use crate::sandboxd::Sandboxd;
@@ -31,7 +32,7 @@ use crate::{
     controller, driver, modal_helper, next, print, runs_dir, say, star, task_problems,
 };
 
-pub(crate) fn run(flags: cli::Run) -> Result<ExitCode, String> {
+pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
     if let Some(client) = config::client(flags.config.as_deref())? {
         return controller::run(&client, flags);
     }
@@ -45,7 +46,7 @@ pub(crate) fn run(flags: cli::Run) -> Result<ExitCode, String> {
 /// Starts run `id` in a driver of its own, and returns once the run has started, or with
 /// `flags.wait` once it has ended. It says nothing of how to follow the run to a follower
 /// ([`Reader`]).
-pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<ExitCode, String> {
+pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit, String> {
     // Absolute, so that the record's path, which the driver says and `run` opens, names it from
     // any directory. A runs directory not given is left for the driver to find as `run` does,
     // so that the driver's flags are those that the operator gave.
@@ -83,7 +84,7 @@ pub(crate) fn start(id: &RunTag, flags: cli::Run, reader: Reader) -> Result<Exit
             print(format!("{id}\n").as_bytes()).context(format_args!(
                 "run {id} has started, but printing its id failed"
             ))?;
-            Ok(ExitCode::SUCCESS)
+            Ok(Exit::Success)
         }
         Handoff::Ended(status, record) => {
             let printed = wait.unwrap_or(Printed::Nothing);
@@ -97,7 +98,7 @@ fn unstarted(
     record: Option<&Record>,
     runs: Option<&str>,
     printed: Printed,
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     if status.code().is_some() {
         if let Some(record) = record {
             let recorded = record.dir().join("outcome.json");
@@ -105,7 +106,7 @@ fn unstarted(
                 printed.print(record.dir())?;
             }
         }
-        return Ok(ExitCode::FAILURE);
+        return Ok(Exit::Failure);
     }
     let ended = format!("the driver ended before the run started, by {status}");
     match record {
@@ -132,7 +133,7 @@ fn recorded_args(run: &cli::Run) -> Result<Vec<String>, String> {
 
 /// The driver of the run that `args` name, until the run ends; `args` are those that
 /// [`Driver::spawn`] gives it. A run that stops short of its outcome is a failure.
-pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
+pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
     let (id, reader, run) = driver_started(args)?;
     let words = recorded_args(&run)?;
     // A controller's client says how to run it again from its own workspace: from its copy of
@@ -213,9 +214,9 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
             say(closing(&id, &stopped.to_string(), &dir));
             advise("run it again", again);
         }
-        return Ok(ExitCode::FAILURE);
+        return Ok(Exit::Failure);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// Says to `reader` that run `id` is begun: to the operator, where it is recorded, `dir`, before
