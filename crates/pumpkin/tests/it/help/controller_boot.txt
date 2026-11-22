@@ -1,7 +1,0 @@
-Reap what lost runs left, at the controller's boot
-
-Usage: pumpkin controller boot
-
-Options:
-  -h, --help
-          Print help

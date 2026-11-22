@@ -26,6 +26,7 @@ runtime = { path = "../runtime" }
 schema = { path = "../schema" }
 stdx = { path = "../stdx" }
 tls = { path = "../tls" }
+anstream.workspace = true
 clap.workspace = true
 jiff.workspace = true
 libc.workspace = true
@@ -42,6 +43,7 @@ mimalloc.workspace = true
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
+anstyle-svg.workspace = true
 expect-test.workspace = true
 
 [lints]

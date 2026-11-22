@@ -1,0 +1,81 @@
+<svg width="852px" height="524px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Check tasks without building or running them.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>`check` evaluates each task's entry file and the files it loads with the given `--arg`s. Every task</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>gets the same `--arg`s. It then checks each image's recipe and the workflow, and lints the files it</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>read. It says every problem in every task, and prints nothing when it finds none. It reads only</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>files below each task's root. It reaches no Docker engine, network or configuration, so an image's</tspan>
+</tspan>
+    <tspan x="10px" y="136px"><tspan>build can still fail.</tspan>
+</tspan>
+    <tspan x="10px" y="154px">
+</tspan>
+    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin check</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
+</tspan>
+    <tspan x="10px" y="190px">
+</tspan>
+    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-cyan">&lt;entry&gt;...</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>          A task's entry file, below the nearest directory that holds PUMPKIN.star</tspan>
+</tspan>
+    <tspan x="10px" y="262px">
+</tspan>
+    <tspan x="10px" y="280px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--arg</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;=&lt;value&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>          Set the arg that an `arg()` call declares as &lt;name&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="334px">
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
+</tspan>
+    <tspan x="10px" y="406px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="424px"><tspan>  pumpkin check tasks/bench/task.star --arg model=model-a</tspan>
+</tspan>
+    <tspan x="10px" y="442px"><tspan>  pumpkin check tasks/*/task.star --arg model=model-a</tspan>
+</tspan>
+    <tspan x="10px" y="460px">
+</tspan>
+    <tspan x="10px" y="478px"><tspan>The lint's rules:</tspan>
+</tspan>
+    <tspan x="10px" y="496px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint</tspan>
+</tspan>
+    <tspan x="10px" y="514px">
+</tspan>
+  </text>
+
+</svg>

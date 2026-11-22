@@ -549,9 +549,9 @@ fn test_data() {
             file("crates/lang/tests/conformance/suite/list.star"),
             file("crates/lang/tests/fixtures/lib/parts.star"),
             file("crates/lang/tests/fixtures/lib/parts.json"),
+            file("crates/pumpkin/tests/it/help/run.svg"),
             file("crates/pumpkin/tests/it/help/run.txt"),
-            file("crates/pumpkin/tests/it/help/run.json"),
-            file("crates/pumpkin/tests/it/records/run.txt"),
+            file("crates/pumpkin/tests/it/records/run.svg"),
         ],
         tidy,
         &expect![[r#"
@@ -559,8 +559,8 @@ fn test_data() {
             crates/a/tests/fixtures/README.md: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
             crates/a/tests/it/records/outcome.json: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
             crates/lang/tests/fixtures/lib/parts.json: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
-            crates/pumpkin/tests/it/help/run.json: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
-            crates/pumpkin/tests/it/records/run.txt: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it"#]],
+            crates/pumpkin/tests/it/help/run.txt: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it
+            crates/pumpkin/tests/it/records/run.svg: a file that isn't Rust, under a `tests/` directory: make what the test reads in the test, with Pumpkin's own writer where Pumpkin reads it"#]],
     );
 }
 
