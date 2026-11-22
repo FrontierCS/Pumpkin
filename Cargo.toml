@@ -21,6 +21,7 @@ ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rustix = "1.1.6"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_ignored = "0.1.14"
 serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 sha2 = { version = "0.11.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }

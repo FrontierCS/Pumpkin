@@ -5,6 +5,7 @@
 //! refuses any other key, and a file that mixes the two forms.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -38,8 +39,9 @@ enum Target {
     Controller(Client),
 }
 
+// No table that a controller's settings hold has `deny_unknown_fields`. So a job can ignore a key
+// of a newer envelope's (`remove_unknown`). A machine still refuses it (`target`).
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Tables {
     docker: Option<Docker>,
     providers: Option<BTreeMap<Name, Kind>>,
@@ -84,25 +86,23 @@ pub(crate) struct SentModal {
     classes: BTreeMap<Name, modal::SandboxClass>,
 }
 
+// Without `deny_unknown_fields`, as `Tables`.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Docker {
     pub(crate) context: ContextName,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Kind {
     Docker(Empty),
     Ec2(ec2::Settings),
     Modal(modal::Settings),
 }
 
+// Without `deny_unknown_fields`, as `Tables`.
 #[derive(Deserialize)]
-#[serde(
-    deny_unknown_fields,
-    expecting = "an empty table, as the provider's kind takes no settings"
-)]
+#[serde(expecting = "an empty table, as the provider's kind takes no settings")]
 pub(crate) struct Empty {}
 
 #[derive(Default, Deserialize)]
@@ -369,16 +369,19 @@ pub(crate) fn client(config: Option<&str>) -> Result<Option<Client>, String> {
 
 fn target(path: &Path, text: &str) -> Result<Target, String> {
     // `toml` ends its message, which quotes the line, with a newline of its own.
-    let parsed = toml::from_str(text);
-    let Tables {
-        docker,
-        providers,
-        gateway,
-        mut upstreams,
-        controller,
-    } = parsed
-        .map_err(|error| error.to_string().trim_end().to_owned())
-        .context(path.display())?;
+    let shown = |error: toml::de::Error| error.to_string().trim_end().to_owned();
+    let parsed = toml::Deserializer::parse(text).and_then(tables);
+    let (
+        Tables {
+            docker,
+            providers,
+            gateway,
+            mut upstreams,
+            controller,
+        },
+        unknown,
+    ) = parsed.map_err(shown).context(path.display())?;
+    known(path, text, &unknown)?;
     unique(&upstreams).context(path.display())?;
     // Below the file's directory, rather than the working directory or `HOME`, so that a
     // configuration and its keys move together, and no variable of the environment changes which
@@ -427,6 +430,134 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         gateway: gateway.unwrap_or_default(),
         upstreams,
     }))
+}
+
+/// Fails if `unknown` names any key, naming `path` and each key. `unknown` holds the keys that no
+/// table of the configuration `text` takes.
+fn known(path: &Path, text: &str, unknown: &[Vec<Step>]) -> Result<(), String> {
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let document = toml::from_str(text).map_err(|error| error.to_string().trim_end().to_owned());
+    let names = removed(&mut document.context(path.display())?, unknown);
+    let them = if names.len() == 1 { "it" } else { "them" };
+    Err(format!(
+        "{}: no table of a configuration takes {}: remove {them}, as `pumpkin help config` says \
+         what each table takes",
+        path.display(),
+        names.join(", ")
+    ))
+}
+
+/// Removes from `tables` each key that no table of a configuration takes, and returns their names,
+/// as [`removed`] gives them. Fails if `tables` isn't a configuration once they are gone. The error
+/// says where as `toml` does: by the keys that lead there, without an enum's variant, such as a
+/// provider's kind.
+pub(crate) fn remove_unknown(tables: &mut toml::Table) -> Result<Vec<String>, String> {
+    // `toml` puts the keys on a line of their own, and ends with a newline.
+    let shown = |error: toml::de::Error| error.to_string().trim_end().replace('\n', " ");
+    let (_, unknown) = self::tables(tables.clone()).map_err(shown)?;
+    let mut document = toml::Value::Table(std::mem::take(tables));
+    let names = removed(&mut document, &unknown);
+    let toml::Value::Table(document) = document else {
+        unreachable!("`removed` keeps the top of the document a table")
+    };
+    *tables = document;
+    Ok(names)
+}
+
+// A step from a value into one it holds. It goes by a table's key, by an array's index, or into the
+// value of an enum's variant. An enum's variant is its table's one key.
+enum Step {
+    Key(String),
+    Index(usize),
+    Variant,
+}
+
+/// The tables of the configuration that `deserializer` reads, and each key in it that no table
+/// takes, as the steps that lead to it from the top.
+fn tables<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(Tables, Vec<Vec<Step>>), D::Error> {
+    let mut unknown = Vec::new();
+    // Cargo reads a manifest this way, and warns of the keys it doesn't know rather than refusing
+    // them:
+    // https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/src/workspace/parser/mod.rs#L192-L206
+    let tables = serde_ignored::deserialize(deserializer, |path| {
+        let mut steps = Vec::new();
+        let mut at = &path;
+        loop {
+            at = match at {
+                serde_ignored::Path::Root => break,
+                serde_ignored::Path::Map { parent, key } => {
+                    steps.push(Step::Key(key.clone()));
+                    parent
+                }
+                serde_ignored::Path::Seq { parent, index } => {
+                    steps.push(Step::Index(*index));
+                    parent
+                }
+                serde_ignored::Path::NewtypeVariant { parent } => {
+                    steps.push(Step::Variant);
+                    parent
+                }
+                serde_ignored::Path::Some { parent }
+                | serde_ignored::Path::NewtypeStruct { parent } => parent,
+            };
+        }
+        steps.reverse();
+        unknown.push(steps);
+    })?;
+    Ok((tables, unknown))
+}
+
+/// Removes from `document` each key that `unknown` leads to, as [`tables`] found them there.
+/// Returns their names, each set as code. A name joins the keys from the top by `.`, with an
+/// array's index in `[]`.
+fn removed(document: &mut toml::Value, unknown: &[Vec<Step>]) -> Vec<String> {
+    let mut names = Vec::new();
+    for steps in unknown {
+        let mut name = String::new();
+        let dotted = |name: &mut String, key: &str| {
+            if !name.is_empty() {
+                name.push('.');
+            }
+            name.push_str(key);
+        };
+        let Some((Step::Key(last), steps)) = steps.split_last() else {
+            unreachable!("serde_ignored names only a table's entry as ignored, by its key")
+        };
+        let mut value = &mut *document;
+        for step in steps {
+            let next = match (step, value) {
+                (Step::Key(key), toml::Value::Table(table)) => {
+                    dotted(&mut name, key);
+                    table.get_mut(key)
+                }
+                (Step::Variant, toml::Value::Table(table)) => {
+                    table.iter_mut().next().map(|(key, value)| {
+                        dotted(&mut name, key);
+                        value
+                    })
+                }
+                (Step::Index(index), toml::Value::Array(array)) => {
+                    let _ = write!(name, "[{index}]");
+                    array.get_mut(*index)
+                }
+                _ => None,
+            };
+            value = next.unwrap_or_else(|| {
+                unreachable!("each step that serde_ignored took is in the document it read")
+            });
+        }
+        let toml::Value::Table(table) = value else {
+            unreachable!("serde_ignored names only a table's entry as ignored")
+        };
+        table.remove(last);
+        dotted(&mut name, last);
+        names.push(format!("`{name}`"));
+    }
+    names
 }
 
 impl Client {

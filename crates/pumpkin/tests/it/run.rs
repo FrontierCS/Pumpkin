@@ -740,11 +740,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/unserved.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config placed.toml
             exit status: Some(1)
-            pumpkin: placed.toml: TOML parse error at line 11, column 2
-               |
-            11 | [placement.agent]
-               |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`
+            pumpkin: placed.toml: no table of a configuration takes `placement`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)
@@ -756,11 +752,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/podman.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config context.toml
             exit status: Some(1)
-            pumpkin: context.toml: TOML parse error at line 10, column 1
-               |
-            10 | context = "remote"
-               | ^^^^^^^
-            unknown field `context`, there are no fields
+            pumpkin: context.toml: no table of a configuration takes `providers.local.docker.context`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/context.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config valued.toml
             exit status: Some(1)
@@ -780,11 +772,7 @@ fn configurations() {
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/mixed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config bundled.toml
             exit status: Some(1)
-            pumpkin: bundled.toml: TOML parse error at line 7, column 74
-              |
-            7 | repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd", bundles = "pumpkin/bundles" }
-              |                                                                          ^^^^^^^
-            unknown field `bundles`, expected `roles` or `sandboxd`
+            pumpkin: bundled.toml: no table of a configuration takes `providers.aws.ec2.repositories.bundles`: remove it, as `pumpkin help config` says what each table takes
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/bundled.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config regional.toml
             exit status: Some(1)

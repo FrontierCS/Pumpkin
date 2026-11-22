@@ -309,6 +309,15 @@ settings:
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
 
+On a controller, each job reads its configuration from the controller's
+settings, which deploy/aws writes. The job sets [gateway] itself. The client
+sends [upstreams] and [controller.modal]. Before any table, the settings may
+name `envelope`, the version \"M.m\" of the envelope that wrote them. Without
+it, the settings are of 1.0. A job refuses an envelope whose major isn't 1. It
+refuses each key that it doesn't know, unless the envelope is a later minor
+than 1.0, the newest that this release knows. It then ignores the key and names
+it in its log. A minor adds only keys that an older release may safely ignore.
+
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
 `ls`, `cancel`, `view` and `reap` go to it, as each one's help says.
 Each run is sent the [upstreams.<name>] tables, their keys, [controller.modal]

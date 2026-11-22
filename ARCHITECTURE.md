@@ -453,7 +453,8 @@ job's log and its milestones. It is of the client's own build, which the client 
 whole: its executable and the files beside it, by their SHA-256. `manifest` describes the task tree
 and the client install that `send` transfers by content. Its `store` admits complete uploads by
 their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
-and keeps the install that its unit runs. `job` also holds the prune and the slots that admit its
+and keeps the install that its unit runs. Its `settings` checks the envelope that made the
+controller's settings. `job` also holds the prune and the slots that admit its
 builds and publishes (`Admission`). `progress` is what `ls` shows. `next` makes the commands to run
 next. `style` runs the formatter. `view` serves the runs' records to a browser. Its `json` holds the
 JSON forms of its answers, and its `Answering` is the view that `serve` keeps to answer a client.
@@ -505,6 +506,13 @@ names (`--member`, a `member::Member`), and each run's job it starts records tha
 `cancel` matches only that member's runs, and those that name no member, unless asked
 otherwise. This prevents accidents, not members: each member's build runs as the controller's
 one user.
+
+**Architecture Invariant:** a job takes the controller's settings of its own envelope major alone.
+In settings of a minor it knows, it refuses a key that no table takes. In settings of a later minor,
+it leaves such a key out of its configuration and names it in its log. A later minor adds only keys
+that an older release may safely ignore. A machine's `pumpkin.toml` refuses such a key all the same.
+`config` tells the keys apart through `serde_ignored`, so no table that the settings hold has
+`deny_unknown_fields`.
 
 **Architecture Invariant:** each `pumpkin` process adds 022 to its umask as it starts (`main`), so
 nothing it makes, a run's record included, is writable by another user.
