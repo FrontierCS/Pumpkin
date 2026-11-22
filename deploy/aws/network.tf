@@ -33,9 +33,9 @@ resource "aws_vpc_security_group_egress_rule" "sandbox_gateway" {
   referenced_security_group_id = aws_security_group.controller.id
 }
 
-# The controller's `sshd` is reached only from `ssh_from`, and its gateway only from the
-# sandboxes. The group's description stays as it is, since
-# the provider replaces a group whose description changes, with every rule in it.
+# The controller's `sshd` is reached only from its VPC, and its gateway only from the sandboxes.
+# The group's description stays as it is, since the provider replaces a group whose description
+# changes, with every rule in it.
 resource "aws_security_group" "controller" {
   name        = "${local.prefix}-controller"
   description = "Pumpkin controller: in from its sandboxes alone; out to HTTPS"
@@ -51,12 +51,22 @@ resource "aws_vpc_security_group_ingress_rule" "controller_gateway" {
   referenced_security_group_id = aws_security_group.sandbox.id
 }
 
+data "aws_vpc" "this" {
+  id = var.vpc_id
+}
+
+# Each IPv4 block associated with the VPC reaches port 22. rust-lang's EFS module admits its VPC's
+# primary block, read the same way
+# (https://github.com/rust-lang/simpleinfra/blob/75291a2cdf0dd5ba60860701274f9500703102da/terraform/shared/modules/efs-filesystem/main.tf#L23-L48).
+# A block that is still being associated gets its rule at the next apply. `sshd` admits for
+# `pumpkin` only the keys that `members` lists, and for `ubuntu` only a key that EC2 Instance
+# Connect pushes for an IAM principal.
 # Its description has no apostrophe, which EC2 refuses in a rule's description and a plan doesn't
 # check.
 resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
-  for_each          = toset(var.ssh_from)
+  for_each          = toset([for block in data.aws_vpc.this.cidr_block_associations : block.cidr_block if block.state == "associated"])
   security_group_id = aws_security_group.controller.id
-  description       = "ssh from the machines that ssh_from names"
+  description       = "ssh from the VPC"
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22

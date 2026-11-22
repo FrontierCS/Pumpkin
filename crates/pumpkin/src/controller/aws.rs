@@ -276,8 +276,9 @@ pub(super) fn unanswered(error: &io::Error) -> &'static str {
         io::ErrorKind::TimedOut
         | io::ErrorKind::HostUnreachable
         | io::ErrorKind::NetworkUnreachable => {
-            "this machine doesn't reach the controller's VPC, or `deploy/aws`'s `ssh_from` doesn't \
-             admit it: apply it with this machine's address among them"
+            "this machine doesn't reach the controller from an address of the controller's VPC: \
+             run the command from a machine in that VPC, or through a VPN that translates its \
+             addresses into the VPC's"
         }
         _ => "run the command again",
     }

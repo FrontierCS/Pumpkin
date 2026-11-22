@@ -9,7 +9,7 @@ variable "name" {
 }
 
 variable "vpc_id" {
-  description = "The VPC of the sandboxes and of the controller that runs them."
+  description = "The VPC of the sandboxes and of the controller that runs them. Its associated IPv4 blocks reach the controller's `sshd`. Its ID is known at plan, as an existing VPC's is."
   type        = string
 }
 
@@ -110,17 +110,6 @@ variable "pumpkin_release" {
   validation {
     condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9._-]* [0-9a-f]{40} [0-9a-f]{64}$", var.pumpkin_release))
     error_message = "The release is not a `pumpkinversion` line, `<tag> <commit> <sha256>`: give the line of a release's `pumpkinversion` asset, as a task repository's `.pumpkinversion` holds it."
-  }
-}
-
-variable "ssh_from" {
-  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as each member's machine's private address as a `/32`: `pumpkin` reaches the controller at its private address, from the controller's VPC or a network routed to it. None by default, so no `pumpkin` reaches the controller."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for cidr in var.ssh_from : can(cidrnetmask(cidr))])
-    error_message = "An entry of `ssh_from` is not an IPv4 CIDR: give one such as `10.0.1.23/32`."
   }
 }
 

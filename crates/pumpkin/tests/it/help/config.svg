@@ -384,17 +384,17 @@
 </tspan>
     <tspan x="10px" y="3322px"><tspan>task's files and starts its job over SSH to the controller's private address.</tspan>
 </tspan>
-    <tspan x="10px" y="3340px"><tspan>It uses up to four connections for large task uploads. The machine needs a</tspan>
+    <tspan x="10px" y="3340px"><tspan>It uses up to four connections for large task uploads. The machine is in the</tspan>
 </tspan>
-    <tspan x="10px" y="3358px"><tspan>route there, and deploy/aws's `ssh_from` must admit it. The first command</tspan>
+    <tspan x="10px" y="3358px"><tspan>controller's VPC, or reaches it through a VPN that translates its addresses</tspan>
 </tspan>
-    <tspan x="10px" y="3376px"><tspan>creates a key. The controller admits the key once its admin lists it under the</tspan>
+    <tspan x="10px" y="3376px"><tspan>into the VPC's. The first command creates a key. The controller admits the key</tspan>
 </tspan>
-    <tspan x="10px" y="3394px"><tspan>person's name in deploy/aws's `members`. Until then, each command is refused</tspan>
+    <tspan x="10px" y="3394px"><tspan>once its admin lists it under the person's name in deploy/aws's `members`.</tspan>
 </tspan>
-    <tspan x="10px" y="3412px"><tspan>with the line to send the admin. The client keeps that key and the pinned host</tspan>
+    <tspan x="10px" y="3412px"><tspan>Until then, each command is refused with the line to send the admin. The client</tspan>
 </tspan>
-    <tspan x="10px" y="3430px"><tspan>key in $HOME/.config/pumpkin/ssh/.</tspan>
+    <tspan x="10px" y="3430px"><tspan>keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
 </tspan>
     <tspan x="10px" y="3448px"><tspan>  name          The `name` that deploy/aws was applied with.</tspan>
 </tspan>
