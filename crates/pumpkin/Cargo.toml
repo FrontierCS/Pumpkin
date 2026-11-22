@@ -49,6 +49,7 @@ mimalloc.workspace = true
 test-support = { path = "../test-support" }
 anstyle-svg.workspace = true
 expect-test.workspace = true
+rustix = { workspace = true, features = ["pipe"] }
 
 [lints]
 workspace = true

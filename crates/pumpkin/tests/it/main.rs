@@ -40,6 +40,7 @@ mod gateway_ports;
 mod help;
 mod ls;
 mod members;
+mod output;
 mod policy;
 mod reap;
 mod run;
