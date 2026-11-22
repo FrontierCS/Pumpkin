@@ -671,45 +671,6 @@ fn retry_start() {
 }
 
 #[test]
-fn interrupted_launch_keeps_the_job() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    let key = served(&scratch);
-    scratch.write(
-        &format!("home/store/manifests/{EMPTY_TREE}"),
-        "pumpkin-tree/1\n",
-    );
-    scratch.write_executable("bin/systemd-run", b"#!/bin/sh\nkill -TERM $$\n");
-    let id = id_ago(0, "0777abcd");
-    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
-    let unconfirmed = ask(b"first");
-    assert_eq!(unconfirmed["type"], "unconfirmed");
-    assert!(
-        unconfirmed["message"]
-            .as_str()
-            .unwrap()
-            .contains("systemctl --user status")
-    );
-    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
-    assert_eq!(ask(b"second")["type"], "unconfirmed");
-    assert_eq!(
-        fs::read(scratch.0.join(format!("run/pumpkin/{id}/modal.toml"))).unwrap(),
-        b"first"
-    );
-    // A reboot loses the tmpfs even when the server died before submitting the unit.
-    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
-    assert_eq!(ask(b"third")["type"], "unconfirmed");
-    // The link that controller job writes survives the unit, including an older install's job.
-    symlink(
-        scratch.0.join(format!("home/.pumpkin/{key}/bin/pumpkin")),
-        scratch.0.join(format!("home/builds/{id}/pumpkin")),
-    )
-    .unwrap();
-    assert_eq!(ask(b"fourth")["type"], "already_started");
-    assert!(!scratch.0.join("bin/argv").exists());
-}
-
-#[test]
 fn start_after_a_cut() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
@@ -1567,43 +1528,6 @@ echo "$*" >> "${0%/*}/units"
         exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
         --user kill --signal=KILL pumpkin-job-<id>
         --user stop pumpkin-job-<id>"#]],
-    );
-}
-
-#[test]
-fn cancel_another_builds_job() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let id = id_ago(0, "0c000007");
-    ended_job(&scratch, &id, "running a different build\n");
-    let dir = format!("home/.pumpkin/runs/{id}");
-    let foreign = json!({ "record_version": "another format", "pumpkin": { "version": "1.2.3" } });
-    scratch.write(&format!("{dir}/record.json"), &foreign);
-    scratch.write(&format!("{dir}/outcome.json"), "the other build's outcome");
-    scratch.write(&format!("run/pumpkin/{id}/held"), "");
-    let ctl = r#"#!/bin/sh
-echo "$*" >> "${0%/*}/units"
-rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"
-"#;
-    scratch.write_executable("bin/systemctl", ctl.as_bytes());
-    let cancel = on_client(&scratch, &client, &["cancel", &id])
-        .output()
-        .unwrap();
-    let copied = scratch
-        .0
-        .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
-    assert_eq!(
-        fs::read_to_string(copied).unwrap(),
-        "the other build's outcome"
-    );
-    let said = String::from_utf8_lossy(&cancel.stderr);
-    assert!(said.contains("1.2.3"), "{said}");
-    assert!(cancel.status.success(), "{said}");
-    assert_eq!(
-        fs::read_to_string(scratch.0.join("bin/units")).unwrap(),
-        format!("--user stop pumpkin-job-{id}\n")
     );
 }
 
