@@ -11,6 +11,22 @@
     },
     {
       "Action": [
+        "iam:PassRole"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ec2.amazonaws.com"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "${member_role_arn}"
+      ]
+    },
+    {
+      "Action": [
         "ssm:GetParameter"
       ],
       "Effect": "Allow",
@@ -38,8 +54,27 @@
     },
     {
       "Action": [
+        "ec2:RunInstances"
+      ],
+      "Condition": {
+        "Null": {
+          "ec2:InstanceType": [
+            "true"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:DescribeImages",
         "ec2:DescribeInstances",
         "ec2:DescribeLaunchTemplateVersions",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVpcs",
         "iam:GetInstanceProfile",
         "iam:SimulatePrincipalPolicy",
         "scheduler:ListSchedules"
@@ -47,6 +82,114 @@
       "Effect": "Allow",
       "Resource": [
         "*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:InstanceProfile": [
+            "${member_profile_arn}"
+          ]
+        },
+        "Null": {
+          "aws:RequestTag/pumpkin:join": [
+            "false"
+          ]
+        },
+        "StringEquals": {
+          "ec2:InstanceType": [
+            "t3.micro"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:TerminateInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:InstanceProfile": [
+            "${member_profile_arn}"
+          ]
+        },
+        "Null": {
+          "ec2:ResourceTag/pumpkin:join": [
+            "false"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*",
+        "arn:${partition}:ec2:${region}:${account}:security-group/*",
+        "arn:${partition}:ec2:${region}:${account}:volume/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:CreateSecurityGroup"
+      ],
+      "Condition": {
+        "Null": {
+          "aws:RequestTag/pumpkin:join": [
+            "false"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:security-group/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Condition": {
+        "Null": {
+          "ec2:ResourceTag/pumpkin:join": [
+            "false"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:security-group/*"
+      ]
+    },
+    {
+      "Action": [
+        "ec2:CreateSecurityGroup"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:vpc/*"
       ]
     }
   ],

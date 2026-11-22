@@ -4,7 +4,9 @@
 //! makes its jobs' calls: they run the providers and read their settings. The providers'
 //! other principals make their own calls. A client's calls reach its controller.
 
-use aws::iam::{self, Allow, Call, Fill, Placeholder, Resource};
+use aws::iam::{
+    self, Allow, Call, Condition, Fill, Key, Part, Placeholder, Resource, Test, Values,
+};
 use clap::ValueEnum;
 
 /// A principal of a deployment of the controller, or a part of one, whose policy
@@ -23,8 +25,8 @@ pub(crate) enum Principal {
     Client,
     /// What `pumpkin-admin check` needs to read the deployment.
     Check,
-    /// What a contributor's `cargo xtask live` needs: the client's, the check's and
-    /// `scheduler:ListSchedules`.
+    /// What a contributor's `cargo xtask live` needs: the client's, the check's,
+    /// `scheduler:ListSchedules`, and the launch and the end of a member's machine.
     Contributor,
 }
 
@@ -133,6 +135,124 @@ pub(crate) const CHECK: Check = Check {
 /// `xtask` runs itself.
 const LIST_SCHEDULES: Allow = Allow::new(&["scheduler:ListSchedules"], &[Resource::Any]);
 
+const MEMBER_PROFILE: Placeholder = Placeholder::new(
+    "member_profile_arn",
+    "the ARN of the instance profile of a member's machine",
+);
+
+const MEMBER_ROLE: Placeholder = Placeholder::new(
+    "member_role_arn",
+    "the ARN of the role of a member's machine",
+);
+
+/// The tag of each machine that `cargo xtask live join` launches, and of its security group.
+const JOIN_TAG: &str = "pumpkin:join";
+
+/// The one instance type of the machine that `cargo xtask live join` launches, which bounds what
+/// a launch costs.
+const JOIN_INSTANCE_TYPE: &str = "t3.micro";
+
+const JOIN_REQUESTED: Condition = Condition::new(
+    Test::Null,
+    Key::Named("aws:RequestTag/pumpkin:join"),
+    Values::Are(&[Part::Text("false")]),
+);
+
+const JOIN_INSTANCES: &[Resource] = &[Resource::In("ec2", &[Part::Text("instance/*")])];
+
+const JOIN_GROUPS: &[Resource] = &[Resource::In("ec2", &[Part::Text("security-group/*")])];
+
+const MEMBER_INSTANCE: Condition = Condition::new(
+    Test::ArnEquals,
+    Key::Named("ec2:InstanceProfile"),
+    Values::Are(&[Part::Fill(&MEMBER_PROFILE)]),
+);
+
+const TAGGED: Condition = Condition::new(
+    Test::Null,
+    Key::Tag("ec2", JOIN_TAG),
+    Values::Are(&[Part::Text("false")]),
+);
+
+/// What `cargo xtask live join` allows itself beyond the client's calls, each by the `aws`
+/// command that it runs. It launches a member's machine with the members' instance profile, in
+/// a security group of its own that admits `ssh` from the VPC. It then ends both. It may end only
+/// the machines and groups that carry its tag.
+// As Packer's builder makes a temporary group for the instance it builds from, and deletes it once
+// the instance is terminated:
+// https://github.com/hashicorp/packer/blob/0ca418d656cd5c28798ed5accdd132680979a6de/builder/amazon/common/step_security_group.go#L80-L188
+static JOIN: [Allow; 9] = [
+    // `ec2 run-instances`: the instance, tagged, of its one type, with the members' profile alone.
+    Allow::new(&["ec2:RunInstances"], JOIN_INSTANCES).when(&[
+        MEMBER_INSTANCE,
+        JOIN_REQUESTED,
+        Condition::new(
+            Test::StringEquals,
+            Key::Named("ec2:InstanceType"),
+            Values::Are(&[Part::Text(JOIN_INSTANCE_TYPE)]),
+        ),
+    ]),
+    // The launch's other resources: its image, which a public AMI's ARN names without an account,
+    // its subnet, group, interface and volume. Of RunInstances' resource types, only the instance
+    // has `ec2:InstanceType`, so this statement allows no instance:
+    // https://github.com/salesforce/policy_sentry/blob/2575f2b873e1c1f0fb604a448dee392f39ad74ad/policy_sentry/shared/data/iam-definition.json#L112478-L112507
+    Allow::new(&["ec2:RunInstances"], &[Resource::Any]).when(&[Condition::new(
+        Test::Null,
+        Key::Named("ec2:InstanceType"),
+        Values::Are(&[Part::Text("true")]),
+    )]),
+    // The tags of the launch and of `ec2 create-security-group`.
+    Allow::new(
+        &["ec2:CreateTags"],
+        &[
+            Resource::In("ec2", &[Part::Text("instance/*")]),
+            Resource::In("ec2", &[Part::Text("volume/*")]),
+            Resource::In("ec2", &[Part::Text("security-group/*")]),
+        ],
+    )
+    .when(&[Condition::new(
+        Test::StringEquals,
+        Key::Named("ec2:CreateAction"),
+        Values::Are(&[
+            Part::Text("RunInstances"),
+            Part::Text("CreateSecurityGroup"),
+        ]),
+    )]),
+    // The profile's role, which the launch names.
+    Allow::new(&["iam:PassRole"], &[Resource::Arn(&MEMBER_ROLE)]).when(&[Condition::new(
+        Test::StringEquals,
+        Key::Named("iam:PassedToService"),
+        Values::Are(&[Part::Text("ec2.amazonaws.com")]),
+    )]),
+    // `ec2 terminate-instances`.
+    Allow::new(&["ec2:TerminateInstances"], JOIN_INSTANCES).when(&[TAGGED, MEMBER_INSTANCE]),
+    // `ec2 create-security-group`, of a tagged group, in a VPC.
+    Allow::new(
+        &["ec2:CreateSecurityGroup"],
+        &[Resource::In("ec2", &[Part::Text("vpc/*")])],
+    ),
+    Allow::new(&["ec2:CreateSecurityGroup"], JOIN_GROUPS).when(&[JOIN_REQUESTED]),
+    // `ec2 authorize-security-group-ingress` and `ec2 delete-security-group`.
+    Allow::new(
+        &[
+            "ec2:AuthorizeSecurityGroupIngress",
+            "ec2:DeleteSecurityGroup",
+        ],
+        JOIN_GROUPS,
+    )
+    .when(&[TAGGED]),
+    // `ec2 describe-images`, which finds the AMI, `ec2 wait security-group-exists`, and `ec2
+    // describe-vpcs`, which reads the VPC's blocks.
+    Allow::new(
+        &[
+            "ec2:DescribeImages",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeVpcs",
+        ],
+        &[Resource::Any],
+    ),
+];
+
 /// What IAM must allow `principal`.
 // A call that its crate declares but lists in no principal's statements compiles all the same.
 // IAM then refuses it. `cargo xtask live ec2` and `cargo xtask live modal` show that as AWS's
@@ -180,6 +300,7 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
             let mut allows = self::allows(Principal::Client);
             allows.extend(self::allows(Principal::Check));
             allows.push(&LIST_SCHEDULES);
+            allows.extend(&JOIN);
             allows
         }
     }

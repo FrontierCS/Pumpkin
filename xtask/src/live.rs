@@ -17,6 +17,10 @@ use crate::{
     target_dir, tools, wait,
 };
 
+mod join;
+
+pub(crate) use self::join::join;
+
 /// The bound of a `./pumpkin` command that xtask runs to its end. pumpkin bounds each of its own
 /// steps. This bound outlasts their sum: the start of a stopped controller (10 min), the
 /// reconnects after it, and the send of the build and the task.
@@ -99,17 +103,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         Provider::Ec2 => "cargo xtask live ec2",
         Provider::Modal => "cargo xtask live modal",
     };
-    let home =
-        env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
-    let config = Path::new(&home).join(".config/pumpkin/pumpkin.toml");
-    let text = fs::read_to_string(&config).map_err(|error| {
-        format!(
-            "{} can't be read ({error}): write the configuration that names the controller \
-             there, as the README says",
-            config.display()
-        )
-    })?;
-    let settings = Settings::parse(&text, &config, provider, gpu_model)?;
+    let settings = configured(provider, gpu_model)?;
     reached(&settings)?;
     let commit = head_commit()?;
     let repo = task_repository()?;
@@ -156,6 +150,29 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         return Ok(());
     }
     Err(format!("{}: fix it, and run `{again}` again", failed.join("; ")).into())
+}
+
+/// The settings of a live run on `provider`, as `~/.config/pumpkin/pumpkin.toml` gives them.
+fn configured(provider: Provider, gpu_model: Option<&str>) -> Result<Settings> {
+    let home =
+        env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
+    let config = Path::new(&home).join(".config/pumpkin/pumpkin.toml");
+    let text = fs::read_to_string(&config).map_err(|error| {
+        format!(
+            "{} can't be read ({error}): write the configuration that names the controller \
+             there, as the README says",
+            config.display()
+        )
+    })?;
+    Settings::parse(&text, &config, provider, gpu_model)
+}
+
+/// The directory of this machine's `ssh` key to its controllers, `key`, and of the host keys that
+/// it pins, `known_hosts`, as `pumpkin` keeps them.
+fn kept() -> Result<PathBuf> {
+    let home =
+        env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
+    Ok(PathBuf::from(home).join(".config/pumpkin/ssh"))
 }
 
 /// The longest a lost smoke run's sandboxes may take to end by themselves, from when its job is
@@ -314,9 +331,7 @@ fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
     };
     let host = format!("pumpkin@{address}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
-    let home =
-        std::env::var_os("HOME").ok_or("HOME is unset: expected the client's SSH key under it")?;
-    let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
+    let kept = kept()?;
     let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
     let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
     let mut ssh = process::command("ssh", Environment::Inherited);
@@ -344,12 +359,7 @@ fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
 /// Fails, saying what to give, unless the credentials that the smoke's checks use reach AWS,
 /// `EventBridge` Scheduler's list of schedules and, for Modal, the profile's workspace.
 fn reached(settings: &Settings) -> Result<()> {
-    let credentials = "give `aws` the credentials of the controller's account, as `aws \
-                       configure` does, and run this again";
-    listed(
-        &mut aws(settings, &["sts", "get-caller-identity"]),
-        Some(credentials),
-    )?;
+    identified(settings)?;
     // Credentials that can't list schedules are refused here, before a run, not at its end.
     let policy = "grant these credentials `scheduler:ListSchedules` on `*`, as the policy that \
                   deploy/aws outputs as `contributor_policy_arn` does, and run this again";
@@ -362,6 +372,17 @@ fn reached(settings: &Settings) -> Result<()> {
         );
         modal_python(modal, MODAL_LIST, &["no-such-run"], Some(&token))?;
     }
+    Ok(())
+}
+
+/// Fails, saying what to give, unless `aws` has credentials.
+fn identified(settings: &Settings) -> Result<()> {
+    let credentials = "give `aws` the credentials of the controller's account, as `aws \
+                       configure` does, and run this again";
+    listed(
+        &mut aws(settings, &["sts", "get-caller-identity"]),
+        Some(credentials),
+    )?;
     Ok(())
 }
 

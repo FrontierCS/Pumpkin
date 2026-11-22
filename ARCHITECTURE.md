@@ -384,7 +384,7 @@ composes a principal's policy from what its calls need (`iam::policy`).
 conditions, as AWS's Service Authorization Reference gives them. Each crate that makes calls
 declares them in its `iam` module. That module lists each call in the policy of the principal that
 makes it. `pumpkin-admin policy` prints each policy. `xtask`'s own `aws` commands are a
-contributor's. Of them, `pumpkin`'s `iam` states the one that no call of the client's or the
+contributor's. Of them, `pumpkin`'s `iam` states those that no call of the client's or the
 check's covers, in the contributor's policy.
 
 **Architecture Invariant:** every call that `Cli` makes is in its region, with no variable of this
@@ -621,9 +621,9 @@ developer installs.
 
 The Terraform module that makes one team's Pumpkin on AWS, as [its README](deploy/aws/README.md)
 says. The admin lists the team's members by key. The module makes the EC2 envelope that `ec2`
-relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
-controller. The controller comes with the SSM parameters of its jobs' settings and its members'
-keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
+relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, the
+instance profile of a member's machine, and the controller. The controller comes with the SSM
+parameters of its jobs' settings and its members' keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
 `pumpkin-admin install`. The module is a child module. An admin's root calls it at a Pumpkin
 release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the
 provider's configuration, the backend and the lock file, and the provider's region is the module's.

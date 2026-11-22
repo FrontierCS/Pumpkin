@@ -92,7 +92,12 @@ mod flags {
             /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
             /// check fails and runs `pumpkin cancel` to remove it.
             cmd live {
-                /// `docker`, `ec2` or `modal`.
+                /// `docker`, `ec2`, `modal` or `join`. `join` launches a new member's machine in
+                /// the controller's VPC with the members' instance profile. It installs Pumpkin at
+                /// `HEAD` there with the `[controller]` table and this machine's key, runs
+                /// `pumpkin ls`, and ends the machine. It reaches the machine over `ssh` from the
+                /// VPC. The machine costs under a cent, beside the controller's time if `pumpkin
+                /// ls` starts it.
                 required target: String
                 /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
                 /// the smoke's GPU runner needs.
@@ -306,26 +311,31 @@ fn try_main() -> Result<()> {
             gpu_model,
             lost,
         }) => {
+            // `join` runs on no provider of Pumpkin's.
             let provider = match target.as_str() {
-                "docker" if lost => {
+                "docker" | "join" if lost => {
                     return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
                 }
                 "docker" => return live::docker(),
-                "ec2" => settings::Provider::Ec2,
-                "modal" => settings::Provider::Modal,
+                "join" => None,
+                "ec2" => Some(settings::Provider::Ec2),
+                "modal" => Some(settings::Provider::Modal),
                 _ => {
                     return Err(format!(
-                        "`{target}` is no live target: give `docker`, `ec2` or `modal`"
+                        "`{target}` is no live target: give `docker`, `ec2`, `modal` or `join`"
                     )
                     .into());
                 }
             };
-            if gpu_model.is_some() && provider != settings::Provider::Modal {
+            if gpu_model.is_some() && provider != Some(settings::Provider::Modal) {
                 return Err(
                     "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
                 );
             }
-            live::smoke(provider, gpu_model.as_deref(), lost)
+            match provider {
+                Some(provider) => live::smoke(provider, gpu_model.as_deref(), lost),
+                None => live::join(),
+            }
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())

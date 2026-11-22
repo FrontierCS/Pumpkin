@@ -15,6 +15,7 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
+| the role and instance profile of a member's machine, `pumpkin-<name>-member`: the client's policy | a machine in the VPC that runs with it needs only its key in `members` |
 | the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
@@ -174,10 +175,33 @@ an `output` of its own.
   by hand, as `aws iam attach-role-policy --role-name <role> --policy-arn <arn>` (or
   `attach-user-policy`). `policies/client.json.tftpl` says what it allows. The machine reaches
   port 22 at the controller's private address from the controller's VPC.
+- `terraform output -raw member_profile_name` is the instance profile of a member's machine in
+  the VPC, whose role holds the client's policy. Choose it at the machine's launch, or attach it
+  with `aws ec2 associate-iam-instance-profile`. A root that made `pumpkin-<name>-member` itself
+  deletes its own role, attachment and profile, and moves each into the module in the apply that
+  takes this module, as below. Otherwise the apply fails, as the names exist.
+
+  ```hcl
+  moved {
+    from = aws_iam_role.member
+    to   = module.pumpkin.aws_iam_role.member
+  }
+
+  moved {
+    from = aws_iam_role_policy_attachment.member_client
+    to   = module.pumpkin.aws_iam_role_policy_attachment.member_client
+  }
+
+  moved {
+    from = aws_iam_instance_profile.member
+    to   = module.pumpkin.aws_iam_instance_profile.member
+  }
+  ```
 - `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
   machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
   `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin
-  check` reads, and the list of the timer's schedules that a run left.
+  check` reads, the list of the timer's schedules that a run left, and the launch and the end of
+  the member's machine that `cargo xtask live join` makes, with its security group.
 - `[gateway] private`, the address the sandboxes dial, is `"<private ip>:0"`, as each job sets it
   on the controller: the groups admit only the ephemeral ports that `gateway_ports.json` holds,
   where the kernel's pick for port 0 falls.
