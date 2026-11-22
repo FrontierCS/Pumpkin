@@ -14,10 +14,10 @@ The rules for writing Pumpkin's tests and their snapshots.
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
   small one in the test; CHECK IN only data a third party wrote, such as a vendored suite
 - PREFER one integration test binary per crate; add modules, not files under `tests/`
-- RUN `cargo xtask install-tools`, or an xtask command that runs tests, such as `cargo xtask ci`,
-  in a new checkout before a plain `cargo test` or `cargo nextest run`: pumpkin's tests run the
-  pinned formatter from `bin/buildifier`, which `.cargo/config.toml` names, and which each such
-  command makes from the cache that checkouts share, fetching it on first use
+- RUN `cargo xtask install-tools`, or an xtask command that runs tests such as `cargo xtask ci`,
+  before a plain `cargo test` or `cargo nextest run` in a new checkout. `pumpkin`'s tests run the
+  pinned formatter from `bin/buildifier`, which `.cargo/config.toml` names. Each of those
+  commands links it there from the cache that checkouts share, and fetches it on first use
 - ASSUME that each test runs alone, in a process of its own, as cargo-nextest runs it in
   `cargo xtask ci`: tests share no per-process state
 - SPLIT cases that each start a process into tests of their own, which nextest runs at once

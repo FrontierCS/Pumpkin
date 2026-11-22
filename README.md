@@ -406,8 +406,8 @@ the connection and use the same commands to follow, list, stop, reap or view tho
   [`deploy/aws`](deploy/aws/README.md), `pumpkin help config`.
 - Models: [routes, budgets and prices](docs/models.md).
 - Contributing: [`ARCHITECTURE.md`](ARCHITECTURE.md), the map of the code, and
-  [`docs/dev/`](docs/dev/), the rules for changing it. `cargo xtask ci` runs the checks every
-  change passes, fetching the pinned tools it needs on first use.
+  [`docs/dev/`](docs/dev/), the rules for changing it. `cargo xtask ci` runs the checks that
+  every change must pass. It fetches the pinned tools it needs on first use.
 - On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
   the current checkout. The archive, launcher and pin are in `target/release-assets/preview/`.
   Pushing a new tag builds its assets and runs `cargo xtask release <tag> --publish` to attach

@@ -66,8 +66,8 @@ mod flags {
             }
 
             /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails. They reach no Docker engine or cloud, and the network only to fetch crates
-            /// and pinned tools on first use.
+            /// fails. They reach no Docker engine or cloud. They reach the network only to fetch
+            /// crates and pinned tools on first use.
             cmd ci {}
 
             /// Writes the figures drawn from the workspace, which `ci` checks are up to date:
@@ -158,12 +158,12 @@ mod flags {
                 optional filter: String
             }
 
-            /// Fetches every contributor tool that xtask runs, at its pinned version, such as
-            /// cargo-nextest, into the cache that every checkout shares,
-            /// `$XDG_CACHE_HOME/pumpkin/tools` or `~/.cache/pumpkin/tools`, installs the nightly
-            /// rustfmt through rustup, and links the pinned buildifier where the tests find it,
-            /// `bin/buildifier`. Each command fetches the tools it runs on first use: this one is
-            /// for working offline later.
+            /// Fetches each contributor tool that xtask runs, such as cargo-nextest, at its pinned
+            /// version. The tools go into the cache that every checkout shares:
+            /// `$XDG_CACHE_HOME/pumpkin/tools`, or `~/.cache/pumpkin/tools` when that is unset.
+            /// It also installs the nightly rustfmt through rustup. It links the pinned buildifier
+            /// at `bin/buildifier`, where the tests find it. Each command fetches the tools it runs
+            /// on first use, so this one is for working offline later.
             cmd install-tools {}
         }
     }
@@ -376,17 +376,17 @@ impl Cargo {
         self.package_vars.iter().fold(cmd, Cmd::env_remove)
     }
 
-    /// The cargo subcommand of `release`, such as `nextest`, run by the pinned release, fetched
-    /// on first use, rather than by whichever one cargo finds. `args` begin with the
-    /// subcommand's name, as cargo passes it.
+    /// The command that runs `release`'s cargo subcommand, such as `nextest`. It runs the pinned
+    /// release, not whichever one cargo finds, and fetches the release on first use. `args` begin
+    /// with the subcommand's name, as cargo passes it.
     fn subcommand(&self, release: tools::Release, args: &[&str]) -> Result<Cmd<'_>> {
         let binary = tools::fetched(self, release)?;
         let cmd = self.sh.cmd(binary).args(args);
         Ok(self.package_vars.iter().fold(cmd, Cmd::env_remove))
     }
 
-    /// The pinned formatter, installed on first use, without rustup's implicit installation of
-    /// its whole default profile or an inherited binary override.
+    /// The pinned formatter. It installs the toolchain on first use, so that rustup never
+    /// installs the whole default profile implicitly. It ignores an inherited binary override.
     fn fmt(&self) -> Result<Cmd<'_>> {
         tools::rustfmt(&self.sh)?;
         let toolchain = format!("+{}", tools::RUSTFMT_TOOLCHAIN);
@@ -495,9 +495,9 @@ fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
 /// that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
 fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let buildifier = star::link(cargo)?;
-    // cargo-mutants runs `cargo nextest`, which runs the first cargo-nextest on `PATH`, the
-    // pinned one here. Cargo's own `bin`, where `cargo install` puts one, comes first only if
-    // `PATH` doesn't name it.
+    // cargo-mutants runs `cargo nextest`, which runs the first cargo-nextest on `PATH`. The
+    // pinned one goes first here. Cargo puts its own `bin`, where `cargo install` puts one,
+    // before it only if `PATH` doesn't name that `bin`.
     let nextest = tools::fetched(cargo, tools::NEXTEST)?;
     let dir = nextest.parent().map(Path::to_path_buf);
     let path = env::var_os("PATH").unwrap_or_default();

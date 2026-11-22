@@ -24,8 +24,8 @@ pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
     tools::fetched(cargo, tools::BUILDIFIER)
 }
 
-/// Makes [`LINK`] the pinned buildifier, fetched if need be, replacing what is there, and returns
-/// its path.
+/// Replaces what is at [`LINK`] with the pinned buildifier, and returns that path. It fetches
+/// buildifier first if the cache lacks it.
 pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     let link = Path::new(LINK);
     let Some(dir) = link.parent() else {
@@ -33,7 +33,7 @@ pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     };
     let buildifier = buildifier(cargo)?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
-    // On the checkout's filesystem, where the tests hard-link it again.
+    // The tests hard-link it again, so it must lie on the checkout's filesystem.
     tools::replace(link, |made| linked(&buildifier, made))?;
     Ok(link.to_owned())
 }
@@ -46,8 +46,8 @@ fn linked(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build`
-/// puts it beside an installed one: a link to it, or a copy, which replaces what is there.
+/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build` does
+/// for an installed one. A link to it, or a copy, replaces what is there.
 pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
     let beside = pumpkin.with_file_name("buildifier");
     match fs::remove_file(&beside) {

@@ -1,7 +1,8 @@
-//! The contributor tools that xtask runs, each pinned to one version: the nightly rustfmt, which
-//! rustup installs, and the tools that their projects release as a file, pinned by its URL and
-//! SHA-256. A command fetches each tool it runs on first use, as rustup installs the toolchain that
-//! `rust-toolchain.toml` pins when a command first needs it:
+//! The contributor tools that xtask runs, each pinned to one version. rustup installs the nightly
+//! rustfmt. Each other tool is a file that its project releases, pinned by its URL and SHA-256.
+//!
+//! A command fetches each tool it runs on first use. rustup does the same with the toolchain that
+//! `rust-toolchain.toml` pins:
 //! <https://github.com/rust-lang/rustup/blob/bb60b1e89cc01a682dd16f2854329030938d3fe3/src/config.rs#L810-L812>.
 
 use std::fmt::Write as _;
@@ -60,7 +61,7 @@ const ZIG: Release = Release {
     member: Some("zig-x86_64-linux-0.16.0/zig"),
 };
 
-/// The static build, whose SHA-256 is the one in the `.sha256` file that nextest publishes beside
+/// The static build. Its SHA-256 is the one in the `.sha256` file that nextest publishes beside
 /// it.
 pub(crate) const NEXTEST: Release = Release {
     name: "cargo-nextest",
@@ -87,7 +88,8 @@ const MUSL_CC: &str = "x86_64-linux-musl-cc";
 /// still links the binary.
 pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
     let zig = fetched(cargo, ZIG)?;
-    // The checkout's own, as the link to xtask is: the cache holds each release as it was fetched.
+    // The directory belongs to the checkout, as the link to xtask does. The cache holds each
+    // release only as it was fetched.
     let dir = target_dir(cargo)?.join("musl-cc");
     fs::create_dir_all(&dir)
         .map_err(|error| format!("making {} failed: {error}", dir.display()))?;
@@ -121,7 +123,7 @@ pub(crate) fn run_as_musl_cc() -> Option<ExitCode> {
         .args(["--target=x86_64-linux-musl", "-fno-sanitize=all"])
         .exec();
     eprintln!(
-        "xtask: running {} failed: {error}: remove the cache's entry it leads to, and run \
+        "xtask: running {} failed: {error}: remove the cache entry that it leads to, then run \
          `cargo xtask install-tools` to fetch it again",
         zig.display()
     );
@@ -130,22 +132,22 @@ pub(crate) fn run_as_musl_cc() -> Option<ExitCode> {
 
 /// Replaces what is at `at` with the file that `write` makes at the path it is given.
 pub(crate) fn replace(at: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
-    // Made beside it, then renamed over it, so that a process that runs it at once never finds
-    // it missing.
+    // The file is made beside `at` and then renamed over it, so that a process that runs it at
+    // the same time never finds it missing.
     let mut made = at.as_os_str().to_owned();
     made.push(format!(".{}", process::id()));
     let made = PathBuf::from(made);
     let replaced = write(&made).and_then(|()| fs::rename(&made, at));
     if let Err(error) = replaced {
-        // Made and not renamed, or not made.
+        // `write` may have made the file before the rename failed.
         let _ = fs::remove_file(&made);
         return Err(format!("making {} failed: {error}", at.display()).into());
     }
     Ok(())
 }
 
-/// Installs the nightly rustfmt, and fetches each of [`RELEASES`], each unless it is already
-/// there.
+/// Installs the nightly rustfmt and fetches each of [`RELEASES`]. It skips each one that is
+/// already there.
 pub(crate) fn install(cargo: &Cargo) -> Result<()> {
     rustfmt(&cargo.sh)?;
     for release in RELEASES {
@@ -160,7 +162,7 @@ pub(crate) fn install(cargo: &Cargo) -> Result<()> {
     Ok(())
 }
 
-/// Installs [`RUSTFMT_TOOLCHAIN`]'s rustfmt through rustup, in its minimal profile, unless rustup
+/// Installs [`RUSTFMT_TOOLCHAIN`]'s rustfmt through rustup in the minimal profile, unless rustup
 /// already runs it.
 pub(crate) fn rustfmt(sh: &Shell) -> Result<()> {
     let which = cmd!(sh, "rustup which --toolchain {RUSTFMT_TOOLCHAIN} rustfmt")
@@ -179,9 +181,9 @@ pub(crate) fn rustfmt(sh: &Shell) -> Result<()> {
     Ok(install.run()?)
 }
 
-/// The pinned `release`, in the cache of one user, which every checkout shares. It is fetched
-/// there with `curl` once, and kept, unpacked if it is a tar, and read-only, only if its SHA-256
-/// is the pin's.
+/// The pinned `release` in the cache that all of one user's checkouts share. The first call
+/// fetches it with `curl`. It keeps the file only if its SHA-256 is the pin's, unpacks it if it is
+/// a tar, and makes it read-only.
 pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
     let Release {
         name,
@@ -191,7 +193,7 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
         member,
     } = release;
     let cache = cache()?;
-    // Keyed by the SHA-256, as Bazel's repository cache keys a download:
+    // Each entry is keyed by its SHA-256, as Bazel's repository cache keys a download:
     // https://github.com/bazelbuild/bazel/blob/7108c77007efc6f3162e127f252707e9ab743d36/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
     let entry = cache.join(sha256);
     let file = url.rsplit('/').next().unwrap_or(name);
@@ -214,10 +216,11 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
     eprintln!("xtask: fetching {name} {version} from {url}");
     fs::create_dir_all(&cache)
         .map_err(|error| format!("making {} failed: {error}", cache.display()))?;
-    // A directory of this fetch's own, renamed whole into place once it holds the release, so
-    // that a fetch at once, from another checkout, container or host too, never finds an entry
-    // half made. Named by the time too, as process ids repeat across PID namespaces and hosts,
-    // as Bazel names its temporary file by a random UUID.
+    // The fetch fills a directory of its own and renames it into place once it holds the
+    // release. Another fetch at the same time, even from another checkout, container or host,
+    // never finds an entry half made. The name holds the time as well as the process ID, since
+    // process IDs repeat across PID namespaces and hosts. Bazel names its temporary file by a
+    // random UUID for the same reason.
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -232,8 +235,8 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
             None => Ok(()),
             Some(_) => unpack(&cargo.sh, &download, &staging),
         })
-        // Read-only, as Go's module cache makes what it unpacks, since every checkout's hard link
-        // to it shares its inode:
+        // Every checkout's hard link to the file shares its inode, so the file is read-only, as
+        // Go's module cache makes what it unpacks:
         // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L501-L522
         .and_then(|()| {
             fs::set_permissions(&staged, Permissions::from_mode(0o555)).map_err(|error| {
@@ -242,7 +245,7 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
         })
         .and_then(|()| match fs::rename(&staging, &entry) {
             Ok(()) => Ok(()),
-            // A fetch at once put the release there first.
+            // Another fetch at the same time put the release there first.
             Err(_) if path.is_file() => Ok(()),
             Err(error) => Err(format!(
                 "renaming {} to {} failed: {error}: {}",
@@ -252,17 +255,17 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
             )
             .into()),
         });
-    // Renamed, or not needed, or failed.
+    // After the rename nothing is left here. Otherwise the directory is no longer needed.
     let _ = fs::remove_dir_all(&staging);
     fetched?;
     Ok(path)
 }
 
 /// Where the fetched releases are: `pumpkin/tools` in the user's cache directory, as the XDG Base
-/// Directory Specification places it, the directory where the launcher `deploy/pumpkin` caches
-/// the releases of Pumpkin.
+/// Directory Specification places it. The launcher `deploy/pumpkin` caches Pumpkin's releases in
+/// that cache directory too.
 fn cache() -> Result<PathBuf> {
-    // The specification has a relative path ignored.
+    // The specification says to ignore a relative path.
     let dir = match env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
         Some(dir) if dir.is_absolute() => dir,
         _ => match env::var_os("HOME") {
@@ -278,7 +281,7 @@ fn cache() -> Result<PathBuf> {
     Ok(dir.join("pumpkin/tools"))
 }
 
-/// Downloads `release` into `to`, and fails unless its SHA-256 is the pin's.
+/// Downloads `release` into `to` and fails unless its SHA-256 is the pin's.
 fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
     let Release {
         name,
@@ -308,7 +311,7 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Unpacks the tar `archive` into `dir`, then removes it.
+/// Unpacks the tar `archive` into `dir` and then removes the archive.
 fn unpack(sh: &Shell, archive: &Path, dir: &Path) -> Result<()> {
     cmd!(sh, "tar --extract --file {archive} --directory {dir}").run()?;
     fs::remove_file(archive)

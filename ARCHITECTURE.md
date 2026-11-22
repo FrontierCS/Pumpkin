@@ -515,8 +515,9 @@ among them the checks of Rust files, of documents and their figures (`tidy`), of
 (`star`), of the figure of the crates (`figure`) and of the types of the page that `view` serves
 (`page`). `live` runs those that reach a real environment. `build` builds `pumpkin` and lays out the
 files it needs beside it. `release` packages and checks that build and publishes its archive,
-launcher and pin on GitHub. `tools` pins the contributor tools, and fetches each on first use into
-a cache that every checkout of one user shares, keyed by the SHA-256 of its release file.
+launcher and pin on GitHub. `tools` pins the contributor tools and fetches each one on first use.
+All checkouts of one user share the cache it fetches into. The cache keys each tool by the SHA-256
+of its release file.
 
 ### `dist`
 
@@ -706,7 +707,8 @@ randomness, and the workspace's clippy configuration bans `HashMap` and `HashSet
 iteration order follows a seed each process draws. What Pumpkin builds or runs is pinned: an
 image's tag is the digest of its build's inputs, a recipe fetches only what a digest pins, a
 harness is pinned by its recipe in the standard library, the Modal helper's packages by its lock,
-the formatter and each contributor tool by version, and each that xtask fetches by checksum too.
+the formatter and each contributor tool by version, and each release that xtask fetches by its
+checksum too.
 
 ### Processes, panics and threads
 
