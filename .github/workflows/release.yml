@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  # The publish step reads the tagged commit's `pumpkin/examples` status.
+  statuses: read
 
 jobs:
   release:

@@ -27,11 +27,14 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream, printe
 mod aws_certificates;
 mod diff;
 mod figure;
+mod gate;
 mod live;
 mod op_stats;
 mod page;
 mod release;
 mod repo;
+mod resume;
+mod sandboxes;
 mod settings;
 mod star;
 mod tidy;
@@ -92,7 +95,13 @@ mod flags {
             /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
             /// check fails and runs `pumpkin cancel` to remove it.
             cmd live {
-                /// `docker`, `ec2` or `modal`.
+                /// `docker`, `ec2`, `modal` or `examples`. `examples` costs about $10 over two
+                /// hours. It runs `pumpkin-admin check`, then each shipped example on real
+                /// models, through the controller of `--config`. Each run must pass its checker,
+                /// end with its sandboxes deleted and leave nothing on a provider. Run again at
+                /// a commit, it runs only the examples that haven't passed there, which
+                /// `live/examples/<commit>` in the target directory keeps: remove that to run
+                /// them all.
                 required target: String
                 /// With `modal`, the model of the GPU, of a class of `[controller.modal]`, that
                 /// the smoke's GPU runner needs.
@@ -102,6 +111,24 @@ mod flags {
                 /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
                 /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal.
                 optional --lost
+                /// With `examples`, the configuration whose `[controller]` the runs go to and whose
+                /// upstreams serve `--model` and the native benchmark's `glm-5.3-flash`. The
+                /// default, as for `ec2` and `modal`, is `~/.config/pumpkin/pumpkin.toml`.
+                optional --config file: PathBuf
+                /// With `examples`, the model of the examples that take one as `--arg model`.
+                optional --model name: String
+                /// With `examples`, the native benchmark's binding, a JSON file that you keep
+                /// outside the repository, whose `source` names the revision of the public
+                /// source that the benchmark adapts.
+                optional --binding file: PathBuf
+                /// With `examples`, the Git repository of that public source, a URL or a path,
+                /// which the command fetches that revision from into the target directory.
+                optional --source repository: String
+                /// With `examples`, posts how the runs ended as the commit status
+                /// `pumpkin/examples` of `HEAD`, which `release --publish` requires to be a
+                /// success. It is one once every example has passed at `HEAD`, in any number of
+                /// runs.
+                optional --status
             }
 
             /// Counts incoming operations by request kind in a run's `log.jsonl`. Reports the
@@ -132,8 +159,9 @@ mod flags {
             cmd release {
                 /// The tag to put in the archive's name.
                 required tag: String
-                /// Publishes the existing files as the latest GitHub release for the tag.
-                /// The default is to build them locally.
+                /// Publishes the existing files as the latest GitHub release for the tag, but
+                /// only if the tagged commit's `pumpkin/examples` status is a success, which
+                /// `live examples --status` posts. The default is to build them locally.
                 optional --publish
             }
 
@@ -211,6 +239,11 @@ mod flags {
 
         pub gpu_model: Option<String>,
         pub lost: bool,
+        pub config: Option<PathBuf>,
+        pub model: Option<String>,
+        pub binding: Option<PathBuf>,
+        pub source: Option<String>,
+        pub status: bool,
     }
 
     #[derive(Debug)]
@@ -301,32 +334,7 @@ fn try_main() -> Result<()> {
         flags::XtaskCmd::Ci(flags::Ci) => ci(),
         flags::XtaskCmd::Figures(flags::Figures) => figure::write(root(), &metadata()?),
         flags::XtaskCmd::AwsCertificates(flags::AwsCertificates) => aws_certificates::write(),
-        flags::XtaskCmd::Live(flags::Live {
-            target,
-            gpu_model,
-            lost,
-        }) => {
-            let provider = match target.as_str() {
-                "docker" if lost => {
-                    return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
-                }
-                "docker" => return live::docker(),
-                "ec2" => settings::Provider::Ec2,
-                "modal" => settings::Provider::Modal,
-                _ => {
-                    return Err(format!(
-                        "`{target}` is no live target: give `docker`, `ec2` or `modal`"
-                    )
-                    .into());
-                }
-            };
-            if gpu_model.is_some() && provider != settings::Provider::Modal {
-                return Err(
-                    "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
-                );
-            }
-            live::smoke(provider, gpu_model.as_deref(), lost)
-        }
+        flags::XtaskCmd::Live(flags) => live::run(flags),
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
         }
@@ -402,6 +410,13 @@ fn subcommand(release: tools::Release, args: &[&str]) -> Result<Command> {
     let mut command = process::command(tools::fetched(release)?, Environment::Cargo);
     command.current_dir(root()).args(args);
     Ok(command)
+}
+
+/// A `program` that runs in `dir`, with this process's environment.
+fn program(program: impl AsRef<OsStr>, dir: &Path) -> Command {
+    let mut command = process::command(program, Environment::Inherited);
+    command.current_dir(dir);
+    command
 }
 
 /// The pinned formatter. It installs the toolchain on first use, so that rustup never installs

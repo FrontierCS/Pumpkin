@@ -606,6 +606,9 @@ launcher and pin on GitHub. `tools` pins the contributor tools and fetches each 
 All checkouts of one user share the cache it fetches into. The cache keys each tool by the SHA-256
 of its release file.
 
+**Architecture Invariant:** a tag publishes only if `live examples` passed on its commit, which
+the commit's status records on GitHub (`gate`).
+
 ### `dist`
 
 The files that a release ships as they are in the repository: `buildifier-LICENSE`, the
@@ -638,8 +641,8 @@ the gateway. The roles' trust policies and the AMI build's AWS-managed policies 
 ### `examples`
 
 Tasks in the workflow language: `hello` needs no model, `codex` takes one as `--arg model`, and
-`smoke`, which `cargo xtask live` runs, probes each sandbox's confinement. `pumpkin`'s tests copy
-`hello`.
+`smoke`, which `cargo xtask live` runs, probes each sandbox's confinement. `cargo xtask live
+examples` runs them all before a release. `pumpkin`'s tests copy `hello`.
 
 ## Cross-cutting concerns
 

@@ -410,7 +410,12 @@ the connection and use the same commands to follow, list, stop, reap or view tho
   every change must pass. It fetches the pinned tools it needs on first use.
 - On Linux x86-64, run `cargo xtask release preview` to build and check the release archive for
   the current checkout. The archive, launcher and pin are in `target/release-assets/preview/`.
-  Pushing a new tag builds its assets and runs `cargo xtask release <tag> --publish` to attach
-  them to a GitHub draft and publish it as the latest release. If the workflow leaves a draft,
-  verify its assets against the local files for the tag, attach any missing file, and publish
-  the draft as the latest release.
+  Before you tag a commit, check it out on a branch that you pushed to GitHub, and run
+  `cargo xtask live examples --status --model <model> --binding <file>`. It runs every shipped
+  example through the controller, and posts the commit's `pumpkin/examples` status. The binding
+  is the one that the native benchmark's README says to keep outside the repository.
+  Pushing a new tag builds its assets and runs `cargo xtask release <tag> --publish`. That
+  attaches them to a GitHub draft and publishes it as the latest release, but only if the tagged
+  commit's `pumpkin/examples` status is a success. If the workflow leaves a draft, verify its
+  assets against the local files for the tag, attach any missing file, and publish the draft as
+  the latest release.

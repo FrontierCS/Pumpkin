@@ -1,17 +1,16 @@
 //! A release ships a launcher, its one-line pin and the static archive named by the pin.
 //! Publication checks all three against the tag before attaching them to a draft.
 
-use std::ffi::OsStr;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::process::Command;
 
 use stdx::Context as _;
-use stdx::process::{self, Bound, Echo, Environment, Run};
+use stdx::process::{Bound, Echo, Run};
 
 use crate::repo::{Repo, STEP_TIMEOUT};
-use crate::{MUSL, Result, build, ran, read, root, step, tools};
+use crate::{MUSL, Result, build, gate, program, ran, read, root, step, tools};
 
 struct Release<'a> {
     tag: &'a str,
@@ -59,6 +58,7 @@ pub(super) fn run(tag: &str, publish: bool) -> Result<()> {
 
     let output = root().join("target/release-assets").join(tag);
     if publish {
+        examples_passed(&release.commit)?;
         return publish_assets(&output, &release);
     }
 
@@ -210,6 +210,15 @@ fn check(dir: &Path, commit: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fails unless every shipped example passed on `commit`, as its `pumpkin/examples` status on
+/// GitHub says.
+fn examples_passed(commit: &str) -> Result<()> {
+    // The latest 100, as a page holds at most that many. An older status counts for nothing.
+    let statuses = format!("repos/{{owner}}/{{repo}}/commits/{commit}/statuses?per_page=100");
+    let statuses = read(program("gh", root()).args(["api", &statuses]), STEP_TIMEOUT)?;
+    Ok(gate::passed(&statuses, commit)?)
+}
+
 fn publish_assets(dir: &Path, release: &Release<'_>) -> Result<()> {
     let Release {
         tag,
@@ -262,13 +271,6 @@ fn publish_assets(dir: &Path, release: &Release<'_>) -> Result<()> {
     edit.args(["release", "edit", tag, "--draft=false", "--latest=true"]);
     ran(&mut edit, step(STEP_TIMEOUT))?;
     Ok(())
-}
-
-/// `program`, run in `dir`.
-fn program(program: impl AsRef<OsStr>, dir: &Path) -> Command {
-    let mut command = process::command(program, Environment::Inherited);
-    command.current_dir(dir);
-    command
 }
 
 /// What `command` printed, as it printed it.

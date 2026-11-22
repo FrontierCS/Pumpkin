@@ -21,10 +21,17 @@ mod diff;
 mod entry;
 #[path = "../../src/figure.rs"]
 mod figure;
+#[path = "../../src/gate.rs"]
+mod gate;
 mod live;
 mod op_stats;
+mod release;
 #[path = "../../src/repo.rs"]
 mod repo;
+#[path = "../../src/resume.rs"]
+mod resume;
+#[path = "../../src/sandboxes.rs"]
+mod sandboxes;
 #[path = "../../src/settings.rs"]
 mod settings;
 #[path = "../../src/tidy.rs"]

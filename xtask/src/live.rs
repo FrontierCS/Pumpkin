@@ -13,9 +13,11 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 use crate::repo::{Repo, STEP_TIMEOUT};
 use crate::settings::{Provider, Settings};
 use crate::{
-    BUILD_TIMEOUT, Placed, Result, install_file, root, sandboxd, star, step, subcommand,
-    target_dir, tools, wait,
+    BUILD_TIMEOUT, Placed, Result, flags, install_file, root, sandboxd, sandboxes, star, step,
+    subcommand, target_dir, tools, wait,
 };
+
+mod examples;
 
 /// The bound of a `./pumpkin` command that xtask runs to its end. pumpkin bounds each of its own
 /// steps. This bound outlasts their sum: the start of a stopped controller (10 min), the
@@ -42,6 +44,78 @@ except modal.exception.NotFoundError:
 for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.argv[1]}):
     print(sandbox.object_id)
 "#;
+
+/// Runs `cargo xtask live` as `flags` ask.
+pub(crate) fn run(flags: flags::Live) -> Result<()> {
+    let flags::Live {
+        target,
+        gpu_model,
+        lost,
+        config,
+        model,
+        binding,
+        source,
+        status,
+    } = flags;
+    let examples_only = [
+        ("--config", config.is_some()),
+        ("--model", model.is_some()),
+        ("--binding", binding.is_some()),
+        ("--source", source.is_some()),
+        ("--status", status),
+    ];
+    let given = examples_only
+        .iter()
+        .find_map(|(flag, given)| given.then_some(*flag));
+    let provider = match target.as_str() {
+        "examples" if gpu_model.is_some() || lost => {
+            return Err(
+                "`--gpu-model` and `--lost` are for `ec2` and `modal`: leave them out".into(),
+            );
+        }
+        "examples" => {
+            let Some(model) = model else {
+                return Err(
+                    "`cargo xtask live examples` needs a model: name it with `--model`".into(),
+                );
+            };
+            let Some(binding) = binding else {
+                return Err(
+                    "`cargo xtask live examples` needs a binding: name its file with `--binding`"
+                        .into(),
+                );
+            };
+            let Some(source) = source else {
+                return Err(
+                    "`cargo xtask live examples` needs the binding's source: name it with `--source`"
+                        .into(),
+                );
+            };
+            return examples::examples(config.as_deref(), &model, &binding, &source, status);
+        }
+        _ if let Some(flag) = given => {
+            return Err(
+                format!("`{flag}` is for `cargo xtask live examples` alone: leave it out").into(),
+            );
+        }
+        "docker" if lost => {
+            return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
+        }
+        "docker" => return docker(),
+        "ec2" => Provider::Ec2,
+        "modal" => Provider::Modal,
+        _ => {
+            return Err(format!(
+                "`{target}` is no live target: give `docker`, `ec2`, `modal` or `examples`"
+            )
+            .into());
+        }
+    };
+    if gpu_model.is_some() && provider != Provider::Modal {
+        return Err("`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into());
+    }
+    smoke(provider, gpu_model.as_deref(), lost)
+}
 
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker() -> Result<()> {
@@ -99,17 +173,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         Provider::Ec2 => "cargo xtask live ec2",
         Provider::Modal => "cargo xtask live modal",
     };
-    let home =
-        env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
-    let config = Path::new(&home).join(".config/pumpkin/pumpkin.toml");
-    let text = fs::read_to_string(&config).map_err(|error| {
-        format!(
-            "{} can't be read ({error}): write the configuration that names the controller \
-             there, as the README says",
-            config.display()
-        )
-    })?;
-    let settings = Settings::parse(&text, &config, provider, gpu_model)?;
+    let settings = settings(None, Some(provider), gpu_model)?;
     reached(&settings)?;
     let commit = head_commit()?;
     let repo = task_repository()?;
@@ -119,8 +183,8 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     }
     let mut run = pumpkin(&repo);
     run.args(["run", "--wait"]);
-    if let Some(modal) = &settings.modal {
-        run.args(["--arg", &format!("gpu_model={}", modal.gpu_model)]);
+    if let Some(gpu_model) = &settings.gpu_model {
+        run.args(["--arg", &format!("gpu_model={gpu_model}")]);
     }
     run.arg("smoke/task.star");
     eprintln!("xtask: running examples/smoke at {commit} through the controller");
@@ -132,7 +196,7 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
         ));
     }
     let record = repo.join(".pumpkin/runs").join(&id);
-    failed.extend(checked(&record, settings.modal.is_some()));
+    failed.extend(checked(&record, settings.gpu_model.is_some()));
     let left = left(&settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
@@ -158,6 +222,31 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     Err(format!("{}: fix it, and run `{again}` again", failed.join("; ")).into())
 }
 
+/// The settings of live runs on `provider`, or on any of the controller's, that the configuration
+/// at `config`, or else `~/.config/pumpkin/pumpkin.toml`, gives, as [`Settings::parse`] reads
+/// them.
+fn settings(
+    config: Option<&Path>,
+    provider: Option<Provider>,
+    gpu_model: Option<&str>,
+) -> Result<Settings> {
+    let config = if let Some(config) = config {
+        config.to_owned()
+    } else {
+        let home =
+            env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
+        Path::new(&home).join(".config/pumpkin/pumpkin.toml")
+    };
+    let text = fs::read_to_string(&config).map_err(|error| {
+        format!(
+            "{} can't be read ({error}): write the configuration that names the controller \
+             there, as the README says",
+            config.display()
+        )
+    })?;
+    Settings::parse(&text, &config, provider, gpu_model)
+}
+
 /// The longest a lost smoke run's sandboxes may take to end by themselves, from when its job is
 /// killed, after the run's start.
 // The run's hard end is at most 94 minutes after its start: three of an EC2 sandbox's startups (29
@@ -177,10 +266,7 @@ fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
     };
     // The agent holds a lease of each grant, so that the run is lost with its sandboxes in use.
     let mut args = vec!["run", "--arg", "hold=true", "--arg", "deadline_seconds=120"];
-    let gpu = settings
-        .modal
-        .as_ref()
-        .map(|modal| format!("gpu_model={}", modal.gpu_model));
+    let gpu = (settings.gpu_model.as_ref()).map(|gpu_model| format!("gpu_model={gpu_model}"));
     if let Some(gpu) = &gpu {
         args.extend(["--arg", gpu]);
     }
@@ -354,13 +440,12 @@ fn reached(settings: &Settings) -> Result<()> {
     let policy = "grant these credentials `scheduler:ListSchedules` on `*`, as the policy that \
                   deploy/aws outputs as `contributor_policy_arn` does, and run this again";
     schedules(settings, "no-such-run", Some(policy))?;
-    if let Some(modal) = &settings.modal {
+    if let Some(profile) = &settings.modal_profile {
         let token = format!(
-            "give Modal's profile `{}` a token, as `uvx --from {MODAL_SDK} modal token new \
-             --profile {}` does, and run this again",
-            modal.profile, modal.profile
+            "give Modal's profile `{profile}` a token, as `uvx --from {MODAL_SDK} modal token new \
+             --profile {profile}` does, and run this again"
         );
-        modal_python(modal, MODAL_LIST, &["no-such-run"], Some(&token))?;
+        modal_python(profile, MODAL_LIST, &["no-such-run"], Some(&token))?;
     }
     Ok(())
 }
@@ -433,9 +518,7 @@ fn head_commit() -> Result<String> {
 /// from this checkout so an unpublished change can be exercised.
 fn task_repository() -> Result<PathBuf> {
     let repo = target_dir()?.join("live/repo");
-    let made =
-        |path: &Path, error: std::io::Error| format!("writing {} failed: {error}", path.display());
-    fs::create_dir_all(&repo).map_err(|error| made(&repo, error))?;
+    fs::create_dir_all(&repo).map_err(|error| made(&repo, &error))?;
     if !repo.join(".git").exists() {
         Repo { root: &repo }.git(["init", "--quiet"])?;
     }
@@ -455,14 +538,25 @@ fn task_repository() -> Result<PathBuf> {
         removed.map_err(|error| format!("removing {} failed: {error}", path.display()))?;
     }
     copy_tree(&root().join("examples"), &repo)?;
+    install(&repo)?;
+    Ok(repo)
+}
+
+/// Installs `pumpkin`, built from this checkout, in the task repository `repo`, as its
+/// `.pumpkin`, which Git ignores, and `./pumpkin`, which [`pumpkin`] runs.
+fn install(repo: &Path) -> Result<()> {
     let workspace = repo.join(".pumpkin");
     crate::build(Some(workspace.clone()), crate::MUSL)?;
     let ignore = workspace.join(".gitignore");
-    fs::write(&ignore, "*\n").map_err(|error| made(&ignore, error))?;
+    fs::write(&ignore, "*\n").map_err(|error| made(&ignore, &error))?;
     let entry = repo.join("pumpkin");
     std::os::unix::fs::symlink(".pumpkin/bin/pumpkin", &entry)
-        .map_err(|error| made(&entry, error))?;
-    Ok(repo)
+        .map_err(|error| made(&entry, &error))?;
+    Ok(())
+}
+
+fn made(path: &Path, error: &std::io::Error) -> String {
+    format!("writing {} failed: {error}", path.display())
 }
 
 fn pumpkin(repo: &Path) -> Command {
@@ -498,8 +592,7 @@ fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
             line.map_err(|error| format!("reading what `./pumpkin` said failed: {error}"))?;
         eprintln!("{line}");
         if id.is_none()
-            && let Some(rest) = line.strip_prefix("pumpkin: run ")
-            && let Some((run, _)) = rest.split_once(" goes to controller ")
+            && let Some(run) = wait::run_started(&line)
         {
             id = Some(run.to_owned());
         }
@@ -531,6 +624,14 @@ fn started(pumpkin: &mut Command) -> Result<(Child, ChildStderr)> {
 /// failed or is missing, and a sandbox that isn't deleted. `gpu` is whether the run has a GPU
 /// runner.
 fn checked(record: &Path, gpu: bool) -> Vec<String> {
+    let (outcome, mut failed) = ended(record);
+    failed.extend(probes(&outcome, gpu));
+    failed
+}
+
+/// The `outcome.json` of the run at `record`, null if it can't be read, and what is wrong in the
+/// record: a run that didn't finish, and a sandbox that isn't deleted.
+fn ended(record: &Path) -> (serde_json::Value, Vec<String>) {
     let read = |path: &Path| -> std::result::Result<serde_json::Value, String> {
         let text = fs::read_to_string(path)
             .map_err(|error| format!("reading {} failed: {error}", path.display()))?;
@@ -546,6 +647,14 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
     if outcome["state"] != "finished" {
         failed.push(format!("the run didn't finish: {}", outcome["state"]));
     }
+    failed.extend(sandboxes::undeleted(record));
+    (outcome, failed)
+}
+
+/// What is wrong in the probes that `outcome`, a smoke run's, returned: a probe that failed or is
+/// missing. `gpu` is whether the run has a GPU runner.
+fn probes(outcome: &serde_json::Value, gpu: bool) -> Vec<String> {
+    let mut failed = Vec::new();
     let values = outcome["verdict"]["result"]["values"].as_array();
     let detail = (values.into_iter().flatten())
         .find(|value| value["name"] == "detail")
@@ -566,29 +675,6 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
             detail.len(),
             sandboxes * CHECKS_PER_SANDBOX
         ));
-    }
-    let mut dirs = vec![record.join("agents/agent")];
-    for kind in ["jobs", "leases"] {
-        if let Ok(entries) = fs::read_dir(record.join(kind)) {
-            dirs.extend(entries.flatten().map(|entry| entry.path()));
-        }
-    }
-    for dir in dirs {
-        let sandbox = match read(&dir.join("sandbox.json")) {
-            Ok(sandbox) => sandbox,
-            Err(error) => {
-                failed.push(error);
-                continue;
-            }
-        };
-        let deleted = sandbox["delete"]["state"].as_str().unwrap_or("not deleted");
-        println!(
-            "sandbox {} on {}: {deleted}",
-            sandbox["id"], sandbox["provider"]
-        );
-        if deleted != "deleted" {
-            failed.push(format!("sandbox {} is {deleted}", sandbox["id"]));
-        }
     }
     failed
 }
@@ -613,17 +699,13 @@ fn left(settings: &Settings, id: &str) -> Result<Vec<String>> {
             .unwrap_or_default()
     }) {
         let state = instance["State"]["Name"].as_str().unwrap_or_default();
-        println!(
-            "EC2 instance {} of the run: {state}",
-            instance["InstanceId"]
-        );
         if state != "terminated" {
             left.push(format!("EC2 instance {} ({state})", instance["InstanceId"]));
         }
     }
     left.extend(schedules(settings, id, None)?);
-    if let Some(modal) = &settings.modal {
-        let listed = modal_python(modal, MODAL_LIST, &[id], None)?;
+    if let Some(profile) = &settings.modal_profile {
+        let listed = modal_python(profile, MODAL_LIST, &[id], None)?;
         left.extend(
             listed
                 .lines()
@@ -668,10 +750,9 @@ fn listed(command: &mut Command, expected: Option<&str>) -> Result<serde_json::V
     Ok(json.context(format_args!("`{shown}` printed what isn't JSON"))?)
 }
 
-/// What `script` printed, run with `args` in a Python that has the Modal SDK, under the profile
-/// of `modal`.
+/// What `script` printed, run with `args` in a Python that has the Modal SDK, under `profile`.
 fn modal_python(
-    modal: &crate::settings::Modal,
+    profile: &str,
     script: &str,
     args: &[&str],
     expected: Option<&str>,
@@ -681,7 +762,7 @@ fn modal_python(
         .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK])
         .args(["python", "-I", "-c", script])
         .args(args)
-        .env("MODAL_PROFILE", &modal.profile);
+        .env("MODAL_PROFILE", profile);
     let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named("uv run python");
     let output = process::run(&mut python, how).map_err(|failure| refused(&failure, expected))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
