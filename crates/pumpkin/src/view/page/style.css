@@ -78,8 +78,8 @@ input:hover, select:hover { background: var(--line-soft); }
 
 /* The header: wordmark, where, and whether the page follows a live run. */
 .bar { flex: none; display: flex; gap: var(--s3); align-items: center; height: var(--bar); padding: 0 var(--s4); border-bottom: 1px solid var(--line); }
-/* The wordmark, as FrontierCS sets its own: the mark 24 px high, 9 px, then the name in Instrument
-   Sans Medium at 23 px, drawn as its outline, so that the page needs no third face. */
+/* The wordmark: the mark 24 px high, a 9 px gap, then the name in Instrument Sans Medium at 23 px,
+   drawn as its outline, so that the page needs no third face. */
 .home { flex: none; display: inline-flex; align-items: center; color: var(--logo-ink); }
 .home:hover { color: var(--logo-ink); }
 .logo { display: block; flex: none; overflow: visible; }
@@ -573,8 +573,7 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .ccd .del { background: var(--del); } .ccd .del .n, .ccd .del .s { color: var(--del-t); }
 .ccd mark { color: inherit; border-radius: 2px; } .ccd .add mark { background: var(--add-w); } .ccd .del mark { background: var(--del-w); }
 .ccd .gap .c { color: var(--dim); }
-/* JSON in the FrontierCS site's colours of code: keys and `true`, `false` and `null` in the accent,
-   strings green, numbers brown. */
+/* JSON: keys and `true`, `false` and `null` in the accent, strings green, numbers brown. */
 .jsonview .j-key, .jsonview .j-literal { color: var(--accent); }
 .jsonview .j-string { color: light-dark(#3d6b4f, #81c995); }
 .jsonview .j-number { color: light-dark(#8a5a12, #e6b36a); }

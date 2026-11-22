@@ -13,8 +13,8 @@ use super::{agent, args, check, check_refusals, check_roles, entry, evaluated};
 /// The argument `codex()` takes besides `SHARED`, with the Starlark of its value.
 const OWN: [(&str, &str); 1] = [("tools", r#"arg("tools", str)"#)];
 
-/// The prompt of the task repository's `lib/fcs.star`.
-const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
+/// A task's prompt, in full.
+const TASK_PROMPT: &str = "Solve the evaluation task in /task/README.md.
 
 Before doing any task work, read that file completely. It is authoritative for the exact train
 and final tar layouts, and for how to submit with `/.pumpkin/bin/sandboxctl`. Work only in
@@ -47,7 +47,7 @@ fn cases() -> Vec<[&'static str; 7]> {
             "gpt-6.1-terra",
             "xhigh",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "18000",
             "60",
             "functions",
@@ -56,7 +56,7 @@ fn cases() -> Vec<[&'static str; 7]> {
             "glm-5.3",
             "xhigh",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "3600",
             "60",
             "functions",
@@ -65,7 +65,7 @@ fn cases() -> Vec<[&'static str; 7]> {
             "gpt-6.1-terra",
             "xhigh",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "3600",
             "60",
             "native",
@@ -83,7 +83,7 @@ fn cases() -> Vec<[&'static str; 7]> {
             "model-small",
             "xhigh",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "3600",
             "60",
             "native",

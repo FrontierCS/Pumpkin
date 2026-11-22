@@ -4,13 +4,12 @@ Run `python3 docs/logo.py --output docs/figures/logo.svg` from the repository's 
 also what it does without `--output`. It writes the same bytes each time: an SVG that reads on
 GitHub's light and dark pages, as the other figures in `docs/figures/` do.
 
-The proportions are those of FrontierCS's mark, as a share of each mark's own height.
+The mark's proportions are shares of its own height, set by the constants below.
 
-`python3 docs/logo.py --wordmark <file>` writes the logo with the name beside it instead, as
-FrontierCS sets its own: the mark 24 px high, 9 px, then "Pumpkin" in Instrument Sans Medium at
-23 px. The name is drawn as its outline, so the file needs no font; the page of `pumpkin view`
-holds the same shapes in its header (`crates/pumpkin/src/view/page/index.html`), coloured by its
-style.
+`python3 docs/logo.py --wordmark <file>` writes the logo with the name beside it instead: the mark
+24 px high, a 9 px gap, then "Pumpkin" in Instrument Sans Medium at 23 px. The name is drawn as
+its outline, so the file needs no font; the page of `pumpkin view` holds the same shapes in its
+header (`crates/pumpkin/src/view/page/index.html`), coloured by its style.
 """
 
 import argparse
@@ -22,14 +21,14 @@ DEFAULT_OUTPUT = Path(__file__).resolve().parent / "figures" / "logo.svg"
 # The ring's radius, to the middle of its stroke. The tile's centre is on the ring at its top.
 RADIUS = 50.0
 
-# FrontierCS's mark: the height of its ink, its tile's side and corner radius, its stroke, and
+# The mark's measures: the height of its ink, its tile's side and corner radius, its stroke, and
 # the space from the tile's corner to the arc's outer edge (the tile's centre is 45.2 units
 # right of the arc's centre and as far above it).
-FRONTIER_HEIGHT = 74.7
-FRONTIER_TILE = 24.0
-FRONTIER_CORNER = 5.5
-FRONTIER_STROKE = 11.0
-FRONTIER_SPACE = math.hypot(45.2, 45.2) - (RADIUS + FRONTIER_STROKE / 2)
+MARK_HEIGHT = 74.7
+MARK_TILE = 24.0
+MARK_CORNER = 5.5
+MARK_STROKE = 11.0
+MARK_SPACE = math.hypot(45.2, 45.2) - (RADIUS + MARK_STROKE / 2)
 
 MARGIN = 16.0
 SCALE = 1.5  # pixels to a unit of the drawing
@@ -134,17 +133,17 @@ def ring_end(side, corner, reach):
 def mark():
     """The mark's measures: its ink's width and height, its stroke, and its shapes' numbers."""
     # A turned tile's tip is this far above its centre, as a share of its side.
-    tip = 1 / math.sqrt(2) - (FRONTIER_CORNER / FRONTIER_TILE) * (math.sqrt(2) - 1)
-    tile_share = FRONTIER_TILE / FRONTIER_HEIGHT
-    stroke_share = FRONTIER_STROKE / FRONTIER_HEIGHT
-    space_share = FRONTIER_SPACE / FRONTIER_HEIGHT
+    tip = 1 / math.sqrt(2) - (MARK_CORNER / MARK_TILE) * (math.sqrt(2) - 1)
+    tile_share = MARK_TILE / MARK_HEIGHT
+    stroke_share = MARK_STROKE / MARK_HEIGHT
+    space_share = MARK_SPACE / MARK_HEIGHT
     # The ink runs from the tile's tip to the ring's bottom edge, 2R + tip * tile + stroke / 2,
     # and the tile and the stroke are shares of it, so it is solved for first.
     ink_height = 2 * RADIUS / (1 - tile_share * tip - stroke_share / 2)
     tile = tile_share * ink_height
     stroke = stroke_share * ink_height
     space = space_share * ink_height
-    corner = FRONTIER_CORNER / FRONTIER_TILE * tile
+    corner = MARK_CORNER / MARK_TILE * tile
     end_x, end_y = ring_end(tile, corner, space + stroke / 2)
     top = -RADIUS
     return {

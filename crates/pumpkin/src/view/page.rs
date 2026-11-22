@@ -105,7 +105,7 @@ const FILES: [(&str, &str, &[u8]); 24] = [
         "text/javascript; charset=utf-8",
         include_bytes!("page/steps.js"),
     ),
-    // Hanken Grotesk, the face of frontier-cs.org, as a Latin subset of its variable weights; its
+    // Hanken Grotesk, for the interface, as a Latin subset of its variable weights; its
     // licence, the SIL Open Font License, is beside it.
     (
         "/hanken-grotesk.woff2",

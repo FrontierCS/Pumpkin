@@ -254,7 +254,7 @@ fn args(own: &[(&str, &str)], case: &[&str]) -> Args {
 }
 
 /// A prompt of the task repository's form, shortened.
-const FCS_PROMPT: &str = "Solve the evaluation task in /frontier/task/README.md.
+const TASK_PROMPT: &str = "Solve the evaluation task in /task/README.md.
 
 When the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.
 ";
