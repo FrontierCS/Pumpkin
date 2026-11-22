@@ -1199,13 +1199,6 @@ repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
 timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
 "#;
 
-const MODAL: &str = r#"[providers.gpus.modal]
-profile = "pumpkin"
-dials_from = "203.0.113.7"
-images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
-classes = { h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 17179869184, startup_seconds = 1800 } }
-"#;
-
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
     fs::create_dir_all(&dir).unwrap();
