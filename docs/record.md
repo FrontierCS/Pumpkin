@@ -96,18 +96,6 @@ request that names this machine as its host. Its only change to a run is a cance
 `pumpkin cancel --runs <dir> <run>`, or `pumpkin cancel <run>` for a controller's run, and shows
 what that says.
 
-`pumpkin view --export <dir>` writes the runs' data as files that a static copy of the page reads,
-with the page and a `robots.txt` that asks search engines to stay out. Each file that holds a
-reply is deflated, so a host serves it with `Content-Encoding: deflate`. In each reply, a stand-in
-replaces each sandbox's id, as `<sandbox of job-3>`. Another replaces the home and user of this
-machine and of the run's arguments, as `~` and `<user>`. A third replaces each string of a
-provider's report but its Docker engine's and its processors', as `<aws.account>`. A home, a user
-or a report's string shorter than 8 bytes is kept as it is. A file is written only if its bytes
-changed, and a run that had ended at the last export is read no further. The export says how many
-files it wrote. A controller deployed with a public page publishes its runs this way as their jobs
-run, to a page that a team reads at one address; [`deploy/aws`](../deploy/aws/README.md) says how to
-set it up and take a run down.
-
 ## Spend
 
 A record keeps what a run spent: each sandbox's class and its price an hour, as the provider's

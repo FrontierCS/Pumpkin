@@ -2,7 +2,7 @@
 // tabs. Text is shown as it was sent, its whitespace kept; a text the server cut is fetched
 // whole on asking; the bytes the record keeps are shown as kept.
 
-import { Refused, STATIC, bytes, clock, count, fill, get, getText, h, plural, span, utc } from "./h.js";
+import { bytes, clock, count, fill, get, getText, h, plural, span, utc } from "./h.js";
 import { diffTab } from "./diff.js";
 import { firstLine } from "./ledger.js";
 import { Steps } from "./steps.js";
@@ -66,7 +66,7 @@ function exchange(base, n) {
 // `text` with ASCII capitals in lower case, and no other letter changed, as the server's search
 // folds them: the text keeps its length, so a place in it is a place in `text`.
 /** @param {string} text */
-export const fold = (text) => text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+const fold = (text) => text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
 
 // `text` with each place that holds `needle` marked, as text nodes and `mark` elements, matched
 // as the server's search matches.
@@ -117,33 +117,7 @@ function sent(text, needle, api, at) {
   return h("div", {}, tools, pre);
 }
 
-// The items of a kept request read at once, at most.
-const ITEMS_AT_ONCE = 8;
-
-// Request `path` (`…/exchange/<n>/request`) rebuilt from the export's file of it and of its
-// items, in the bytes that the server answers.
-/** @param {string} path @returns {Promise<string>} */
-async function rebuilt(path) {
-  const base = path.slice(0, path.lastIndexOf("/exchange/"));
-  /** @typedef {{ item: string } | { sent: any }} Part */
-  /** @type {{ conversation: { field: string, items: Part[] } | null, fields: Array<{ name: string } & Part> }} */
-  const kept = await get(path);
-  const parts = [...kept.fields, ...(kept.conversation?.items ?? [])];
-  const digests = [...new Set(parts.flatMap((part) => ("item" in part ? [part.item] : [])))];
-  /** @type {Map<string, any>} */
-  const items = new Map();
-  for (let at = 0; at < digests.length; at += ITEMS_AT_ONCE) {
-    await Promise.all(digests.slice(at, at + ITEMS_AT_ONCE).map(async (digest) => items.set(digest, await get(base + "/item/" + digest))));
-  }
-  const value = (/** @type {Part} */ part) => ("item" in part ? items.get(part.item) : part.sent);
-  const fields = kept.fields.map((field) => [field.name, value(field)]);
-  if (kept.conversation) fields.push([kept.conversation.field, kept.conversation.items.map(value)]);
-  // In the order of their names, as the server writes an object, so that the bytes are its own.
-  return JSON.stringify(Object.fromEntries(fields.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
-}
-
-// Bytes the record keeps, read on asking, the first `RAW_SHOWN` of them shown as kept; in the
-// static mode a request is rebuilt from its items.
+// Bytes the record keeps, read on asking, the first `RAW_SHOWN` of them shown as kept.
 /** @param {string} label @param {string} path @param {number | null | undefined} size */
 function rawBytes(label, path, size) {
   const shown = h("div", {});
@@ -152,7 +126,7 @@ function rawBytes(label, path, size) {
     onclick: async () => {
       fill(shown, h("p", { class: "dim" }, "Reading…"));
       try {
-        const text = await (STATIC && path.endsWith("/request") ? rebuilt(path) : getText(path));
+        const text = await getText(path);
         fill(shown, h("p", { class: "tools" }, copy(text), text.length > RAW_SHOWN ? h("span", { class: "dim" }, " the first " + bytes(RAW_SHOWN) + " shown") : null), h("pre", { class: "sent" }, text.length > RAW_SHOWN ? text.slice(0, RAW_SHOWN) : text));
       } catch (error) {
         fill(shown, h("p", { class: "error" }, "Reading it failed: " + (error instanceof Error ? error.message : String(error))));
@@ -268,8 +242,7 @@ function inspectStep(node, s, ctx) {
       fill(config, ex.config && !ex.config.error ? h("pre", { class: "sent" }, JSON.stringify(ex.config, null, 2)) : h("p", { class: "error" }, "The request can't be rebuilt: " + (ex.config ? ex.config.error : "no config")));
     },
     (error) => {
-      const unpublished = STATIC && error instanceof Refused && error.status === 404;
-      const said = unpublished ? h("p", { class: "empty" }, "Not published yet: the exchange is published once this step and every one before it is answered.") : h("p", { class: "error" }, "Reading the exchange failed: " + (error instanceof Error ? error.message : String(error)));
+      const said = h("p", { class: "error" }, "Reading the exchange failed: " + (error instanceof Error ? error.message : String(error)));
       fill(held, said);
       fill(config, said.cloneNode(true));
       fill(measured, said.cloneNode(true));

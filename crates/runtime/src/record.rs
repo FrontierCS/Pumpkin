@@ -632,7 +632,7 @@ impl Record {
 
     /// The `sandbox.json` of each sandbox that has one, with its directory below the record, in
     /// order.
-    pub fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
+    fn sandboxes(&self) -> Result<Vec<(PathBuf, Value)>, String> {
         let mut dirs = Vec::new();
         for of in ["agents", "shared", "jobs", "leases"] {
             let path = self.dir.join(of);

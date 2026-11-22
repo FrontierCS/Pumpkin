@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use super::http::{self, Response};
 
 /// The page's files, by the path each is served at, with its type.
-const FILES: [(&str, &str, &[u8]); 25] = [
+const FILES: [(&str, &str, &[u8]); 24] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -94,11 +94,6 @@ const FILES: [(&str, &str, &[u8]); 25] = [
         "/scheme.js",
         "text/javascript; charset=utf-8",
         include_bytes!("page/scheme.js"),
-    ),
-    (
-        "/search.js",
-        "text/javascript; charset=utf-8",
-        include_bytes!("page/search.js"),
     ),
     (
         "/stats.js",
@@ -193,54 +188,6 @@ impl Page {
         let file = Response::file(FILES[index].1, body.clone(), deflated.clone());
         Some(if at == "/" { file } else { file.immutable() })
     }
-}
-
-impl Page {
-    /// The page's files as a static copy serves them, each with its path there, relative, and
-    /// whether it is the same at that path in every build: `index.html`, which reads the data
-    /// from files beside it, as `data-source="static"` on its `<html>` says, and the rest, below
-    /// the directory named by their digest.
-    pub(super) fn exported(&self) -> Vec<(String, Vec<u8>, bool)> {
-        let (html, marked) = (
-            "<html lang=\"en\">",
-            "<html lang=\"en\" data-source=\"static\">",
-        );
-        let files = FILES.iter().zip(&self.files);
-        let files = files.map(|((path, ..), (body, _))| {
-            if *path != "/" {
-                return (format!("{}{path}", &self.dir[1..]), body.clone(), true);
-            }
-            let index = String::from_utf8_lossy(body);
-            assert!(
-                index.contains(html),
-                "the page's index.html opens with {html}"
-            );
-            assert!(
-                index.contains(CHARSET),
-                "the page's index.html names its {CHARSET}"
-            );
-            let index = index.replacen(html, marked, 1);
-            let index = index.replacen(CHARSET, &format!("{CHARSET}\n{}", policy_meta()), 1);
-            ("index.html".to_owned(), index.into_bytes(), false)
-        });
-        files.collect()
-    }
-}
-
-/// The line of `index.html` that the policy's `<meta>` follows, as early as the page allows.
-const CHARSET: &str = "<meta charset=\"utf-8\">";
-
-/// The view's content security policy ([`http::CONTENT_SECURITY_POLICY`]) as a `<meta>`, but for
-/// `frame-ancestors`, which a `<meta>` can't say.
-fn policy_meta() -> String {
-    let policy = http::CONTENT_SECURITY_POLICY.split("; ");
-    let policy: Vec<&str> = policy
-        .filter(|directive| !directive.starts_with("frame-ancestors"))
-        .collect();
-    format!(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">",
-        policy.join("; ")
-    )
 }
 
 /// `index.html`, `body`, with each file of [`FILES`] that it names named below `dir`, and each

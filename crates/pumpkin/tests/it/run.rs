@@ -775,7 +775,7 @@ fn configurations() {
                |
             11 | [placement.agent]
                |  ^^^^^^^^^
-            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`, `publish`
+            unknown field `placement`, expected one of `docker`, `providers`, `gateway`, `upstreams`, `controller`
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/placed.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
             $ pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config podman.toml
             exit status: Some(1)

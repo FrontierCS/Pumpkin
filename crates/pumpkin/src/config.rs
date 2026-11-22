@@ -23,7 +23,6 @@ pub(crate) struct Config {
     pub(crate) providers: Providers<Kind>,
     pub(crate) gateway: Gateway,
     pub(crate) upstreams: Upstreams,
-    pub(crate) publish: Option<crate::publish::Settings>,
 }
 
 /// A machine whose runs go to a controller: its `[controller]`, and the `[upstreams]` and
@@ -49,7 +48,6 @@ struct Tables {
     #[serde(default)]
     upstreams: Upstreams,
     controller: Option<Controller>,
-    publish: Option<crate::publish::Settings>,
 }
 
 #[derive(Deserialize)]
@@ -381,7 +379,6 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         gateway,
         mut upstreams,
         controller,
-        publish,
     } = parsed
         .map_err(|error| error.to_string().trim_end().to_owned())
         .context(path.display())?;
@@ -398,7 +395,6 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
             ("`[docker]`", docker.is_some()),
             ("`[providers]`", providers.is_some()),
             ("`[gateway]`", gateway.is_some()),
-            ("`[publish]`", publish.is_some()),
         ]
         .into_iter()
         .filter_map(|(table, given)| given.then_some(table))
@@ -436,7 +432,6 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
         providers,
         gateway: gateway.unwrap_or_default(),
         upstreams,
-        publish,
     }))
 }
 

@@ -4,8 +4,7 @@
 //! A [`View`] holds each run it has been asked about between requests, as a fold of its log that
 //! is read further on each request, so that a page that polls reads only what the log has grown
 //! by. Its replies are JSON, built here and in [`json`](mod@json), [`talk`] and [`trace`]. The same
-//! replies are written as files by [`export`], and answered to the view that asks over a link
-//! ([`Answering`]).
+//! replies are answered to the view that asks over a link ([`Answering`]).
 //!
 //! A run that has ended is listed from its record, read once, as an ended record doesn't change;
 //! one that is lost, whose driver ended without an outcome, is read again until a reap writes it.
@@ -19,12 +18,10 @@
 
 mod asked;
 mod cancel;
-mod export;
 mod failure;
 mod http;
 mod json;
 mod page;
-mod scrub;
 mod talk;
 mod trace;
 
@@ -46,11 +43,9 @@ use serde_json::{Value, json};
 use stdx::Context;
 
 use self::asked::{Asked, START, allowed, asked};
-pub(crate) use self::export::{Exported, exported};
 use self::failure::Failures;
 use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
-pub(crate) use self::scrub::Scrub;
 use self::talk::Talk;
 use crate::controller::{Unviewed, Viewing};
 use crate::link::Viewed;
@@ -78,10 +73,7 @@ const HELD_ENDED_RUNS: usize = 8;
 /// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
 /// configuration, the controller's runs, until the process is stopped.
 pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
-    let cli::View { runs, port, export } = flags;
-    if let Some(export) = export {
-        return export::export(runs, &export, Scrub::of_machine());
-    }
+    let cli::View { runs, port } = flags;
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?
     {

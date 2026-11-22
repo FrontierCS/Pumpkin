@@ -4,7 +4,7 @@ Serve the runs to this machine's browser.
 and needs the token in the address. The page lists the runs newest first, each as `ls` says it. A
 run's page shows its summary, its sandboxes' lanes, who talks to whom and its log. The page changes
 a run only by a cancel, which runs `pumpkin cancel`. With `[controller]` in the configuration and no
-`--runs`, `view` serves the controller's runs. `--export` always writes this machine's runs.
+`--runs`, `view` serves the controller's runs.
 
 Usage: pumpkin view [OPTIONS]
 
@@ -15,18 +15,13 @@ Options:
       --port <port>
           The port on 127.0.0.1 to serve at (default: a free one)
 
-      --export <dir>
-          Write the runs' data and a static copy of the page into `<dir>` instead of serving them
-
   -h, --help
           Print help
 
 Examples:
   pumpkin view
   pumpkin view --runs runs --port 8080
-  pumpkin view --export public
 
-Without --export, `view` serves until a signal stops it, so it never exits 0.
+`view` serves until a signal stops it, so it never exits 0.
 
-What the page shows and what --export writes:
-https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page
+What the page shows: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page

@@ -34,7 +34,7 @@ pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
 }
 
 /// `value` with each string longer than [`STRING_CUT_BYTES`] cut, at a character, and marked with
-/// its length in all, which [`was_cut`] reads.
+/// its length in all.
 pub(super) fn cut(value: Value) -> Value {
     match value {
         Value::String(text) if text.len() > STRING_CUT_BYTES => {
@@ -49,15 +49,6 @@ pub(super) fn cut(value: Value) -> Value {
         ),
         Value::String(_) | Value::Null | Value::Bool(_) | Value::Number(_) => value,
     }
-}
-
-/// Whether `text` ends with the mark that [`cut`] puts on a string.
-pub(super) fn was_cut(text: &str) -> bool {
-    let Some(rest) = text.strip_suffix(" bytes in all]") else {
-        return false;
-    };
-    let length = rest.rsplit_once("… [").map(|(_, length)| length);
-    length.is_some_and(|length| length.parse::<usize>().is_ok())
 }
 
 /// The row of the run list for a run that has not ended.

@@ -283,7 +283,6 @@ fn prepared<'e>(
         providers,
         gateway,
         upstreams,
-        publish: _,
     } = config::read(config)?;
     let servings = task
         .workflow()

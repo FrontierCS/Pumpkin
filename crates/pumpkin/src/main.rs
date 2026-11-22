@@ -33,7 +33,6 @@ mod manifest;
 mod member;
 mod next;
 mod progress;
-mod publish;
 mod reaping;
 mod run;
 mod sandboxd;
@@ -85,7 +84,6 @@ fn main() -> ExitCode {
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Serve(member)) => serve::serve(member.as_ref()),
-        Ok(cli::Command::Publish(flags)) => publish::by_hand(flags),
         Ok(cli::Command::Print(text)) => print(text.as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
@@ -440,7 +438,6 @@ fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
         providers: _,
         gateway: _,
         upstreams: _,
-        publish: _,
     } = config::read(path)?;
     engine(context, reader)
 }

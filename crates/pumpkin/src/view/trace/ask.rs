@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::super::http::{Request, Response};
 use super::super::{Failed, Held, View, line_at};
-use super::json::{EntryKind, exchange_json, kept_json};
+use super::json::{EntryKind, exchange_json};
 use super::{Address, Exchanges, TRACE_PASSES, Trace, diff, stats};
 
 /// The most bytes of a search's text: each search reads every entry of the trace.
@@ -62,11 +62,6 @@ pub(in crate::view) enum Asked {
     Ops {
         caller: CallerName,
     },
-    /// A chunk of the trace's searchable text.
-    SearchChunk {
-        caller: CallerName,
-        chunk: usize,
-    },
     Diff {
         a: u64,
         b: u64,
@@ -79,8 +74,6 @@ pub(in crate::view) enum Asked {
 pub(in crate::view) enum Side {
     Request,
     Response,
-    /// The request as the record keeps it, its items apart ([`kept_json`]).
-    Kept,
 }
 
 /// What `parts`, the path's parts past the run's id, and `request` ask for; refused if nothing
@@ -293,7 +286,6 @@ impl View {
             Asked::Entries { caller, .. }
             | Asked::Entry { caller, .. }
             | Asked::Search { caller, .. }
-            | Asked::SearchChunk { caller, .. }
             | Asked::Stats { caller, .. } => (known(id, held, *caller)?, None, None),
             Asked::Diff { a, b, .. } => (caller_of(id, held, *a, *b)?, None, None),
             Asked::Exchange {
@@ -379,7 +371,6 @@ impl Trace {
                 thread,
                 ..
             } => Ok(self.search_json(&query, kind, thread)),
-            Asked::SearchChunk { chunk, .. } => Ok(self.search_chunk_json(chunk)),
             Asked::Stats { by, .. } => Ok(self.stats_json(exchanges, prices, by)),
             Asked::Diff { a, b, part } => Ok(self.diff_json(&held.record, a, b, part)),
             Asked::Exchange { request, .. } => {
@@ -453,8 +444,8 @@ fn caller_of(id: &provider::RunTag, held: &Held, a: u64, b: u64) -> Result<Calle
     Ok(caller)
 }
 
-/// Request `request`'s `part` of `exchanges`, of `record`: its bytes as kept, the request
-/// rebuilt, or the request as kept, as JSON.
+/// Request `request`'s `part` of `exchanges`, of `record`: its bytes as kept, or the request
+/// rebuilt.
 fn exchange_bytes(
     record: &Record,
     exchanges: &Exchanges,
@@ -470,11 +461,6 @@ fn exchange_bytes(
     let bytes = match part {
         Side::Request => record.model_request(request),
         Side::Response => record.model_response(request),
-        Side::Kept => {
-            let event = exchanges.by_request[&request].event();
-            let kept = record.kept_request(request, &event["kept"]["request"]);
-            return Ok(Answer::Json(kept_json(kept.map_err(Failed::NotFound)?)));
-        }
     };
     let bytes = bytes.map_err(Failed::NotFound)?;
     Ok(Answer::Bytes(Response::bytes(

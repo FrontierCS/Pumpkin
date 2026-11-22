@@ -444,8 +444,7 @@ whole, its executable and the files beside it, by a SHA-256 of theirs;
 its `store` admits complete uploads by their SHA-256. `job` is the controller's side, whose
 `start` starts each id once under the jobs' lock and keeps the install its unit runs, with the
 prune and the slots that admit its builds and publishes
-(`Admission`), `publish` copies the runs, as `view` exports them, to the public page's bucket as
-their jobs run, `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
+(`Admission`), `progress` is what `ls` shows, `next` makes the commands to run next, `style` runs
 the formatter, `view` serves the runs' records to a browser, its `json` the JSON forms of what it
 answers with, its `Answering` the view that `serve` keeps to answer a client's, and `Workspace` is
 the `.pumpkin` directory.

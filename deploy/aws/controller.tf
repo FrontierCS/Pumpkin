@@ -84,8 +84,7 @@ resource "aws_iam_instance_profile" "controller" {
 # Each job's settings, which `pumpkin controller job` reads as it starts, so an apply that
 # changes them takes effect at the next job: the controller's Docker engine, the EC2 provider
 # `aws`, and the `images` of the Modal provider `modal`, which a job drops if its client sends no
-# `[controller.modal]`; and, with `publish_from_jobs`, where each job publishes the public page
-# (public.tf). Nothing else is here: the rest is each job's own or its client's. The
+# `[controller.modal]`. Nothing else is here: the rest is each job's own or its client's. The
 # advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
@@ -95,7 +94,6 @@ resource "aws_ssm_parameter" "settings" {
     ["[docker]", "context = \"default\"", "", "[providers.aws.ec2]"],
     local.ec2_settings,
     ["", "[providers.modal.modal]", local.modal_images],
-    local.publish_settings,
     [""],
   ))
 }

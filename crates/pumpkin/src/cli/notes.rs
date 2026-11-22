@@ -1,12 +1,6 @@
 //! The examples that end each command's help, below its options, with the exit statuses of the
 //! commands that depart from those of `pumpkin --help`, and the topics that `pumpkin help` prints.
 
-pub(super) const PUBLISH_NOTES: &str = "\
-Example, of the runs copied from a controller:
-  pumpkin controller publish --runs records --bucket pumpkin-alice-public \\
-    --region us-west-1 --since 2026-11-15T00:00:00Z \\
-    --controller-address 172.31.5.6 --controller-address 198.51.100.9";
-
 pub(super) const CHECK_NOTES: &str = "\
 Examples:
   pumpkin check tasks/bench/task.star --arg model=model-a
@@ -65,11 +59,10 @@ pub(super) const VIEW_NOTES: &str = "\
 Examples:
   pumpkin view
   pumpkin view --runs runs --port 8080
-  pumpkin view --export public
 
-Without --export, `view` serves until a signal stops it, so it never exits 0.
+`view` serves until a signal stops it, so it never exits 0.
 
-What the page shows and what --export writes: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page";
+What the page shows: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page";
 
 pub(super) const HELP_NOTES: &str = "\
 Examples:
@@ -108,13 +101,13 @@ Examples:
   pumpkin controller boot";
 
 pub(super) const CONFIG: &str = "\
-pumpkin.toml is the machine's configuration, which `pumpkin run` and
-`pumpkin build` read. It is the file that --config names, by default
+pumpkin.toml is the machine's configuration, which `pumpkin run` and `pumpkin
+build` read. It is the file that --config names, by default
 $HOME/.config/pumpkin/pumpkin.toml. It is TOML, with the tables below. Every key
-is required unless it says what its absence means. [gateway], the
-[upstreams.<name>] tables and [publish] may be left out. Any other key is
-refused. On a machine whose runs go to the person's controller, [controller]
-takes the place of [docker], [providers.<name>.<kind>] and [gateway].
+is required unless it says what its absence means. [gateway] and the
+[upstreams.<name>] tables may be left out. Any other key is refused. On a
+machine whose runs go to the person's controller, [controller] takes the place
+of [docker], [providers.<name>.<kind>] and [gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -279,17 +272,6 @@ settings:
 
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
-
-[publish] says where each run's job publishes the runs, on the controller.
-deploy/aws writes it into the controller's settings. A run's job publishes
-every minute while the run is live, and once more as it ends, as
-`pumpkin controller publish` does. Without [publish], nothing is published.
-  bucket        The S3 bucket of the public page.
-  distribution  The ID of the CloudFront distribution that serves the bucket.
-  address       The page's address, which each job's log names.
-  since         An instant, as a TOML offset date-time, unquoted, such as
-                2026-11-15T00:00:00Z. A run that started before it is not
-                published. Without it, every run is.
 
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
 `ls`, `cancel`, `view`, `build` and `reap` go to it, as each one's help says.

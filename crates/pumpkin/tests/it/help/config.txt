@@ -1,10 +1,10 @@
-pumpkin.toml is the machine's configuration, which `pumpkin run` and
-`pumpkin build` read. It is the file that --config names, by default
+pumpkin.toml is the machine's configuration, which `pumpkin run` and `pumpkin
+build` read. It is the file that --config names, by default
 $HOME/.config/pumpkin/pumpkin.toml. It is TOML, with the tables below. Every key
-is required unless it says what its absence means. [gateway], the
-[upstreams.<name>] tables and [publish] may be left out. Any other key is
-refused. On a machine whose runs go to the person's controller, [controller]
-takes the place of [docker], [providers.<name>.<kind>] and [gateway].
+is required unless it says what its absence means. [gateway] and the
+[upstreams.<name>] tables may be left out. Any other key is refused. On a
+machine whose runs go to the person's controller, [controller] takes the place
+of [docker], [providers.<name>.<kind>] and [gateway].
 
 Example, of a machine whose runs go to EC2 and Modal:
   [docker]
@@ -169,17 +169,6 @@ settings:
 
 Each entry of a workflow's model route reaches the one upstream that serves
 every model it allows.
-
-[publish] says where each run's job publishes the runs, on the controller.
-deploy/aws writes it into the controller's settings. A run's job publishes
-every minute while the run is live, and once more as it ends, as
-`pumpkin controller publish` does. Without [publish], nothing is published.
-  bucket        The S3 bucket of the public page.
-  distribution  The ID of the CloudFront distribution that serves the bucket.
-  address       The page's address, which each job's log names.
-  since         An instant, as a TOML offset date-time, unquoted, such as
-                2026-11-15T00:00:00Z. A run that started before it is not
-                published. Without it, every run is.
 
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
 `ls`, `cancel`, `view`, `build` and `reap` go to it, as each one's help says.

@@ -105,12 +105,6 @@ fn controller_serve_help() {
 }
 
 #[test]
-fn controller_publish_help() {
-    let expect = expect_file!["help/controller_publish.txt"];
-    check(&["controller", "publish", "--help"], &expect);
-}
-
-#[test]
 fn config_topic() {
     check(&["help", "config"], &expect_file!["help/config.txt"]);
 }

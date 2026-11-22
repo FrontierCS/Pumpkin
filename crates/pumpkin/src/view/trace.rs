@@ -33,8 +33,7 @@ mod json;
 mod ops;
 mod stats;
 
-pub(super) use ask::{Answer, Asked, Side, asked};
-pub(super) use json::searchable;
+pub(super) use ask::{Answer, Asked, asked};
 pub(super) use ops::Ops;
 
 /// How many traces `View::trace` keeps of runs that it no longer holds live; the one read longest

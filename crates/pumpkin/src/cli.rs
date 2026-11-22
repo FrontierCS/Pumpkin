@@ -13,7 +13,6 @@ mod notes;
 
 use std::ffi::OsString;
 use std::iter;
-use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
@@ -28,11 +27,10 @@ use schema::ir::Sha256Digest;
 
 use self::notes::{
     BUILD_NOTES, CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES,
-    HELP_NOTES, LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    HELP_NOTES, LS_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
 use crate::member::Member;
-use crate::publish::{Bucket, Since};
 use crate::star::Entry;
 
 /// Run workflows of agents in sandboxes.
@@ -116,7 +114,7 @@ enum Parsed {
     /// each as `ls` says it. A run's page shows its summary, its sandboxes' lanes, who talks to
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
-    /// runs. `--export` always writes this machine's runs.
+    /// runs.
     #[command(after_help = VIEW_NOTES)]
     View(View),
     /// Print the help of a command or a topic.
@@ -153,7 +151,7 @@ enum Parsed {
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
-    /// `job` in a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
+    /// `job` in a unit of its own. The controller's boot runs `boot`.
     #[command(hide = true, after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -210,38 +208,6 @@ enum Action {
         #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
         member: Option<Member>,
     },
-    /// Upload the runs to the bucket of the public page.
-    ///
-    /// `publish` exports the runs into `public/` beside `--runs`, as `pumpkin view --export` does.
-    /// It leaves out runs that started before `--since`, and replaces each controller address.
-    /// It then uploads with `aws` what changed since the last publish that uploaded all it
-    /// planned. It deletes nothing, so its credentials need only list the bucket and put objects.
-    /// One publish runs at a time, and another waits for it.
-    #[command(after_help = PUBLISH_NOTES)]
-    Publish(Publish),
-}
-
-// Its doc would become the help of `pumpkin controller publish`, which the variant's replaces.
-#[derive(Args)]
-pub(crate) struct Publish {
-    /// The directory of the runs to publish (default: `runs` in the repository's `.pumpkin`).
-    #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
-    pub(crate) runs: Option<String>,
-    /// The S3 bucket to upload to.
-    #[arg(long, value_name = "name")]
-    #[arg(value_parser = |name: &str| Bucket::try_from(name.to_owned()))]
-    pub(crate) bucket: Bucket,
-    /// The bucket's AWS region.
-    #[arg(long, value_name = "region")]
-    #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
-    pub(crate) region: Region,
-    /// Leave out the runs that started before this RFC 3339 instant, such as
-    /// 2026-11-15T00:00:00Z.
-    #[arg(long, value_name = "instant", value_parser = |since: &str| since.parse::<Since>())]
-    pub(crate) since: Option<Since>,
-    /// An IPv4 address of the controller, which becomes `<controller>` in what is published.
-    #[arg(long = "controller-address", value_name = "ipv4")]
-    pub(crate) controller_addresses: Vec<Ipv4Addr>,
 }
 
 /// What a command line asks for. `Job` and the variants after it are the controller's own side,
@@ -260,7 +226,6 @@ pub(crate) enum Command {
     Boot,
     CancelFor(Cancel),
     Serve(Option<Member>),
-    Publish(Publish),
     Print(String),
 }
 
@@ -455,9 +420,6 @@ pub(crate) struct View {
     /// The port on 127.0.0.1 to serve at (default: a free one).
     #[arg(long, value_name = "port")]
     pub(crate) port: Option<u16>,
-    /// Write the runs' data and a static copy of the page into `<dir>` instead of serving them.
-    #[arg(long, value_name = "dir", conflicts_with = "port")]
-    pub(crate) export: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -663,9 +625,6 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Serve { member },
         } => Command::Serve(member),
         Parsed::Controller {
-            action: Action::Publish(publish),
-        } => Command::Publish(publish),
-        Parsed::Controller {
             action:
                 Action::Job {
                     id,
@@ -701,7 +660,6 @@ fn job_command(cli: &mut clap::Command, command: Vec<OsString>) -> Result<JobCom
         | Command::Boot
         | Command::CancelFor(_)
         | Command::Serve(_)
-        | Command::Publish(_)
         | Command::Print(_) => {
             let problem = "the job's command is neither `run` nor `build`: give one";
             let controller = cli.find_subcommand_mut("controller");

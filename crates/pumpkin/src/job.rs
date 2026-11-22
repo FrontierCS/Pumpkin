@@ -41,7 +41,7 @@ use stdx::process::Environment;
 use crate::controller::bounded;
 use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
-use crate::{cli, config, publish, say, star};
+use crate::{cli, config, say, star};
 
 mod member;
 mod start;
@@ -115,9 +115,8 @@ const IMDS_SECONDS: u64 = 10;
 
 /// Runs job `job`, in its tree and as its unit does. It assembles the job's
 /// configuration, prunes, builds the task's images under the controller's
-/// build slots, and then runs the task, or builds it for a build job, as the job's command says,
-/// publishing the runs meanwhile if the settings have `[publish]`. Returns the command's exit
-/// status.
+/// build slots, and then runs the task, or builds it for a build job, as the job's command says.
+/// Returns the command's exit status.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -163,15 +162,11 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             };
             // Only one who follows the run reads the job's log.
             let exit = crate::start(&id, run, crate::Reader::Follower)?;
-            // The run's end is the job's, so that the unit lasts as long as the run, and its last
-            // publish is of the run ended.
+            // The run's end is the job's, so that the unit lasts as long as the run.
             if exit == ExitCode::SUCCESS {
                 let runs = crate::default_runs()?;
                 let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
-                match crate::config::read(&path)?.publish {
-                    Some(settings) => publish::until_ended(&record, settings, &runs, region)?,
-                    None => drop(record.wait(|| {})?),
-                }
+                drop(record.wait(|| {})?);
             }
             exit
         }
@@ -470,7 +465,7 @@ fn take_modal(
 
 /// This instance's private and public IPv4 addresses, `local-ipv4` and `public-ipv4`, as its
 /// metadata service serves them under an `IMDSv2` token, through `curl`.
-pub(crate) fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
+fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
     // Long enough for the two reads that follow.
     let ttl = "X-aws-ec2-metadata-token-ttl-seconds: 60";
     let token = curl(&[
