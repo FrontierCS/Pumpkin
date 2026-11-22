@@ -1378,6 +1378,7 @@ fn serves_the_page() {
             /<digest>/trace.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/scheme.js: HTTP/1.1 200 OK text/javascript; charset=utf-8; public, max-age=31536000, immutable
             /<digest>/hanken-grotesk.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
+            /<digest>/jetbrains-mono.woff2: HTTP/1.1 200 OK font/woff2; public, max-age=31536000, immutable
             /nothing.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/nothing.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}
             /0000000000000000000000000000000000000000000000000000000000000000/app.js []: HTTP/1.1 404 Not Found {"error":"nothing is at `/0000000000000000000000000000000000000000000000000000000000000000/app.js`: expected the page at `/`, or the runs at `/api/runs` and below it"}

@@ -176,7 +176,7 @@ export async function traceView(id, caller) {
   /** @type {Partial<Record<View, { node: HTMLElement, show: () => void, key: (event: KeyboardEvent) => void }>>} */
   const others = {};
   const panes = h("div", { class: "pane" });
-  show(title, within, tabs, pane, panes);
+  show(h("section", { class: "head panel" }, title, within), tabs, pane, panes);
   const showView = (/** @type {View} */ view) => {
     setQuery({ view: view === "trace" ? null : view });
     for (const [name, button] of Object.entries(tabButtons)) {

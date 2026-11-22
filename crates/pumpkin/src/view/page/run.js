@@ -178,7 +178,7 @@ export async function runView(id) {
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
   fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(verdict, result, failed, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
+  show(h("section", { class: "head panel" }, verdict, result, failed, facts, dropped, again, traces, cancelBox, unread), startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {

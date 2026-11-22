@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use super::http::{self, Response};
 
 /// The page's files, by the path each is served at, with its type.
-const FILES: [(&str, &str, &[u8]); 23] = [
+const FILES: [(&str, &str, &[u8]); 24] = [
     (
         "/",
         "text/html; charset=utf-8",
@@ -111,6 +111,13 @@ const FILES: [(&str, &str, &[u8]); 23] = [
         "/hanken-grotesk.woff2",
         "font/woff2",
         include_bytes!("page/font/hanken-grotesk.woff2"),
+    ),
+    // JetBrains Mono, for what is machine-made, as a Latin subset of its variable weights; its
+    // licence, the SIL Open Font License, is beside it.
+    (
+        "/jetbrains-mono.woff2",
+        "font/woff2",
+        include_bytes!("page/font/jetbrains-mono.woff2"),
     ),
     (
         "/style.css",
