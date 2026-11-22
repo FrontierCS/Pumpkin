@@ -9,6 +9,10 @@ The rules for writing Pumpkin's tests and their snapshots.
 - PREFER testing a decision as a function of values to running it through a stand-in
 - START a snapshot as `expect![[""]]`, fill it with
   `cargo xtask refill --package <crate> [<test>]`, and read the diff before keeping it
+- SNAPSHOT each command's help, and each help topic's, in a file of its own, as cargo and
+  rustup do: one test in `crates/pumpkin/tests/it/help.rs` compares the standard output with
+  `help/<name>.txt` through `expect_file!`. Fill the file with `cargo xtask refill`, and read
+  the diff before keeping it
 - ASSERT in a file's `check` helper what holds of every case, such as files left or modes; show
   in the snapshot what the test is about, and what departs from that
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
@@ -52,4 +56,5 @@ The rules for writing Pumpkin's tests and their snapshots.
   an empty doctest run for
 - `cargo xtask ci` checks the rest: each test ends within 5 s, but those that
   `.config/nextest.toml` names with why, and no file but Rust sits under a `tests/` directory
-  outside `crates/lang`'s vendored suites and `.star` fixtures
+  outside `crates/lang`'s vendored suites and `.star` fixtures, and `crates/pumpkin`'s help
+  snapshots in `tests/it/help/`

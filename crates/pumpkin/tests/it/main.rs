@@ -36,6 +36,7 @@ mod controller;
 mod driver;
 mod export;
 mod fmt;
+mod help;
 mod ls;
 mod publish;
 mod reap;

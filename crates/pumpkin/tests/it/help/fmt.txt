@@ -1,0 +1,23 @@
+Format `.star` files.
+
+`fmt` rewrites each `.star` file in the one style of the workflow language. It formats the files it
+is given and the `.star` files below the directories it is given. Below a directory, it skips names
+that start with `.` and anything a symbolic link leads to. If a file can't be formatted, `fmt` says
+why and formats the others. It prints nothing on success.
+
+Usage: pumpkin fmt [OPTIONS] [path]...
+
+Arguments:
+  [path]...
+          A `.star` file or a directory to format (default: the working directory)
+
+Options:
+      --check
+          Name each file that isn't formatted, change none, and fail if there is one
+
+  -h, --help
+          Print help
+
+Examples:
+  pumpkin fmt
+  pumpkin fmt --check lib tasks/bench/task.star
