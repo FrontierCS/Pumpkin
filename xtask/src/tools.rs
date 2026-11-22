@@ -10,15 +10,15 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io, process};
 
 use sha2::{Digest as _, Sha256};
-use stdx::process::Environment;
-use xshell::{Cmd, Shell, cmd};
+use stdx::process::{Bound, Echo, Environment, Failure, Run, Stream};
 
-use crate::{Cargo, Result};
+use crate::repo::STEP_TIMEOUT;
+use crate::{Result, ran, root, step, target_dir};
 
 /// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
 pub(crate) const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
@@ -86,11 +86,11 @@ const MUSL_CC: &str = "x86_64-linux-musl-cc";
 
 /// Sets the musl C compiler for a build of `pumpkin`, the pinned Zig's. The host compiler
 /// still links the binary.
-pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
-    let zig = fetched(cargo, ZIG)?;
+pub(crate) fn musl_cc(build: &mut Command) -> Result<()> {
+    let zig = fetched(ZIG)?;
     // The directory belongs to the checkout, as the link to xtask does. The cache holds each
     // release only as it was fetched.
-    let dir = target_dir(cargo)?.join("musl-cc");
+    let dir = target_dir()?.join("musl-cc");
     fs::create_dir_all(&dir)
         .map_err(|error| format!("making {} failed: {error}", dir.display()))?;
     // One executable, xtask as `MUSL_CC`: cc-rs drops the arguments of a compiler named as
@@ -100,10 +100,11 @@ pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
         .map_err(|error| format!("finding xtask's own executable failed: {error}"))?;
     replace(&cc, |made| symlink(&xtask, made))?;
     replace(&dir.join("zig"), |made| symlink(&zig, made))?;
-    Ok(build
+    build
         .env("ZIG_LIB_DIR", zig.with_file_name("lib"))
         .env("ZIG_GLOBAL_CACHE_DIR", dir.join("cache"))
-        .env("CC_x86_64_unknown_linux_musl", cc))
+        .env("CC_x86_64_unknown_linux_musl", cc);
+    Ok(())
 }
 
 /// Runs the pinned Zig's C compiler with this process's arguments, if xtask runs as
@@ -148,10 +149,10 @@ pub(crate) fn replace(at: &Path, write: impl FnOnce(&Path) -> io::Result<()>) ->
 
 /// Installs the nightly rustfmt and fetches each of [`RELEASES`]. It skips each one that is
 /// already there.
-pub(crate) fn install(cargo: &Cargo) -> Result<()> {
-    rustfmt(&cargo.sh)?;
+pub(crate) fn install() -> Result<()> {
+    rustfmt()?;
     for release in RELEASES {
-        let path = fetched(cargo, release)?;
+        let path = fetched(release)?;
         println!(
             "xtask: {} {} is at {}",
             release.name,
@@ -164,27 +165,34 @@ pub(crate) fn install(cargo: &Cargo) -> Result<()> {
 
 /// Installs [`RUSTFMT_TOOLCHAIN`]'s rustfmt through rustup in the minimal profile, unless rustup
 /// already runs it.
-pub(crate) fn rustfmt(sh: &Shell) -> Result<()> {
-    let which = cmd!(sh, "rustup which --toolchain {RUSTFMT_TOOLCHAIN} rustfmt")
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .quiet()
-        .ignore_stdout()
-        .ignore_stderr()
-        .ignore_status();
-    if which.output()?.status.success() {
-        return Ok(());
+pub(crate) fn rustfmt() -> Result<()> {
+    let mut which = rustup(&["which", "--toolchain", RUSTFMT_TOOLCHAIN, "rustfmt"]);
+    which.env("RUSTUP_AUTO_INSTALL", "0");
+    let quiet = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent)
+        .stdout(Stream::Discarded)
+        .stderr(Stream::Discarded);
+    match stdx::process::run(&mut which, quiet) {
+        Ok(_) => return Ok(()),
+        // rustup doesn't run that toolchain's rustfmt.
+        Err(Failure::Exited { .. }) => {}
+        Err(failure) => return Err(failure.to_string().into()),
     }
-    let install = cmd!(
-        sh,
-        "rustup toolchain install {RUSTFMT_TOOLCHAIN} --profile minimal --component rustfmt"
-    );
-    Ok(install.run()?)
+    let install = ["toolchain", "install", RUSTFMT_TOOLCHAIN];
+    let mut install = rustup(&install);
+    install.args(["--profile", "minimal", "--component", "rustfmt"]);
+    ran(&mut install, step(STEP_TIMEOUT)).map(drop)
+}
+
+fn rustup(args: &[&str]) -> Command {
+    let mut rustup = stdx::process::command("rustup", Environment::Inherited);
+    rustup.current_dir(root()).args(args);
+    rustup
 }
 
 /// The pinned `release` in the cache that all of one user's checkouts share. The first call
 /// fetches it with `curl`. It keeps the file only if its SHA-256 is the pin's, unpacks it if it is
 /// a tar, and makes it read-only.
-pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
+pub(crate) fn fetched(release: Release) -> Result<PathBuf> {
     let Release {
         name,
         version,
@@ -230,10 +238,10 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
         .map_err(|error| format!("making {} failed: {error}", staging.display()))?;
     let download = staging.join(file);
     let staged = staging.join(member.unwrap_or(file));
-    let fetched = fetch(&cargo.sh, release, &download)
+    let fetched = fetch(release, &download)
         .and_then(|()| match member {
             None => Ok(()),
-            Some(_) => unpack(&cargo.sh, &download, &staging),
+            Some(_) => unpack(&download, &staging),
         })
         // Every checkout's hard link to the file shares its inode, so the file is read-only, as
         // Go's module cache makes what it unpacks:
@@ -282,7 +290,7 @@ fn cache() -> Result<PathBuf> {
 }
 
 /// Downloads `release` into `to` and fails unless its SHA-256 is the pin's.
-fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
+fn fetch(release: Release, to: &Path) -> Result<()> {
     let Release {
         name,
         version,
@@ -290,17 +298,15 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
         sha256,
         member: _,
     } = release;
-    let curl = cmd!(
-        sh,
-        "curl --location --silent --show-error --fail --proto =https --tlsv1.2 --output {to} {url}"
-    );
-    curl.run()?;
+    let mut curl = stdx::process::command("curl", Environment::Inherited);
+    curl.args(["--location", "--silent", "--show-error", "--fail"])
+        .args(["--proto", "=https", "--tlsv1.2", "--output"])
+        .arg(to)
+        .arg(url);
+    ran(&mut curl, step(STEP_TIMEOUT))?;
     let bytes =
         fs::read(to).map_err(|error| format!("reading {} failed: {error}", to.display()))?;
-    let mut found = String::new();
-    for byte in Sha256::digest(&bytes) {
-        let _ = write!(found, "{byte:02x}");
-    }
+    let found = self::sha256(&bytes);
     if found != sha256 {
         return Err(format!(
             "{url} has the SHA-256 {found}, not the pinned {sha256}: the download is not \
@@ -311,19 +317,23 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Unpacks the tar `archive` into `dir` and then removes the archive.
-fn unpack(sh: &Shell, archive: &Path, dir: &Path) -> Result<()> {
-    cmd!(sh, "tar --extract --file {archive} --directory {dir}").run()?;
-    fs::remove_file(archive)
-        .map_err(|error| format!("removing {} failed: {error}", archive.display()).into())
+/// The SHA-256 of `bytes`, in lowercase hex.
+pub(crate) fn sha256(bytes: &[u8]) -> String {
+    let mut hex = String::new();
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
-/// The target directory, as `cargo metadata` reports it.
-fn target_dir(cargo: &Cargo) -> Result<PathBuf> {
-    let metadata = cargo.cmd(&["metadata", "--format-version=1", "--no-deps", "--locked"]);
-    let metadata: serde_json::Value = serde_json::from_str(&metadata.read()?)?;
-    match metadata["target_directory"].as_str() {
-        Some(dir) => Ok(dir.into()),
-        None => Err("cargo metadata reported no target_directory: expected its path".into()),
-    }
+/// Unpacks the tar `archive` into `dir` and then removes the archive.
+pub(crate) fn unpack(archive: &Path, dir: &Path) -> Result<()> {
+    let mut tar = stdx::process::command("tar", Environment::Inherited);
+    tar.args(["--extract", "--file"])
+        .arg(archive)
+        .arg("--directory")
+        .arg(dir);
+    ran(&mut tar, step(STEP_TIMEOUT))?;
+    fs::remove_file(archive)
+        .map_err(|error| format!("removing {} failed: {error}", archive.display()).into())
 }

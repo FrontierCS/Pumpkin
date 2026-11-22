@@ -3,14 +3,24 @@
 
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use stdx::process::Environment;
+use stdx::Context as _;
+use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 
+use crate::repo::{Repo, STEP_TIMEOUT};
 use crate::settings::{Provider, Settings};
-use crate::{Cargo, Result, install_file, root, sandboxd, star, tools, wait};
+use crate::{
+    BUILD_TIMEOUT, Result, install_file, root, sandboxd, star, step, subcommand, target_dir, tools,
+    wait,
+};
+
+/// The bound of a `./pumpkin` command that xtask runs to its end. pumpkin bounds each of its own
+/// steps. This bound outlasts their sum: the start of a stopped controller (10 min), the
+/// reconnects after it, and the send of the build and the task.
+const PUMPKIN_TIMEOUT: Duration = Duration::from_hours(1);
 
 /// How many lines the smoke's probe prints for each sandbox, each of which must say `ok`.
 const CHECKS_PER_SANDBOX: usize = 6;
@@ -34,12 +44,13 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
 "#;
 
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
-pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
-    star::link(cargo)?;
-    let built = sandboxd(cargo)?;
+pub(crate) fn docker() -> Result<()> {
+    star::link()?;
+    let built = sandboxd()?;
     // A sandbox runs under its role's UID. Give it the installed mode even when the
     // contributor's umask makes Cargo's own artifacts executable only by their owner.
-    let install = cargo.sh.create_dir(root().join("bin/live"))?;
+    let install = root().join("bin/live");
+    fs::create_dir_all(&install).context(format_args!("making {} failed", install.display()))?;
     let sandboxd = install_file(&install, "sandboxd", &built, 0o755)?;
     install_file(
         &install,
@@ -57,40 +68,31 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "--run-ignored",
         "only",
     ];
-    let test = cargo.subcommand(tools::NEXTEST, &test)?;
-    let test = test
+    let mut test = subcommand(tools::NEXTEST, &test)?;
+    test
         // These poison the variables the Docker provider must ignore: passed on to `docker`, they
         // would steer it to an engine that doesn't exist, or to TLS without certificates, so the
         // Docker tests fail unless the provider clears `docker`'s environment.
         .env("DOCKER_HOST", "unix:///nonexistent/pumpkin-poison.sock")
         .env("DOCKER_CONTEXT", "pumpkin-poison-no-such-context")
-        .env("DOCKER_TLS_VERIFY", "1");
-    let test = test
+        .env("DOCKER_TLS_VERIFY", "1")
         .env("PUMPKIN_SANDBOXD", &sandboxd)
         .env_remove("UPDATE_EXPECT");
-    let line = test.to_string();
-    let status = Command::from(test).status();
-    let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
-    if status.success() {
-        return Ok(());
+    let how = step(BUILD_TIMEOUT).named("cargo nextest run");
+    match process::run(&mut test, how) {
+        Ok(_) => Ok(()),
+        Err(failure @ Failure::Exited { .. }) => {
+            Err(format!("{failure}, and run `cargo xtask live docker` again").into())
+        }
+        Err(failure) => Err(failure.to_string().into()),
     }
-    Err(format!(
-        "`{line}` ended with {status}: fix what it printed above, and run `cargo xtask live \
-         docker` again"
-    )
-    .into())
 }
 
 /// Runs `examples/smoke` at `HEAD` on `provider` through the controller, and fails unless every
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. With
 /// `lost`, it loses the run instead, and checks that its sandboxes end by themselves and that a
 /// reap removes the rest. `again` names the command that repeats it.
-pub(crate) fn smoke(
-    cargo: &Cargo,
-    provider: Provider,
-    gpu_model: Option<&str>,
-    lost: bool,
-) -> Result<()> {
+pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
     let again = match provider {
         Provider::Ec2 => "cargo xtask live ec2",
         Provider::Modal => "cargo xtask live modal",
@@ -106,11 +108,11 @@ pub(crate) fn smoke(
         )
     })?;
     let settings = Settings::parse(&text, &config, provider, gpu_model)?;
-    reached(cargo, &settings)?;
-    let (branch, commit) = head(cargo)?;
-    let repo = task_repository(cargo)?;
+    reached(&settings)?;
+    let (branch, commit) = head()?;
+    let repo = task_repository()?;
     if lost {
-        return self::lost(cargo, &settings, &repo, again);
+        return self::lost(&settings, &repo, again);
     }
     let mut run = pumpkin(&repo);
     run.args(["run", "--wait"]);
@@ -128,16 +130,17 @@ pub(crate) fn smoke(
     }
     let record = repo.join(".pumpkin/runs").join(&id);
     failed.extend(checked(&record, settings.modal.is_some()));
-    let left = left(cargo, &settings, &id)?;
+    let left = left(&settings, &id)?;
     if !left.is_empty() {
         failed.push(format!("left after the run: {}", left.join(", ")));
         let mut cancel = pumpkin(&repo);
         cancel.args(["cancel", &id]);
-        let cancelled = cancel
-            .status()
-            .map_err(|error| format!("`pumpkin cancel` failed: {error}"))?;
-        eprintln!("xtask: `pumpkin cancel {id}` ended with {cancelled}");
-        let still = self::left(cargo, &settings, &id)?;
+        let cancelled = process::run(&mut cancel, step(PUMPKIN_TIMEOUT).named("./pumpkin cancel"));
+        match cancelled {
+            Ok(_) => eprintln!("xtask: `./pumpkin cancel {id}` passed"),
+            Err(failure) => eprintln!("xtask: {failure}"),
+        }
+        let still = self::left(&settings, &id)?;
         if !still.is_empty() {
             failed.push(format!("left after `pumpkin cancel`: {}", still.join(", ")));
         }
@@ -163,7 +166,7 @@ const LOST_BY: Duration = Duration::from_mins(94 + 2 + 10);
 /// How often a lost run's sandboxes are looked for.
 const LOST_EVERY: Duration = Duration::from_mins(1);
 
-fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<()> {
+fn lost(settings: &Settings, repo: &Path, again: &str) -> Result<()> {
     let pumpkin = |args: &[&str]| {
         let mut command = pumpkin(repo);
         command.args(args);
@@ -179,22 +182,22 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
         args.extend(["--arg", gpu]);
     }
     args.push("smoke/task.star");
-    let ran = pumpkin(&args).stderr(Stdio::inherit()).output();
-    let ran = ran.map_err(|error| format!("running `./pumpkin run` failed: {error}"))?;
+    let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent)
+        .stderr(Stream::Inherited)
+        .named("./pumpkin run");
+    let ran = process::run(&mut pumpkin(&args), how).map_err(|failure| failure.to_string())?;
     let id = String::from_utf8_lossy(&ran.stdout).trim().to_owned();
-    if !ran.status.success() || id.is_empty() {
-        return Err(format!(
-            "`./pumpkin run` ended with {}, as it said above",
-            ran.status
-        )
-        .into());
+    if id.is_empty() {
+        return Err(
+            "`./pumpkin run` printed no run id: expected the id of the run it started".into(),
+        );
     }
     let leases = if gpu.is_some() { 2 } else { 1 };
     held(pumpkin(&["wait", &id]), &id, leases)?;
-    kill_job(cargo, settings, repo, &id)?;
+    kill_job(settings, repo, &id)?;
     let killed = Instant::now();
     println!("xtask: run {id} is lost: its job was killed");
-    let before = ended_by_themselves(cargo, settings, repo, &id, killed)?;
+    let before = ended_by_themselves(settings, repo, &id, killed)?;
     if before.is_empty() {
         println!(
             "xtask: the providers hold nothing of run {id} before the reap, so this check doesn't \
@@ -206,17 +209,19 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
             before.join(", ")
         );
     }
-    let reaped = pumpkin(&["reap"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::piped())
-        .output();
-    let reaped = reaped.map_err(|error| format!("`./pumpkin reap` failed: {error}"))?;
+    let how = Run::new(Bound::Within(PUMPKIN_TIMEOUT), Echo::Silent)
+        .stdout(Stream::Inherited)
+        .named("./pumpkin reap");
+    let reaped = match process::run(&mut pumpkin(&["reap"]), how) {
+        Ok(output) | Err(Failure::Exited { output, .. }) => output,
+        Err(failure) => return Err(failure.to_string().into()),
+    };
     let said = String::from_utf8_lossy(&reaped.stderr);
     eprint!("{said}");
     // `reap` reaps every run on the controller, and fails if any one can't be reaped: only a
     // failure that names other runs alone isn't this check's.
     let failed = !reaped.status.success() && !wait::others_failed(&said, &id);
-    let left = left(cargo, settings, &id)?;
+    let left = left(settings, &id)?;
     println!(
         "xtask: `./pumpkin reap` ended with {}; left of run {id}: {}",
         reaped.status,
@@ -235,14 +240,13 @@ fn lost(cargo: &Cargo, settings: &Settings, repo: &Path, again: &str) -> Result<
 /// Waits until no sandbox of run `id` is left, looking every `LOST_EVERY`, and returns what else of
 /// it the providers hold, its schedules. Fails if a sandbox is left `LOST_BY` after `killed`.
 fn ended_by_themselves(
-    cargo: &Cargo,
     settings: &Settings,
     repo: &Path,
     id: &str,
     killed: Instant,
 ) -> Result<Vec<String>> {
     loop {
-        let left = left(cargo, settings, id)?;
+        let left = left(settings, id)?;
         let sandboxes: Vec<&String> = left
             .iter()
             .filter(|left| !left.starts_with("schedule "))
@@ -270,11 +274,7 @@ fn ended_by_themselves(
 /// Follows `wait`, a `./pumpkin wait` of run `id`, until it has said that `leases` leases are
 /// ready, and stops it.
 fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
-    let wait = wait.stderr(Stdio::piped()).spawn();
-    let mut wait = wait.map_err(|error| format!("running `./pumpkin wait` failed: {error}"))?;
-    let Some(stderr) = wait.stderr.take() else {
-        unreachable!("the child's standard error is missing, though it is piped just above")
-    };
+    let (mut wait, stderr) = started(&mut wait)?;
     let mut ready = 0;
     for line in BufReader::new(stderr).lines() {
         let line = line.map_err(|error| format!("reading `./pumpkin wait` failed: {error}"))?;
@@ -299,7 +299,7 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
 
 /// Kills the unit of job `id` on the controller to leave a lost run, with the client's key and
 /// pinned host key for that controller.
-fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result<()> {
+fn kill_job(settings: &Settings, repo: &Path, id: &str) -> Result<()> {
     let shared = repo
         .join(".pumpkin/controller")
         .join(format!("{}.{}", settings.name, settings.region));
@@ -316,10 +316,8 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
     let kept = PathBuf::from(home).join(".config/pumpkin/ssh");
     let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
     let alias = format!("HostKeyAlias={}.{}", settings.name, settings.region);
-    cargo
-        .sh
-        .cmd("ssh")
-        .args(["-F", "/dev/null", "-i"])
+    let mut ssh = process::command("ssh", Environment::Inherited);
+    ssh.args(["-F", "/dev/null", "-i"])
         .arg(kept.join("key"))
         .args([
             "-o",
@@ -334,57 +332,62 @@ fn kill_job(cargo: &Cargo, settings: &Settings, repo: &Path, id: &str) -> Result
             &alias,
             &host,
             &kill,
-        ])
-        .run()?;
+        ]);
+    process::run(&mut ssh, step(STEP_TIMEOUT).named("ssh"))
+        .map_err(|failure| failure.to_string())?;
     Ok(())
 }
 
 /// Fails, saying what to give, unless the credentials that the smoke's checks use reach AWS,
 /// `EventBridge` Scheduler's list of schedules and, for Modal, the profile's workspace.
-fn reached(cargo: &Cargo, settings: &Settings) -> Result<()> {
-    let aws = cargo
-        .sh
-        .cmd("aws")
-        .args(["--no-cli-pager", "--region", &settings.region]);
-    let identity = aws
-        .args(["sts", "get-caller-identity"])
-        .quiet()
-        .ignore_stdout()
-        .run();
-    identity.map_err(|error| {
-        format!(
-            "{error}: give `aws` the credentials of the controller's account, as `aws configure` \
-             does, and run this again"
-        )
-    })?;
+fn reached(settings: &Settings) -> Result<()> {
+    let credentials = "give `aws` the credentials of the controller's account, as `aws \
+                       configure` does, and run this again";
+    listed(
+        &mut aws(settings, &["sts", "get-caller-identity"]),
+        Some(credentials),
+    )?;
     // A client whose policy can't list schedules is refused here, before a run, not at its end.
-    schedules(cargo, settings, "no-such-run").map_err(|error| {
-        format!(
-            "{error}: give the client the policy that `deploy/aws` makes, which lets it list \
-             `EventBridge` Scheduler's schedules, by applying it again, and run this again"
-        )
-    })?;
+    let policy = "give the client the policy that `deploy/aws` makes, which lets it list \
+                  `EventBridge` Scheduler's schedules, by applying it again, and run this again";
+    schedules(settings, "no-such-run", Some(policy))?;
     if let Some(modal) = &settings.modal {
-        let token = modal_python(cargo, modal, MODAL_LIST, &["no-such-run"]);
-        token.map_err(|error| {
-            format!(
-                "{error}: give Modal's profile `{}` a token, as `uvx --from {MODAL_SDK} modal \
-                 token new --profile {}` does, and run this again",
-                modal.profile, modal.profile
-            )
-        })?;
+        let token = format!(
+            "give Modal's profile `{}` a token, as `uvx --from {MODAL_SDK} modal token new \
+             --profile {}` does, and run this again",
+            modal.profile, modal.profile
+        );
+        modal_python(modal, MODAL_LIST, &["no-such-run"], Some(&token))?;
     }
     Ok(())
 }
 
+/// The message of `failure`. If `expected` is given and the command exited with a status other
+/// than 0, the message says to do `expected`. It then leaves out what the failure says to fix.
+fn refused(failure: &Failure, expected: Option<&str>) -> String {
+    match (failure, expected) {
+        (Failure::Exited { name, output, .. }, Some(expected)) => {
+            let status = output.status;
+            match failure.reported() {
+                reported if reported.is_empty() => {
+                    format!("`{name}` failed with {status}: {expected}")
+                }
+                reported => format!("`{name}` failed with {status}: {reported}: {expected}"),
+            }
+        }
+        (failure, _) => failure.to_string(),
+    }
+}
+
 /// The branch and the commit of `HEAD`. Fails if `HEAD` is detached or the working tree differs
 /// from it in a tracked file.
-fn head(cargo: &Cargo) -> Result<(String, String)> {
-    let git = |args: &[&str]| cargo.sh.cmd("git").args(args).read();
-    let branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+fn head() -> Result<(String, String)> {
+    let repo = Repo { root: root() };
+    let branch = repo
+        .git(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|_| "HEAD is detached: check out a branch that names the commit to check")?;
-    let commit = git(&["rev-parse", "HEAD"])?;
-    let changed = git(&["status", "--porcelain", "--untracked-files=no"])?;
+    let commit = repo.git(["rev-parse", "HEAD"])?;
+    let changed = repo.git(["status", "--porcelain", "--untracked-files=no"])?;
     if !changed.is_empty() {
         return Err(format!(
             "the working tree has changes that `HEAD` doesn't hold, and a live run builds `HEAD`: \
@@ -398,25 +401,13 @@ fn head(cargo: &Cargo) -> Result<(String, String)> {
 /// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
 /// keeps its `.git` and `.pumpkin` from one live run to the next. The executable is installed
 /// from this checkout so an unpublished change can be exercised.
-fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
-    let metadata = cargo
-        .cmd(&["metadata", "--format-version=1", "--no-deps"])
-        .read()?;
-    let metadata: serde_json::Value = serde_json::from_str(&metadata)?;
-    let Some(target) = metadata["target_directory"].as_str() else {
-        return Err("`cargo metadata` named no target directory: expected one".into());
-    };
-    let repo = Path::new(target).join("live/repo");
+fn task_repository() -> Result<PathBuf> {
+    let repo = target_dir()?.join("live/repo");
     let made =
         |path: &Path, error: std::io::Error| format!("writing {} failed: {error}", path.display());
     fs::create_dir_all(&repo).map_err(|error| made(&repo, error))?;
     if !repo.join(".git").exists() {
-        cargo
-            .sh
-            .cmd("git")
-            .args(["init", "--quiet"])
-            .arg(&repo)
-            .run()?;
+        Repo { root: &repo }.git(["init", "--quiet"])?;
     }
     // The last run's copy goes, so that no file that `examples` has since lost is left behind.
     let read = |error: std::io::Error| format!("reading {} failed: {error}", repo.display());
@@ -435,7 +426,7 @@ fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
     }
     copy_tree(&root().join("examples"), &repo)?;
     let workspace = repo.join(".pumpkin");
-    crate::build(cargo, Some(workspace.clone()), crate::MUSL)?;
+    crate::build(Some(workspace.clone()), crate::MUSL)?;
     let ignore = workspace.join(".gitignore");
     fs::write(&ignore, "*\n").map_err(|error| made(&ignore, error))?;
     let entry = repo.join("pumpkin");
@@ -445,10 +436,7 @@ fn task_repository(cargo: &Cargo) -> Result<PathBuf> {
 }
 
 fn pumpkin(repo: &Path) -> Command {
-    let mut command = stdx::process::command(repo.join("pumpkin"), Environment::Inherited);
-    for var in stdx::process::cargo_package_vars() {
-        command.env_remove(var);
-    }
+    let mut command = process::command(repo.join("pumpkin"), Environment::Cargo);
     command.current_dir(repo).env_remove("PUMPKIN_WORKSPACE");
     command
 }
@@ -473,13 +461,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// Runs `run`, echoing what it says, and returns the status it ends with and the id of the run it
 /// started, which its first words name.
 fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
-    let mut child = run
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("running `./pumpkin` failed: {error}"))?;
-    let Some(stderr) = child.stderr.take() else {
-        unreachable!("the child's standard error is missing, though it is piped just above")
-    };
+    let (mut child, stderr) = started(&mut run)?;
     let mut id = None;
     for line in BufReader::new(stderr).lines() {
         let line =
@@ -503,6 +485,16 @@ fn followed(mut run: Command) -> Result<(String, ExitStatus)> {
         )
         .into()),
     }
+}
+
+/// Starts `pumpkin`, a `./pumpkin` command that the caller follows. It returns the child and the
+/// pipe of its standard error.
+fn started(pumpkin: &mut Command) -> Result<(Child, ChildStderr)> {
+    let mut child = process::spawn(pumpkin, Stdio::inherit(), Stdio::inherit(), Stdio::piped())?;
+    let Some(stderr) = child.stderr.take() else {
+        unreachable!("the child's standard error is missing, though it starts piped")
+    };
+    Ok((child, stderr))
 }
 
 /// What is wrong in the record of a smoke run at `record`: a run that didn't finish, a probe that
@@ -572,20 +564,14 @@ fn checked(record: &Path, gpu: bool) -> Vec<String> {
 }
 
 /// What of run `id` the providers still hold: an instance not terminated, a schedule, a sandbox.
-fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
-    let aws = |args: &[&str]| -> Result<serde_json::Value> {
-        let cmd = cargo.sh.cmd("aws").args([
-            "--no-cli-pager",
-            "--output",
-            "json",
-            "--region",
-            &settings.region,
-        ]);
-        Ok(serde_json::from_str(&cmd.args(args).read()?)?)
-    };
+fn left(settings: &Settings, id: &str) -> Result<Vec<String>> {
     let mut left = Vec::new();
     let filter = format!("Name=tag:pumpkin:run,Values={id}");
-    let described = aws(&["ec2", "describe-instances", "--filters", &filter])?;
+    let mut described = aws(
+        settings,
+        &["ec2", "describe-instances", "--filters", &filter],
+    );
+    let described = listed(&mut described, None)?;
     let reservations = described["Reservations"]
         .as_array()
         .cloned()
@@ -605,9 +591,9 @@ fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
             left.push(format!("EC2 instance {} ({state})", instance["InstanceId"]));
         }
     }
-    left.extend(schedules(cargo, settings, id)?);
+    left.extend(schedules(settings, id, None)?);
     if let Some(modal) = &settings.modal {
-        let listed = modal_python(cargo, modal, MODAL_LIST, &[id])?;
+        let listed = modal_python(modal, MODAL_LIST, &[id], None)?;
         left.extend(
             listed
                 .lines()
@@ -619,15 +605,9 @@ fn left(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
 
 /// The schedules of `EventBridge` Scheduler whose names start with `id`, each as
 /// `schedule <group>/<name>`.
-fn schedules(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>> {
-    let list = cargo
-        .sh
-        .cmd("aws")
-        .args(["--no-cli-pager", "--output", "json", "--region"]);
-    let list =
-        list.arg(&settings.region)
-            .args(["scheduler", "list-schedules", "--name-prefix", id]);
-    let listed: serde_json::Value = serde_json::from_str(&list.read()?)?;
+fn schedules(settings: &Settings, id: &str, expected: Option<&str>) -> Result<Vec<String>> {
+    let list = ["scheduler", "list-schedules", "--name-prefix", id];
+    let listed = listed(&mut aws(settings, &list), expected)?;
     let listed = listed["Schedules"].as_array().cloned().unwrap_or_default();
     let named = listed
         .iter()
@@ -635,23 +615,47 @@ fn schedules(cargo: &Cargo, settings: &Settings, id: &str) -> Result<Vec<String>
     Ok(named.collect())
 }
 
-/// The output of `script` run with `args` in a Python that has the Modal SDK, under the profile
+/// An `aws` with `args`, in the controller's region, which prints JSON.
+// Its global options follow the command, so that a failure names the command.
+fn aws(settings: &Settings, args: &[&str]) -> Command {
+    let mut aws = process::command("aws", Environment::Inherited);
+    aws.args(args).args([
+        "--no-cli-pager",
+        "--output",
+        "json",
+        "--region",
+        &settings.region,
+    ]);
+    aws
+}
+
+/// What `command` printed, as JSON. If the command fails, the error says what [`refused`] says.
+fn listed(command: &mut Command, expected: Option<&str>) -> Result<serde_json::Value> {
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
+    let output = process::run(command, how).map_err(|failure| refused(&failure, expected))?;
+    let shown = process::shown(command);
+    let json = serde_json::from_slice(&output.stdout);
+    Ok(json.context(format_args!("`{shown}` printed what isn't JSON"))?)
+}
+
+/// What `script` printed, run with `args` in a Python that has the Modal SDK, under the profile
 /// of `modal`.
 fn modal_python(
-    cargo: &Cargo,
     modal: &crate::settings::Modal,
     script: &str,
     args: &[&str],
+    expected: Option<&str>,
 ) -> Result<String> {
-    let python = cargo
-        .sh
-        .cmd("uv")
-        .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK]);
-    let python = python.args(["python", "-I", "-c", script]).args(args);
-    let python = python.env("MODAL_PROFILE", &modal.profile);
-    let python = match &modal.config {
-        Some(config) => python.env("MODAL_CONFIG_PATH", config),
-        None => python,
-    };
-    Ok(python.quiet().read()?)
+    let mut python = process::command("uv", Environment::Inherited);
+    python
+        .args(["run", "--quiet", "--no-project", "--with", MODAL_SDK])
+        .args(["python", "-I", "-c", script])
+        .args(args)
+        .env("MODAL_PROFILE", &modal.profile);
+    if let Some(config) = &modal.config {
+        python.env("MODAL_CONFIG_PATH", config);
+    }
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent).named("uv run python");
+    let output = process::run(&mut python, how).map_err(|failure| refused(&failure, expected))?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

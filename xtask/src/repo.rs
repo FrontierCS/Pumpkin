@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use stdx::Context as _;
@@ -11,8 +12,8 @@ use stdx::process::{self, Bound, Echo, Environment, Run, printed};
 
 use crate::Result;
 
-/// The bound of each command that xtask runs as a step of a check, which takes seconds; one that
-/// lasts past it is taken as hung, and killed.
+/// The bound of each command that xtask runs as a step, such as a check or a download. Such a step
+/// takes seconds or minutes. One that outlasts the bound counts as hung, and xtask kills it.
 // TigerBeetle's default bound of each command that its scripts run:
 // https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/shell.zig#L462-L469
 pub(crate) const STEP_TIMEOUT: Duration = Duration::from_mins(10);
@@ -35,11 +36,17 @@ pub(crate) struct Repo<'a> {
 }
 
 impl Repo<'_> {
+    /// A `git` with `args`, at the root.
+    pub(crate) fn command<I: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = I>) -> Command {
+        let mut git = process::command("git", Environment::Only(&["PATH"]));
+        git.current_dir(self.root).args(args).envs(GIT_PINNED);
+        git
+    }
+
     /// What `git` with `args` printed, at the root, as text less its trailing newline; an error
     /// if it failed, saying what git reported.
     pub(crate) fn git<I: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = I>) -> Result<String> {
-        let mut git = process::command("git", Environment::Only(&["PATH"]));
-        git.current_dir(self.root).args(args).envs(GIT_PINNED);
+        let mut git = self.command(args);
         let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
         let output = process::run(&mut git, how).map_err(|failure| failure.to_string())?;
         let shown = process::shown(&git);
