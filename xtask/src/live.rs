@@ -35,7 +35,6 @@ for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"pumpkin-run": sys.ar
 
 /// Runs the tests that need a Docker engine, with the static `sandboxd` they run in a sandbox.
 pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
-    tools::require(cargo, tools::NEXTEST)?;
     star::link(cargo)?;
     let built = sandboxd(cargo)?;
     // A sandbox runs under its role's UID. Give it the installed mode even when the
@@ -48,7 +47,7 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         &built.with_file_name("ec2-boot"),
         0o755,
     )?;
-    let test = cargo.cmd(&[
+    let test = [
         "nextest",
         "run",
         "--workspace",
@@ -57,7 +56,8 @@ pub(crate) fn docker(cargo: &Cargo) -> Result<()> {
         "live",
         "--run-ignored",
         "only",
-    ]);
+    ];
+    let test = cargo.subcommand(tools::NEXTEST, &test)?;
     let test = test
         // These poison the variables the Docker provider must ignore: passed on to `docker`, they
         // would steer it to an engine that doesn't exist, or to TLS without certificates, so the

@@ -2,7 +2,7 @@
 //! beside `pumpkin`, and `ci`'s check that the repository's own `.star` files are formatted.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use stdx::process::{self, Bound, Echo, Environment, Run, Stream};
@@ -19,13 +19,13 @@ const UNCHECKED: &str = "crates/lang/tests/";
 /// [`link`] makes, which `.cargo/config.toml` names.
 const LINK: &str = env!("PUMPKIN_BUILDIFIER");
 
-/// The pinned buildifier, fetched once into the target directory ([`tools::fetched`]).
+/// The pinned buildifier, fetched on first use ([`tools::fetched`]).
 pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
     tools::fetched(cargo, tools::BUILDIFIER)
 }
 
-/// Makes [`LINK`] a symbolic link to the pinned buildifier, fetched if need be, replacing what is
-/// there, and returns the pinned one's path.
+/// Replaces what is at [`LINK`] with the pinned buildifier, and returns that path. It fetches
+/// buildifier first if the cache lacks it.
 pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     let link = Path::new(LINK);
     let Some(dir) = link.parent() else {
@@ -33,22 +33,21 @@ pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     };
     let buildifier = buildifier(cargo)?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
-    // Made beside it, then renamed over it, so that a test never finds the link missing. The
-    // target is absolute, so that the link in a copy of the tree, as cargo-mutants makes,
-    // finds it too.
-    let made = dir.join(format!(".buildifier.{}", std::process::id()));
-    let linked =
-        std::os::unix::fs::symlink(&buildifier, &made).and_then(|()| fs::rename(&made, link));
-    if let Err(error) = linked {
-        // Made and not renamed, or not made.
-        let _ = fs::remove_file(&made);
-        return Err(format!("linking {} failed: {error}", link.display()).into());
-    }
-    Ok(buildifier)
+    // The tests hard-link it again, so it must lie on the checkout's filesystem.
+    tools::replace(link, |made| linked(&buildifier, made))?;
+    Ok(link.to_owned())
 }
 
-/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build`
-/// puts it beside an installed one: a link to it, which replaces what is there.
+/// Makes `to` a hard link to `from`, or a copy where the two lie on different filesystems.
+fn linked(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => fs::copy(from, to).map(drop),
+        linked => linked,
+    }
+}
+
+/// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build` does
+/// for an installed one. A link to it, or a copy, replaces what is there.
 pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
     let beside = pumpkin.with_file_name("buildifier");
     match fs::remove_file(&beside) {
@@ -57,7 +56,7 @@ pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
         }
         Ok(()) | Err(_) => {}
     }
-    fs::hard_link(buildifier, &beside)
+    linked(buildifier, &beside)
         .map_err(|error| format!("linking {} failed: {error}", beside.display()).into())
 }
 

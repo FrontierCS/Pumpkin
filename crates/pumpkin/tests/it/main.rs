@@ -1186,7 +1186,7 @@ fn buildifier() -> PathBuf {
     let link = env!("PUMPKIN_BUILDIFIER");
     fs::canonicalize(link).unwrap_or_else(|error| {
         panic!(
-            "{link} doesn't lead to the formatter ({error}): make it with `cargo xtask \
+            "{link} doesn't lead to the pinned formatter ({error}): link it with `cargo xtask \
              install-tools`"
         )
     })

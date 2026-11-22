@@ -41,9 +41,6 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// The target of the static binaries in an install.
 const MUSL: &str = "x86_64-unknown-linux-musl";
 
-/// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
-const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
-
 mod flags {
     #![expect(
         unreachable_pub,
@@ -69,7 +66,8 @@ mod flags {
             }
 
             /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails. They reach no Docker engine, network or cloud.
+            /// fails. They reach no Docker engine or cloud. They reach the network only to fetch
+            /// crates and pinned tools on first use.
             cmd ci {}
 
             /// Writes the figures drawn from the workspace, which `ci` checks are up to date:
@@ -160,10 +158,12 @@ mod flags {
                 optional filter: String
             }
 
-            /// Installs each contributor tool that xtask runs, such as cargo-nextest, at its
-            /// pinned version, fetches each that its project releases as a file, such as
-            /// TypeScript's compiler, into the target directory, and links the pinned buildifier
-            /// where the tests find it, `bin/buildifier`.
+            /// Fetches each contributor tool that xtask runs, such as cargo-nextest, at its pinned
+            /// version. The tools go into the cache that every checkout shares:
+            /// `$XDG_CACHE_HOME/pumpkin/tools`, or `~/.cache/pumpkin/tools` when that is unset.
+            /// It also installs the nightly rustfmt through rustup. It links the pinned buildifier
+            /// at `bin/buildifier`, where the tests find it. Each command fetches the tools it runs
+            /// on first use, so this one is for working offline later.
             cmd install-tools {}
         }
     }
@@ -291,7 +291,7 @@ fn try_main() -> Result<()> {
     let cargo = Cargo::new()?;
     match flags.subcommand {
         flags::XtaskCmd::Fmt(flags::Fmt { check }) => {
-            let fmt = cargo.fmt();
+            let fmt = cargo.fmt()?;
             let fmt = if check { fmt.arg("--check") } else { fmt };
             fmt.run()?;
             Ok(())
@@ -376,12 +376,24 @@ impl Cargo {
         self.package_vars.iter().fold(cmd, Cmd::env_remove)
     }
 
-    /// The pinned formatter, without implicit installation or an inherited binary override.
-    fn fmt(&self) -> Cmd<'_> {
-        let toolchain = format!("+{RUSTFMT_TOOLCHAIN}");
-        self.cmd(&[&toolchain, "fmt", "--all"])
+    /// The command that runs `release`'s cargo subcommand, such as `nextest`. It runs the pinned
+    /// release, not whichever one cargo finds, and fetches the release on first use. `args` begin
+    /// with the subcommand's name, as cargo passes it.
+    fn subcommand(&self, release: tools::Release, args: &[&str]) -> Result<Cmd<'_>> {
+        let binary = tools::fetched(self, release)?;
+        let cmd = self.sh.cmd(binary).args(args);
+        Ok(self.package_vars.iter().fold(cmd, Cmd::env_remove))
+    }
+
+    /// The pinned formatter. It installs the toolchain on first use, so that rustup never
+    /// installs the whole default profile implicitly. It ignores an inherited binary override.
+    fn fmt(&self) -> Result<Cmd<'_>> {
+        tools::rustfmt(&self.sh)?;
+        let toolchain = format!("+{}", tools::RUSTFMT_TOOLCHAIN);
+        Ok(self
+            .cmd(&[&toolchain, "fmt", "--all"])
             .env("RUSTUP_AUTO_INSTALL", "0")
-            .env_remove("RUSTFMT")
+            .env_remove("RUSTFMT"))
     }
 }
 
@@ -400,8 +412,7 @@ fn root() -> &'static Path {
 /// Runs the checks every change must pass, in order, and stops at the first that fails. The
 /// tests leave out those ignored, which [`live::docker`] runs.
 fn ci(cargo: &Cargo) -> Result<()> {
-    tools::require(cargo, tools::NEXTEST)?;
-    cargo.fmt().arg("--check").run()?;
+    cargo.fmt()?.arg("--check").run()?;
     let repo = Repo { root: root() };
     tidy::check(&repo)?;
     figure::check(root(), &metadata(cargo)?)?;
@@ -414,7 +425,10 @@ fn ci(cargo: &Cargo) -> Result<()> {
     let pumpkin = tests_pumpkin(cargo)?;
     star::place(&buildifier, &pumpkin)?;
     star::check(&repo, &pumpkin)?;
-    let test = cargo.cmd(&["nextest", "run", "--workspace", "--locked"]);
+    let test = cargo.subcommand(
+        tools::NEXTEST,
+        &["nextest", "run", "--workspace", "--locked"],
+    )?;
     let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
     // ci checks snapshots, never rewrites them.
     tests(
@@ -466,9 +480,9 @@ fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
 /// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs; then prints `git diff --stat`,
 /// also if a test failed.
 fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
-    tools::require(cargo, tools::NEXTEST)?;
     star::link(cargo)?;
-    let test = cargo.cmd(&["nextest", "run", "--locked", "--package", package]);
+    let test = ["nextest", "run", "--locked", "--package", package];
+    let test = cargo.subcommand(tools::NEXTEST, &test)?;
     let test = test.args(filter).env("UPDATE_EXPECT", "1");
     let ran = test.run();
     cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
@@ -480,9 +494,18 @@ fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
 /// mutates that source whole, then runs the mutants missed again on the merge base, to name those
 /// that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
 fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
-    tools::require(cargo, tools::MUTANTS)?;
-    tools::require(cargo, tools::NEXTEST)?;
     let buildifier = star::link(cargo)?;
+    // cargo-mutants runs `cargo nextest`, which runs the first cargo-nextest on `PATH`. The
+    // pinned one goes first here. Cargo puts its own `bin`, where `cargo install` puts one,
+    // before it only if `PATH` doesn't name that `bin`.
+    let nextest = tools::fetched(cargo, tools::NEXTEST)?;
+    let dir = nextest.parent().map(Path::to_path_buf);
+    let path = env::var_os("PATH").unwrap_or_default();
+    let path = env::join_paths(dir.into_iter().chain(env::split_paths(&path)))?;
+    let cargo_mutants = |args: &[&str]| {
+        let run = cargo.subcommand(tools::MUTANTS, &[&["mutants"], args].concat());
+        run.map(|run| run.env("PATH", &path))
+    };
     let mut again = "cargo xtask mutants".to_owned();
     for path in paths {
         again = format!("{again} {}", path.display());
@@ -505,11 +528,12 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let files: Vec<_> = files
         .flat_map(|glob| ["--file".into(), glob.into_os_string()])
         .collect();
-    let whole = !paths.is_empty() && unchanged(cargo, &base, &files)?;
+    let list = cargo_mutants(&["--list-files"])?;
+    let whole = !paths.is_empty() && unchanged(sh, list, &base, &files)?;
     let run = if whole {
-        cargo.cmd(&["mutants"]).args(&files)
+        cargo_mutants(&[])?.args(&files)
     } else {
-        cargo.cmd(&["mutants", "--in-diff"]).arg(&diff_path)
+        cargo_mutants(&["--in-diff"])?.arg(&diff_path)
     };
     let report = root().join("mutants.out");
     if !missed(run, &again)? {
@@ -532,7 +556,7 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     // Its tests find the formatter by the link in their own tree, which the archive doesn't hold.
     let bin = sh.create_dir(tree.join("bin"))?;
     std::os::unix::fs::symlink(&buildifier, bin.join("buildifier"))?;
-    let run = cargo.cmd(&["mutants", "--iterate", "--dir"]).arg(&tree);
+    let run = cargo_mutants(&["--iterate", "--dir"])?.arg(&tree);
     missed(run.arg("--output").arg(root()).args(&files), &again)?;
     let brought = sh.read_file(report.join("caught.txt"))?;
     let brought = if brought.is_empty() {
@@ -550,13 +574,12 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
 
 /// Whether the source files that `files`, cargo-mutants' `--file` arguments, select are the same
 /// in the working tree as on `base`, and there are any.
-fn unchanged(cargo: &Cargo, base: &str, files: &[OsString]) -> Result<bool> {
-    let listed = cargo.cmd(&["mutants", "--list-files"]).args(files).read()?;
+fn unchanged(sh: &Shell, list: Cmd<'_>, base: &str, files: &[OsString]) -> Result<bool> {
+    let listed = list.args(files).read()?;
     let sources: Vec<&str> = listed.lines().collect();
     if sources.is_empty() {
         return Ok(false);
     }
-    let sh = &cargo.sh;
     let diff = cmd!(sh, "git diff --quiet {base} -- {sources...}")
         .quiet()
         .ignore_status();

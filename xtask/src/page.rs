@@ -13,7 +13,7 @@ const PAGE: &str = "crates/pumpkin/src/view/page";
 /// Fails unless the page's modules pass their type check, the compiler printing each error with
 /// its line and column.
 pub(crate) fn check(cargo: &Cargo) -> Result<()> {
-    let tsc = tools::found(cargo, tools::TSC)?;
+    let tsc = tools::fetched(cargo, tools::TSC)?;
     let config = root().join(PAGE).join("tsconfig.json");
     let mut check = process::command(tsc, Environment::Inherited);
     check.current_dir(root()).arg("--project").arg(config);
