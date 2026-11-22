@@ -93,6 +93,16 @@ Ctrl-C reaches it, and its command alone is killed at the bound.
 **Architecture Invariant:** it holds the workspace's only `unsafe`, the `sigaction` in
 `signal::catch`. The workspace's lints deny `unsafe_code`, and that function alone expects it.
 
+### `crates/install`
+
+The files of an install, `pumpkin` and those beside it in `bin/` (`File`): which files there are,
+their names, and which are executable. `xtask` takes them from here to lay an install out
+(`build`), to check its archived copy (`release`) and to place files for its checks. `pumpkin`
+takes them to find the files beside itself, and to hash its own install to send to a controller.
+
+**Architecture Invariant:** it holds data and does no I/O, as `recipe` and `library` do. It is
+`#![no_std]`, and its manifest names no dependency.
+
 ### `crates/schema`
 
 The formats that Pumpkin's programs share: the workflow IR (`ir`); a workflow parsed and placed

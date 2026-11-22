@@ -377,6 +377,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "install"
+version = "0.0.0"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -577,6 +581,7 @@ dependencies = [
  "engine",
  "expect-test",
  "gateway",
+ "install",
  "jiff",
  "lang",
  "libc",
@@ -1112,6 +1117,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "install",
  "proc-macro2",
  "serde_json",
  "sha2",

@@ -117,9 +117,8 @@ mod flags {
             /// the static ec2-boot beside it, which the EC2 provider's sandboxd image holds.
             cmd sandboxd {}
 
-            /// Builds `pumpkin`, the static sandboxd and ec2-boot, and puts them in `<root>/bin`
-            /// with the pinned buildifier, the Modal helper and its lock. Prints each file's path.
-            /// The pinned tools require Linux on x86-64.
+            /// Builds the files of an install, which `install::File` lists, and puts them in
+            /// `<root>/bin`. Prints each file's path. The pinned tools require Linux on x86-64.
             cmd build {
                 /// The directory whose `bin` they go in: this checkout's `.pumpkin` by default.
                 optional --root dir: PathBuf
@@ -616,7 +615,7 @@ fn tree(repo: &Repo<'_>, base: &str, scratch: &Path, buildifier: &Path) -> Resul
     let bin = tree.join("bin");
     fs::create_dir_all(&bin).context(format_args!("making {} failed", bin.display()))?;
     tools::unpack(&archive, &tree)?;
-    let link = bin.join("buildifier");
+    let link = bin.join(install::File::Buildifier.name());
     let linked = std::os::unix::fs::symlink(buildifier, &link);
     linked.context(format_args!("making {} failed", link.display()))?;
     Ok(tree)
@@ -718,11 +717,10 @@ fn executables(mut build: Command) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds `pumpkin` for `target` and the static `sandboxd` and `ec2-boot`, and installs them
-/// with the Modal provider's helper and its lock, and the pinned
-/// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
-/// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
-/// `root`, says if `<root>/bin` is not on `PATH`.
+/// Builds the files of an install, which [`install::File`] lists, with `pumpkin` for `target`.
+/// Installs them in `<root>/bin`, made if need be, and replaces what is there. `<root>` is `root`
+/// made absolute, or this checkout's `.pumpkin`. Prints each one's path. Without a `root`, says if
+/// `<root>/bin` is not on `PATH`.
 fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
@@ -732,25 +730,21 @@ fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     // The Modal provider's helper and its lock, which `pumpkin` finds beside it, under the
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
-    let mut built = vec![
-        ("pumpkin", release_binary("pumpkin", target)?, 0o755),
-        ("buildifier", star::buildifier()?, 0o755),
-    ];
+    let pumpkin = release_binary("pumpkin", target)?;
+    let buildifier = star::buildifier()?;
     let sandboxd = sandboxd()?;
-    built.extend([
-        ("ec2-boot", sandboxd.with_file_name("ec2-boot"), 0o755),
-        ("sandboxd", sandboxd, 0o755),
-        ("pumpkin-modal.py", helper.join("pumpkin-modal.py"), 0o644),
-        (
-            "pumpkin-modal.py.lock",
-            helper.join("pumpkin-modal.py.lock"),
-            0o644,
-        ),
-    ]);
     fs::create_dir_all(&bin)
         .map_err(|error| format!("making {} failed: {error}", bin.display()))?;
-    for (name, from, mode) in built {
-        let to = install_file(&bin, name, &from, mode)?;
+    for file in install::File::ALL {
+        let from = match file {
+            install::File::Pumpkin => pumpkin.clone(),
+            install::File::Buildifier => buildifier.clone(),
+            install::File::Ec2Boot => sandboxd.with_file_name(file.name()),
+            install::File::Sandboxd => sandboxd.clone(),
+            install::File::ModalHelper | install::File::ModalLock => helper.join(file.name()),
+        };
+        let mode = if file.is_executable() { 0o755 } else { 0o644 };
+        let to = install_file(&bin, file.name(), &from, mode)?;
         println!("{}", to.display());
     }
     let path = env::var_os("PATH").unwrap_or_default();
