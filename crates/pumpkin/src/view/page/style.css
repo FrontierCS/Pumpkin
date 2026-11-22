@@ -122,7 +122,10 @@ table.runs th:last-child, table.runs td:last-child { padding-right: var(--s4); }
 table.runs th { height: 34px; padding-top: var(--s1); font-size: var(--fs-label); font-weight: 500; color: var(--faint); border-top: none; vertical-align: middle; }
 table.runs tbody tr:first-child td { border-top-color: var(--line); }
 table.runs .num { text-align: right; }
-table.runs td.id { color: var(--text); }
+table.runs td.task { color: var(--text); font-weight: 600; max-width: 22em; overflow: hidden; text-overflow: ellipsis; }
+table.runs td.id { color: var(--dim); }
+table.runs td.none { color: var(--faint); }
+table.runs th.num, table.runs td.num, table.runs td.mono { padding-right: var(--s4); }
 table.runs td.rest { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
 table.runs tr.link { cursor: pointer; }
 table.runs tr.link:hover { background: var(--hover); }

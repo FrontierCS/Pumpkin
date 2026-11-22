@@ -25,18 +25,33 @@ import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, 
 
 const COLUMNS = [
   ["State", ""],
+  ["Task", ""],
   ["Run", ""],
   ["Time", "num"],
   ["Bound", ""],
   ["Cost", "num"],
   ["Requests", "num"],
   ["Tokens in", "num"],
-  ["Out", "num"],
+  ["Tokens out", "num"],
   ["", "rest"],
 ];
 
 // After the run's id, when some run names its member.
 const MEMBER = ["Member", ""];
+
+// A run's `rest`, as `ls` writes it, in two: its task, a word before the first ": ", and what
+// follows it; a `rest` that begins with no such word, as a sentence does, is all the second.
+/** @param {string} rest @returns {[string, string]} */
+function taskOf(rest) {
+  const at = rest.indexOf(": ");
+  const task = at < 0 ? rest : rest.slice(0, at);
+  if (task === "-" || /\s/.test(task)) return ["", rest];
+  return [task, at < 0 ? "" : rest.slice(at + 2)];
+}
+
+// A cell's class: `none` added for a count of nothing or one unknown, which the style fades.
+/** @param {string} cls @param {string} text */
+const faded = (cls, text) => (text === "-" || text === "0" || text === "" ? cls + " none" : cls);
 
 export async function runsView() {
   const body = h("tbody");
@@ -46,7 +61,7 @@ export async function runsView() {
   // Whether the columns hold the member's, as `ls` shows it only when some run names one.
   /** @type {boolean | null} */
   let membered = null;
-  const columns = () => (membered ? [...COLUMNS.slice(0, 2), MEMBER, ...COLUMNS.slice(2)] : COLUMNS);
+  const columns = () => (membered ? [...COLUMNS.slice(0, 3), MEMBER, ...COLUMNS.slice(3)] : COLUMNS);
   /** @type {{ first: Array<ListedRun | Unlisted>, older: Array<ListedRun | Unlisted>, next: string | null, cursor: number }} */
   const state = { first: [], older: [], next: null, cursor: -1 };
   // Each run's row, by its id, made once and changed after.
@@ -63,8 +78,9 @@ export async function runsView() {
     if (run.error !== undefined) {
       return /** @type {Cell[]} */ ([
         { cls: "", title: null, text: "" },
+        { cls: "task", title: null, text: "" },
         { cls: "id", title: null, text: run.id },
-        { cls: "error", title: null, text: run.error, span: columns().length - 2 },
+        { cls: "error", title: null, text: run.error, span: columns().length - 3 },
       ]);
     }
     const listed = /** @type {ListedRun} */ (run);
@@ -72,17 +88,21 @@ export async function runsView() {
     const noLog = "Unknown: the run's log says nothing of its model requests yet";
     const noTokens = "Unknown: no response reported its tokens";
     const counted = (/** @type {number | null | undefined} */ n) => (n === null || n === undefined ? (tokens === null ? noLog : noTokens) : null);
+    const [task, said] = taskOf(listed.rest);
+    // A count alone: its unit is its column's head.
+    const number = (/** @type {number | null | undefined} */ n) => count(n, "").trimEnd();
     return /** @type {Cell[]} */ ([
       { cls: "state", title: null, text: sentence(listed.state), mark: "mark " + tone(listed) },
+      { cls: "task", title: task || null, text: task },
       { cls: "id", title: null, text: listed.id },
       ...(membered ? [{ cls: "", title: null, text: listed.member ?? "-" }] : []),
       { cls: "num", title: null, text: listed.time },
-      { cls: "mono", title: null, text: listed.bound },
-      { cls: "num", title: null, text: listed.usd },
-      { cls: "num", title: listed.requests === null ? noLog : null, text: count(listed.requests, "req") },
-      { cls: "num", title: counted(tokens && tokens.input), text: count(tokens && tokens.input, "tok") },
-      { cls: "num", title: counted(tokens && tokens.output), text: count(tokens && tokens.output, "tok") },
-      { cls: "rest", title: listed.rest, text: listed.rest },
+      { cls: faded("mono", listed.bound), title: null, text: listed.bound },
+      { cls: faded("num", listed.usd), title: null, text: listed.usd },
+      { cls: faded("num", number(listed.requests)), title: listed.requests === null ? noLog : null, text: number(listed.requests) },
+      { cls: faded("num", number(tokens && tokens.input)), title: counted(tokens && tokens.input), text: number(tokens && tokens.input) },
+      { cls: faded("num", number(tokens && tokens.output)), title: counted(tokens && tokens.output), text: number(tokens && tokens.output) },
+      { cls: "rest", title: said || null, text: said },
     ]);
   };
   // Sets `value` as `node`'s attribute `name`, null removing it, only where it differs.
