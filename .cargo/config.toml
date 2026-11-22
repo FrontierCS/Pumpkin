@@ -6,8 +6,8 @@ xtask = "run --package xtask --bin xtask --locked --"
 # this is set, and for a checkout nested in another that is the other one.
 # https://github.com/rust-lang/cargo/issues/3946
 CARGO_WORKSPACE_DIR = { value = "", relative = true }
-# pumpkin's tests put the formatter of `.star` files beside each `pumpkin` they run, from this link
-# to the pinned one in the cache that every checkout shares, which each xtask command that runs
-# tests remakes, fetching the formatter on first use, as `cargo xtask install-tools` does too.
-# Outside `target/`, so that cargo-mutants' copies of the tree hold it.
+# pumpkin's tests put the formatter of `.star` files beside each `pumpkin` they run, from this file,
+# the pinned one, which each xtask command that runs tests, and `cargo xtask install-tools`, makes
+# from the cache that every checkout shares, fetching it on first use. Outside `target/`, so that
+# cargo-mutants' copies of the tree hold it.
 PUMPKIN_BUILDIFIER = { value = "bin/buildifier", relative = true }

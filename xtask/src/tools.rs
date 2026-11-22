@@ -10,6 +10,7 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io, process};
 
 use sha2::{Digest as _, Sha256};
@@ -120,7 +121,8 @@ pub(crate) fn run_as_musl_cc() -> Option<ExitCode> {
         .args(["--target=x86_64-linux-musl", "-fno-sanitize=all"])
         .exec();
     eprintln!(
-        "xtask: running {} failed: {error}: run `cargo xtask install-tools` to fetch it again",
+        "xtask: running {} failed: {error}: remove the cache's entry it leads to, and run \
+         `cargo xtask install-tools` to fetch it again",
         zig.display()
     );
     Some(ExitCode::FAILURE)
@@ -178,8 +180,8 @@ pub(crate) fn rustfmt(sh: &Shell) -> Result<()> {
 }
 
 /// The pinned `release`, in the cache of one user, which every checkout shares. It is fetched
-/// there with `curl` once, and kept, unpacked if it is a tar, only if its SHA-256 is the pin's,
-/// so that what is there is always the pinned release.
+/// there with `curl` once, and kept, unpacked if it is a tar, and read-only, only if its SHA-256
+/// is the pin's.
 pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
     let Release {
         name,
@@ -197,6 +199,10 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
+    let again = || format!("remove {} to fetch it again", entry.display());
+    if entry.exists() {
+        return Err(format!("{} lacks {name} {version}: {}", entry.display(), again()).into());
+    }
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
     if (os, arch) != ("linux", "x86_64") {
         return Err(format!(
@@ -206,28 +212,43 @@ pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
         .into());
     }
     eprintln!("xtask: fetching {name} {version} from {url}");
-    // A directory of this process's own, renamed whole into place once it holds the release, so
-    // that a fetch at once, from another checkout too, never finds an entry half made.
-    let staging = cache.join(format!(".{sha256}.{}", process::id()));
-    // Left by a process that had this one's id and was killed.
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging)
+    fs::create_dir_all(&cache)
+        .map_err(|error| format!("making {} failed: {error}", cache.display()))?;
+    // A directory of this fetch's own, renamed whole into place once it holds the release, so
+    // that a fetch at once, from another checkout, container or host too, never finds an entry
+    // half made. Named by the time too, as process ids repeat across PID namespaces and hosts,
+    // as Bazel names its temporary file by a random UUID.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let staging = format!(".{sha256}.{}.{}", process::id(), nanos.as_nanos());
+    let staging = cache.join(staging);
+    fs::create_dir(&staging)
         .map_err(|error| format!("making {} failed: {error}", staging.display()))?;
     let download = staging.join(file);
+    let staged = staging.join(member.unwrap_or(file));
     let fetched = fetch(&cargo.sh, release, &download)
         .and_then(|()| match member {
             None => Ok(()),
             Some(_) => unpack(&cargo.sh, &download, &staging),
+        })
+        // Read-only, as Go's module cache makes what it unpacks, since every checkout's hard link
+        // to it shares its inode:
+        // https://github.com/golang/go/blob/46b62495e1bf4d56e0313320772ae588d9119aed/src/cmd/go/internal/modfetch/fetch.go#L501-L522
+        .and_then(|()| {
+            fs::set_permissions(&staged, Permissions::from_mode(0o555)).map_err(|error| {
+                format!("{url} holds no {name} at {}: {error}", staged.display()).into()
+            })
         })
         .and_then(|()| match fs::rename(&staging, &entry) {
             Ok(()) => Ok(()),
             // A fetch at once put the release there first.
             Err(_) if path.is_file() => Ok(()),
             Err(error) => Err(format!(
-                "renaming {} to {} failed: {error}: remove {} to fetch it again",
+                "renaming {} to {} failed: {error}: {}",
                 staging.display(),
                 entry.display(),
-                entry.display()
+                again()
             )
             .into()),
         });
@@ -257,7 +278,7 @@ fn cache() -> Result<PathBuf> {
     Ok(dir.join("pumpkin/tools"))
 }
 
-/// Downloads `release` into `to`, executable, if its SHA-256 is the pin's.
+/// Downloads `release` into `to`, and fails unless its SHA-256 is the pin's.
 fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
     let Release {
         name,
@@ -284,8 +305,7 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
         )
         .into());
     }
-    fs::set_permissions(to, Permissions::from_mode(0o755))
-        .map_err(|error| format!("making {} executable failed: {error}", to.display()).into())
+    Ok(())
 }
 
 /// Unpacks the tar `archive` into `dir`, then removes it.

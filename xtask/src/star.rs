@@ -2,7 +2,7 @@
 //! beside `pumpkin`, and `ci`'s check that the repository's own `.star` files are formatted.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use stdx::process::{self, Bound, Echo, Environment, Run, Stream};
@@ -33,19 +33,21 @@ pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     };
     let buildifier = buildifier(cargo)?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
-    // A hard link, or a copy where the cache lies on another filesystem, so that it lies on the
-    // checkout's, where `place` and the tests hard-link it again.
-    tools::replace(link, |made| match fs::hard_link(&buildifier, made) {
-        Err(error) if error.kind() == ErrorKind::CrossesDevices => {
-            fs::copy(&buildifier, made).map(drop)
-        }
-        linked => linked,
-    })?;
+    // On the checkout's filesystem, where the tests hard-link it again.
+    tools::replace(link, |made| linked(&buildifier, made))?;
     Ok(link.to_owned())
 }
 
+/// Makes `to` a hard link to `from`, or a copy where the two lie on different filesystems.
+fn linked(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => fs::copy(from, to).map(drop),
+        linked => linked,
+    }
+}
+
 /// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build`
-/// puts it beside an installed one: a link to it, which replaces what is there.
+/// puts it beside an installed one: a link to it, or a copy, which replaces what is there.
 pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
     let beside = pumpkin.with_file_name("buildifier");
     match fs::remove_file(&beside) {
@@ -54,7 +56,7 @@ pub(crate) fn place(buildifier: &Path, pumpkin: &Path) -> Result<()> {
         }
         Ok(()) | Err(_) => {}
     }
-    fs::hard_link(buildifier, &beside)
+    linked(buildifier, &beside)
         .map_err(|error| format!("linking {} failed: {error}", beside.display()).into())
 }
 

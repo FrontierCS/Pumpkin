@@ -66,8 +66,8 @@ mod flags {
             }
 
             /// Runs the checks every change must pass, in order, and stops at the first that
-            /// fails. They reach no Docker engine or cloud, and the network only to fetch a
-            /// pinned tool on its first use.
+            /// fails. They reach no Docker engine or cloud, and the network only to fetch crates
+            /// and pinned tools on first use.
             cmd ci {}
 
             /// Writes the figures drawn from the workspace, which `ci` checks are up to date:
