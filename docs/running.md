@@ -62,10 +62,11 @@ repository by its full commit; a stage that pins a step's downloads by checksum,
 
 ## Running
 
-`pumpkin run` builds the task's images on the Docker engine, then starts a driver process that
-places each role, reserves what the run needs on its providers, and runs it. It prints the run's
-id once the run has started, then returns; the run goes on without it. On a machine with a
-controller, the controller builds the images and starts the driver.
+`pumpkin run` starts a driver process, which builds the task's images on the Docker engine,
+places each role, reserves what the run needs on its providers, and runs it. `run` prints the
+run's id once the run has started, then returns; the run goes on without it. On a machine with a
+controller, the controller builds the images and starts the driver. `run` then prints the id at
+once, before the build, and `pumpkin wait` follows the build and the run.
 
 ```console
 $ ./pumpkin run tasks/bench/task.star --arg model=model-a
@@ -87,9 +88,9 @@ pumpkin: to stop it: pumpkin cancel 20261116-195228-234cd166
 20261116-195228-234cd166
 ```
 
-Before it reaches the Docker engine, `run` checks the task and reads the configuration. It warns
-if the engine runs as root. It builds the task's images there, then reaches each provider that
-the configuration names, before anything starts. [Providers](providers.md#placing-a-run) says how
+Before it reaches the Docker engine, the driver checks the task and reads the configuration. It warns if the engine runs as root. It
+builds the task's images there, then reaches each provider that the configuration names, before
+anything starts. [Providers](providers.md#placing-a-run) says how
 it places each role. The driver writes what it says after the start to `driver.log` in the
 record. Whatever ends `run` before the start ends the driver too. After the start, the run goes on
 without `run`.
@@ -98,8 +99,8 @@ without `run`.
 the standard output. It tags each image by the digest of the build's inputs. The image goes in
 `pumpkin/<recipe's directory below the root>`, or for a recipe of the standard library in
 `pumpkin-library/<directory below @pumpkin//>`. An image that the engine already has under its
-tag isn't built again. Builds run at once, as many as the CPUs that `pumpkin` may run on, as
-Cargo's jobs do, each once the images it builds on are built. Each build's output is said whole
+tag isn't built again. As many builds run at once as the CPUs that `pumpkin` may run on, as
+Cargo's jobs do. Each build starts once the images it builds on are built. Each build's output is said whole
 as it ends, as `make --output-sync` does. A failed build is said at the `image()` call that
 declares its image. Once one has failed, no other build starts, and those already running are
 waited for.
@@ -182,15 +183,15 @@ leaves the run lost with its sandboxes. A create that the driver gave up on can 
 sandbox after that.
 
 `reap`, and `cancel` after the stop, delete what a run left on each provider it ran on. On the
-Docker engine of the context that the record's `provider.json` names, that is the containers
-labelled `pumpkin.run=<id>`. On a provider of kind ec2 or modal, as the configuration that ran
-the run names it, that is the EC2 instances tagged `pumpkin:run=<id>` or the Modal sandboxes
-tagged `pumpkin-run=<id>`. The run's `--config`, as its `record.json` keeps it, picks that
-configuration, or else the default. A reap also removes the run's socket directories in
+Docker engine of the context that the record's `provider.json` names, they delete the containers
+labelled `pumpkin.run=<id>`. On a provider of kind ec2, they delete the EC2 instances tagged
+`pumpkin:run=<id>`, and on one of kind modal, the Modal sandboxes tagged `pumpkin-run=<id>`. They
+read such a provider from the configuration that ran the run: the `--config` that its
+`record.json` keeps, or else the default. A reap also removes the run's socket directories in
 `sockets/` and records a lost run as failed. It notes each sandbox it removes in `reaps.jsonl`,
-with the time. A sandbox that the record holds undeleted but that its provider no longer lists,
-as when the configuration now points to another region or profile, is said and noted there as
-gone. On a controller, `reap` reaps again if the reply is cut. The ids it prints may then omit
+with the time. A provider may no longer list a sandbox that the record holds undeleted, as when
+the configuration now points to another region or profile. The reap then says so and notes the
+sandbox there as gone. On a controller, `reap` reaps again if the reply is cut. The ids it prints may then omit
 runs that were cleaned before the cut.
 
 ## What a command prints next

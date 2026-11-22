@@ -12,7 +12,7 @@ Examples:
   pumpkin check tasks/bench/task.star --arg model=model-a
   pumpkin check tasks/*/task.star --arg model=model-a
 
-docs/language.md lists the lint's rules.";
+The lint's rules: https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint";
 
 pub(super) const FMT_NOTES: &str = "\
 Examples:
@@ -22,9 +22,11 @@ Examples:
 pub(super) const RUN_NOTES: &str = "\
 Examples:
   pumpkin run tasks/bench/task.star --arg model=model-a
-  pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome > outcome.json
+  pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome \\
+    > outcome.json
 
-docs/running.md says how a run is placed, how it stops and how it outlives a logout.";
+How a run is placed and how it outlives a logout:
+https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running";
 
 pub(super) const WAIT_NOTES: &str = "\
 Examples:
@@ -44,7 +46,7 @@ Examples:
   pumpkin ls 20261110-1
   pumpkin ls --runs runs
 
-docs/running.md lists the phases and states.";
+The phases and states: https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs";
 
 pub(super) const CANCEL_NOTES: &str = "\
 Examples:
@@ -55,9 +57,9 @@ After --force, a create that the driver gave up on can still make a sandbox. `pu
 removes it.
 
 Exit status:
-  0  The run has ended and nothing that it left remains.
-  3  The run has ended, but a provider of it can't be reached, so what the run
-     left there may remain.";
+  0  The run has ended, and nothing that it left remains.
+  3  The run has ended, but one of its providers can't be reached.
+     What the run left there may remain.";
 
 pub(super) const VIEW_NOTES: &str = "\
 Examples:
@@ -65,8 +67,9 @@ Examples:
   pumpkin view --runs runs --port 8080
   pumpkin view --export public
 
-`view` serves until a signal stops it, so it never exits 0. docs/record.md says what the page \
-shows and what --export writes.";
+Without --export, `view` serves until a signal stops it, so it never exits 0.
+
+What the page shows and what --export writes: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page";
 
 pub(super) const HELP_NOTES: &str = "\
 Examples:
@@ -76,7 +79,8 @@ Examples:
 pub(super) const BUILD_NOTES: &str = "\
 Examples:
   pumpkin build tasks/bench/task.star --arg model=model-a > workflow.json
-  pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml";
+  pumpkin build tasks/bench/task.star --arg model=model-a \\
+    --config pumpkin.toml";
 
 pub(super) const REAP_NOTES: &str = "\
 Examples:
@@ -85,9 +89,14 @@ Examples:
 
 Exit status:
   0  Nothing that the runs left remains.
-  3  Only a provider of a run can't be reached, which `reap` names, so what the
-     run left there may remain. Its Docker context may be gone, or the
-     configuration may no longer name it.";
+  3  `reap` can't reach a provider of a run, which it names, and nothing else
+     failed. What the run left there may remain. The provider's Docker context
+     may be gone, or the configuration may no longer name the provider.";
+
+pub(super) const CANCEL_FOR_NOTES: &str = "\
+Exit status:
+  102  The run has ended. The client copies its record.
+  103  The run has ended, but one of its providers can't be reached.";
 
 pub(super) const CONTROLLER_NOTES: &str = "\
 Examples:
@@ -188,12 +197,12 @@ settings:
   ec2           Sandboxes on EC2 instances of their own, in the envelope that
                 its settings name. The instances pull their images from the
                 envelope, which the engine of [docker] pushes them to. They
-                dial the private address of [gateway]. The provider runs `aws`,
-                AWS CLI v2, from PATH, with the credentials that `aws` finds,
-                such as the instance's role. Its settings:
+                dial the private address of [gateway]. The provider runs AWS
+                CLI v2 as `aws` from PATH. It uses the credentials that `aws`
+                finds, such as the instance's role. Its settings:
     region        The envelope's AWS region, which every call names.
-    classes       Each class of sandbox, by name, at least one. Each class has
-                  these keys:
+    classes       The classes of sandbox, by name. There is at least one. Each
+                  class has these keys:
                   `template` is the ID of its launch template, and `version`
                   the template's version that its instances launch from.
                   `vcpus` and `memory_mib` are its instance type's CPUs and
@@ -231,8 +240,8 @@ settings:
                   and `repository` an ECR repository there. `role_arn` is the
                   ARN of the AWS role that Modal pulls with, which trusts
                   Modal's identity.
-    classes       Each class of sandbox, by name, at least one. Each class has
-                  `cpu_millis`, `memory_bytes` in whole MiB and
+    classes       The classes of sandbox, by name. There is at least one. Each
+                  class has `cpu_millis`, `memory_bytes` in whole MiB and
                   `startup_seconds`. A class with a GPU has `gpu`, as Modal
                   names one, such as \"H100!\", or \"A100-80GB:2\" for two. It
                   then has `gpu_model`, the model as nvidia-smi names it, such

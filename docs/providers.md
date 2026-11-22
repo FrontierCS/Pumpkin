@@ -71,7 +71,8 @@ two of its CPUs. While every slot is taken, it waits. Once a prune has removed t
 job holds, a job refuses to build while more than 85% of the controller's volume is used. `ls`
 says first how long the controller has been up, its jobs, how full its disk is, and whether its
 boot failed. It lists a job that has yet to start its run as `waiting` for a build slot or
-`building`, or as `unstarted` once it has ended without one. `cancel` stops a job whose run has
+`building`, or as `unstarted` once it has ended without one. It lists this machine's copies of
+runs beside the controller's. `cancel` stops a job whose run has
 yet to start. `cancel` and `reap` send this machine's Modal configuration file, which the boot
 lacks.
 

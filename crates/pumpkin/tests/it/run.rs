@@ -141,7 +141,7 @@ fn usage() {
               Rarely needed:
                 build       Build a task's images and print its workflow's IR
                 reap        Remove what ended runs left
-                controller  Run the controller's side of a client's commands
+                controller  Run the controller's own commands
 
               Topics:
                 config      The machine's configuration, pumpkin.toml
@@ -160,12 +160,13 @@ fn usage() {
             printed:
               Build a task and start a run of it.
 
-              `run` builds the task as `pumpkin build` does. It then starts a driver process, which places each
-              role on a provider and drives the run. `run` prints the run's id once the run has started, and the
-              run goes on without `run`.
+              `run` starts a driver process, which builds the task as `pumpkin build` does, places each role on a
+              provider and drives the run. `run` prints the run's id once the run has started, and the run goes on
+              without `run`.
 
               With `[controller]` in the configuration, `run` sends the task to the controller, which builds and
-              runs it. `--runs` and `--sandboxd` are then refused.
+              runs it. `run` then prints the id at once and returns before the build. `pumpkin wait` follows the
+              build and the run. `--runs` and `--sandboxd` are refused.
 
               Usage: pumpkin run [OPTIONS] <entry>
 
@@ -178,7 +179,8 @@ fn usage() {
                         Set the arg that an `arg()` call declares as <name>
 
                     --runs <dir>
-                        The directory to record runs in, each in `<dir>/<id>` (default: `.pumpkin/runs`)
+                        The directory to record runs in, each in `<dir>/<id>` (default: `runs` in the repository's
+                        `.pumpkin`)
 
                     --config <file>
                         The machine's configuration, which `pumpkin help config` describes (default:
@@ -186,22 +188,25 @@ fn usage() {
 
                     --sandboxd <path>
                         The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:
-                        the one beside `pumpkin`)
+                        the one beside `pumpkin`, where `cargo xtask build` puts both)
 
                     --wait
                         Follow the run to its end and exit as `pumpkin wait` does
 
                     --outcome
-                        Print the run's outcome.json on the standard output once it ends
+                        Print the run's outcome.json on the standard output once it ends, even if it failed to
+                        start
 
                 -h, --help
                         Print help
 
               Examples:
                 pumpkin run tasks/bench/task.star --arg model=model-a
-                pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome > outcome.json
+                pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome \
+                  > outcome.json
 
-              docs/running.md says how a run is placed, how it stops and how it outlives a logout.
+              How a run is placed and how it outlives a logout:
+              https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running
             $ pumpkin wait -h
             exit status: Some(0)
             printed:
@@ -223,10 +228,11 @@ fn usage() {
 
               Options:
                     --runs <dir>
-                        The directory to look the run up in (default: `.pumpkin/runs`)
+                        The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)
 
                     --outcome
-                        Print the run's outcome.json on the standard output once it ends
+                        Print the run's outcome.json on the standard output once it ends, even if it failed to
+                        start
 
                 -h, --help
                         Print help
@@ -249,9 +255,9 @@ fn usage() {
               `ls` prints a line for each run, oldest first, then a line of totals. Without a prefix, it lists the
               runs that are live or ended within the last day, and the totals say how to list the others. A live
               run's line gives its phase and the bound on it. An ended run's line gives its state, how long it ran
-              and its result's values. If a run can't be listed, `ls` says why and lists the others.
-
-              With `[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs.
+              and its result's values. If a run can't be listed, `ls` says why and lists the others. With
+              `[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs beside this
+              machine's copies.
 
               Usage: pumpkin ls [OPTIONS] [prefix]...
 
@@ -261,7 +267,7 @@ fn usage() {
 
               Options:
                     --runs <dir>
-                        The directory of the runs to list (default: `.pumpkin/runs`)
+                        The directory of the runs to list (default: `runs` in the repository's `.pumpkin`)
 
                 -h, --help
                         Print help
@@ -271,7 +277,8 @@ fn usage() {
                 pumpkin ls 20261110-1
                 pumpkin ls --runs runs
 
-              docs/running.md lists the phases and states.
+              The phases and states:
+              https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs
             $ pumpkin cancel --help
             exit status: Some(0)
             printed:
@@ -282,7 +289,7 @@ fn usage() {
               ended. A run that has ended or is lost gets no signal.
 
               With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the controller.
-              It then copies the record here, as `pumpkin wait` does.
+              It then copies a started run's record here, as `pumpkin wait` does.
 
               Usage: pumpkin cancel [OPTIONS] <run>
 
@@ -293,13 +300,14 @@ fn usage() {
 
               Options:
                     --runs <dir>
-                        The directory to look the run up in (default: `.pumpkin/runs`)
+                        The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)
 
                     --force
                         Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed
 
                     --any-member
-                        Match the run among every member's runs on the controller, not only this member's
+                        Match the run among every member's runs on the controller, not only this member's and
+                        those that no member started
 
                 -h, --help
                         Print help
@@ -312,26 +320,25 @@ fn usage() {
               it.
 
               Exit status:
-                0  The run has ended and nothing that it left remains.
-                3  The run has ended, but a provider of it can't be reached, so what the run
-                   left there may remain.
+                0  The run has ended, and nothing that it left remains.
+                3  The run has ended, but one of its providers can't be reached.
+                   What the run left there may remain.
             $ pumpkin view --help
             exit status: Some(0)
             printed:
               Serve the runs to this machine's browser.
 
-              `view` prints the address to open and serves until a signal stops it. The page lists the runs as
-              `ls` does. A run's page shows its summary, its sandboxes' lanes, who talks to whom and its log. The
-              page listens on 127.0.0.1 alone and asks for the token in its address. It changes a run only by a
-              cancel, which runs `pumpkin cancel`.
-
-              With `[controller]` in the configuration and no `--runs`, `view` serves the controller's runs.
+              `view` prints the address to open and serves until a signal stops it. It listens on 127.0.0.1 alone
+              and needs the token in the address. The page lists the runs newest first, each as `ls` says it. A
+              run's page shows its summary, its sandboxes' lanes, who talks to whom and its log. The page changes
+              a run only by a cancel, which runs `pumpkin cancel`. With `[controller]` in the configuration and no
+              `--runs`, `view` serves the controller's runs. `--export` always writes this machine's runs.
 
               Usage: pumpkin view [OPTIONS]
 
               Options:
                     --runs <dir>
-                        The directory of the runs to serve (default: `.pumpkin/runs`)
+                        The directory of the runs to serve (default: `runs` in the repository's `.pumpkin`)
 
                     --port <port>
                         The port on 127.0.0.1 to serve at (default: a free one)
@@ -347,8 +354,10 @@ fn usage() {
                 pumpkin view --runs runs --port 8080
                 pumpkin view --export public
 
-              `view` serves until a signal stops it, so it never exits 0. docs/record.md says what the page shows
-              and what --export writes.
+              Without --export, `view` serves until a signal stops it, so it never exits 0.
+
+              What the page shows and what --export writes:
+              https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page
             $ pumpkin reap --help
             exit status: Some(0)
             printed:
@@ -366,7 +375,7 @@ fn usage() {
 
               Options:
                     --runs <dir>
-                        The directory of the runs to reap (default: `.pumpkin/runs`)
+                        The directory of the runs to reap (default: `runs` in the repository's `.pumpkin`)
 
                 -h, --help
                         Print help
@@ -377,9 +386,9 @@ fn usage() {
 
               Exit status:
                 0  Nothing that the runs left remains.
-                3  Only a provider of a run can't be reached, which `reap` names, so what the
-                   run left there may remain. Its Docker context may be gone, or the
-                   configuration may no longer name it.
+                3  `reap` can't reach a provider of a run, which it names, and nothing else
+                   failed. What the run left there may remain. The provider's Docker context
+                   may be gone, or the configuration may no longer name the provider.
             $ pumpkin help --help
             exit status: Some(0)
             printed:
@@ -492,12 +501,12 @@ fn usage() {
                 ec2           Sandboxes on EC2 instances of their own, in the envelope that
                               its settings name. The instances pull their images from the
                               envelope, which the engine of [docker] pushes them to. They
-                              dial the private address of [gateway]. The provider runs `aws`,
-                              AWS CLI v2, from PATH, with the credentials that `aws` finds,
-                              such as the instance's role. Its settings:
+                              dial the private address of [gateway]. The provider runs AWS
+                              CLI v2 as `aws` from PATH. It uses the credentials that `aws`
+                              finds, such as the instance's role. Its settings:
                   region        The envelope's AWS region, which every call names.
-                  classes       Each class of sandbox, by name, at least one. Each class has
-                                these keys:
+                  classes       The classes of sandbox, by name. There is at least one. Each
+                                class has these keys:
                                 `template` is the ID of its launch template, and `version`
                                 the template's version that its instances launch from.
                                 `vcpus` and `memory_mib` are its instance type's CPUs and
@@ -535,8 +544,8 @@ fn usage() {
                                 and `repository` an ECR repository there. `role_arn` is the
                                 ARN of the AWS role that Modal pulls with, which trusts
                                 Modal's identity.
-                  classes       Each class of sandbox, by name, at least one. Each class has
-                                `cpu_millis`, `memory_bytes` in whole MiB and
+                  classes       The classes of sandbox, by name. There is at least one. Each
+                                class has `cpu_millis`, `memory_bytes` in whole MiB and
                                 `startup_seconds`. A class with a GPU has `gpu`, as Modal
                                 names one, such as "H100!", or "A100-80GB:2" for two. It
                                 then has `gpu_model`, the model as nvidia-smi names it, such
@@ -649,7 +658,7 @@ fn usage() {
             Rarely needed:
               build       Build a task's images and print its workflow's IR
               reap        Remove what ended runs left
-              controller  Run the controller's side of a client's commands
+              controller  Run the controller's own commands
 
             Topics:
               config      The machine's configuration, pumpkin.toml
@@ -767,10 +776,10 @@ fn usage() {
             $ pumpkin help controller
             exit status: Some(0)
             printed:
-              Run the controller's side of a client's commands.
+              Run the controller's own commands.
 
-              These actions run on the controller. A client's commands start them over `ssh`, and the controller's
-              boot runs `boot`.
+              These actions run on the controller. `serve` answers a client's `ssh` link and starts each `job` in
+              a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
 
               Usage: pumpkin controller <action>
 

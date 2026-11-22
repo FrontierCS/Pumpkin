@@ -27,8 +27,8 @@ use provider::RunTag;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
-    BUILD_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
-    LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    BUILD_NOTES, CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES,
+    HELP_NOTES, LS_NOTES, PUBLISH_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
 };
 use crate::ending::Printed;
 use crate::member::Member;
@@ -52,28 +52,31 @@ use crate::star::Entry;
 enum Parsed {
     /// Check tasks without building or running them.
     ///
-    /// `check` evaluates each task's entry file and the files it loads with the `--arg`s given,
-    /// the same for every task. It then checks each image's recipe and the workflow, and lints
-    /// the files it read. It says every problem in every task, and prints nothing when it finds
-    /// none. It reads only files below each task's root. It reaches no Docker engine, network or
-    /// configuration, so an image's build can still fail.
+    /// `check` evaluates each task's entry file and the files it loads with the given `--arg`s.
+    /// Every task gets the same `--arg`s. It then checks each image's recipe and the workflow, and
+    /// lints the files it read. It says every problem in every task, and prints nothing when it
+    /// finds none. It reads only files below each task's root. It reaches no Docker engine,
+    /// network or configuration, so an image's build can still fail.
     #[command(after_help = CHECK_NOTES)]
     Check(Check),
     /// Format `.star` files.
     ///
     /// `fmt` rewrites each `.star` file in the one style of the workflow language. It formats the
-    /// files it is given and the `.star` files below the directories it is given. It skips names
-    /// that start with `.` and files that a symbolic link leads to. It prints nothing on success.
+    /// files it is given and the `.star` files below the directories it is given. Below a
+    /// directory, it skips names that start with `.` and anything a symbolic link leads to. If a
+    /// file can't be formatted, `fmt` says why and formats the others. It prints nothing on
+    /// success.
     #[command(after_help = FMT_NOTES)]
     Fmt(Fmt),
     /// Build a task and start a run of it.
     ///
-    /// `run` builds the task as `pumpkin build` does. It then starts a driver process, which places
-    /// each role on a provider and drives the run. `run` prints the run's id once the run has
-    /// started, and the run goes on without `run`.
+    /// `run` starts a driver process, which builds the task as `pumpkin build` does, places each
+    /// role on a provider and drives the run. `run` prints the run's id once the run has started,
+    /// and the run goes on without `run`.
     ///
     /// With `[controller]` in the configuration, `run` sends the task to the controller, which
-    /// builds and runs it. `--runs` and `--sandboxd` are then refused.
+    /// builds and runs it. `run` then prints the id at once and returns before the build.
+    /// `pumpkin wait` follows the build and the run. `--runs` and `--sandboxd` are refused.
     #[command(after_help = RUN_NOTES)]
     Run(Run),
     /// Wait for a run to end and say how it ended.
@@ -92,9 +95,8 @@ enum Parsed {
     /// lists the runs that are live or ended within the last day, and the totals say how to list
     /// the others. A live run's line gives its phase and the bound on it. An ended run's line
     /// gives its state, how long it ran and its result's values. If a run can't be listed, `ls`
-    /// says why and lists the others.
-    ///
-    /// With `[controller]` in the configuration and no `--runs`, `ls` lists the controller's runs.
+    /// says why and lists the others. With `[controller]` in the configuration and no `--runs`,
+    /// `ls` lists the controller's runs beside this machine's copies.
     #[command(after_help = LS_NOTES)]
     Ls(Ls),
     /// Stop a run and remove what it left.
@@ -104,18 +106,17 @@ enum Parsed {
     /// says how the run ended. A run that has ended or is lost gets no signal.
     ///
     /// With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the
-    /// controller. It then copies the record here, as `pumpkin wait` does.
+    /// controller. It then copies a started run's record here, as `pumpkin wait` does.
     #[command(after_help = CANCEL_NOTES)]
     Cancel(CancelRun),
     /// Serve the runs to this machine's browser.
     ///
-    /// `view` prints the address to open and serves until a signal stops it. The page lists the
-    /// runs as `ls` does. A run's page shows its summary, its sandboxes' lanes, who talks to whom
-    /// and its log. The page listens on 127.0.0.1 alone and asks for the token in its address. It
-    /// changes a run only by a cancel, which runs `pumpkin cancel`.
-    ///
+    /// `view` prints the address to open and serves until a signal stops it. It listens on
+    /// 127.0.0.1 alone and needs the token in the address. The page lists the runs newest first,
+    /// each as `ls` says it. A run's page shows its summary, its sandboxes' lanes, who talks to
+    /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
-    /// runs.
+    /// runs. `--export` always writes this machine's runs.
     #[command(after_help = VIEW_NOTES)]
     View(View),
     /// Print the help of a command or a topic.
@@ -134,7 +135,8 @@ enum Parsed {
     /// image by its ID, as a run's record keeps it in `ir.json`. The standard output holds only
     /// the IR, and the builds' output goes to the standard error.
     ///
-    /// With `[controller]` in the configuration, the controller builds the task.
+    /// With `[controller]` in the configuration, the controller builds the task, and `build`
+    /// prints the IR.
     #[command(hide = true, after_help = BUILD_NOTES)]
     Build(Build),
     /// Remove what ended runs left.
@@ -148,10 +150,10 @@ enum Parsed {
     /// runs that this build made.
     #[command(hide = true, after_help = REAP_NOTES)]
     Reap(Reap),
-    /// Run the controller's side of a client's commands.
+    /// Run the controller's own commands.
     ///
-    /// These actions run on the controller. A client's commands start them over `ssh`, and the
-    /// controller's boot runs `boot`.
+    /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
+    /// `job` in a unit of its own. The controller's boot runs `boot`, and `publish` is run by hand.
     #[command(hide = true, after_help = CONTROLLER_NOTES)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -170,7 +172,7 @@ enum Action {
     /// Run a client's `run` or `build` as a job.
     ///
     /// `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`.
-    /// It then runs the command there in a unit of its own.
+    /// It then runs the command there.
     Job {
         /// The job's id, which its run takes.
         #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
@@ -196,6 +198,7 @@ enum Action {
     /// Cancel a run for a client.
     ///
     /// The client then says how the run ended, from its copy of the record.
+    #[command(after_help = CANCEL_FOR_NOTES)]
     Cancel(Cancel),
     /// Answer a client on the standard input and output.
     ///
@@ -221,7 +224,7 @@ enum Action {
 // Its doc would become the help of `pumpkin controller publish`, which the variant's replaces.
 #[derive(Args)]
 pub(crate) struct Publish {
-    /// The directory of the runs to publish (default: `.pumpkin/runs`).
+    /// The directory of the runs to publish (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
     /// The S3 bucket to upload to.
@@ -307,8 +310,9 @@ const OUTCOME: &str = "outcome";
 impl Args for Printed {
     fn augment_args(command: clap::Command) -> clap::Command {
         let outcome = Arg::new(OUTCOME).long(OUTCOME).action(ArgAction::SetTrue);
-        command
-            .arg(outcome.help("Print the run's outcome.json on the standard output once it ends"))
+        let help = "Print the run's outcome.json on the standard output once it ends, even if it \
+                    failed to start";
+        command.arg(outcome.help(help))
     }
 
     fn augment_args_for_update(command: clap::Command) -> clap::Command {
@@ -391,13 +395,14 @@ pub(crate) struct Run {
     pub(crate) entry: Entry,
     #[command(flatten)]
     pub(crate) args: TaskArgs,
-    /// The directory to record runs in, each in `<dir>/<id>` (default: `.pumpkin/runs`).
+    /// The directory to record runs in, each in `<dir>/<id>` (default: `runs` in the
+    /// repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RECORDED))]
     pub(crate) runs: Option<String>,
     #[arg(long, value_name = "file", value_parser = utf8(RECORDED), help = CONFIG_HELP)]
     pub(crate) config: Option<String>,
     /// The static sandboxd that every sandbox runs, with the static ec2-boot beside it (default:
-    /// the one beside `pumpkin`).
+    /// the one beside `pumpkin`, where `cargo xtask build` puts both).
     #[arg(long, value_name = "path", value_parser = utf8(RECORDED))]
     pub(crate) sandboxd: Option<String>,
     #[command(flatten)]
@@ -427,7 +432,8 @@ impl Run {
 const RUN_HELP: &str = "The run's id, a prefix of the id or of its last 8 digits that no other \
                         run shares, or its record's path with a `/`";
 
-const RUNS_HELP: &str = "The directory to look the run up in (default: `.pumpkin/runs`)";
+const RUNS_HELP: &str =
+    "The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)";
 
 /// Its paths are UTF-8, as those of `ls`, `cancel` and `reap` are, so that a command that names
 /// them names the same files.
@@ -443,7 +449,7 @@ pub(crate) struct Wait {
 
 #[derive(Args)]
 pub(crate) struct View {
-    /// The directory of the runs to serve (default: `.pumpkin/runs`).
+    /// The directory of the runs to serve (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
     /// The port on 127.0.0.1 to serve at (default: a free one).
@@ -456,7 +462,7 @@ pub(crate) struct View {
 
 #[derive(Args)]
 pub(crate) struct Ls {
-    /// The directory of the runs to list (default: `.pumpkin/runs`).
+    /// The directory of the runs to list (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
     /// A prefix of the ids of the runs to list, such as a day's in UTC, as `20261110`.
@@ -469,7 +475,8 @@ pub(crate) struct Ls {
 pub(crate) struct CancelRun {
     #[command(flatten)]
     pub(crate) cancel: Cancel,
-    /// Match the run among every member's runs on the controller, not only this member's.
+    /// Match the run among every member's runs on the controller, not only this member's and
+    /// those that no member started.
     #[arg(long)]
     pub(crate) any_member: bool,
 }
@@ -489,7 +496,7 @@ pub(crate) struct Cancel {
 
 #[derive(Args)]
 pub(crate) struct Reap {
-    /// The directory of the runs to reap (default: `.pumpkin/runs`).
+    /// The directory of the runs to reap (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]

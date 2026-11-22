@@ -149,7 +149,7 @@ mod flags {
             }
 
             /// Runs a package's tests with `UPDATE_EXPECT=1`, which rewrites each snapshot that
-            /// differs. Then prints `git diff --stat`, so you read the changes before keeping them.
+            /// differs. Then prints `git diff --stat` of the changes, to read before keeping them.
             cmd refill {
                 /// The package whose tests run.
                 required -p, --package package: String

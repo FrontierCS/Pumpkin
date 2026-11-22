@@ -65,7 +65,7 @@ fn refusals() {
               record keeps it in `ir.json`. The standard output holds only the IR, and the builds' output goes to
               the standard error.
 
-              With `[controller]` in the configuration, the controller builds the task.
+              With `[controller]` in the configuration, the controller builds the task, and `build` prints the IR.
 
               Usage: pumpkin build [OPTIONS] <entry>
 
@@ -86,7 +86,8 @@ fn refusals() {
 
               Examples:
                 pumpkin build tasks/bench/task.star --arg model=model-a > workflow.json
-                pumpkin build tasks/bench/task.star --arg model=model-a --config pumpkin.toml
+                pumpkin build tasks/bench/task.star --arg model=model-a \
+                  --config pumpkin.toml
             $ env --unset=HOME PATH=<scratch>/bin pumpkin build tasks/broken/task.star --arg model=model-a
             exit status: Some(1)
             lib/bench.star:52:19: `tasks/broken/agent/Dockerfile` doesn't exist: name a regular file below the root that does

@@ -350,11 +350,11 @@ fn tasks() {
             printed:
               Check tasks without building or running them.
 
-              `check` evaluates each task's entry file and the files it loads with the `--arg`s given, the same
-              for every task. It then checks each image's recipe and the workflow, and lints the files it read. It
-              says every problem in every task, and prints nothing when it finds none. It reads only files below
-              each task's root. It reaches no Docker engine, network or configuration, so an image's build can
-              still fail.
+              `check` evaluates each task's entry file and the files it loads with the given `--arg`s. Every task
+              gets the same `--arg`s. It then checks each image's recipe and the workflow, and lints the files it
+              read. It says every problem in every task, and prints nothing when it finds none. It reads only
+              files below each task's root. It reaches no Docker engine, network or configuration, so an image's
+              build can still fail.
 
               Usage: pumpkin check [OPTIONS] <entry>...
 
@@ -373,7 +373,8 @@ fn tasks() {
                 pumpkin check tasks/bench/task.star --arg model=model-a
                 pumpkin check tasks/*/task.star --arg model=model-a
 
-              docs/language.md lists the lint's rules.
+              The lint's rules:
+              https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint
             $ env --unset=HOME PATH=<scratch>/bin pumpkin check tasks/bench/task.star --arg model=model-a
             exit status: Some(0)
             docker was run: false

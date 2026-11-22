@@ -33,8 +33,8 @@ use crate::say;
 /// <https://github.com/UKGovernmentBEIS/inspect_ai/blob/7cf09c929b3ea9138762ca9e4d8d23f119554ee6/src/inspect_ai/log/_bundle.py#L246-L257>.
 const ROBOTS: &str = "User-agent: *\nDisallow: /\n";
 
-/// Exports the runs of `runs` into `to` and says what was written; the flag's help is the
-/// interface.
+/// Exports the runs of `runs` into `to` and says what was written, as `docs/record.md` says of
+/// `--export`.
 pub(super) fn export(runs: Option<String>, to: &Path, scrub: Scrub) -> Result<ExitCode, String> {
     let (runs, _) = crate::runs_dir(runs)?;
     let exported = exported(Path::new(&runs), to, scrub, None)?;

@@ -45,7 +45,7 @@ fn usage() {
 
               Options:
                     --runs <dir>
-                        The directory of the runs to publish (default: `.pumpkin/runs`)
+                        The directory of the runs to publish (default: `runs` in the repository's `.pumpkin`)
 
                     --bucket <name>
                         The S3 bucket to upload to
