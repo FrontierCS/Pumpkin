@@ -1,15 +1,16 @@
 //! The driver, the process that drives a run, and how `pumpkin run` starts it and learns that
 //! the run has started.
 //!
-//! `run` starts the driver by executing itself under the name [`ARGV0`], in the process group
-//! `run` is in, and the driver first asks the kernel to kill it if `run` ends
+//! `run` starts the driver by executing itself with [`ARGV0`] as its name and its first
+//! argument, in the process group `run` is in, and the driver first asks the kernel to kill it
+//! if `run` ends
 //! ([`die_with_run`]). So until the run has started, what ends `run`, a signal from its
 //! terminal or one sent to it alone, ends the driver too. The driver
 //! reads the configuration and the upstream's key itself: the key never crosses argv, the
 //! environment or the pipe.
 //!
-//! The driver's first argument is `run`'s process ID, its second the run's id, which `run` mints
-//! ([`runtime::new_id`]), its third who reads what it says ([`crate::Reader`]), and the rest are
+//! After [`ARGV0`], the driver's arguments are `run`'s process ID, the run's id, which `run` mints
+//! ([`runtime::new_id`]), who reads what it says ([`crate::Reader`]), and the rest, which are
 //! `run`'s own: the driver also builds the task's images. Its standard output is a pipe
 //! to `run`, which carries at most two lines: the run's id once its record is locked
 //! ([`locked`]), then [`STARTED`] once the run has started ([`announce`]). Before the second,
@@ -31,8 +32,8 @@ use rustix::stdio::{dup2_stderr, dup2_stdout};
 use stdx::Context;
 use stdx::process::Environment;
 
-/// The name that `run` gives the driver as its `argv[0]`, by which `main` knows it, and that
-/// the driver gives its process, as `ps` shows it.
+/// The name that `run` gives the driver as its `argv[0]` and that the driver gives its process,
+/// as `ps` shows it, and the driver's first argument, by which `main` knows it.
 pub(crate) const ARGV0: &CStr = c"pumpkin-driver";
 
 const STARTED: &str = "started";
@@ -61,8 +62,13 @@ impl Driver {
         let (pipe, output) = io::pipe().context("making the driver's pipe failed")?;
         // `pumpkin` itself, even if its file is replaced meanwhile.
         let mut command = stdx::process::command("/proc/self/exe", Environment::Inherited);
+        let name = OsStr::from_bytes(ARGV0.to_bytes());
+        // The name again as the first argument, which the kernel passes on as it is: an emulator
+        // started for a foreign executable without binfmt_misc's `P` flag gets the executable's
+        // path as `argv[0]`, as Rosetta does as Lima and colima register it.
         command
-            .arg0(OsStr::from_bytes(ARGV0.to_bytes()))
+            .arg0(name)
+            .arg(name)
             .arg(std::process::id().to_string())
             .arg(id.as_str())
             .arg(reader.word())

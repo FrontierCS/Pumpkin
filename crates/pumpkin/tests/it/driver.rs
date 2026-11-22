@@ -56,6 +56,24 @@ fn live_driver(dir: &Path) -> Option<i64> {
     text.trim().parse().ok().filter(|_| held)
 }
 
+// An emulator such as Rosetta, as Lima registers it, gives the driver the executable's path as its
+// `argv[0]`, as this command does, in place of the name that `run` gives it.
+#[test]
+fn known_by_its_first_argument() {
+    let scratch = Scratch::new();
+    let driver = scratch.pumpkin(&["pumpkin-driver", "1"]);
+    check(
+        &scratch,
+        [driver],
+        false,
+        &[],
+        &expect![[r#"
+            $ pumpkin pumpkin-driver 1
+            exit status: Some(1)
+            pumpkin: `run` ended before its driver asked to end with it"#]],
+    );
+}
+
 #[test]
 #[ignore = "needs Docker: run cargo xtask live docker"]
 #[expect(

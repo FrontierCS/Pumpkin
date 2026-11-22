@@ -242,8 +242,8 @@ fn begun(id: &str, dir: &Path, pushing: &[String], reader: Reader) {
 }
 
 fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), String> {
-    // Only `run` starts the driver, with its process ID and the run's id, but an `argv[0]` of
-    // the driver's name can come from anyone.
+    // Only `run` starts the driver, with its process ID and the run's id, but a first argument
+    // of the driver's name can come from anyone.
     let refused = || {
         "the driver was asked for something other than `pumpkin run` asks of it: start a run \
          with `pumpkin run`"

@@ -70,12 +70,9 @@ fn main() -> Exit {
     let shared_write = Mode::from_raw_mode(0o022);
     let started = umask(shared_write);
     umask(started | shared_write);
-    let mut args = env::args_os();
+    let mut args = env::args_os().peekable();
     let argv0 = args.next();
-    if argv0
-        .as_ref()
-        .is_some_and(|name| name.as_bytes() == ARGV0.to_bytes())
-    {
+    if (args.next_if(|first| first.as_bytes() == ARGV0.to_bytes())).is_some() {
         return finish(driver_run(args.collect()));
     }
     // One executable runs as the command that its name gives. BusyBox runs the applet that its
