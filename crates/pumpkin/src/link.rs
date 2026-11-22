@@ -595,15 +595,11 @@ pub(crate) fn refuse(output: &mut impl Write, message: String) -> io::Result<()>
     frame::write(output, &Head::<()>::Refused { message }, &[])
 }
 
-/// The directory of `serve`'s installs, relative to the controller user's home: each is
-/// `<sha256>/`, a build's files by their manifest digest.
-pub(crate) fn installs() -> String {
-    format!("{}/serve", workspace::DIR)
-}
-
-fn installed(digest: &Sha256Digest) -> String {
-    // An install holds its build's `bin/` whole, whose `pumpkin` is `serve`.
-    format!("{}/{}/pumpkin", installs(), digest.hex())
+/// The install of the build whose manifest has the SHA-256 `digest`, relative to the controller
+/// user's home. Its `bin/` holds the build's files whole. Its `pumpkin` is the build's `serve`, and
+/// each job of the build runs it.
+pub(crate) fn install(digest: &Sha256Digest) -> String {
+    format!("{}/{}", workspace::DIR, digest.hex())
 }
 
 /// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
@@ -618,20 +614,19 @@ pub(crate) fn command(digest: &Sha256Digest) -> String {
     // Each byte as the octal escape that `printf` reads in its format, so that none is the shell's.
     let escaped: Vec<String> = absent.iter().map(|byte| format!("\\{byte:03o}")).collect();
     format!(
-        "serve={}\ncd && [ -x \"$serve\" ] && exec \"$serve\" controller serve \"$@\"\nprintf '{}'\n",
-        installed(digest),
+        "serve={}/bin/pumpkin\ncd && [ -x \"$serve\" ] && exec \"$serve\" controller serve \"$@\"\nprintf '{}'\n",
+        install(digest),
         escaped.concat()
     )
 }
 
 /// The script that installs the `tar` archive on standard input as the `serve` that [`command`]
-/// runs. Its files must match `manifest`. They are written into a directory of
-/// its own beside the installs, checked, made 0555 and renamed into place whole, so that no
-/// `serve` runs a part of one. An install that another client renamed there first is as good.
+/// runs. Its files must match `manifest`. The script writes them into a directory of its own in
+/// the install and checks them. It makes them 0555 and renames the directory into place whole as
+/// the install's `bin/`, so that no `serve` or job runs a part of an install. An install that
+/// another client renamed there first is as good.
 pub(crate) fn installing(manifest: &manifest::Manifest) -> String {
-    let installs = installs();
-    let key = manifest.name();
-    let hex = key.hex();
+    let install = install(&manifest.name());
     let listing: String = manifest
         .entries()
         .iter()
@@ -643,9 +638,11 @@ pub(crate) fn installing(manifest: &manifest::Manifest) -> String {
         .map(|entry| entry.path.as_str())
         .collect();
     let names = names.join(" ");
+    // The files are made in `.made.*` inside the install. That renews the time that the prune of
+    // installs reads, and the prune removes what a cut script leaves there, with the install.
     format!(
-        r#"installs={installs}
-cd && mkdir --parents "$installs" && cd "$installs" || exit 1
+        r#"install={install}
+cd && mkdir --parents "$install" && cd "$install" || exit 1
 made=$(mktemp --directory .made.XXXXXX) || exit 1
 trap 'rm --recursive --force "$made"' EXIT
 tar --extract --directory="$made" -- {names} || exit 1
@@ -654,8 +651,8 @@ if ! printf %s '{listing}' | (cd "$made" && sha256sum --check --status); then
     exit 1
 fi
 (cd "$made" && chmod 0555 -- {names}) || exit 1
-mv --no-target-directory "$made" {hex} 2>/dev/null || [ -x {hex}/pumpkin ] || {{
-    echo "moving the files that arrived to ~/$installs/{hex} failed: see that the controller's user may write there, and run the command again" >&2
+mv --no-target-directory "$made" bin 2>/dev/null || [ -x bin/pumpkin ] || {{
+    echo "moving the files that arrived to ~/$install/bin failed: see that the controller's user may write there, and run the command again" >&2
     exit 1
 }}
 "#

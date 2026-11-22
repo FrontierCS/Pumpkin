@@ -47,8 +47,9 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 to its private address. It follows, lists, stops, reaps and views the runs there. The client's
 `controller serve` receives the files by content and starts jobs. It streams their output, copies
 ended records, and handles the commands that inspect or stop runs. Each job runs in its own systemd
-unit. On boot, `pumpkin-admin boot-all` runs each job install's `bin/pumpkin`, so each build reaps
-the records it wrote.
+unit, from the install of its build that the client uploaded for `serve`. On boot,
+`pumpkin-admin boot-all` runs each install's `bin/pumpkin`, so each build reaps the records it
+wrote.
 
 `pumpkin-admin` is the same executable again. An install holds it as a hard link to `pumpkin`, and
 `main.rs` dispatches by its name. The controller's admin runs its `install` from the release they
@@ -125,6 +126,19 @@ with `restrict` and the forced command that names the key's one member. No key c
 command. A list with a line that it refuses is refused whole, so no line of it is rendered. Only
 `Members::parse` and `Members::of_keys` make a `Members`, and its tests pin each refusal and the line rendered. It does
 no I/O, and its manifest names serde alone.
+
+### `crates/retention`
+
+The decisions of the controller's prune: what it removes of what its jobs keep. They cover the
+runs' records (`records`), the installs (`installs`), the jobs' trees and directories (`jobs`) and
+the store's files (`store`). The crate also says whether the boot has ended (`boot::Unit`). The
+prunes of the records and the installs remove nothing before it has. Each decision takes the
+values that `pumpkin`'s `job` observed in the controller's directories, and the time now. It
+returns what to remove. `pumpkin` reads the directories, takes the locks and removes the files.
+`engine`'s `prune` decides which images go.
+
+**Architecture Invariant:** it does no I/O and reads no clock, so its tests pin each rule on
+values. Its manifest names no dependency.
 
 ### `crates/schema`
 
@@ -488,11 +502,12 @@ follows a job, and its `commands` stop and reap runs. `link` is the protocol of 
 the jobs, each with its member (`Member`), for `wait` and `cancel` to find a run among. It streams a
 job's log and its milestones. It is of the client's own build, which the client installs there
 whole: its executable and the files beside it, by their SHA-256. `iam` states its own calls on
-AWS and composes each principal's policy from its calls and the providers'. `manifest` describes the task tree and the client install that `send` transfers by content. Its `store` admits complete uploads by
-their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
-and keeps the install that its unit runs. Its `settings` checks the envelope that made the
-controller's settings and refuses a job while they drain. `job` also holds the prune and the
-slots that admit its builds and publishes (`Admission`). `host` is the host's software, which
+AWS and composes each principal's policy from its calls and the providers'. `manifest` describes the
+task tree that `send` transfers by content. Its `store` admits complete uploads by their SHA-256.
+`job` is the controller's side. Its `start` starts each id once under the jobs' lock and marks the
+install that its unit runs. Its `settings` checks the envelope that made the controller's settings
+and refuses a job while they drain. `job` also holds the slots that admit its builds and publishes
+(`Admission`). Its prune removes what `retention` picks. `host` is the host's software, which
 `pumpkin-admin install` installs as root. Its units run the boot and the idle stop. They also copy
 the members' keys from the parameter that the settings' `[deployment]` names. Each key gets the
 forced command that `members` renders. `host`'s `file` is the host file,
@@ -534,18 +549,19 @@ providers, so the class a role is placed in never turns on the machine's memory.
 that names a provider of kind `docker` names no other (`Providers::new`).
 
 **Architecture Invariant:** each file in the controller's store has the SHA-256 that names it.
-A sender holds the partial file's lock while appending and checking its digest. A blob from the
-running install is checked on a private copy. Both are admitted under the store lock, which the
-prune also takes. The prune leaves active partials alone. A job's tree links to the store and
-its `.pumpkin` links to the controller's workspace, which no manifest path is below. A client
-sends only what the store lacks, and no secret of a job's goes there.
+A sender holds the partial file's lock while appending and checking its digest. A blob is
+admitted under the store lock, which the prune also takes. The prune leaves active partials
+alone. A job's tree links to the store and its `.pumpkin` links to the controller's workspace,
+which no manifest path is below. A client sends only what the store lacks, and no secret of a
+job's goes there.
 
 **Architecture Invariant:** a controller's prune never removes an image that a running job holds,
 or that the IR of a running job's started run names. It never removes an install that a running
-job runs, that a job started within `KEPT` ran, or that a start handed out within `KEPT`. It
-removes no install before the boot's reap has ended. Each job names what it holds in its directory
-in tmpfs, which its unit removes as it ends. Its `OWN` link names its install. A prune reads those
-names under the lock of the jobs' directory. A start holds that lock as it hands out an install.
+job runs, or that a `serve` or a start marked within `KEPT`. It removes no install before the
+boot's reap has ended. Each job names what it holds in its directory in tmpfs, which its unit
+removes as it ends. Its `OWN` link names its install. A prune reads those names under the lock of the jobs'
+directory. A start holds that lock as it hands out and marks an install. `retention` decides what
+to remove from what the prune read.
 
 **Architecture Invariant:** `serve` acts for the member that the controller's forced command
 names (`--member`, a `members::Member`), and each run's job it starts records that member.
@@ -813,13 +829,14 @@ credentials, which it reads. The runs' records are outside too, where `--runs` n
 directory. So are the files that `fmt` and `lock` rewrite, which their command lines name, and the
 Docker engine's images and its ledger of CPUs, which every run on the engine shares. The last is
 the machine's key to its controllers, with the host keys it pinned. The admin lists that key as the
-member's credential. On a controller, below the controller user's home, as the `job` module lays
-out, the jobs also keep the store of the files that clients sent, the trees of links into it and
-each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the clients
-upload. Each job's directory also names its release and the envelopes it takes. A run's job
-directory names its member too. Outside the controller user's home, `pumpkin-admin install`
-writes only the host's software, as `host` lays it out: the host file, the members' keys, `sshd`'s
-drop-ins, the units, `pumpkin-admin` itself, and the idle check's mark of the last busy time.
+member's credential. On a controller, the `job` module also lays out the store of the files that
+clients sent, the trees of links into it and each job's own directory, all below the controller
+user's home. The `.pumpkin` there keeps the install of each build that a client uploads. The
+build's `serve` and jobs run from it. Each job's directory also names its release and the
+envelopes it takes. A run's job directory names its member too. Outside the controller user's home,
+`pumpkin-admin install` writes only the host's software, as `host` lays it out: the host file, the
+members' keys, `sshd`'s drop-ins, the units, `pumpkin-admin` itself, and the idle check's mark of
+the last busy time.
 
 ### Testing
 

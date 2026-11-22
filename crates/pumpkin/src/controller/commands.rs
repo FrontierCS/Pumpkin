@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::SystemTime;
 
+use retention::KEPT_DAYS;
 use stdx::Context as _;
 
 use super::Reached;
@@ -15,7 +16,6 @@ use super::follow::{self, Finished};
 use super::linking::Build;
 use super::send::{send, tree};
 use crate::ending::Printed;
-use crate::job::{KEPT, KEPT_DAYS};
 use crate::link::{
     Ask, CancelAnswer, CancelRequest, Job, Jobs, JobsRequest, Owner, ReapRequest, Unanswered,
 };
@@ -153,10 +153,8 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
 /// `error`, which says that `run` names none of the jobs `ids` or several. If `run` names a run
 /// whose record the controller may have removed, it adds where the record may be instead.
 fn unnamed(ids: &[String], run: &str, error: String) -> String {
-    // The controller removes a run's job directory with its record. Such a run is older than
-    // `KEPT`.
-    let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
-    let old = runtime::minted(run).is_some_and(|minted| minted < cutoff);
+    // The controller removes a run's job directory with its record. Such a run has expired.
+    let old = retention::jobs::expired(crate::job::started(run), SystemTime::now());
     let none = (ids.iter()).all(|id| runtime::named(std::slice::from_ref(id), run, "").is_err());
     if !old || !none {
         return error;

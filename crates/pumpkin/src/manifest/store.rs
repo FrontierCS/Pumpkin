@@ -11,7 +11,7 @@ use schema::ir::Sha256Digest;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
-use super::{Entry, INCOMING, Kind, LOCK, MANIFESTS, Manifest, file_sha256};
+use super::{Entry, INCOMING, Kind, LOCK, MANIFESTS, Manifest};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Missing {
@@ -46,28 +46,14 @@ fn partial(store: &Path, digest: &Sha256Digest) -> PathBuf {
 }
 
 /// Refreshes the manifest before listing its missing blobs, under the lock that a prune takes.
-/// The running install can supply a blob of its own manifest without a second upload.
-pub(crate) fn lacks(
-    store: &Path,
-    manifest: &Manifest,
-    install: Option<&Path>,
-) -> Result<Vec<Missing>, String> {
+pub(crate) fn lacks(store: &Path, manifest: &Manifest) -> Result<Vec<Missing>, String> {
     let directory = store.join(MANIFESTS);
     let incoming = store.join(INCOMING);
     for dir in [&directory, &incoming] {
         fs::create_dir_all(dir).context(dir.display())?;
     }
     let text = manifest.text();
-    let name = super::sha256(&text);
-    if let Some(install) = install
-        && install.file_name() != Some(name.hex().as_ref())
-    {
-        return Err(
-            "the install manifest differs from this serve's build: link to its own build"
-                .to_owned(),
-        );
-    }
-    let path = directory.join(name.hex());
+    let path = directory.join(super::sha256(&text).hex());
     let mut staged = tempfile::NamedTempFile::new_in(&incoming).context(incoming.display())?;
     staged.write_all(&text).context(path.display())?;
     staged
@@ -78,12 +64,7 @@ pub(crate) fn lacks(
     staged.persist(&path).context(path.display())?;
     let mut lacking = BTreeMap::new();
     for entry in manifest.entries() {
-        let Some(target) = missing_path(store, entry)? else {
-            continue;
-        };
-        if let Some(install) = install
-            && seed(&incoming, install, entry, &target)?
-        {
+        if !lacked(store, entry)? {
             continue;
         }
         let part = partial(store, &entry.digest);
@@ -104,16 +85,16 @@ pub(crate) fn lacks(
     Ok(lacking.into_values().collect())
 }
 
-fn missing_path(store: &Path, entry: &Entry) -> Result<Option<PathBuf>, String> {
+fn lacked(store: &Path, entry: &Entry) -> Result<bool, String> {
     let blob = store.join(entry.digest.hex());
     if blob.try_exists().context(blob.display())? {
-        return Ok(None);
+        return Ok(false);
     }
     if entry.kind == Kind::Executable {
         let copy = store.join(format!("{}.x", entry.digest.hex()));
-        return Ok((!copy.try_exists().context(copy.display())?).then_some(copy));
+        return Ok(!copy.try_exists().context(copy.display())?);
     }
-    Ok(Some(blob))
+    Ok(true)
 }
 
 /// A job may start once its entire tree is available. Renew its manifest under the prune's lock
@@ -125,7 +106,7 @@ pub(crate) fn required(store: &Path, tree: &Sha256Digest) -> Result<(), String> 
     let mut text = Vec::new();
     (&file).read_to_end(&mut text).context(path.display())?;
     for entry in Manifest::parse(&text)?.entries() {
-        if missing_path(store, entry)?.is_some() {
+        if lacked(store, entry)? {
             return Err(format!(
                 "the controller lacks the blob for `{}`: send the task again",
                 entry.path
@@ -134,30 +115,6 @@ pub(crate) fn required(store: &Path, tree: &Sha256Digest) -> Result<(), String> 
     }
     file.set_modified(std::time::SystemTime::now())
         .context(path.display())
-}
-
-fn seed(incoming: &Path, install: &Path, entry: &Entry, target: &Path) -> Result<bool, String> {
-    let path = install.join(&entry.path);
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context(path.display()),
-    };
-    let mut copy = tempfile::NamedTempFile::new_in(incoming).context(incoming.display())?;
-    io::copy(&mut file, copy.as_file_mut()).context(path.display())?;
-    if file_sha256(copy.path())? != (entry.digest.clone(), entry.size_bytes) {
-        return Ok(false);
-    }
-    let mode = if entry.kind == Kind::Executable {
-        0o555
-    } else {
-        0o444
-    };
-    copy.as_file()
-        .set_permissions(Permissions::from_mode(mode))
-        .context(target.display())?;
-    copy.persist(target).context(target.display())?;
-    Ok(true)
 }
 
 fn still_named(file: &File, path: &Path) -> Result<bool, String> {

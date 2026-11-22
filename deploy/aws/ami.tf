@@ -1,9 +1,8 @@
 # The AMI that the sandboxes boot, baked once by EC2 Image Builder: Amazon Linux 2023 at a named
 # release, with Docker, ECR's credential helper and nftables, which each sandbox's boot runs. The
-# helper is installed, not configured: each boot's user data configures it, as a configured helper
-# makes the `docker login` of older boots fail. AL2023's package
-# repositories are fixed to the release of the AMI that they run on, so the release pins the
-# version of every package installed here. A change to `packages` or `release` also bumps
+# AMI installs the helper without configuring it. Each boot's user data configures it. AL2023's
+# package repositories are fixed to the release of the AMI that they run on, so the release pins
+# the version of every package installed here. A change to `packages` or `release` also bumps
 # `version`, which names the component and the recipe, and bakes a new AMI.
 locals {
   ami_build = {

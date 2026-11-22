@@ -65,11 +65,7 @@ pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String>
     });
     let boots_once = BOOTS_ONCE.replace("@ATTESTATION_DIR@", ATTESTATION_DIR);
     // Docker asks ECR's credential helper for the registry's token on each pull, by the
-    // instance's role. In user data, not in the AMI, as a configured helper makes `docker login`
-    // fail, which the boots of other builds run: Docker stores the login through the helper,
-    // which stores none.
-    // https://github.com/docker/cli/blob/0bab007417226f0c43a897216c4e40471b9d70d1/cli/command/registry/login.go#L144-L157
-    // https://github.com/awslabs/amazon-ecr-credential-helper/blob/7ff7d6bd7a06408ddb9646c9ebccf97dbd190d55/ecr-login/ecr.go#L80-L93
+    // instance's role. The AMI only installs the helper, so the boot names it for the registry.
     let docker = json!({ "credHelpers": { registry: "ecr-login" } }).to_string();
     let config = json!({
         "write_files": [

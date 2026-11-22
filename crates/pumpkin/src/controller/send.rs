@@ -206,27 +206,13 @@ pub(super) fn send(
         modal_bytes,
     };
     let request = StartRequest::encode(&start, &mut body)?;
-    let (mut install_left, mut tree_left) = (None, None);
+    let mut left = None;
     match reached.carrying_on(
         &build,
         "starting the job",
         |reached, linked, at, advanced| {
-            upload::send(
-                linked,
-                reached,
-                &build.hashed,
-                None,
-                &mut install_left,
-                advanced,
-            )?;
-            upload::send(
-                linked,
-                reached,
-                &tree.hashed,
-                Some((&build, at)),
-                &mut tree_left,
-                advanced,
-            )?;
+            let peer = (&build, at);
+            upload::send(linked, reached, &tree.hashed, peer, &mut left, advanced)?;
             linked.ask_with_body(reached, request, &body)
         },
     )?? {
@@ -235,21 +221,10 @@ pub(super) fn send(
     }
 }
 
-fn holds(
-    name: &Name,
-    manifest: &manifest::Manifest,
-    missing: &[Missing],
-    bytes: u64,
-    install: bool,
-) -> String {
-    let what = if install {
-        "the build's files"
-    } else {
-        "the task's files"
-    };
+fn holds(name: &Name, manifest: &manifest::Manifest, missing: &[Missing], bytes: u64) -> String {
     let files = manifest.entries().len();
     if missing.is_empty() {
-        return format!("controller `{name}` holds all {files} of {what}");
+        return format!("controller `{name}` holds all {files} of the task's files");
     }
     let digests: BTreeSet<_> = missing.iter().map(|blob| &blob.digest).collect();
     let count = manifest
@@ -258,12 +233,9 @@ fn holds(
         .filter(|entry| digests.contains(&entry.digest))
         .count();
     let which = if count == files {
-        format!("all {files} of {what}")
+        format!("all {files} of the task's files")
     } else {
-        format!(
-            "{count} of {} {files} files",
-            if install { "the build's" } else { "the task's" }
-        )
+        format!("{count} of the task's {files} files")
     };
     format!(
         "controller `{name}` lacks {which}: sending {}",

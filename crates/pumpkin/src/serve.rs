@@ -1,13 +1,10 @@
 //! `pumpkin controller serve`: the controller's end of a client's link ([`crate::link`]), on its
 //! standard input and output, which answers from the runs, the jobs and the machine there.
 //!
-//! As it starts, it marks its install as used, and removes the other installs, and what an install
-//! left half made, that no `serve` used for a day, as Zed's server removes its older binaries as
-//! it starts
-//! (<https://github.com/zed-industries/zed/blob/e231594b6b8818ea8d668ee2eb73e1fb09300654/crates/remote_server/src/server.rs#L1429-L1449>).
-//! Then it answers each request until its input ends, brings no request for [`IDLE`], or breaks
-//! the protocol, which it refuses and exits 1. It marks its install as used again as each request
-//! arrives, so that a `serve` kept for days by an open page keeps its install.
+//! It answers each request until its input ends or brings no request for [`IDLE`]. As it starts,
+//! and at each request, it marks its install as used, and the prune of installs reads that mark.
+//! So a `serve` that an open page keeps for days keeps its install. It refuses input
+//! that breaks the protocol, and exits 1.
 //!
 //! It acts for the member that `--member` names, as the controller's forced command gives it: each
 //! job it starts names that member, its listings name each job's, and it cancels another member's
@@ -17,11 +14,10 @@ mod copy;
 mod follow;
 mod reaping;
 
-use std::ffi::OsStr;
-use std::fs::{self, DirEntry, File};
+use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
 use std::os::fd::AsFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -48,37 +44,25 @@ use crate::view::Answering;
 /// a minute with none is a closed page or a lost connection, and ending closes its SSH connection.
 pub(crate) const IDLE: Duration = Duration::from_mins(1);
 
-// How long an install lasts that no `serve` uses: a day, as a store's partial blobs last, so
-// that a build used every day keeps its install, and one left behind is gone by the next.
-const INSTALL_KEPT: Duration = Duration::from_hours(24);
-
 const UPTIME: &str = "/proc/uptime";
 
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
 pub(crate) fn serve(member: &Member) -> Result<ExitCode, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
-    let install = own_install();
-    match &install {
-        Ok(install) => prune(&home.join(link::installs()), install),
-        Err(error) => say(format_args!(
-            "{error}, so no install is removed, or marked as used"
-        )),
-    }
+    marked();
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
         return Ok(ExitCode::SUCCESS);
     }
-    let install = install.as_deref().ok();
-    requests(&mut input, &mut output, &home, install, member)
+    requests(&mut input, &mut output, &home, member)
 }
 
 fn requests(
     input: &mut BufReader<File>,
     output: &mut impl Write,
     home: &Path,
-    install: Option<&Path>,
     member: &Member,
 ) -> Result<ExitCode, String> {
     // Kept for the link's life: it holds what it read of the live runs.
@@ -89,9 +73,7 @@ fn requests(
             Ok(None) => break,
             Err(error) => return invalid_request(output, error),
         };
-        if let Some(install) = install {
-            mark_install_used(install);
-        }
+        marked();
         let body = match ask.read_buffered_body(input) {
             Ok(body) => body,
             Err(error) => return invalid_request(output, error),
@@ -195,8 +177,7 @@ fn missing(home: &Path, request: &link::store::Lacks, body: &[u8]) -> Result<Vec
             "the manifest that arrived differs from its digest: send the task again".to_owned(),
         );
     }
-    let install = request.install.then(own_install).transpose()?;
-    crate::manifest::store::lacks(&home.join(crate::job::STORE), &manifest, install.as_deref())
+    crate::manifest::store::lacks(&home.join(crate::job::STORE), &manifest)
 }
 
 fn receive_put(
@@ -271,71 +252,23 @@ fn ready(fd: &impl AsFd, events: PollFlags, timeout: Duration) -> io::Result<boo
     }
 }
 
-/// The directory of this `serve`'s install, which holds its executable and the rest of its build.
-fn own_install() -> Result<PathBuf, String> {
-    let exe = crate::workspace::exe("expected it to tell its install from the others")?;
-    match exe.parent() {
-        Some(install) => Ok(install.to_owned()),
-        None => Err(format!(
-            "{} is in no directory, as an install is",
-            exe.display()
-        )),
-    }
-}
-
-/// Marks `install`, this `serve`'s, as used, and removes each other entry in `installs` that
-/// nothing changed for `INSTALL_KEPT`, saying, but going on past, what it can't do.
-fn prune(installs: &Path, install: &Path) {
-    let own = install.file_name();
-    let entries = match fs::read_dir(installs) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-        Err(error) => return say(format_args!("{}: {error}", installs.display())),
-    };
-    let now = SystemTime::now();
-    for entry in entries {
-        let pruned = (entry.context(installs.display())).and_then(|entry| pruned(&entry, own, now));
-        if let Err(error) = pruned {
-            say(format_args!(
-                "{error}: expected to remove each install of `serve` there that none used for a \
-                 day, which the next `serve` tries again"
-            ));
-        }
-    }
-}
-
-/// Marks `install`, this `serve`'s, as used now, saying, but going on past, what it can't do.
-fn mark_install_used(install: &Path) {
-    if let Err(error) = mark_used(install, SystemTime::now()) {
+/// Marks this `serve`'s install as used now, as [`mark_used`] does. Says what it can't do, and goes
+/// on.
+fn marked() {
+    if let Err(error) = mark_used() {
         say(error);
     }
 }
 
-fn mark_used(install: &Path, now: SystemTime) -> Result<(), String> {
-    let touched = File::open(install).and_then(|dir| dir.set_modified(now));
-    touched.context(install.display())
-}
-
-fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), String> {
-    let path = entry.path();
-    if Some(entry.file_name().as_os_str()) == own {
-        return mark_used(&path, now);
-    }
-    let modified = entry.metadata().and_then(|metadata| metadata.modified());
-    let modified = modified.context(path.display())?;
-    if now.duration_since(modified).unwrap_or_default() <= INSTALL_KEPT {
-        return Ok(());
-    }
-    let removed = if entry.file_type().context(path.display())?.is_dir() {
-        fs::remove_dir_all(&path)
-    } else {
-        fs::remove_file(&path)
+/// Marks this `serve`'s install as used now. The install is the directory above the `bin/` that
+/// holds the executable.
+fn mark_used() -> Result<(), String> {
+    let exe = crate::workspace::exe("expected it to mark its install as used")?;
+    let Some(install) = exe.parent().and_then(Path::parent) else {
+        return Err(format!("{} is in no install's `bin/`", exe.display()));
     };
-    match removed {
-        // Another `serve`'s prune removed it first.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        removed => removed.context(path.display()),
-    }
+    let marked = File::open(install).and_then(|dir| dir.set_modified(SystemTime::now()));
+    marked.context(install.display())
 }
 
 /// The whole seconds since the machine booted.

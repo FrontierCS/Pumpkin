@@ -1,7 +1,7 @@
-//! The prune of the runs' records. A run's record is evidence, and the controller's copy may be the
-//! only one. So no shortage of room removes a record. A record lasts until the run's member has
-//! copied it whole, which `COPIED` in the run's job's directory notes. It then lasts `KEPT` from
-//! that copy, as long as the controller keeps the run's tree to run it again.
+//! The runs' records on the controller, and their prune. A run's record is evidence, and the
+//! controller's copy may be the only one. So no shortage of room removes a record.
+//! `retention::records` says how long a record lasts. `COPIED` in the run's job's directory notes
+//! when its member last copied the record.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -11,10 +11,11 @@ use std::time::SystemTime;
 
 use members::Member;
 use provider::RunTag;
+use retention::KEPT_DAYS;
 use runtime::Record;
 use stdx::Context as _;
 
-use super::{JOBS, KEPT, KEPT_DAYS, ids};
+use super::{JOBS, ids};
 use crate::{counted, next, say, size};
 
 // The file in a run's job's directory that notes the member's copy of the run's record. It is
@@ -34,18 +35,20 @@ pub(crate) fn mark_copied(home: &Path, id: &RunTag, member: &Member) -> Result<(
     let path = job.join(COPIED);
     let marked = (OpenOptions::new().write(true).create(true).truncate(false)).open(&path);
     match marked {
-        // The record lasts `KEPT` from the last copy, not the first.
+        // The record lasts `KEPT_DAYS` days from the last copy, not the first.
         Ok(file) => file.set_modified(SystemTime::now()).context(path.display()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).context(path.display()),
     }
 }
 
-/// Removes each record whose member last copied it more than `KEPT` ago, and whose job in `home`
-/// no longer runs. A job that runs has its directory in `jobs`. Keeps a record that something
-/// holds or wrote since the copy (`Record::remove`). Also finishes each removal cut short. Says
-/// which records it removed, and the room they took. Says why it couldn't remove a record, and
-/// goes on with the others. Removes none until the boot unit has ended (`boot::after`).
+/// Removes the records of the jobs in `home` that `retention::records::removed` picks. A job that
+/// runs has its directory in `jobs`.
+///
+/// It leaves a record that something holds, or that was written since its copy
+/// (`Record::remove`). It also finishes each removal cut short. It says which records it removed,
+/// and the room they took. It says why it couldn't remove a record, and goes on with the others.
+/// It removes none until the boot unit has ended (`boot::after`).
 // The boot may reap a record.
 pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
@@ -55,10 +58,23 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     for failed in Record::finish_removals(&runs) {
         say(format_args!("finishing the removal of a record: {failed}"));
     }
+    let mut records = Vec::new();
+    for id in ids(&home.join(JOBS))? {
+        // A record that its member hasn't copied stays, so its job and record go unread.
+        let record = copied(home, &id).and_then(|copied| {
+            copied
+                .map(|copied| observed(&runs, jobs, &id, Some(copied)))
+                .transpose()
+        });
+        match record {
+            Ok(record) => records.extend(record),
+            Err(error) => say(format_args!("removing run {id}'s record: {error}")),
+        }
+    }
     let mut removed = Vec::new();
     let mut removed_bytes = 0;
-    for id in ids(&home.join(JOBS))? {
-        match removed_record(home, &runs, jobs, &id) {
+    for (id, copied) in retention::records::removed(&records, SystemTime::now()) {
+        match Record::remove(&runs.join(id), copied, size_bytes) {
             Ok(Some(size_bytes)) => {
                 removed.push(id);
                 removed_bytes += size_bytes;
@@ -78,24 +94,11 @@ pub(super) fn collect(home: &Path, jobs: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes the record of run `id` in `runs` as `collect` says. Returns the room it took, or `None`
-/// if it is kept.
-fn removed_record(home: &Path, runs: &Path, jobs: &Path, id: &str) -> Result<Option<u64>, String> {
-    let Some(copied) = copied(home, id)? else {
-        return Ok(None);
-    };
-    let since = SystemTime::now().duration_since(copied).unwrap_or_default();
-    if since <= KEPT || exists(&jobs.join(id))? {
-        return Ok(None);
-    }
-    Record::remove(&runs.join(id), copied, size_bytes)
-}
-
-/// What a refusal for want of room adds about the records that their members haven't copied,
-/// which no prune removes. It counts the records whose jobs in `home` have ended, as their
-/// directories in `jobs` are gone. It says how many there are, the room they take, and the command
-/// that copies the oldest. It adds nothing if there are none. If it can't tell, it adds nothing
-/// and says why.
+/// What a refusal for want of room adds about the records that their members haven't copied. No
+/// prune removes them (`retention::records::uncopied`). It counts the records whose jobs in `home`
+/// have ended, as their directories in `jobs` are gone. It says how many there are, the room they
+/// take, and the command that copies the oldest. It adds nothing if there are none. If it can't
+/// tell, it adds nothing and says why.
 pub(super) fn uncopied(home: &Path, jobs: &Path) -> String {
     match uncopied_in(home, jobs) {
         Ok(Some(uncopied)) => format!("; {uncopied}"),
@@ -111,16 +114,12 @@ pub(super) fn uncopied(home: &Path, jobs: &Path) -> String {
 
 fn uncopied_in(home: &Path, jobs: &Path) -> Result<Option<String>, String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    let mut uncopied = Vec::new();
-    let mut uncopied_bytes = 0;
+    let mut records = Vec::new();
     for id in ids(&home.join(JOBS))? {
-        let record = runs.join(&id);
-        if copied(home, &id)?.is_some() || exists(&jobs.join(&id))? || !exists(&record)? {
-            continue;
-        }
-        uncopied_bytes += size_bytes(&record);
-        uncopied.push(id);
+        records.push(observed(&runs, jobs, &id, copied(home, &id)?)?);
     }
+    let uncopied = retention::records::uncopied(&records);
+    let uncopied_bytes: u64 = (uncopied.iter()).map(|id| size_bytes(&runs.join(id))).sum();
     // Ids sort as their runs started.
     let Some(oldest) = uncopied.first() else {
         return Ok(None);
@@ -132,6 +131,23 @@ fn uncopied_in(home: &Path, jobs: &Path) -> Result<Option<String>, String> {
         size(uncopied_bytes),
         next::of_run("wait", None, oldest)
     )))
+}
+
+/// Observes run `id` for `retention`: whether its job runs, as its directory in `jobs` says, and
+/// whether its record is in `runs`. `copied` is when its member last copied the record, if they
+/// have.
+fn observed(
+    runs: &Path,
+    jobs: &Path,
+    id: &str,
+    copied: Option<SystemTime>,
+) -> Result<retention::records::Record, String> {
+    Ok(retention::records::Record {
+        id: id.to_owned(),
+        copied,
+        running: exists(&jobs.join(id))?,
+        recorded: exists(&runs.join(id))?,
+    })
 }
 
 /// When the member of run `id`, whose job is in `home`, last copied its record, if they have.

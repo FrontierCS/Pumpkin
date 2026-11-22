@@ -93,10 +93,9 @@ impl Linked {
         Self::connect(reached, &key, at)?.ok_or_else(|| {
             Unlinked::Failed(format!(
                 "controller `{}` has no serve of this pumpkin though it was just installed \
-                 there, in `~/{}/{}`: see that its user may run it, and run the command again",
+                 there, in `~/{}/bin`: see that its user may run it, and run the command again",
                 reached.name,
-                link::installs(),
-                key.hex()
+                link::install(&key),
             ))
         })
     }

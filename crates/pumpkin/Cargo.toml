@@ -23,6 +23,7 @@ members = { path = "../members" }
 modal = { path = "../../providers/modal" }
 provider = { path = "../provider" }
 recipe = { path = "../recipe" }
+retention = { path = "../retention" }
 route = { path = "../route" }
 runtime = { path = "../runtime" }
 schema = { path = "../schema" }

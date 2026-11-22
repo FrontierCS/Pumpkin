@@ -58,20 +58,20 @@ pub(crate) fn state(home: &Path) -> Boot {
     }
 }
 
-/// Returns the jobs' directory `jobs`, locked as a prune locks it (`super::open_jobs`), once the
-/// boot unit has run to its end in this boot, with no job of it queued. Returns `None` until then,
-/// and while `systemctl` can't say.
+/// Locks the jobs' directory `jobs` as a prune does (`super::open_jobs`), and returns the lock once
+/// the boot unit has ended (`retention::boot::Unit::ended`). Returns `None` until then, and while
+/// `systemctl` can't say.
 // The boot's reap of an old build may need what the prune would remove.
 pub(super) fn after(jobs: &Path) -> Result<Option<File>, String> {
     let locked = super::open_jobs(jobs)?;
     locked.lock().context(super::jobs_named(jobs))?;
     let shown = Shown::of(&["ActiveState", "Job", "ExecMainExitTimestamp"]);
-    // systemd keeps a unit's times for the boot alone, so an exit time is of this boot's run.
-    let ended = shown
-        .get("ExecMainExitTimestamp")
-        .is_some_and(|value| !value.is_empty());
-    let idle = shown.get("Job") == Some("") && shown.get("ActiveState") != Some("activating");
-    Ok((ended && idle).then_some(locked))
+    let unit = retention::boot::Unit {
+        active_state: shown.get("ActiveState"),
+        job: shown.get("Job"),
+        exit_timestamp: shown.get("ExecMainExitTimestamp"),
+    };
+    Ok(unit.ended().then_some(locked))
 }
 
 /// The boot unit's properties, as `systemctl show` gives them. They are empty if `systemctl`
