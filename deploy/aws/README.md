@@ -16,7 +16,7 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
 | the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
-| the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply never replaces it | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
+| the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
 | what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
 | the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
@@ -105,8 +105,9 @@ terraform apply pumpkin.tfplan
 
 The first apply waits while Image Builder bakes the AMI on a build instance of its own. It makes
 the controller after the bake, as the controller's settings name the templates that boot the AMI. A
-concurrent `plan` or `apply` of the same state waits on its lock. To take a later release's module,
-set a new `ref`, run `terraform init -upgrade`, and plan. "Versions" says what a release may change.
+concurrent `plan` or `apply` of the same state waits on its lock. To take a later release, set a
+new `ref` and its `pumpkin_release`, run `terraform init -upgrade`, and plan, in the cutover under
+"Versions". "Versions" also says what a release may change.
 
 A state that an apply made with this directory as its root moves into the module once. The root
 gets a `moved` block for each of the module's resources, as Terraform's refactoring guide moves
@@ -120,11 +121,11 @@ moved {
 }
 ```
 
-`grep '^resource' *.tf` here lists them. Besides the moves, the plan updates the controller's
-`run` policy, the sandbox's and the client's to this release's, and destroys the controller's
-`settings` and `members` policies, which `run` now holds. The update and the destroys are
-unordered, so apply it as a cutover, with the drain runbook under "Versions". Once it is applied,
-the blocks can go.
+`grep '^resource' *.tf` here lists them. Besides the moves, the plan creates
+`terraform_data.pumpkin_release`, updates the controller's `run` policy, the sandbox's and the
+client's to this release's, and destroys the controller's `settings` and `members` policies, which
+`run` now holds. The update and the destroys are unordered, so apply it as a cutover, with the
+drain runbook under "Versions". Once it is applied, the blocks can go.
 
 ## Members
 
@@ -207,33 +208,20 @@ no apply: it is the client's `[controller.modal]`, which each job takes.
 
 With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
 us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at
-us-east-1's rates, more in other regions; beside ECR's storage. A new Ubuntu release or a new
-cloud-init reaches it only by `terraform apply -replace=module.pumpkin.aws_instance.controller`,
-once no run is live: its volume, and the records on it, go with it.
+us-east-1's rates, more in other regions; beside ECR's storage.
 
-An apply never changes what Pumpkin installs on the controller: its user, its units and `sshd`'s
-settings. A release changes them, when the admin runs the release's install there. As `ubuntu`,
-with administrator access, download the archive for the release's `pumpkinversion` line, `<tag>
-<commit> <sha256>`. Run its install with the settings' ARN, `terraform output -raw
-settings_parameter_arn`. The install keeps the ARN in `/etc/pumpkin/controller.toml`. It reads the
-settings' `[deployment]`, so apply this module's settings first. Each job finds the settings by
-that file alone, so the install comes before a member's `.pumpkinversion` names the release. The
-install says each change it makes, and nothing if it makes none:
+The controller's first boot runs the install of the release that `pumpkin_release` names. The
+install sets up Pumpkin's user, its units and `sshd`'s settings, and nothing changes them later.
+So an apply that changes `pumpkin_release` replaces the controller. The new controller also takes
+the current Ubuntu release and this module's `controller.yaml`, and its volume is new.
+`terraform apply -replace=module.pumpkin.aws_instance.controller` replaces it at the same
+release. Either replacement is a cutover, under "Versions".
 
-```sh
-curl --fail --location --output pumpkin.tar.xz \
-    https://github.com/FrontierCS/Pumpkin/releases/download/<tag>/pumpkin-<tag>-x86_64-unknown-linux-musl.tar.xz
-echo '<sha256>  pumpkin.tar.xz' | sha256sum --check --strict
-mkdir pumpkin && tar --extract --xz --file=pumpkin.tar.xz --directory=pumpkin
-sudo pumpkin/bin/pumpkin-admin install --settings <settings_parameter_arn>
-```
-
-Set `pumpkin_release` to that line too. A controller made later installs that release at its first
-boot. A first boot that fails powers the controller off 30 minutes later. `/var/log/cloud-init-output.log`
-there says why. Once the cause is fixed,
-`terraform apply -replace=module.pumpkin.aws_instance.controller` makes the controller again. At
-boot, the controller runs the boot of each installed build. Sandboxes that remain unreachable
-expire at the run's hard end.
+A first boot that fails powers the controller off 30 minutes later.
+`/var/log/cloud-init-output.log` there says why. Once the cause is fixed, an apply that corrects
+`pumpkin_release`, or `terraform apply -replace=module.pumpkin.aws_instance.controller`, makes the
+controller again. At boot, the controller runs the boot of each installed build. Sandboxes that
+remain unreachable expire at the run's hard end.
 
 ## Versions
 
@@ -254,9 +242,8 @@ members' keys. Both refuse settings without it.
   other key there without a word in the log.
 - A release keeps nothing but the envelope across releases. It need not work with another tag's
   module, controller install or members' clients. So at each tag, the admin applies the tag's
-  module. The admin then runs the release's `pumpkin-admin install --settings` on the controller,
-  in a cutover as below, as "Changes" says. Each member then raises `.pumpkinversion` to that
-  release.
+  module with the tag's `pumpkin_release`, in a cutover as below. Each member then raises
+  `.pumpkinversion` to that release.
 - Each job's directory on the controller is `~pumpkin/jobs/<id>/`. Its `release` names the release
   that runs it, as `pumpkin --version` does. Its `envelope` names the envelopes it takes, such as
   `^1.1`, Cargo's caret requirement: 1.1 or a later 1.x. Step 2 of a cutover, below, lists the ids
@@ -266,21 +253,27 @@ A cutover that a running job would meet drains the controller first. Such a cuto
 change to the host's software or a replaced controller. Nomad likewise drains a node and lets its
 batch jobs complete
 ([node drain](https://github.com/hashicorp/nomad/blob/a3b86c697f38ab032e1acaae8503ed10815bc4a2/website/content/commands/node/drain.mdx#L9-L22)).
-The steps:
+Where CI applies the team's root, each apply below is one merged pull request. A `-replace` is an
+apply of its own, outside them.
 
 1. Set `draining = true` and apply. Each job that starts is refused, and its refusal names the
    drain. The jobs that run go on.
 2. Wait until no job runs. On the controller,
    `sudo ls /run/user/$(id --user pumpkin)/pumpkin` lists the id of each job whose unit runs.
    Each job's unit removes the job's directory there as it ends. A run's job ends by the run's
-   hard end at the latest. To see which releases still run, `sudo cat ~pumpkin/jobs/<id>/release`
-   names the release of job `<id>`.
-3. Each member runs `pumpkin wait`, which copies their runs' records.
-4. Apply the change, or replace the controller. For a new release, also run its
-   `sudo pumpkin/bin/pumpkin-admin install --settings <settings_parameter_arn>` on the controller,
-   from its archive, as "Changes" says.
-5. Set `draining = false` and apply.
-6. At a tag, each member raises `.pumpkinversion` to its release.
+   hard end at the latest. `sudo cat ~pumpkin/jobs/<id>/release` names the release of job `<id>`.
+   Before a replacement, each member runs `pumpkin wait <id>` for each run whose record they
+   keep. A replacement discards each run's record that no member copied.
+3. Apply the change. For a release, raise the module's `ref` and `pumpkin_release` to the
+   release's. Its plan replaces `module.pumpkin.aws_instance.controller`, and the new
+   controller's first boot installs the release. The apply that creates
+   `terraform_data.pumpkin_release` replaces nothing, as only a change of it does. So where the
+   plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. The new
+   controller has a new host key, so each member's first command after the replacement is
+   refused. Once the admin confirms the replacement, the member runs the `ssh-keygen -R` command
+   that the refusal names, and the next command pins the new key.
+4. Once `pumpkin ls` reaches the controller, set `draining = false` and apply.
+5. At a tag, each member raises `.pumpkinversion` to its release.
 
 ## Teardown
 
