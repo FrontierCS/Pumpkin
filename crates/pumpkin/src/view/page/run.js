@@ -25,14 +25,12 @@ import {
   get,
   grip,
   h,
-  keepSetting,
   plural,
   post,
   route,
   sentence,
   setKeys,
   setQuery,
-  setting,
   show,
   span,
   svg,
@@ -182,11 +180,8 @@ export async function runView(id) {
     lanes: grip({ name: "run.lanes", across: "y", sized: lanes, on: lanes, property: "--pane", stepPx: lanePx, title: "Drag to size the lanes" }),
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
-  // The diagram of who talks to whom, folded until it is asked for, or the address lights a role;
-  // this browser keeps whether it is open.
-  const diagram = /** @type {HTMLDetailsElement} */ (h("details", { class: "roles panel" }, h("summary", {}, "Who talks to whom"), talk, grips.talk));
-  diagram.open = query.has("role") || setting("run.roles") === "open";
-  diagram.addEventListener("toggle", () => keepSetting("run.roles", diagram.open ? "open" : "shut"));
+  // The diagram of who talks to whom, on a panel of its own above the inspector.
+  const diagram = h("section", { class: "roles panel" }, h("div", { class: "name" }, "Who talks to whom"), talk, grips.talk);
   fill(split, h("div", { class: "left" }, lanes, grips.lanes, h("section", { class: "log panel" }, filter, list.node)), grips.side, h("div", { class: "right" }, diagram, inspector));
   show(h("section", { class: "head panel" }, h("div", { class: "headline" }, verdict, traces, again, cancelBox), facts, failed, result, unread), startedOver, split);
 

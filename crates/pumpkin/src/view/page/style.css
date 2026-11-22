@@ -314,14 +314,9 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .row.refused .kind { color: var(--warn); } .row.failed .kind { color: var(--fail); }
 
 /* Who talks to whom. */
-/* Folded until it is asked for: a quiet line that names it, which opens it. */
-.roles { flex: none; display: flex; flex-direction: column; box-shadow: none; background: none; }
-.roles > summary { list-style: none; display: flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s4); font-size: 13px; color: var(--dim); cursor: pointer; }
-.roles > summary::-webkit-details-marker { display: none; }
-.roles > summary::after { content: "▸"; margin-left: auto; color: var(--faint); }
-.roles[open] > summary::after { content: "▾"; }
-.roles > summary:hover { color: var(--text); }
-.roles[open] { background: var(--panel); box-shadow: var(--shadow); }
+/* A quiet line that names it, over the diagram. */
+.roles { flex: none; display: flex; flex-direction: column; }
+.roles > .name { display: flex; align-items: center; height: 36px; padding: 0 var(--s4); font-size: 13px; color: var(--dim); }
 /* Its height is its own, or what its grip sets, and no more than half the window. */
 .talk { flex: none; padding: 0 var(--s4) var(--s3); max-height: min(max(80px, var(--pane, 40vh)), 50vh); overflow: auto; }
 .talk svg { max-width: 100%; height: auto; display: block; }
