@@ -621,8 +621,8 @@ developer installs.
 
 The Terraform module that makes one team's Pumpkin on AWS, as [its README](deploy/aws/README.md)
 says. The admin lists the team's members by key. The module makes the EC2 envelope that `ec2`
-relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
-controller. The controller comes with the SSM parameters of its jobs' settings and its members'
+relies on, the repositories that runs push to, Modal's pull role if the team lists a Modal
+workspace, the sandboxes' AMI, and the controller. The controller comes with the SSM parameters of its jobs' settings and its members'
 keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
 `pumpkin-admin install`. The module is a child module. An admin's root calls it at a Pumpkin
 release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the

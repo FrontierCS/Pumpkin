@@ -765,5 +765,7 @@ roles on, if any. It takes the settings of a provider of kind modal, but
 sets:
   profile       As modal's. The profile is in Modal's configuration file,
                 ~/.modal.toml. Each run is sent that file if it is there.
+                Its workspace is one that deploy/aws's `modal_workspaces`
+                lists.
   classes       As modal's.
 ";

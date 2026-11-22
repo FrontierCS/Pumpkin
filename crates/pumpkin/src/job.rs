@@ -431,7 +431,7 @@ fn take_modal(
     if modal.is_empty() {
         return Err(format!(
             "{named} name no Modal provider, whose `images` the client's `[controller.modal]` \
-             needs: apply `deploy/aws`, whose settings name one"
+             needs: list the profile's workspace in deploy/aws's `modal_workspaces`, and apply it"
         ));
     }
     for settings in modal {

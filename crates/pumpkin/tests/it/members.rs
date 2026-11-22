@@ -19,7 +19,6 @@ fn check_members() {
         key("A", "alice-laptop"),
         key("B", "alice-desk")
     );
-    scratch.write("members/alice.pub", &alice);
     scratch.write("members/README.md", "Each member's keys.\n");
     let ran = |scratch: &Scratch| {
         let output = scratch
@@ -34,6 +33,8 @@ fn check_members() {
         )
     };
     let mut lines = vec![ran(&scratch)];
+    scratch.write("members/alice.pub", &alice);
+    lines.push(ran(&scratch));
     scratch.write("members/bob.pub", "ssh-rsa AAAAB3NzaC1yc2E bob\n");
     lines.push(ran(&scratch));
     scratch.write("members/bob.pub", "\n");
@@ -42,9 +43,10 @@ fn check_members() {
         $ pumpkin-admin check-members members
         exit status: Some(0)
         $ pumpkin-admin check-members members
+        exit status: Some(0)
+        $ pumpkin-admin check-members members
         exit status: Some(1)
         pumpkin: members/bob.pub, line 1: member `bob`'s key is not an ed25519 public key: expected `ssh-ed25519 <68 characters of base64>` and an optional comment of printable ASCII, as `~/.config/pumpkin/ssh/key.pub` holds
         $ pumpkin-admin check-members members
-        exit status: Some(1)
-        pumpkin: members/bob.pub lists no key: list each of the member's keys on a line, or remove the file"#]].assert_eq(&lines.join("\n"));
+        exit status: Some(0)"#]].assert_eq(&lines.join("\n"));
 }

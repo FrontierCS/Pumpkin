@@ -8,18 +8,18 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | What | Why |
 | --- | --- |
 | the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
-| the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to HTTPS | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone |
+| the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to anywhere | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone; builds fetch from wherever their tasks name |
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
 | a launch template per class: the AMI, the type, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on; the provider's launch sets the metadata options |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
 | the timer: a schedule group and a role that terminates the run instances of this envelope's sandbox profile | a kill bound outside each guest |
-| the Modal pull role: ECR pulls from `roles`, assumed only by `modal_workspace`'s tokens | Modal imports the images of calls' targets, which hold hidden data |
+| the Modal pull role, if `modal_workspaces` lists any: ECR pulls from `roles`, assumed only by the tokens of those workspaces | Modal imports the images of calls' targets, which hold hidden data |
 | an AMI baked by EC2 Image Builder from a named AL2023 release, with Docker, ECR's credential helper and nftables | each sandbox's boot runs them, at the release's versions |
 | the controller's role and instance profile: access to its jobs' settings parameter, the members' parameter and the EC2 provider's resources: launches from its templates with nothing they name overridden and at their instance types, and terminations and console reads of its own sandboxes alone | the runs' launches, timers, sweeps and pushes, from the controller |
 | the controller: an on-demand instance on Ubuntu 24.04 LTS, with a public IPv4 address, IMDSv2 within one hop, an encrypted gp3 root, stopping on shutdown, tagged `pumpkin:controller=<name>`; an apply replaces it only for a new `pumpkin_release` | builds the tasks' images and runs the drivers, which a person's machine sends it, and runs no role |
 | what cloud-init installs there: Docker, which runs as root, so its `docker` group, which holds `pumpkin` alone, is root-equivalent; Buildx, AWS CLI v2 and uv at exact versions, and the rest of `controller.yaml`'s packages from a snapshot of Ubuntu's archive | builds with the containerd image store |
 | what the Pumpkin release `pumpkin_release` installs there, with `pumpkin-admin install` (`pumpkin-admin install --help` says what): the user `pumpkin`, lingering; an `sshd` that admits concurrent openings and ends a session whose client has gone; a unit that stops the controller after 30 minutes with no job and no SSH session; and one that runs each installed build's reap at boot | jobs that outlive every connection; a stop and a reap that need no client |
-| the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
+| the SSM parameter `/pumpkin-<name>/settings` (advanced tier), of envelope 1.1: the `[deployment]` that the host reads, with the deployment's `name` and members' parameter; the Docker engine, the EC2 provider `aws`, and, with the pull role, the Modal provider `modal`'s `images` | each job's settings, which an apply changes for the next job; the rest of the Modal provider is the client's |
 | the SSM parameter `/pumpkin-<name>/members` (advanced tier): a line `<member> <key>` for each key in `members`; the controller copies it every minute into `/etc/ssh/pumpkin/members`, with a forced command that names each key's member; `sshd` admits for `pumpkin` only the keys in that file | who may reach the controller, and which member each job belongs to; an apply changes the list within a minute |
 
 `ami.tf`, `controller.tf` and the other files say more of each. What the `ec2` provider requires
@@ -27,8 +27,9 @@ of its envelope is that crate's module doc, "The envelope".
 
 ## Once per account
 
-The state bucket, versioned so a bad write can be undone, and, if `aws iam
-list-open-id-connect-providers` lists no `oidc.modal.com`, Modal's OIDC provider:
+The state bucket, versioned so a bad write can be undone. A team that lists `modal_workspaces`
+also needs Modal's OIDC provider, if `aws iam list-open-id-connect-providers` lists no
+`oidc.modal.com`:
 
 ```sh
 aws s3api create-bucket --bucket pumpkin-tfstate-<account>-<region> --region <region> \
@@ -71,10 +72,10 @@ provider "aws" {
 module "pumpkin" {
   source = "git::https://github.com/FrontierCS/Pumpkin.git//deploy/aws?ref=<tag>"
 
-  name            = local.name
-  vpc_id          = "vpc-…"
-  subnet_id       = "subnet-…"
-  modal_workspace = "ac-…"
+  name             = local.name
+  vpc_id           = "vpc-…"
+  subnet_id        = "subnet-…"
+  modal_workspaces = ["ac-…", "ac-…"] # alice's and bob's, who run roles on Modal
   members = {
     alice = ["ssh-ed25519 AAAA… alice-laptop", "ssh-ed25519 AAAA… alice-desk"]
     bob   = ["ssh-ed25519 AAAA… bob"]
@@ -92,7 +93,7 @@ and the admin reads. `pumpkin` reaches the controller at its private address. Ma
 controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
 lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
 addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
-key.
+key. A team that enrols no one yet gives `members = {}`, and the controller admits no key.
 
 Then, in that directory:
 

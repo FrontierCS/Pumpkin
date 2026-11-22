@@ -4,24 +4,24 @@
 // `iam:SimulatePrincipalPolicy` is a read, of the principal's policies:
 // https://github.com/salesforce/policy_sentry/blob/2575f2b873e1c1f0fb604a448dee392f39ad74ad/policy_sentry/shared/data/iam-definition.json#L406017
 
-use aws::iam::{Filling, Simulation, Unallowed, simulate};
+use aws::iam::{Allow, Filling, Simulation, Unallowed, simulate};
 use aws::{Cli, Problem};
 
 use super::Found;
-use crate::iam::{CHECK, Principal, allows};
+use crate::iam::{CHECK, Principal};
 
-/// Checks that IAM allows each of `principals`, each with its ARN, each statement of its policy,
-/// filled by `filling`. A statement whose placeholder has no value goes unchecked.
+/// Checks that IAM allows each of `principals`, each with its ARN, each of its statements, filled
+/// by `filling`. A statement whose placeholder has no value goes unchecked.
 pub(super) fn allowed(
     cli: &Cli,
     filling: &Filling,
-    principals: &[(Principal, String)],
+    principals: &[(Principal, String, Vec<&'static Allow>)],
     found: &mut Found,
 ) {
-    for (principal, arn) in principals {
+    for (principal, arn, allows) in principals {
         let name = principal.name();
         let resource = format!("{name} {arn}");
-        let (simulations, unfilled) = Simulation::of(&allows(*principal), filling);
+        let (simulations, unfilled) = Simulation::of(allows, filling);
         for placeholder in unfilled {
             found.unchecked.push(Problem::new(
                 &resource,

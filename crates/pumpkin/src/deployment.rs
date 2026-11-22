@@ -11,7 +11,8 @@
 //! - IAM allows each role its policy, as `pumpkin-admin policy` prints it, filled with the
 //!   deployment's values. The policies of a module of another tag, or a service control policy,
 //!   may deny it. The controller's role is the one of its instance profile, so an instance with
-//!   no profile, or a profile with no role, is a problem too.
+//!   no profile, or a profile with no role, is a problem too. The controller's statements for the
+//!   Modal provider are checked only if the settings name one.
 //!
 //! Every check runs, and each problem it finds is a [`Problem`], said on a line of its own once
 //! all have run; with none, the command says nothing. What only a running controller shows, a
@@ -65,11 +66,15 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
         filling.set(&iam::MEMBERS, members.as_str().to_owned());
         controller = self::controller(&cli, settings.region(), &name, &mut found);
     }
+    // The controller's jobs make the Modal provider's calls only if the settings name one.
+    let runs_modal = (config.iter().flat_map(|config| config.providers.by_name()))
+        .any(|(_, kind)| matches!(kind, Kind::Modal(_)));
     let mut principals = Vec::new();
     if let Some(Controller { id, role }) = controller {
         let arn = filling.arn("ec2", &format!("instance/{id}"));
         filling.set(&iam::CONTROLLER, arn);
-        principals.extend(role.map(|role| (Principal::Controller, role)));
+        principals
+            .extend(role.map(|role| (Principal::Controller, role, iam::controller(runs_modal))));
     }
     if let Some(config) = &config {
         providers(config, &mut filling, &mut found.problems);
@@ -81,7 +86,8 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
         (Principal::ModalPull, &modal::iam::PULL_ROLE),
     ];
     for (principal, role) in roles {
-        principals.extend(filling.get(role).map(|arn| (principal, arn.to_owned())));
+        let arn = filling.get(role).map(str::to_owned);
+        principals.extend(arn.map(|arn| (principal, arn, iam::allows(principal))));
     }
     simulation::allowed(&cli, &filling, &principals, &mut found);
     let Found {

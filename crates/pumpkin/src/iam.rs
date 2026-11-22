@@ -139,19 +139,7 @@ const LIST_SCHEDULES: Allow = Allow::new(&["scheduler:ListSchedules"], &[Resourc
 // `AccessDenied` once a deployment applies these policies.
 pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
     match principal {
-        Principal::Controller => {
-            let Job { settings } = &JOB;
-            let Host {
-                settings: host_settings,
-                members,
-            } = &HOST;
-            (ec2::iam::caller())
-                .chain(modal::iam::caller())
-                .chain(settings.allows())
-                .chain(host_settings.allows())
-                .chain(members.allows())
-                .collect()
-        }
+        Principal::Controller => controller(true),
         Principal::Timer => ec2::iam::timer().collect(),
         Principal::Sandbox => ec2::iam::sandbox().collect(),
         Principal::ModalPull => modal::iam::puller().collect(),
@@ -183,6 +171,22 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
             allows
         }
     }
+}
+
+/// What IAM must allow the controller's role, whose jobs run the Modal provider if `runs_modal`.
+pub(crate) fn controller(runs_modal: bool) -> Vec<&'static Allow> {
+    let Job { settings } = &JOB;
+    let Host {
+        settings: host_settings,
+        members,
+    } = &HOST;
+    let modal_calls = runs_modal.then(modal::iam::caller).into_iter().flatten();
+    (ec2::iam::caller())
+        .chain(modal_calls)
+        .chain(settings.allows())
+        .chain(host_settings.allows())
+        .chain(members.allows())
+        .collect()
 }
 
 /// `principal`'s policy, as IAM's JSON, with each value that only a deployment knows as

@@ -18,13 +18,14 @@ variable "subnet_id" {
   type        = string
 }
 
-variable "modal_workspace" {
-  description = "The ID of the team's Modal workspace, `ac-…`, whose tokens alone may assume the Modal pull role."
-  type        = string
+variable "modal_workspaces" {
+  description = "The IDs of the Modal workspaces, `ac-…`, whose tokens alone may assume the Modal pull role: the workspace of each member who runs roles on Modal. With none, the module makes no pull role, and its settings name no Modal provider."
+  type        = set(string)
+  default     = []
 
   validation {
-    condition     = can(regex("^ac-[A-Za-z0-9]+$", var.modal_workspace))
-    error_message = "The Modal workspace ID is not one: give one such as `ac-zrUhjAwtDAP4iR3aWkCHl2`."
+    condition     = alltrue([for workspace in var.modal_workspaces : can(regex("^ac-[A-Za-z0-9]+$", workspace))])
+    error_message = "A Modal workspace ID is not one: give one such as `ac-zrUhjAwtDAP4iR3aWkCHl2`."
   }
 }
 
@@ -114,18 +115,8 @@ variable "pumpkin_release" {
 }
 
 variable "members" {
-  description = "The team's members, by name, each with the `ssh-ed25519` lines of their machines' `~/.config/pumpkin/ssh/key.pub`. The controller admits only these keys, and names each key's jobs by its member."
+  description = "The team's members, by name, each with the `ssh-ed25519` lines of their machines' `~/.config/pumpkin/ssh/key.pub`. The controller admits only these keys, and names each key's jobs by its member. With none, it admits no one."
   type        = map(list(string))
-
-  validation {
-    condition     = length(var.members) > 0
-    error_message = "`members` lists no one, so no key reaches the controller: list each member's key, such as `{ alice = [\"ssh-ed25519 AAAA… alice-laptop\"] }`."
-  }
-
-  validation {
-    condition     = alltrue([for keys in values(var.members) : length(keys) > 0])
-    error_message = "A member lists no key, so they can't reach the controller: list the line of each of their machines' `~/.config/pumpkin/ssh/key.pub`, or leave them out."
-  }
 
   # The members' list holds a line for each key, so a key with a newline would start a line of its
   # own, under whatever member it names.
