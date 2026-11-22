@@ -1,14 +1,16 @@
-//! The contributor tools that xtask runs, each pinned to one version: those that cargo installs,
-//! and those that their projects release as a file, which xtask fetches into the target
-//! directory.
+//! The contributor tools that xtask runs, each pinned to one version: the nightly rustfmt, which
+//! rustup installs, and the tools that their projects release as a file, pinned by its URL and
+//! SHA-256. A command fetches each tool it runs on first use, as rustup installs the toolchain that
+//! `rust-toolchain.toml` pins when a command first needs it:
+//! <https://github.com/rust-lang/rustup/blob/bb60b1e89cc01a682dd16f2854329030938d3fe3/src/config.rs#L810-L812>.
 
 use std::fmt::Write as _;
 use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::{env, process};
+use std::{env, io, process};
 
 use sha2::{Digest as _, Sha256};
 use stdx::process::Environment;
@@ -16,25 +18,8 @@ use xshell::{Cmd, Shell, cmd};
 
 use crate::{Cargo, Result};
 
-/// A tool that cargo installs and runs as a subcommand.
-#[derive(Clone, Copy)]
-pub(crate) struct Tool {
-    /// The crate, `cargo-<subcommand>`, which also begins the line `--version` prints.
-    binary: &'static str,
-    version: &'static str,
-}
-
-pub(crate) const NEXTEST: Tool = Tool {
-    binary: "cargo-nextest",
-    version: "0.9.151",
-};
-
-pub(crate) const MUTANTS: Tool = Tool {
-    binary: "cargo-mutants",
-    version: "27.1.0",
-};
-
-const TOOLS: [Tool; 2] = [NEXTEST, MUTANTS];
+/// The toolchain whose `rustfmt` formats the workspace: `rustfmt.toml` sets nightly-only options.
+pub(crate) const RUSTFMT_TOOLCHAIN: &str = "nightly-2026-11-07";
 
 /// A tool that its project releases as a file for Linux on x86-64, the one platform that
 /// `pumpkin` is built on, pinned by the file's URL and SHA-256, and fetched by [`fetched`].
@@ -74,7 +59,25 @@ const ZIG: Release = Release {
     member: Some("zig-x86_64-linux-0.16.0/zig"),
 };
 
-const RELEASES: [Release; 3] = [BUILDIFIER, TSC, ZIG];
+/// The static build, whose SHA-256 is the one in the `.sha256` file that nextest publishes beside
+/// it.
+pub(crate) const NEXTEST: Release = Release {
+    name: "cargo-nextest",
+    version: "0.9.151",
+    url: "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-musl.tar.gz",
+    sha256: "6b284d6fde9670dfb6ee10ea9d9abbc85f95643d3f592472d420d82e257b3a6c",
+    member: Some("cargo-nextest"),
+};
+
+pub(crate) const MUTANTS: Release = Release {
+    name: "cargo-mutants",
+    version: "27.1.0",
+    url: "https://github.com/sourcefrog/cargo-mutants/releases/download/v27.1.0/cargo-mutants-x86_64-unknown-linux-gnu.tar.gz",
+    sha256: "dfe6dc37d0342c891d2829b5a695aa57c2d0edecef7e7d0399a30cc6e206411e",
+    member: Some("cargo-mutants"),
+};
+
+const RELEASES: [Release; 5] = [BUILDIFIER, TSC, ZIG, NEXTEST, MUTANTS];
 
 /// The name of the link to xtask that cc-rs runs as the musl C compiler ([`musl_cc`]).
 const MUSL_CC: &str = "x86_64-linux-musl-cc";
@@ -83,22 +86,20 @@ const MUSL_CC: &str = "x86_64-linux-musl-cc";
 /// still links the binary.
 pub(crate) fn musl_cc<'a>(cargo: &Cargo, build: Cmd<'a>) -> Result<Cmd<'a>> {
     let zig = fetched(cargo, ZIG)?;
+    // The checkout's own, as the link to xtask is: the cache holds each release as it was fetched.
+    let dir = target_dir(cargo)?.join("musl-cc");
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("making {} failed: {error}", dir.display()))?;
     // One executable, xtask as `MUSL_CC`: cc-rs drops the arguments of a compiler named as
     // `zig cc` from its flag and family checks, which then all fail.
-    let cc = zig.with_file_name(MUSL_CC);
+    let cc = dir.join(MUSL_CC);
     let xtask = env::current_exe()
         .map_err(|error| format!("finding xtask's own executable failed: {error}"))?;
-    // Made beside it, then renamed over it, so that a build at once never finds it missing.
-    let made = zig.with_file_name(format!(".{MUSL_CC}.{}", process::id()));
-    let linked = std::os::unix::fs::symlink(&xtask, &made).and_then(|()| fs::rename(&made, &cc));
-    if let Err(error) = linked {
-        // Made and not renamed, or not made.
-        let _ = fs::remove_file(&made);
-        return Err(format!("linking {} failed: {error}", cc.display()).into());
-    }
+    replace(&cc, |made| symlink(&xtask, made))?;
+    replace(&dir.join("zig"), |made| symlink(&zig, made))?;
     Ok(build
         .env("ZIG_LIB_DIR", zig.with_file_name("lib"))
-        .env("ZIG_GLOBAL_CACHE_DIR", zig.with_file_name("cache"))
+        .env("ZIG_GLOBAL_CACHE_DIR", dir.join("cache"))
         .env("CC_x86_64_unknown_linux_musl", cc))
 }
 
@@ -125,9 +126,26 @@ pub(crate) fn run_as_musl_cc() -> Option<ExitCode> {
     Some(ExitCode::FAILURE)
 }
 
-/// Installs each of [`TOOLS`] that cargo doesn't run at its version, into cargo's install root,
-/// and fetches each of [`RELEASES`] that isn't fetched yet.
+/// Replaces what is at `at` with the file that `write` makes at the path it is given.
+pub(crate) fn replace(at: &Path, write: impl FnOnce(&Path) -> io::Result<()>) -> Result<()> {
+    // Made beside it, then renamed over it, so that a process that runs it at once never finds
+    // it missing.
+    let mut made = at.as_os_str().to_owned();
+    made.push(format!(".{}", process::id()));
+    let made = PathBuf::from(made);
+    let replaced = write(&made).and_then(|()| fs::rename(&made, at));
+    if let Err(error) = replaced {
+        // Made and not renamed, or not made.
+        let _ = fs::remove_file(&made);
+        return Err(format!("making {} failed: {error}", at.display()).into());
+    }
+    Ok(())
+}
+
+/// Installs the nightly rustfmt, and fetches each of [`RELEASES`], each unless it is already
+/// there.
 pub(crate) fn install(cargo: &Cargo) -> Result<()> {
+    rustfmt(&cargo.sh)?;
     for release in RELEASES {
         let path = fetched(cargo, release)?;
         println!(
@@ -137,65 +155,48 @@ pub(crate) fn install(cargo: &Cargo) -> Result<()> {
             path.display()
         );
     }
-    for tool in TOOLS {
-        let Tool { binary, version } = tool;
-        if installed(cargo, tool).as_deref() == Some(version) {
-            println!("xtask: {binary} {version} is installed");
-            continue;
-        }
-        cargo
-            .cmd(&["install", "--locked", &format!("{binary}@{version}")])
-            .run()?;
-    }
     Ok(())
 }
 
-/// Fails unless cargo runs `tool` at its version, saying how to install it.
-pub(crate) fn require(cargo: &Cargo, tool: Tool) -> Result<()> {
-    let Tool { binary, version } = tool;
-    let wrong = match installed(cargo, tool) {
-        Some(found) if found == version => return Ok(()),
-        Some(found) => format!("{binary} is at {found}, not at {version}"),
-        None => format!("{binary} {version} isn't installed"),
-    };
-    Err(format!("{wrong}: install it with `cargo xtask install-tools`").into())
-}
-
-/// The version of `tool` that cargo runs, as its `--version` prints it: `None` if cargo runs none,
-/// or it prints no version.
-fn installed(cargo: &Cargo, tool: Tool) -> Option<String> {
-    let subcommand = tool.binary.strip_prefix("cargo-")?;
-    let printed = cargo
-        .cmd(&[subcommand, "--version"])
+/// Installs [`RUSTFMT_TOOLCHAIN`]'s rustfmt through rustup, in its minimal profile, unless rustup
+/// already runs it.
+pub(crate) fn rustfmt(sh: &Shell) -> Result<()> {
+    let which = cmd!(sh, "rustup which --toolchain {RUSTFMT_TOOLCHAIN} rustfmt")
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .quiet()
+        .ignore_stdout()
         .ignore_stderr()
-        .read()
-        .ok()?;
-    match printed.split_whitespace().collect::<Vec<_>>()[..] {
-        [binary, version, ..] if binary == tool.binary => Some(version.to_owned()),
-        _ => None,
+        .ignore_status();
+    if which.output()?.status.success() {
+        return Ok(());
     }
+    let install = cmd!(
+        sh,
+        "rustup toolchain install {RUSTFMT_TOOLCHAIN} --profile minimal --component rustfmt"
+    );
+    Ok(install.run()?)
 }
 
-/// The pinned `release` in the target directory, which cargo's configuration places, if it is
-/// fetched there; else fails, saying how to fetch it.
-pub(crate) fn found(cargo: &Cargo, release: Release) -> Result<PathBuf> {
-    let path = path(cargo, release)?;
-    if path.is_file() {
-        return Ok(path);
-    }
-    let Release { name, version, .. } = release;
-    Err(format!("{name} {version} isn't fetched: fetch it with `cargo xtask install-tools`").into())
-}
-
-/// Where the pinned `release` is, or is to be, in the target directory.
-fn path(cargo: &Cargo, release: Release) -> Result<PathBuf> {
+/// The pinned `release`, in the cache of one user, which every checkout shares. It is fetched
+/// there with `curl` once, and kept, unpacked if it is a tar, only if its SHA-256 is the pin's,
+/// so that what is there is always the pinned release.
+pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
     let Release {
         name,
         version,
         url,
+        sha256,
         member,
-        ..
     } = release;
+    let cache = cache()?;
+    // Keyed by the SHA-256, as Bazel's repository cache keys a download:
+    // https://github.com/bazelbuild/bazel/blob/7108c77007efc6f3162e127f252707e9ab743d36/src/main/java/com/google/devtools/build/lib/bazel/repository/cache/RepositoryCache.java#L231-L236
+    let entry = cache.join(sha256);
+    let file = url.rsplit('/').next().unwrap_or(name);
+    let path = entry.join(member.unwrap_or(file));
+    if path.is_file() {
+        return Ok(path);
+    }
     let (os, arch) = (env::consts::OS, env::consts::ARCH);
     if (os, arch) != ("linux", "x86_64") {
         return Err(format!(
@@ -204,42 +205,56 @@ fn path(cargo: &Cargo, release: Release) -> Result<PathBuf> {
         )
         .into());
     }
-    let file = url.rsplit('/').next().unwrap_or(name);
-    let dir = target_dir(cargo)?.join(name).join(version);
-    Ok(dir.join(member.unwrap_or(file)))
-}
-
-/// The pinned `release`, in the target directory, which cargo's configuration places. It is
-/// fetched there with `curl` once, and kept, unpacked if it is a tar, only if its SHA-256 is the
-/// pin's, so that what is there is always the pinned release.
-pub(crate) fn fetched(cargo: &Cargo, release: Release) -> Result<PathBuf> {
-    let Release {
-        name,
-        version,
-        url,
-        member,
-        ..
-    } = release;
-    let path = path(cargo, release)?;
-    if path.is_file() {
-        return Ok(path);
-    }
-    let file = url.rsplit('/').next().unwrap_or(name);
-    let dir = target_dir(cargo)?.join(name).join(version);
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("making {} failed: {error}", dir.display()))?;
     eprintln!("xtask: fetching {name} {version} from {url}");
-    // Names of this process's own, so that another fetch at once writes its own files.
-    let part = dir.join(format!("{file}.{}.part", process::id()));
-    let fetched = fetch(&cargo.sh, release, &part).and_then(|()| match member {
-        None => fs::rename(&part, &path)
-            .map_err(|error| format!("renaming {} failed: {error}", part.display()).into()),
-        Some(member) => unpack(&cargo.sh, &part, &dir, member),
-    });
-    // Renamed, or unpacked and no longer needed, or failed.
-    let _ = fs::remove_file(&part);
+    // A directory of this process's own, renamed whole into place once it holds the release, so
+    // that a fetch at once, from another checkout too, never finds an entry half made.
+    let staging = cache.join(format!(".{sha256}.{}", process::id()));
+    // Left by a process that had this one's id and was killed.
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("making {} failed: {error}", staging.display()))?;
+    let download = staging.join(file);
+    let fetched = fetch(&cargo.sh, release, &download)
+        .and_then(|()| match member {
+            None => Ok(()),
+            Some(_) => unpack(&cargo.sh, &download, &staging),
+        })
+        .and_then(|()| match fs::rename(&staging, &entry) {
+            Ok(()) => Ok(()),
+            // A fetch at once put the release there first.
+            Err(_) if path.is_file() => Ok(()),
+            Err(error) => Err(format!(
+                "renaming {} to {} failed: {error}: remove {} to fetch it again",
+                staging.display(),
+                entry.display(),
+                entry.display()
+            )
+            .into()),
+        });
+    // Renamed, or not needed, or failed.
+    let _ = fs::remove_dir_all(&staging);
     fetched?;
     Ok(path)
+}
+
+/// Where the fetched releases are: `pumpkin/tools` in the user's cache directory, as the XDG Base
+/// Directory Specification places it, the directory where the launcher `deploy/pumpkin` caches
+/// the releases of Pumpkin.
+fn cache() -> Result<PathBuf> {
+    // The specification has a relative path ignored.
+    let dir = match env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir,
+        _ => match env::var_os("HOME") {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(".cache"),
+            _ => {
+                return Err(
+                    "no cache directory is set: set XDG_CACHE_HOME to an absolute path or set HOME"
+                        .into(),
+                );
+            }
+        },
+    };
+    Ok(dir.join("pumpkin/tools"))
 }
 
 /// Downloads `release` into `to`, executable, if its SHA-256 is the pin's.
@@ -273,27 +288,11 @@ fn fetch(sh: &Shell, release: Release, to: &Path) -> Result<()> {
         .map_err(|error| format!("making {} executable failed: {error}", to.display()).into())
 }
 
-/// Unpacks the tar `archive` into `dir`, through a directory of this process's own, so
-/// that `member`'s first directory appears whole or not at all.
-fn unpack(sh: &Shell, archive: &Path, dir: &Path, member: &str) -> Result<()> {
-    let Some(top) = Path::new(member).components().next() else {
-        unreachable!("the member `{member}` has no component, though each pin names a path")
-    };
-    let unpacking = dir.join(format!("unpacking.{}", process::id()));
-    fs::create_dir_all(&unpacking)
-        .map_err(|error| format!("making {} failed: {error}", unpacking.display()))?;
-    let tar = cmd!(sh, "tar --extract --file {archive} --directory {unpacking}");
-    let unpacked = tar.run().map_err(Into::into).and_then(|()| {
-        let to = dir.join(top);
-        match fs::rename(unpacking.join(top), &to) {
-            Ok(()) => Ok(()),
-            // A concurrent fetch installed the archive first. Its compiler may already be in use.
-            Err(_) if dir.join(member).is_file() => Ok(()),
-            Err(error) => Err(format!("renaming into {} failed: {error}", to.display()).into()),
-        }
-    });
-    let _ = fs::remove_dir_all(&unpacking);
-    unpacked
+/// Unpacks the tar `archive` into `dir`, then removes it.
+fn unpack(sh: &Shell, archive: &Path, dir: &Path) -> Result<()> {
+    cmd!(sh, "tar --extract --file {archive} --directory {dir}").run()?;
+    fs::remove_file(archive)
+        .map_err(|error| format!("removing {} failed: {error}", archive.display()).into())
 }
 
 /// The target directory, as `cargo metadata` reports it.

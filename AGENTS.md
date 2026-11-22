@@ -2,7 +2,8 @@
   the tests that need a Docker engine, when a change touches code only those tests reach
 - RUN `cargo xtask live ec2` and `cargo xtask live modal`, which cost money, at review of a
   change that only a real provider reaches, as `docs/dev/testing.md` says
-- RUN `cargo xtask install-tools` before the checks, and again when `cargo xtask ci` asks
+- RUN `cargo xtask install-tools` only before working offline: each xtask command fetches the
+  pinned tools it runs on first use
 - RUN `cargo xtask mutants` on demand, as `docs/dev/testing.md` says
 - NEVER assume a clippy warning or a test failure is pre-existing
 - PREFER running the narrowest relevant test while iterating

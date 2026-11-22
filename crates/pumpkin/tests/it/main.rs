@@ -1217,8 +1217,8 @@ fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let link = env!("PUMPKIN_BUILDIFIER");
     let buildifier = fs::canonicalize(link).unwrap_or_else(|error| {
         panic!(
-            "{link} doesn't lead to the formatter ({error}): make it with `cargo xtask \
-             install-tools`"
+            "{link} doesn't lead to the pinned formatter ({error}): link it, fetched if need \
+             be, with `cargo xtask install-tools`"
         )
     });
     fs::hard_link(buildifier, dir.join("buildifier")).unwrap();

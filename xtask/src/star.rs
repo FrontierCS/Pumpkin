@@ -19,13 +19,13 @@ const UNCHECKED: &str = "crates/lang/tests/";
 /// [`link`] makes, which `.cargo/config.toml` names.
 const LINK: &str = env!("PUMPKIN_BUILDIFIER");
 
-/// The pinned buildifier, fetched once into the target directory ([`tools::fetched`]).
+/// The pinned buildifier, fetched on first use ([`tools::fetched`]).
 pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
     tools::fetched(cargo, tools::BUILDIFIER)
 }
 
-/// Makes [`LINK`] a symbolic link to the pinned buildifier, fetched if need be, replacing what is
-/// there, and returns the pinned one's path.
+/// Makes [`LINK`] the pinned buildifier, fetched if need be, replacing what is there, and returns
+/// its path.
 pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     let link = Path::new(LINK);
     let Some(dir) = link.parent() else {
@@ -33,18 +33,15 @@ pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
     };
     let buildifier = buildifier(cargo)?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
-    // Made beside it, then renamed over it, so that a test never finds the link missing. The
-    // target is absolute, so that the link in a copy of the tree, as cargo-mutants makes,
-    // finds it too.
-    let made = dir.join(format!(".buildifier.{}", std::process::id()));
-    let linked =
-        std::os::unix::fs::symlink(&buildifier, &made).and_then(|()| fs::rename(&made, link));
-    if let Err(error) = linked {
-        // Made and not renamed, or not made.
-        let _ = fs::remove_file(&made);
-        return Err(format!("linking {} failed: {error}", link.display()).into());
-    }
-    Ok(buildifier)
+    // A hard link, or a copy where the cache lies on another filesystem, so that it lies on the
+    // checkout's, where `place` and the tests hard-link it again.
+    tools::replace(link, |made| match fs::hard_link(&buildifier, made) {
+        Err(error) if error.kind() == ErrorKind::CrossesDevices => {
+            fs::copy(&buildifier, made).map(drop)
+        }
+        linked => linked,
+    })?;
+    Ok(link.to_owned())
 }
 
 /// Puts `buildifier` beside `pumpkin`, where that `pumpkin` runs it, as `cargo xtask build`
