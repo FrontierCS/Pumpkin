@@ -23,11 +23,12 @@ const WATCHDOG: Duration = Duration::from_secs(60);
 const SCRIPTED: &str = "the test to make every input the run waits on come, as its clock moves \
                         only by script";
 
-/// A host whose clock reads 0 from the run's start and never moves by itself: a [`LateTake`] or a
-/// [`SlowSync`] moves it. A wait for a time to come takes an input as soon as one comes; once the
-/// time has passed it takes what the inbox holds, without waiting, but for the takes that the late
-/// take says wait. A wait for an input that never comes fails after `WATCHDOG`. A sync makes
-/// nothing last, and succeeds unless the script fails it.
+/// A host whose clock reads 0 from the run's start and never moves by itself: a [`LateTake`], a
+/// [`SlowSync`] or a call of [`SimHost::moving_to`]'s function moves it. A wait for a time to come
+/// takes an input as soon as one comes; once the time has passed it takes what the inbox holds,
+/// without waiting, but for the takes that the late take says wait. A wait for an input that
+/// never comes fails after `WATCHDOG`. A sync makes nothing last, and succeeds unless the script
+/// fails it.
 pub(crate) struct SimHost {
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
@@ -119,6 +120,12 @@ impl SimHost {
     pub(crate) fn failed_sync_of(self, name: &'static str, before: u32) -> Self {
         stdx::unpoisoned(self.state.lock()).failed_file = Some((name, before));
         self
+    }
+
+    /// Returns a function that moves the clock to `at` each time it is called.
+    pub(crate) fn moving_to(&self, at: Duration) -> impl Fn() + Send + Sync + 'static {
+        let state = Arc::clone(&self.state);
+        move || stdx::unpoisoned(state.lock()).now = at
     }
 
     pub(crate) fn journaled(mut self, journal: &Journal) -> Self {

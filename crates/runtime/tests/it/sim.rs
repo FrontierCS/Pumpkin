@@ -126,6 +126,9 @@ pub(crate) const UNDELETABLE_LAST: &str = "/sim/undeletable-last";
 // How long a delete of a `LAST` sandbox waits before the test fails instead of hanging.
 const LAST_WAITS: Duration = Duration::from_secs(60);
 
+// How long a held set-up waits for the others before the test fails instead of hanging.
+const SET_UP_WAITS: Duration = Duration::from_secs(60);
+
 // A platform's sandbox ends some time after it is told to, so a delete that doesn't wait for its
 // end returns while it runs, which the suite then sees (`Subject::held`): far longer than the
 // suite takes to look after a delete returns, and far shorter than any test's bounds.
@@ -141,6 +144,38 @@ pub(crate) struct Sim {
     // its sandboxes.
     state: Arc<Mutex<State>>,
     journal: Option<Journal>,
+    set_ups: Option<Arc<SetUps>>,
+}
+
+/// Holds the first put of each sandbox until the first `sandboxes_count` sandboxes have each made
+/// theirs. Then it calls `then` once, before any of them is answered.
+struct SetUps {
+    sandboxes_count: usize,
+    put_count: Mutex<usize>,
+    then: Box<dyn Fn() + Send + Sync>,
+}
+
+impl SetUps {
+    fn pass(&self) {
+        let mut put_count = stdx::unpoisoned(self.put_count.lock());
+        *put_count += 1;
+        if *put_count == self.sandboxes_count {
+            // Under the lock, so that no sandbox is answered before `then` has returned.
+            (self.then)();
+        }
+        let waited = Deadline::after(SET_UP_WAITS);
+        while *put_count < self.sandboxes_count {
+            drop(put_count);
+            assert!(
+                waited.remaining().is_some(),
+                "a set-up waited {SET_UP_WAITS:?} for the other sandboxes' set-ups: expected the \
+                 run to start {} sandboxes",
+                self.sandboxes_count
+            );
+            thread::sleep(AWAIT_POLL);
+            put_count = stdx::unpoisoned(self.put_count.lock());
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +267,8 @@ struct Status {
     freezing: Freezing,
     journal: Option<Journal>,
     record: Option<PathBuf>,
+    // Taken by the sandbox's first put.
+    set_ups: Option<Arc<SetUps>>,
 }
 
 /// What a sandbox's freeze meets.
@@ -300,6 +337,7 @@ impl Sim {
                 record: None,
             })),
             journal: None,
+            set_ups: None,
         }
     }
 
@@ -313,6 +351,21 @@ impl Sim {
     #[must_use]
     pub(crate) fn journaled(mut self, journal: &Journal) -> Self {
         self.journal = Some(journal.clone());
+        self
+    }
+
+    /// Holds the set-ups of the first `sandboxes_count` sandboxes until each has begun, and calls
+    /// `then` before any of them ends.
+    pub(crate) fn holding_set_ups(
+        mut self,
+        sandboxes_count: usize,
+        then: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.set_ups = Some(Arc::new(SetUps {
+            sandboxes_count,
+            put_count: Mutex::new(0),
+            then: Box::new(then),
+        }));
         self
     }
 
@@ -694,6 +747,7 @@ impl Sim {
         // late the thread runs.
         (status(&shared).console).push_str(if mute { NEVER_DIALS } else { "" });
         status(&shared).freezing = freezing;
+        status(&shared).set_ups.clone_from(&self.set_ups);
         let (ours, model) = (Arc::clone(&shared), create.model);
         let thread = thread::Builder::new()
             .name("sim-sandboxd".to_owned())
@@ -878,6 +932,7 @@ impl Subject for Sim {
             reach: self.reach,
             state: Arc::clone(&self.state),
             journal: self.journal.clone(),
+            set_ups: self.set_ups.clone(),
         }))
     }
 
@@ -2049,6 +2104,10 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
         }
         match request {
             ToSandbox::Put { stream, dir, root } => {
+                let set_ups = status(shared).set_ups.take();
+                if let Some(set_ups) = set_ups {
+                    set_ups.pass();
+                }
                 served.files.begin(stream, dir, root, &mut replies);
             }
             ToSandbox::Entry { entry, .. } => served.files.entry(entry),
