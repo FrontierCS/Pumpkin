@@ -317,6 +317,8 @@ it, the settings are of 1.0. A job refuses an envelope whose major isn't 1. It
 refuses each key that it doesn't know, unless the envelope is a later minor
 than 1.0, the newest that this release knows. It then ignores the key and names
 it in its log. A minor adds only keys that an older release may safely ignore.
+The admin sets `draining = true` for a cutover. Each job is then refused as it
+starts, and the jobs that run go on to their ends.
 
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
 `ls`, `cancel`, `view` and `reap` go to it, as each one's help says.

@@ -135,6 +135,24 @@ The controller's settings are of a version of the envelope, `M.m`. Each job read
 - A release that reads no `envelope` refuses settings that hold a key it doesn't know, `envelope`
   among them. So the module writes the key only once no pinned release is that old.
 
+A cutover that a running job would meet drains the controller first. Such a cutover is a major, a
+change to the host's software or a replaced controller. Nomad likewise drains a node and lets its
+batch jobs complete
+([node drain](https://github.com/hashicorp/nomad/blob/a3b86c697f38ab032e1acaae8503ed10815bc4a2/website/content/commands/node/drain.mdx#L9-L22)).
+The steps:
+
+1. Set `draining = true` and apply. Each job that starts is refused, and its refusal names the
+   drain. The jobs that run go on. A release that doesn't know `draining` refuses the settings too,
+   as it refuses any key of envelope 1.0 that it doesn't know.
+2. Wait until no job runs. On the controller,
+   `sudo ls /run/user/$(id --user pumpkin)/pumpkin` lists the id of each job whose unit runs.
+   Each job's unit removes the job's directory there as it ends. A run's job ends by the run's
+   hard end at the latest.
+3. Each member runs `pumpkin wait`, which copies their runs' records.
+4. Apply the change, or replace the controller.
+5. Set `draining = false` and apply.
+6. Each member raises `.pumpkinversion` if the envelope's major changed.
+
 ## Teardown
 
 ```sh

@@ -1,6 +1,7 @@
 //! What a job takes of a controller's settings across the envelopes that make them. The settings
 //! may name the version of the envelope that made them, as `envelope = "M.m"`. They may hold keys
-//! that this build doesn't know.
+//! that this build doesn't know. They may say `draining = true`, a key of envelope 1.0, which
+//! refuses each job that starts while they do.
 //!
 //! A minor adds only keys that a release of an older minor may safely ignore. A key that every
 //! release must honour needs a major. So does any removal or change of what a release relies on. A
@@ -43,9 +44,31 @@ const _: () = assert!(OLDEST.major == NEWEST.major && !OLDEST.later(NEWEST));
 // The version of settings that name none.
 const UNNAMED: Version = Version { major: 1, minor: 0 };
 
-/// Removes the version of the envelope from `settings`, a controller's settings named as `named`,
-/// and returns it. Fails if it isn't in the form `M.m`, or this build doesn't take it.
+/// Removes the version of the envelope and `draining` from `settings`, a controller's settings
+/// named as `named`, and returns the version. Fails if the version isn't in the form `M.m`, or this
+/// build doesn't take it. Fails too if `draining` isn't a boolean, or is `true`.
 pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
+    let version = envelope(settings, named)?;
+    let draining = match settings.remove("draining") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            format!("{named} hold `draining = {value}`: expected `true` or `false`")
+        })?,
+    };
+    // A drain takes no new job and leaves those that run to end. Buildkite's agent stops
+    // gracefully this way:
+    // https://github.com/buildkite/agent/blob/13f7c6aba3164116caab64a84332676403d724a4/agent/agent_worker.go#L424-L428
+    if draining {
+        return Err(format!(
+            "{named} hold `draining = true`: the controller's admin is draining it for a \
+             cutover, so it starts no job while the jobs it runs end: run this one again once \
+             the admin has set `draining = false`"
+        ));
+    }
+    Ok(version)
+}
+
+fn envelope(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
     let version = match settings.remove("envelope") {
         None => UNNAMED,
         Some(value) => value.as_str().and_then(parse).ok_or_else(|| {

@@ -83,14 +83,16 @@ resource "aws_iam_instance_profile" "controller" {
 
 # Each job's settings. `pumpkin controller job` reads them as it starts, so an apply that changes
 # them takes effect at the next job. They name the controller's Docker engine, the EC2 provider
-# `aws`, and the `images` of the Modal provider `modal`. A job drops `images` if its client sends
-# no `[controller.modal]`. Nothing else is here: the rest is each job's own or its client's. The
-# advanced tier holds 8 KB.
+# `aws`, and the `images` of the Modal provider `modal`. A job drops `images` if its client sends no
+# `[controller.modal]`. With `draining`, each job is refused as it starts. Nothing else is here: the
+# rest is each job's own or its client's. The advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
   tier = "Advanced"
   value = join("\n", concat(
+    # A key of the top, before any table.
+    var.draining ? ["draining = true", ""] : [],
     ["[docker]", "context = \"default\"", "", "[providers.aws.ec2]"],
     local.ec2_settings,
     ["", "[providers.modal.modal]", local.modal_images],
