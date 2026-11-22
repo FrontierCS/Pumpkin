@@ -342,7 +342,7 @@ PAYLOAD = "/pumpkin/in/payload"
 
 def _verified(target: Target, payload: Payload):
     target.put(PAYLOAD, payload)
-    target.run(["/opt/frontier/verifier", "--fast", target.caller()])
+    target.run(["/opt/task/verifier", "--fast", target.caller()])
     return json.decode(target.get("/pumpkin/out/result.json"))
 
 def train_call(target: Target, payload: Payload, *, metrics: list[str]):
@@ -353,7 +353,7 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
 "#,
         &expect![[r#"
             put payload 0 at /pumpkin/in/payload
-            run /opt/frontier/verifier ["--fast", "agent"]
+            run /opt/task/verifier ["--fast", "agent"]
             get /pumpkin/out/result.json
             returns raw_score=43.12 failure="slow" passed=7"#]],
     );
@@ -366,14 +366,14 @@ def train_call(target: Target, payload: Payload, *, metrics: list[str]):
 def final_call(target: Target, submissions, *, mode: str = "final"):
     _ = [target.put("/in/" + name, submissions[name]) for name in submissions if submissions[name] != None]
     target.put("/another", submissions["z"])
-    target.run(["/opt/frontier/verifier", mode])
+    target.run(["/opt/task/verifier", mode])
     return {"score": json.decode(target.get("/pumpkin/out/result.json"))["raw_score"], "missing": submissions["a"]}
 "#,
         &expect![[r#"
             put payload 1 at /in/z
             put payload 0 at /in/b
             put payload 1 at /another
-            run /opt/frontier/verifier ["final"]
+            run /opt/task/verifier ["final"]
             get /pumpkin/out/result.json
             returns score=43.12 missing=null"#]],
     );
@@ -741,13 +741,13 @@ def train_call(target, payload):
         r#"
 #- //lib/verify.star
 def train_call(target, payload):
-    return target.run(["/opt/frontier/verifier", 1])
+    return target.run(["/opt/task/verifier", 1])
 "#,
         &expect![[r#"
             lib/verify.star:2:23: `run` can't run an int: give it a list of strings
-                2 |     return target.run(["/opt/frontier/verifier", 1])
-                  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                the argument, `1`, is made at lib/verify.star:2:50
+                2 |     return target.run(["/opt/task/verifier", 1])
+                  |                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+                the argument, `1`, is made at lib/verify.star:2:46
                 in `train_call()`, called at lib/verify.star:1:5"#]],
     );
     check(

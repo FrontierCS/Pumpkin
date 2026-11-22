@@ -3,7 +3,7 @@
 
 use expect_test::expect;
 
-use super::{FCS_PROMPT, check_refusals, check_roles};
+use super::{TASK_PROMPT, check_refusals, check_roles};
 
 /// The arguments `zcode()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 2] = [
@@ -19,7 +19,7 @@ fn roles() {
             "glm-5.3",
             "max",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "18000",
             "60",
             "1048576",
@@ -62,7 +62,7 @@ fn roles() {
         },
         &expect![[r#"
             glm-5.3 max /workspace 1048576 262144:
-            argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd /workspace --disallowed-tools WebSearch,WebFetch "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
+            argv: /harness/node-24.14.0/node /harness/zcode-0.16.9/zcode.cjs --mode yolo --cwd /workspace --disallowed-tools WebSearch,WebFetch "--prompt=Solve the evaluation task in /task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.zcode-home TMPDIR=/workspace/.zcode-home/tmp ZCODE_DATA_BASE_DIR=/workspace/.zcode-home ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=/workspace/.zcode-home/provider_config.json ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/harness/zcode-0.16.9/provider/zcode-builtin.json
             cwd: /workspace
             dir 0700 /workspace/.zcode-home

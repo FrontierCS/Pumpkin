@@ -57,7 +57,7 @@ terraform {
 }
 
 locals {
-  name = "frontier"
+  name = "research"
 }
 
 provider "aws" {

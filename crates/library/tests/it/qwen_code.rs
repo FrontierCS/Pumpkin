@@ -3,7 +3,7 @@
 
 use expect_test::expect;
 
-use super::{FCS_PROMPT, check_refusals, check_roles};
+use super::{TASK_PROMPT, check_refusals, check_roles};
 
 /// The arguments `qwen_code()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 3] = [
@@ -20,7 +20,7 @@ fn roles() {
             "qwen3.8-max",
             "high",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "18000",
             "60",
             "1000000",
@@ -67,7 +67,7 @@ fn roles() {
         },
         &expect![[r#"
             qwen3.8-max high /workspace 1000000 65536 {"enable_thinking": true, "temperature": 1}:
-            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
+            argv: /harness/node-24.14.0/node /harness/qwen-code-0.25.0/cli-entry.js --auth-type openai --model qwen3.8-max --approval-mode yolo --output-format text "--prompt=Solve the evaluation task in /task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.qwen-home TMPDIR=/workspace/.qwen-home/tmp QWEN_HOME=/workspace/.qwen-home/qwen PUMPKIN_MODEL_KEY=pumpkin QWEN_STREAM_MAX_LIFETIME_MS=0 QWEN_CODE_MODELS_DEV_REFRESH=off
             cwd: /workspace
             dir 0700 /workspace/.qwen-home

@@ -88,7 +88,7 @@ fn requests() {
           User { text: "Solve the evaluation task" }
           Reasoning { text: "We need inspect README" }
           Assistant { text: "I’ll read the task" }
-          Call { id: Some("call_7036f25cd4703cd25abc703a"), name: "exec_command", arguments: "{\"cmd\":\"cat /frontier/task/README.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}" }
+          Call { id: Some("call_7036f25cd4703cd25abc703a"), name: "exec_command", arguments: "{\"cmd\":\"cat /task/README.md\",\"workdir\":\"/workspace\",\"yield_time_ms\":10000,\"max_output_tokens\":30000}" }
           Output { call_id: Some("call_7036f25cd4703cd25abc703a"), text: "Chunk ID: d1afae Wall time: 0.0000 seconds Process exited", error: false }
 
         chat: Config { model: Some("glm-5.3-flash"), reasoning_effort: None, temperature: None, max_tokens: Some(4096), stop: [], stream: false, tools: ["send_email", "delete_email"] }

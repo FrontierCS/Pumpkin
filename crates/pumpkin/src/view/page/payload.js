@@ -2,7 +2,8 @@
 // inspector links to: shown file by file if it
 // is a tar, as most are, else whole. A patch is drawn as a diff, file by file, hunk by hunk, with
 // each line's numbers in the old file and the new, and the part that changed of a line changed in
-// place marked, as the FrontierCS site draws one; JSON indented, coloured as the site colours code. Any other text is shown as it is, binary bytes by their size alone.
+// place marked; JSON indented, its keys, strings and numbers each in a colour of their own. Any
+// other text is shown as it is, binary bytes by their size alone.
 
 import { Refused, bytes, fill, getBytes, h, show } from "./h.js";
 
@@ -115,7 +116,7 @@ function drawFiles(files) {
   });
 }
 
-// A unified diff, as the patch viewer of the FrontierCS site draws one, after Claude Code's design:
+// A unified diff, after Claude Code's design:
 // each file as `Update(path)`, or `Write(path)` for a new one and `Delete(path)` for a removed one,
 // over an elbow line of how many lines it adds and removes; then its lines, each numbered, the old
 // line's number on a removal and the new one's otherwise, `…` between hunks. Within a removed line

@@ -3,7 +3,7 @@
 
 use expect_test::expect;
 
-use super::{FCS_PROMPT, check_refusals, check_roles};
+use super::{TASK_PROMPT, check_refusals, check_roles};
 
 /// The arguments `claude_code()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 1] = [("max_output_tokens", r#"arg("max_output_tokens", int)"#)];
@@ -16,7 +16,7 @@ fn roles() {
             "claude-opus-5-5",
             "max",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "18000",
             "60",
             "64000",
@@ -25,7 +25,7 @@ fn roles() {
             "glm-5.3",
             "max",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "3600",
             "60",
             "128000",

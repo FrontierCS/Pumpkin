@@ -3,7 +3,7 @@
 
 use expect_test::expect;
 
-use super::{FCS_PROMPT, check_refusals, check_roles};
+use super::{TASK_PROMPT, check_refusals, check_roles};
 
 /// The arguments `pi()` takes besides `SHARED`, each with the Starlark of its value.
 const OWN: [(&str, &str); 2] = [
@@ -19,7 +19,7 @@ fn roles() {
             "gemini-4-argon",
             "high",
             "/workspace",
-            FCS_PROMPT,
+            TASK_PROMPT,
             "18000",
             "60",
             "1048576",
@@ -62,7 +62,7 @@ fn roles() {
         },
         &expect![[r#"
             gemini-4-argon high /workspace 1048576 65536:
-            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /frontier/task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
+            argv: /harness/node-24.14.0/node /harness/pi-1.2.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --print --offline --no-approve --provider pumpkin --model gemini-4-argon --thinking high --tools read,bash,edit,write --no-extensions --no-mcp --no-prompt-templates --no-themes --no-skills -- "Solve the evaluation task in /task/README.md.\n\nWhen the answer is ready, run `/.pumpkin/bin/sandboxctl call final <tar> --arg finalize=true`.\n"
             env: HOME=/workspace/.pi-home TMPDIR=/workspace/.pi-home/tmp PI_TELEMETRY=0
             cwd: /workspace
             dir 0700 /workspace/.pi-home
