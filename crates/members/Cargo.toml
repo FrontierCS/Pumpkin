@@ -1,0 +1,19 @@
+[package]
+name = "members"
+version.workspace = true
+description = "A team's members and their keys: the list that the admin keeps, and the lines that sshd admits each key by"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

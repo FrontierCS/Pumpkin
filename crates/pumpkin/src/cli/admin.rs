@@ -1,0 +1,161 @@
+//! `pumpkin-admin`'s command line. Its commands are the controller admin's, and those that the
+//! units written by the admin's install run. `pumpkin` parses this command line when it runs by
+//! the name [`NAME`].
+// Each audience has a command of its own, so a member's `pumpkin --help` lists none of the admin's
+// commands. Teleport splits its users' `tsh` from its admins' `tctl`, and Kubernetes its `kubectl`
+// from the `kubeadm` that sets up a cluster's machines:
+// https://github.com/gravitational/teleport/blob/0c2973dbae77a1a19ebb8bb1d7f059659a674038/tool/tctl/common/usage.go#L20
+// https://github.com/gravitational/teleport/blob/0c2973dbae77a1a19ebb8bb1d7f059659a674038/tool/tsh/tsh.go#L516
+// https://github.com/kubernetes/kubernetes/blob/a866cbe2e5bbaa01cfd5e969aa3e033f3282a8a2/cmd/kubeadm/app/cmd/cmd.go#L37
+// https://github.com/kubernetes/kubernetes/blob/a866cbe2e5bbaa01cfd5e969aa3e033f3282a8a2/staging/src/k8s.io/kubectl/pkg/cmd/cmd.go#L273
+
+use std::ffi::OsString;
+use std::iter;
+use std::path::PathBuf;
+
+use aws::ParameterArn;
+use clap::{CommandFactory as _, FromArgMatches as _, Parser};
+
+use super::{Command, HEADER, LITERAL, Refusal, first_word, flagged, help, printed};
+use crate::iam::{self, Principal};
+
+/// The name that makes `pumpkin` run as `pumpkin-admin`. An install holds a link to `pumpkin` by
+/// that name.
+pub(crate) const NAME: &str = install::File::PumpkinAdmin.name();
+
+/// Administer a Pumpkin controller.
+///
+/// The controller's admin runs `install` as root, from the release they pin. The admin runs
+/// `policy` and `check-members` anywhere. The units that `install` writes run `boot-all`, `idle`
+/// and `members`.
+#[derive(Parser)]
+#[command(
+    name = NAME,
+    disable_help_flag = true,
+    disable_help_subcommand = true,
+    disable_version_flag = true,
+    subcommand_value_name = "command",
+    subcommand_help_heading = "Commands",
+    after_help = notes()
+)]
+enum Parsed {
+    /// Install the controller host's software, as root.
+    ///
+    /// `install` makes the user `pumpkin`, lingering, in Docker's group. It installs this
+    /// `pumpkin-admin`, the host file /etc/pumpkin/controller.toml, the units that run `boot-all`,
+    /// `idle` and `members`, and sshd's settings. Those admit only the members' keys for `pumpkin`.
+    ///
+    /// It copies the members' keys first, and changes nothing else if the copy fails. It needs
+    /// Docker and AWS CLI v2 installed first. It writes a file only where it differs, reloads only
+    /// what changed, and says each change, so a second run says nothing.
+    #[command(after_help = install_notes())]
+    Install {
+        /// The ARN of the SSM parameter that holds the controller's settings. The host file names
+        /// it.
+        #[arg(long, value_name = "arn")]
+        #[arg(value_parser = |arn: &str| ParameterArn::try_from(arn.to_owned()))]
+        settings: ParameterArn,
+    },
+    /// Print the IAM policy of a principal of the controller's deployment.
+    ///
+    /// `policy` prints the policy as IAM's JSON. It holds each statement that this build's calls
+    /// on AWS need as that principal, and nothing else. A value that only the deployment knows,
+    /// such as its account, is a placeholder that Terraform's `templatefile` fills.
+    #[command(after_help = iam::placeholders())]
+    Policy {
+        /// The principal whose policy to print.
+        #[arg(value_name = "principal")]
+        principal: Principal,
+    },
+    /// Run each installed build's boot.
+    #[command(name = "boot-all")]
+    BootAll,
+    /// Stop the controller once it has been idle for 30 minutes.
+    Idle,
+    /// Copy the members' keys, which sshd admits, from SSM.
+    Members,
+    /// Check a directory of the members' keys, as a team's repository keeps them.
+    ///
+    /// `check-members` reads each `<member>.pub` file in the directory. Each of its lines is one
+    /// of the member's keys, as the member's ~/.config/pumpkin/ssh/key.pub holds it. Blank lines
+    /// are skipped. It refuses a name or a key that the controller refuses, and says where it is.
+    /// It refuses a file of no key, and a directory of no file, as deploy/aws does.
+    #[command(name = "check-members", after_help = check_members_notes())]
+    CheckMembers {
+        /// The directory of the members' files.
+        #[arg(value_name = "dir")]
+        dir: PathBuf,
+    },
+}
+
+fn notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
+  sudo ./pumpkin/bin/pumpkin-admin install \\
+    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings
+  pumpkin-admin policy controller
+
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}0{LITERAL:#}  Success.
+  {LITERAL}1{LITERAL:#}  An error. A `pumpkin:` line on the standard error says why.
+  {LITERAL}2{LITERAL:#}  A usage error.
+
+`pumpkin-admin <command> --help` prints a command's help."
+    )
+}
+
+fn install_notes() -> String {
+    format!(
+        "\
+The settings name the members' list in their `[deployment] members`. The list
+holds a line `<member> <key>` for each key. A member's name is 1 to 32 of a-z,
+0-9 and `-`, and starts with a letter. The key is the line of the member's
+~/.config/pumpkin/ssh/key.pub. A list with any other line, or a key twice, is
+refused whole.
+
+{HEADER}Examples:{HEADER:#}
+  sudo ./pumpkin/bin/pumpkin-admin install \\
+    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings"
+    )
+}
+
+fn check_members_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
+  pumpkin-admin check-members members"
+    )
+}
+
+/// Reads `args` into the admin's command that they ask for, as [`super::parse`] does for
+/// `pumpkin`. `args` leave out the program's name.
+pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let mut cli = flagged(Parsed::command());
+    let (first, named) = first_word(&cli, &args);
+    if let Some(print) = printed(NAME, &args, first, || {
+        help(&mut cli, named.as_deref(), None)
+    }) {
+        return Ok(print);
+    }
+    let refusal = |error| Refusal {
+        error,
+        help: match &named {
+            Some(name) => format!("{NAME} {name} --help"),
+            None => format!("{NAME} --help"),
+        },
+    };
+    let line = iter::once(OsString::from(NAME)).chain(args);
+    let matches = cli.try_get_matches_from_mut(line).map_err(refusal)?;
+    let parsed = Parsed::from_arg_matches(&matches);
+    let parsed = parsed.map_err(|error| refusal(error.format(&mut cli)))?;
+    Ok(match parsed {
+        Parsed::Install { settings } => Command::Install(settings),
+        Parsed::Policy { principal } => Command::Print(iam::policy(principal).into()),
+        Parsed::BootAll => Command::BootAll,
+        Parsed::Idle => Command::Idle,
+        Parsed::Members => Command::Members,
+        Parsed::CheckMembers { dir } => Command::CheckMembers(dir),
+    })
+}

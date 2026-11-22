@@ -9,12 +9,12 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use members::Member;
 use provider::RunTag;
 use runtime::Record;
 use stdx::Context as _;
 
 use super::{JOBS, KEPT, KEPT_DAYS, ids};
-use crate::member::Member;
 use crate::{counted, next, say, size};
 
 // The file in a run's job's directory that notes the member's copy of the run's record. It is
@@ -22,14 +22,14 @@ use crate::{counted, next, say, size};
 const COPIED: &str = "copied";
 
 /// Notes that `member` holds a whole copy of run `id`'s record as of now, in the run's job's
-/// directory in `home`. Notes it only if `member` is the run's, or the run names none. Notes
-/// nothing if no job started the run, as such a run has no job directory.
+/// directory in `home`. Notes it only if `member` is the run's. Notes nothing if no job started
+/// the run, as such a run has no job directory.
 // Another member's copy may be gone without the run's member knowing.
-pub(crate) fn mark_copied(home: &Path, id: &RunTag, member: Option<&Member>) -> Result<(), String> {
+pub(crate) fn mark_copied(home: &Path, id: &RunTag, member: &Member) -> Result<(), String> {
     let job = home.join(JOBS).join(id.as_str());
-    match super::member(&job)? {
-        Some(owner) if Some(&owner) != member => return Ok(()),
-        Some(_) | None => {}
+    match super::run_member(&job)? {
+        Some(owner) if owner == *member => {}
+        Some(_) | None => return Ok(()),
     }
     let path = job.join(COPIED);
     let marked = (OpenOptions::new().write(true).create(true).truncate(false)).open(&path);

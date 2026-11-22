@@ -29,11 +29,12 @@ mod config;
 mod controller;
 mod driver;
 mod ending;
+mod host;
 mod iam;
 mod job;
+mod keydir;
 mod link;
 mod manifest;
-mod member;
 mod next;
 mod progress;
 mod reaping;
@@ -43,6 +44,7 @@ mod serve;
 mod star;
 mod style;
 mod view;
+mod whole;
 mod workspace;
 
 use ending::{end, follow};
@@ -68,10 +70,24 @@ fn main() -> ExitCode {
     umask(started | shared_write);
     let mut args = env::args_os();
     let argv0 = args.next();
-    if argv0.is_some_and(|name| name.as_bytes() == ARGV0.to_bytes()) {
+    if argv0
+        .as_ref()
+        .is_some_and(|name| name.as_bytes() == ARGV0.to_bytes())
+    {
         return finish(driver_run(args.collect()));
     }
-    let done = match cli::parse(args) {
+    // One executable runs as the command that its name gives. BusyBox runs the applet that its
+    // `argv[0]`'s last component names. cargo-zigbuild runs as `ar` by its name, and xtask runs as
+    // the musl C compiler by its name:
+    // https://git.busybox.net/busybox/tree/libbb/appletlib.c?id=bd754746394a382e04d116df02547f61b2026da9#n1108
+    // https://github.com/rust-cross/cargo-zigbuild/blob/5225cf45dad1dcd4466b0828b95351c645cc20e6/src/bin/cargo-zigbuild.rs#L33-L41
+    let name = argv0.as_deref().map(Path::new).and_then(Path::file_name);
+    let parsed = if name.is_some_and(|name| name == cli::admin::NAME) {
+        cli::admin::parse(args)
+    } else {
+        cli::parse(args)
+    };
+    let done = match parsed {
         Ok(cli::Command::Run(flags)) => run(flags),
         Ok(cli::Command::Wait(flags)) => wait(flags),
         Ok(cli::Command::Ls(flags)) => ls(flags),
@@ -82,8 +98,12 @@ fn main() -> ExitCode {
         Ok(cli::Command::View(flags)) => view::view(flags),
         Ok(cli::Command::Job(flags)) => job::job(flags),
         Ok(cli::Command::Boot) => job::boot(),
-        Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
-        Ok(cli::Command::Serve(member)) => serve::serve(member.as_ref()),
+        Ok(cli::Command::Install(settings)) => host::install(&settings),
+        Ok(cli::Command::Members) => host::members(),
+        Ok(cli::Command::CheckMembers(dir)) => keydir::check(&dir),
+        Ok(cli::Command::BootAll) => host::boot_all(),
+        Ok(cli::Command::Idle) => host::idle(),
+        Ok(cli::Command::Serve(member)) => serve::serve(&member),
         // clap's own printing writes the help in many pieces. `head` can close the pipe between two
         // of them, and the next write fails. `print` writes the help in one `write_all`.
         Ok(cli::Command::Print(text)) => print(styled(&text).as_bytes())

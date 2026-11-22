@@ -1,4 +1,4 @@
-<svg width="852px" height="650px" xmlns="http://www.w3.org/2000/svg">
+<svg width="852px" height="632px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -62,33 +62,31 @@
 </tspan>
     <tspan x="10px" y="388px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--any-member</tspan>
 </tspan>
-    <tspan x="10px" y="406px"><tspan>          Match the run among every member's runs on the controller, not only this member's and</tspan>
+    <tspan x="10px" y="406px"><tspan>          Match the run among every member's runs on the controller, not only this member's</tspan>
 </tspan>
-    <tspan x="10px" y="424px"><tspan>          those that no member started</tspan>
+    <tspan x="10px" y="424px">
 </tspan>
-    <tspan x="10px" y="442px">
+    <tspan x="10px" y="442px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
 </tspan>
-    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+    <tspan x="10px" y="460px"><tspan>          Print help</tspan>
 </tspan>
-    <tspan x="10px" y="478px"><tspan>          Print help</tspan>
+    <tspan x="10px" y="478px">
 </tspan>
-    <tspan x="10px" y="496px">
+    <tspan x="10px" y="496px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Examples:</tspan>
+    <tspan x="10px" y="514px"><tspan>  pumpkin cancel 126a</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>  pumpkin cancel 126a</tspan>
+    <tspan x="10px" y="532px">
 </tspan>
-    <tspan x="10px" y="550px">
+    <tspan x="10px" y="550px"><tspan class="fg-bright-green bold">Exit status:</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  The run has ended, and nothing that it left remains.</tspan>
 </tspan>
-    <tspan x="10px" y="586px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  The run has ended, and nothing that it left remains.</tspan>
+    <tspan x="10px" y="586px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  The run has ended, but one of its providers can't be reached.</tspan>
 </tspan>
-    <tspan x="10px" y="604px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  The run has ended, but one of its providers can't be reached.</tspan>
+    <tspan x="10px" y="604px"><tspan>     What the run left there may remain.</tspan>
 </tspan>
-    <tspan x="10px" y="622px"><tspan>     What the run left there may remain.</tspan>
-</tspan>
-    <tspan x="10px" y="640px">
+    <tspan x="10px" y="622px">
 </tspan>
   </text>
 

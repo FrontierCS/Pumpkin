@@ -16,8 +16,8 @@ use crate::{manifest, say, workspace};
 
 /// This build's files, which the controller installs whole. The controller runs their `pumpkin`
 /// as `serve`. They are this build's executable, and whichever of an install's other files lie
-/// beside it, as they are. So a `pumpkin` run from cargo's `target/debug` brings that directory's
-/// debug builds.
+/// beside it, as they are. They omit the install's links, which a client never sends. So a
+/// `pumpkin` run from cargo's `target/debug` brings that directory's debug builds.
 pub(super) struct Build {
     files: Vec<(&'static str, PathBuf)>,
     pub(super) hashed: manifest::Hashed,
@@ -30,7 +30,10 @@ impl Build {
         let mut files = Vec::new();
         let mut entries = Vec::new();
         let mut sources = BTreeMap::new();
-        for file in install::File::ALL {
+        for file in install::File::ALL
+            .into_iter()
+            .filter(|file| !file.is_link())
+        {
             let own = file == install::File::Pumpkin;
             let path = if own {
                 exe.clone()
@@ -146,27 +149,32 @@ impl Linked {
 impl Reached {
     fn connected(&self, build: &Build, mut found: Found) -> Result<(Linked, Found), String> {
         let mut repaired = false;
-        let mut enrolled = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let (said, denied) = match Linked::open(self, build, &found.at) {
+            let said = match Linked::open(self, build, &found.at) {
                 Ok(link) => return Ok((link, found)),
                 Err(Unlinked::Failed(error)) => return Err(error),
                 Err(Unlinked::HostKey(error)) => {
                     if !repaired && attempt < OPENINGS {
                         // The cached address may now belong to a different host. Check the pin
                         // against the discovered address before reporting a change there.
-                        (found, _) = self.repair(&found, false, &error)?;
+                        found = self.repair(&found, &error)?;
                         repaired = true;
                         continue;
                     }
                     self.location.failed(&self.name, &found, &error)?;
                     return Err(error);
                 }
-                Err(Unlinked::Cut { said, denied }) => (said, denied),
+                // The controller refuses a key that its admin hasn't listed. No repair or retry
+                // changes that.
+                Err(Unlinked::Cut { denied: true, .. }) => return Err(self.key_refused()?),
+                Err(Unlinked::Cut {
+                    said,
+                    denied: false,
+                }) => said,
             };
-            if attempt == OPENINGS || denied && enrolled {
+            if attempt == OPENINGS {
                 let hosts = self.kept.join("known_hosts");
                 let error = format!(
                     "{said}: check SSH access to the controller and the host key pinned for `{}` in {}, then run the command again",
@@ -176,11 +184,9 @@ impl Reached {
                 self.location.failed(&self.name, &found, &error)?;
                 return Err(error);
             }
-            if denied || !repaired && attempt > 1 {
-                let (next, tried) = self.repair(&found, denied, &said)?;
-                found = next;
+            if !repaired && attempt > 1 {
+                found = self.repair(&found, &said)?;
                 repaired = true;
-                enrolled |= tried;
             }
             let pause = Duration::from_secs(((1_u64 << (attempt - 1)) - 1).min(30));
             say(format_args!(

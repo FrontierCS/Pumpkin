@@ -1,0 +1,65 @@
+<svg width="844px" height="380px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Check a directory of the members' keys, as a team's repository keeps them.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>`check-members` reads each `&lt;member&gt;.pub` file in the directory. Each of its lines is one of the</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>member's keys, as the member's ~/.config/pumpkin/ssh/key.pub holds it. Blank lines are skipped. It</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>refuses a name or a key that the controller refuses, and says where it is. It refuses a file of no</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>key, and a directory of no file, as deploy/aws does.</tspan>
+</tspan>
+    <tspan x="10px" y="136px">
+</tspan>
+    <tspan x="10px" y="154px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin check-members</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="172px">
+</tspan>
+    <tspan x="10px" y="190px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>          The directory of the members' files</tspan>
+</tspan>
+    <tspan x="10px" y="244px">
+</tspan>
+    <tspan x="10px" y="262px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="316px">
+</tspan>
+    <tspan x="10px" y="334px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  pumpkin-admin check-members members</tspan>
+</tspan>
+    <tspan x="10px" y="370px">
+</tspan>
+  </text>
+
+</svg>

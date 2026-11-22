@@ -634,10 +634,10 @@ impl View {
         Ok(self.membered(id, row)?.into())
     }
 
-    /// `row`, of run `id`, with the run's member, if its job names one.
+    /// `row`, of run `id`, with the run's member, if a job started the run.
     fn membered(&self, id: &str, mut row: Value) -> Result<Value, String> {
         if let Some(jobs) = &self.jobs
-            && let Some(member) = crate::job::member(&jobs.join(id))?
+            && let Some(member) = crate::job::run_member(&jobs.join(id))?
         {
             row["member"] = json!(member);
         }

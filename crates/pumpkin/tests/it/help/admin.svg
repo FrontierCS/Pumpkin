@@ -1,0 +1,93 @@
+<svg width="852px" height="632px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Administer a Pumpkin controller.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>The controller's admin runs `install` as root, from the release they pin. The admin runs `policy`</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>and `check-members` anywhere. The units that `install` writes run `boot-all`, `idle` and `members`.</tspan>
+</tspan>
+    <tspan x="10px" y="100px">
+</tspan>
+    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin-admin</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;command&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="136px">
+</tspan>
+    <tspan x="10px" y="154px"><tspan class="fg-bright-green bold">Commands:</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">install</tspan><tspan>        Install the controller host's software, as root</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">policy</tspan><tspan>         Print the IAM policy of a principal of the controller's deployment</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">boot-all</tspan><tspan>       Run each installed build's boot</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">idle</tspan><tspan>           Stop the controller once it has been idle for 30 minutes</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">members</tspan><tspan>        Copy the members' keys, which sshd admits, from SSM</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">check-members</tspan><tspan>  Check a directory of the members' keys, as a team's repository keeps them</tspan>
+</tspan>
+    <tspan x="10px" y="280px">
+</tspan>
+    <tspan x="10px" y="298px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-V</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--version</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>          Print version</tspan>
+</tspan>
+    <tspan x="10px" y="352px">
+</tspan>
+    <tspan x="10px" y="370px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="388px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="406px">
+</tspan>
+    <tspan x="10px" y="424px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="442px"><tspan>  sudo ./pumpkin/bin/pumpkin-admin install \</tspan>
+</tspan>
+    <tspan x="10px" y="460px"><tspan>    --settings arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>  pumpkin-admin policy controller</tspan>
+</tspan>
+    <tspan x="10px" y="496px">
+</tspan>
+    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+</tspan>
+    <tspan x="10px" y="532px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Success.</tspan>
+</tspan>
+    <tspan x="10px" y="550px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">1</tspan><tspan>  An error. A `pumpkin:` line on the standard error says why.</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">2</tspan><tspan>  A usage error.</tspan>
+</tspan>
+    <tspan x="10px" y="586px">
+</tspan>
+    <tspan x="10px" y="604px"><tspan>`pumpkin-admin &lt;command&gt; --help` prints a command's help.</tspan>
+</tspan>
+    <tspan x="10px" y="622px">
+</tspan>
+  </text>
+
+</svg>

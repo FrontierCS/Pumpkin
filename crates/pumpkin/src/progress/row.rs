@@ -1,12 +1,12 @@
 //! A run as `ls` lists it, made where the run's record is: the text that `ls` prints for it, and
 //! the typed fields that the totals and a reader of a listing need.
 
+use members::Member;
 use provider::UnixTime;
 use runtime::{Ending, Stopped};
 use serde::{Deserialize, Serialize};
 
 use super::{Columns, Listed, State, columns, under};
-use crate::member::Member;
 
 /// A run in a listing, rendered at the time and with the runs directory that it was made with.
 #[derive(Serialize, Deserialize)]

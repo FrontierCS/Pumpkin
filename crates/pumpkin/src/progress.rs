@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use members::Member;
 use provider::UnixTime;
 use runtime::{
     CallOf, CallSpan, CallerName, Ending, LeaseSpan, Place, Progress, ReadError, Readout, Record,
@@ -18,7 +19,6 @@ use schema::ir::Name;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::member::Member;
 use crate::next;
 
 mod agent;

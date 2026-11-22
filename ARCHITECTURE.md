@@ -29,7 +29,7 @@ makes ops, such as a call of a function, and model requests. On the host, the ga
 session's end, the decision core decides what the run does next from what has happened, and the
 runtime carries out those decisions on the providers and keeps the run's record.
 
-A run is one process, the driver, on one machine: the operator's own, or the person's controller,
+A run is one process, the driver, on one machine: the operator's own, or a team's controller,
 an EC2 instance that runs the runs a machine sends it.
 
 ![The programs and machines of a run: the operator's pumpkin starts the driver on the operator's machine or on the controller; the driver's parts, the sandboxes that the providers create and the model provider that the route reaches.](docs/figures/run-machines.svg)
@@ -47,8 +47,15 @@ The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 ins
 to its private address. It follows, lists, stops, reaps and views the runs there. The client's
 `controller serve` receives the files by content and starts jobs. It streams their output, copies
 ended records, and handles the commands that inspect or stop runs. Each job runs in its own systemd
-unit. A job install publishes its `bin/pumpkin-boot` link with the build. On boot, systemd runs
-these entries, so each build reaps the records it wrote.
+unit. On boot, `pumpkin-admin boot-all` runs each job install's `bin/pumpkin`, so each build reaps
+the records it wrote.
+
+`pumpkin-admin` is the same executable again. An install holds it as a hard link to `pumpkin`, and
+`main.rs` dispatches by its name. The controller's admin runs its `install` from the release they
+pin. The install writes the units and the rest of what the host's Pumpkin relies on. The admin also
+runs its `policy`, which prints each principal's IAM policy, and its `check-members`, which checks
+a team's directory of members' keys as the controller parses them. The units run its `boot-all`,
+`idle` and `members`. A member's `pumpkin` lists none of these.
 
 ![The data between a machine and its controller, over ssh: the task's tree to the controller's store, the job's start, what the run says as it is followed, the rows that ls lists, the ids of the jobs that wait and cancel find a run among, and an ended run's record, each as the controller modules of pumpkin carry it, and the view's requests for the runs' data and their replies, over one ssh to serve on the controller.](docs/figures/controller-data.svg)
 
@@ -96,12 +103,27 @@ Ctrl-C reaches it, and its command alone is killed at the bound.
 ### `crates/install`
 
 The files of an install, `pumpkin` and those beside it in `bin/` (`File`): which files there are,
-their names, and which are executable. `xtask` takes them from here to lay an install out
-(`build`), to check its archived copy (`release`) and to place files for its checks. `pumpkin`
-takes them to find the files beside itself, and to hash its own install to send to a controller.
+their names, which are executable, and which are hard links to `pumpkin`. No client sends a link
+to a controller. `xtask` takes them from here to lay an install out (`build`), to check its
+archived copy (`release`) and to place files for its checks. `pumpkin` takes them to find the files
+beside itself, and to hash its own install to send to a controller.
 
 **Architecture Invariant:** it holds data and does no I/O, as `recipe` and `library` do. It is
 `#![no_std]`, and its manifest names no dependency.
+
+### `crates/members`
+
+A team's members and their keys. A member's name is a `Member`, which `pumpkin`'s link, jobs and
+listings carry. The team's admin keeps the members' list, a line `<member> <key>` for each key.
+`Members` parses the list, and renders the `authorized_keys` lines by which `sshd` admits each key.
+`pumpkin` decides where the list is kept and which file `sshd` reads.
+
+**Architecture Invariant:** every key that a list admits is `ssh-ed25519 <68 characters of
+base64>` with no options of its own, and no other line lists it. So each line it renders begins
+with `restrict` and the forced command that names the key's one member. No key can replace that
+command. A list with a line that it refuses is refused whole, so no line of it is rendered. Only
+`Members::parse` and `Members::of_keys` make a `Members`, and its tests pin each refusal and the line rendered. It does
+no I/O, and its manifest names serde alone.
 
 ### `crates/schema`
 
@@ -335,16 +357,18 @@ unless a stage that pins each download by its checksum, with `ADD --checksum`, s
 
 ### `crates/aws`
 
-AWS's command line as Pumpkin runs it, `Cli`, in one region, with ECR's repositories on it, a push
-from the operator's engine named by its digest (`Cli::publish`), and the IAM roles that settings
-name (`RoleArn`). `iam` states what IAM must allow of each call (`Call`), ECR's among them
-(`Ecr`). It composes a principal's policy from what its calls need (`iam::policy`).
+AWS's command line as Pumpkin runs it, `Cli`, in one region. It works with ECR's repositories, and
+pushes an image from the operator's engine, named by its digest (`Cli::publish`). `RoleArn` is an
+IAM role that settings name. `ParameterArn` is an SSM parameter, named by its ARN. A call on a
+parameter is made in the region of its ARN. `iam` states what IAM must allow of each call
+(`Call`), ECR's among them (`Ecr`). It composes a principal's policy from what its calls need
+(`iam::policy`).
 
 **Architecture Invariant:** a principal's policy is what the calls of the shipped binaries state.
 `Cli` runs only a `Call`, which names what IAM must allow of it: its actions, resources and
 conditions, as AWS's Service Authorization Reference gives them. Each crate that makes calls
 declares them in its `iam` module. That module lists each call in the policy of the principal that
-makes it. `pumpkin controller policy` prints each policy. `xtask`'s own `aws` commands are a
+makes it. `pumpkin-admin policy` prints each policy. `xtask`'s own `aws` commands are a
 contributor's, and in no policy.
 
 **Architecture Invariant:** every call that `Cli` makes is in its region, with no variable of this
@@ -443,29 +467,36 @@ sandboxes left, or fails.
 
 ### `crates/pumpkin`
 
-The command line and the controller's own side. `cli` parses the command line. `config` reads the
-machine's configuration: `Config`, or `Client` for a machine whose runs go to a controller. `star`
+The command line and the controller's own side. `cli` parses the command line, and its `admin`
+parses `pumpkin-admin`'s. `config` reads the machine's configuration: `Config`, or `Client` for a
+machine whose runs go to a controller. `star`
 reads a task's source below its root (`Root`) and serves the standard library's. `driver` starts the
 driver process. `run` starts a run and drives it in that process. `ending` follows a run and says
 how it ended. `reaping` stops runs and removes what they left. `controller` reaches the controller,
-which its `aws` finds and starts and enrols this machine's key with. A command keeps one direct SSH
-connection for its requests (`Reached`). The workspace saves the controller's address and serialises
-repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
+which its `aws` finds and starts. The controller admits the keys that its admin lists. A command
+keeps one direct SSH connection for its requests (`Reached`). The workspace saves the controller's
+address and serialises repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
 to four connections, then starts the job on the first. Its `copy` receives an ended record file by
 file, `record.json` last. Its `listing` lists the runs there for `ls`. Its `viewing` carries
 `view`'s requests there (`Viewing`). Each goes over a `Link` that its `linking` opens. Its `follow`
 follows a job, and its `commands` stop and reap runs. `link` is the protocol of a client's `Link` to
 `serve`, the controller's end. `serve` starts and cancels jobs and answers `ls` and `view`. It lists
-the jobs, each with its member (`member`), for `wait` and `cancel` to find a run among. It streams a
+the jobs, each with its member (`Member`), for `wait` and `cancel` to find a run among. It streams a
 job's log and its milestones. It is of the client's own build, which the client installs there
 whole: its executable and the files beside it, by their SHA-256. `iam` states its own calls on
 AWS and composes each principal's policy from its calls and the providers'. `manifest` describes the task tree and the client install that `send` transfers by content. Its `store` admits complete uploads by
 their SHA-256. `job` is the controller's side. Its `start` starts each id once under the jobs' lock
 and keeps the install that its unit runs. Its `settings` checks the envelope that made the
 controller's settings and refuses a job while they drain. `job` also holds the prune and the
-slots that admit its builds and publishes (`Admission`). `progress` is what `ls` shows. `next`
-makes the commands to run next. `style` runs the formatter. `view` serves the runs' records to a browser. Its `json` holds the
-JSON forms of its answers, and its `Answering` is the view that `serve` keeps to answer a client.
+slots that admit its builds and publishes (`Admission`). `host` is the host's software, which
+`pumpkin-admin install` installs as root. Its units run the boot and the idle stop. They also copy
+the members' keys from the parameter that the settings' `[deployment]` names. Each key gets the
+forced command that `members` renders. `host`'s `file` is the host file,
+`/etc/pumpkin/controller.toml`. It names the settings' parameter to the units and to each job.
+`keydir` reads a team's directory of `<member>.pub` files into `Members`. `whole` replaces a file
+whole. `progress` is what `ls` shows. `next` makes the commands to run next. `style` runs the
+formatter. `view` serves the runs' records to a browser. Its `json` holds the JSON forms of its
+answers, and its `Answering` is the view that `serve` keeps to answer a client.
 `Workspace` is the `.pumpkin` directory.
 
 **Architecture Invariant:** `view` writes no record, and reads one only through `runtime`'s
@@ -510,15 +541,15 @@ in tmpfs, which its unit removes as it ends. Its `OWN` link names its install. A
 names under the lock of the jobs' directory. A start holds that lock as it hands out an install.
 
 **Architecture Invariant:** `serve` acts for the member that the controller's forced command
-names (`--member`, a `member::Member`), and each run's job it starts records that member.
-`cancel` matches only that member's runs, and those that name no member, unless asked
-otherwise. This prevents accidents, not members: each member's build runs as the controller's
-one user.
+names (`--member`, a `members::Member`), and each run's job it starts records that member.
+`cancel` matches only that member's runs, unless asked otherwise. This prevents accidents, not
+members: each member's build runs as the controller's one user.
 
 **Architecture Invariant:** a job takes the controller's settings of its own envelope major alone.
 In settings of a minor it knows, it refuses a key that no table takes. In settings of a later minor,
 it leaves such a key out of its configuration and names it in its log. A later minor adds only keys
 that an older release may safely ignore. A machine's `pumpkin.toml` refuses such a key all the same.
+A job leaves the settings' `[deployment]` out unread, as the table is the host's alone.
 `config` tells the keys apart through `serde_ignored`, so no table that the settings hold has
 `deny_unknown_fields`.
 
@@ -559,11 +590,13 @@ developer installs.
 
 ### `deploy/aws`
 
-The Terraform module that makes one person's Pumpkin on AWS, as [its README](deploy/aws/README.md)
-says: the EC2 envelope
-that `ec2` relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI,
-and the controller, with the SSM parameter of its jobs' settings and the units that stop it when
-idle and reap at its boot. No crate depends on it; its outputs feed a machine's configuration.
+The Terraform module that makes one team's Pumpkin on AWS, as [its README](deploy/aws/README.md)
+says. The admin lists the team's members by key. The module makes the EC2 envelope that `ec2`
+relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
+controller. The controller comes with the SSM parameters of its jobs' settings and its members'
+keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
+`pumpkin-admin install`. No crate depends on the module. Its outputs feed a machine's
+configuration.
 
 ### `examples`
 
@@ -630,7 +663,8 @@ left behind, never a header's value.
 On the operator's machine, the driver reads the configuration and each key file itself, so no key
 crosses argv, the environment or a pipe; a machine sends its keys to the controller only on a
 connection's standard input, into its job's directory in tmpfs, which the job's unit removes as it
-ends.
+ends. The controller admits only the keys that its admin lists, each with a forced command that
+names its member. Its `docker` group makes every member root there.
 
 ### Deadlines and spending bounds
 
@@ -752,16 +786,19 @@ that its caller states.
 ### What Pumpkin writes on a machine
 
 All that `pumpkin` writes on a machine is below its workspace's `.pumpkin` directory
-(`Workspace`), as `pumpkin --help` says, and each provider kind keeps what it keeps in a directory
-of its own that it is handed as it connects. Outside it are only the configuration and the tools'
-credentials, which it reads; the runs' records, where `--runs` names another directory; the files
-that `fmt` and `lock` rewrite, which their command lines name; the Docker engine's images and its
-ledger of CPUs, which every run on the engine shares; and the machine's key to its controllers,
-with the host keys it pinned. On a controller, below the controller user's home, as the `job`
-module lays out, the jobs also keep the store of the files that clients sent, the trees of links
-into it and each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the
-clients upload. Each job's directory also names its release and the envelopes it takes. A run's
-job directory names its member too.
+(`Workspace`), as `pumpkin --help` says. Each provider kind keeps what it keeps in a directory of
+its own, which it is handed as it connects. Outside them are only the configuration and the tools'
+credentials, which it reads. The runs' records are outside too, where `--runs` names another
+directory. So are the files that `fmt` and `lock` rewrite, which their command lines name, and the
+Docker engine's images and its ledger of CPUs, which every run on the engine shares. The last is
+the machine's key to its controllers, with the host keys it pinned. The admin lists that key as the
+member's credential. On a controller, below the controller user's home, as the `job` module lays
+out, the jobs also keep the store of the files that clients sent, the trees of links into it and
+each job's own directory, and its `.pumpkin` keeps the installs of `serve` that the clients
+upload. Each job's directory also names its release and the envelopes it takes. A run's job
+directory names its member too. Outside the controller user's home, `pumpkin-admin install`
+writes only the host's software, as `host` lays it out: the host file, the members' keys, `sshd`'s
+drop-ins, the units, `pumpkin-admin` itself, and the idle check's mark of the last busy time.
 
 ### Testing
 

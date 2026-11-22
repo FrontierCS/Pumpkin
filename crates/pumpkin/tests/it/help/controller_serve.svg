@@ -30,7 +30,7 @@
 </tspan>
     <tspan x="10px" y="100px">
 </tspan>
-    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin controller serve</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan>
+    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin controller serve</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--member</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;member&gt;</tspan>
 </tspan>
     <tspan x="10px" y="136px">
 </tspan>
@@ -38,7 +38,7 @@
 </tspan>
     <tspan x="10px" y="172px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--member</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;member&gt;</tspan>
 </tspan>
-    <tspan x="10px" y="190px"><tspan>          The member that the controller's forced command names for the link (default: none)</tspan>
+    <tspan x="10px" y="190px"><tspan>          The member that the controller's forced command names for the link</tspan>
 </tspan>
     <tspan x="10px" y="208px">
 </tspan>

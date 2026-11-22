@@ -32,6 +32,7 @@ use self::aws::{Located, find, kept};
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
+/// The controller's user, which runs every Pumpkin process there.
 pub(crate) const USER: &str = "pumpkin";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT_TIMEOUT: Duration = Duration::from_mins(10);
@@ -165,31 +166,27 @@ impl Reached {
         )
     }
 
-    fn repair(&self, previous: &Found, denied: bool, said: &str) -> Result<(Found, bool), String> {
-        let mut enrolled = false;
-        let found = self.location.repair(&self.name, Some(previous), || {
+    /// Why the controller refused this machine's key, and the line its admin adds to admit it.
+    fn key_refused(&self) -> Result<String, String> {
+        let public = self.kept.join("key.pub");
+        let line = fs::read_to_string(&public).context(public.display())?;
+        Ok(format!(
+            "controller `{}` refused this machine's key: ask its admin to add this line under \
+             your name in deploy/aws's `members`, and to apply: \"{}\". If the key is listed \
+             already, run the command again in a minute, once the controller has copied the list",
+            self.name,
+            line.trim_end()
+        ))
+    }
+
+    fn repair(&self, previous: &Found, said: &str) -> Result<Found, String> {
+        self.location.repair(&self.name, Some(previous), || {
             let probe = aws::answers(previous.at.address);
-            let at = find(&self.region, &self.name).map_err(|error| match probe {
+            find(&self.region, &self.name).map_err(|error| match probe {
                 Ok(()) => format!("{said}; finding the controller again: {error}"),
                 Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
-            })?;
-            if denied && at.instance == previous.at.instance && at.address == previous.at.address {
-                let _enrol = self.enrolling()?;
-                let mut probe = self.ssh(&at, "true");
-                if bounded(&mut probe, "ssh", SHORT_TIMEOUT).is_err() {
-                    say(format_args!(
-                        "enrolling this machine's key, {}, with controller `{}`",
-                        self.kept.join("key.pub").display(),
-                        self.name
-                    ));
-                    self.push(&at)?;
-                    self.enrol(&at)?;
-                }
-                enrolled = true;
-            }
-            Ok(at)
-        })?;
-        Ok((found, enrolled))
+            })
+        })
     }
 
     fn ssh_command() -> Command {
@@ -200,12 +197,6 @@ impl Reached {
         ssh.args(self.ssh_options())
             .arg(format!("{USER}@{}", at.address))
             .arg(remote);
-    }
-
-    fn ssh(&self, at: &Located, remote: &str) -> Command {
-        let mut ssh = Self::ssh_command();
-        self.remote(&mut ssh, at, remote);
-        ssh
     }
 
     fn ssh_options(&self) -> Vec<String> {

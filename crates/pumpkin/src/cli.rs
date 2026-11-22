@@ -5,10 +5,10 @@
 //! the first line is the summary. They say what each command and option means, and the guides in
 //! `docs/` say how the commands fit together. `-h` or `--help` before `--` prints the help of the
 //! command that the line names, as `pumpkin help` does, which also prints the topics, such as
-//! [`CONFIG`]. The commands that [`RARE`] names are hidden from
-//! clap's list and listed apart.
-//! What a command does is left to its own module.
+//! [`CONFIG`]. The commands that [`RARE`] names are hidden from clap's list and listed apart.
+//! `pumpkin-admin`'s command line is [`admin`]'s. What a command does is left to its own module.
 
+pub(crate) mod admin;
 mod notes;
 
 use std::ffi::OsString;
@@ -16,23 +16,21 @@ use std::iter;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
-use aws::Region;
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::builder::{OsStringValueParser, StyledStr, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{
     Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser, Subcommand,
 };
+use members::Member;
 use provider::RunTag;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
-    CONFIG, cancel_for_notes, cancel_notes, check_notes, controller_notes, fmt_notes, help_notes,
-    ls_notes, reap_notes, run_notes, view_notes, wait_notes,
+    CONFIG, cancel_notes, check_notes, controller_notes, fmt_notes, help_notes, ls_notes,
+    reap_notes, run_notes, view_notes, wait_notes,
 };
 use crate::ending::Printed;
-use crate::iam::{self, Principal};
-use crate::member::Member;
 use crate::star::Entry;
 
 /// Run workflows of agents in sandboxes.
@@ -142,8 +140,8 @@ enum Parsed {
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
-    /// `job` in a unit of its own. The controller's boot runs `boot`. `policy` runs off the
-    /// controller too. It prints the IAM policy of a principal of the controller's deployment.
+    /// `job` in a unit of its own. The controller's boot runs `boot` of each installed build. The
+    /// controller's admin has its own commands, `pumpkin-admin`'s.
     #[command(hide = true, after_help = controller_notes())]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
@@ -162,19 +160,12 @@ enum Action {
     /// Run a client's `run` as a job.
     ///
     /// `job` makes the job's tree in its working directory, which is `~/trees/<repository>/<id>`.
-    /// It then runs the command there.
+    /// It then runs the command there. The controller's settings are those that the host file,
+    /// /etc/pumpkin/controller.toml, names.
     Job {
         /// The job's id, which its run takes.
         #[arg(value_name = "id", value_parser = |id: &str| RunTag::try_from(id.to_owned()))]
         id: RunTag,
-        /// The controller's AWS region.
-        #[arg(long, value_name = "region")]
-        #[arg(value_parser = |region: &str| Region::try_from(region.to_owned()))]
-        region: Region,
-        /// The SSM parameter that holds the controller's settings.
-        #[arg(long, value_name = "name")]
-        #[arg(value_parser = utf8(", as every SSM parameter's name is: name one that is"))]
-        parameter: String,
         /// The SHA-256 of the manifest of the job's tree in the controller's store.
         #[arg(long, value_name = "sha256")]
         #[arg(value_parser = tree)]
@@ -185,37 +176,21 @@ enum Action {
     },
     /// Reap what lost runs left, at the controller's boot.
     Boot,
-    /// Cancel a run for a client.
-    ///
-    /// The client then says how the run ended, from its copy of the record.
-    #[command(after_help = cancel_for_notes())]
-    Cancel(Cancel),
     /// Answer a client on the standard input and output.
     ///
     /// Each job that `serve` starts belongs to the member that the link acts for. `serve` refuses
     /// to cancel another member's job unless the client asks for any member's.
     Serve {
-        /// The member that the controller's forced command names for the link (default: none).
+        /// The member that the controller's forced command names for the link.
         #[arg(long, value_name = "member")]
         #[arg(value_parser = |member: &str| Member::try_from(member.to_owned()))]
-        member: Option<Member>,
-    },
-    /// Print the IAM policy of a principal of the controller's deployment.
-    ///
-    /// `policy` prints the policy as IAM's JSON. It holds each statement that this build's calls
-    /// on AWS need as that principal, and nothing else. A value that only the deployment knows,
-    /// such as its account, is a placeholder that Terraform's `templatefile` fills.
-    #[command(after_help = iam::placeholders())]
-    Policy {
-        /// The principal whose policy to print.
-        #[arg(value_name = "principal")]
-        principal: Principal,
+        member: Member,
     },
 }
 
-/// What a command line asks for. `Job` and the variants after it are the controller's own side,
-/// `pumpkin controller <action>`. `Print` holds help, the version or a policy, for the standard
-/// output.
+/// What a command line asks for. `Job`, `Boot` and `Serve` are the controller's own side,
+/// `pumpkin controller <action>`. `Install`, `BootAll`, `Idle` and `Members` are `pumpkin-admin`'s.
+/// `Print` holds help, the version or a policy, for the standard output.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
@@ -227,8 +202,12 @@ pub(crate) enum Command {
     View(View),
     Job(Job),
     Boot,
-    CancelFor(Cancel),
-    Serve(Option<Member>),
+    Install(aws::ParameterArn),
+    BootAll,
+    Idle,
+    Members,
+    CheckMembers(PathBuf),
+    Serve(Member),
     Print(StyledStr),
 }
 
@@ -440,8 +419,7 @@ pub(crate) struct Ls {
 pub(crate) struct CancelRun {
     #[command(flatten)]
     pub(crate) cancel: Cancel,
-    /// Match the run among every member's runs on the controller, not only this member's and
-    /// those that no member started.
+    /// Match the run among every member's runs on the controller, not only this member's.
     #[arg(long)]
     pub(crate) any_member: bool,
 }
@@ -452,7 +430,8 @@ pub(crate) struct Cancel {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
-    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
+    // The Modal configuration file that a client sends with a cancel, which no flag gives.
+    #[arg(skip)]
     pub(crate) modal_config: Option<PathBuf>,
 }
 
@@ -461,14 +440,10 @@ pub(crate) struct Reap {
     /// The directory of the runs to reap (default: `runs` in the repository's `.pumpkin`).
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT))]
     pub(crate) runs: Option<String>,
-    #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
+    // The Modal configuration file that a client sends with a reap, as with a cancel.
+    #[arg(skip)]
     pub(crate) modal_config: Option<PathBuf>,
 }
-
-// Hidden: only the controller target gives `--modal-config`, as a job's Modal configuration
-// file goes with the job, and the client sends it again.
-const MODAL_CONFIG_HELP: &str = "Modal's configuration file, in place of the one that the run's \
-                                 configuration names";
 
 #[derive(Args)]
 pub(crate) struct Check {
@@ -495,8 +470,6 @@ const CONFIG_HELP: &str = "The machine's configuration, which `pumpkin help conf
 
 pub(crate) struct Job {
     pub(crate) id: RunTag,
-    pub(crate) region: Region,
-    pub(crate) parameter: String,
     pub(crate) tree: Sha256Digest,
     pub(crate) run: Run,
 }
@@ -541,31 +514,21 @@ pub(crate) struct Refusal {
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
-    // clap's error doesn't name the command it was found in; the first word does, as only `-h`,
-    // `--help`, `-V` and `--version` may come before it.
-    let first = args
-        .iter()
-        .position(|arg| !arg.as_bytes().starts_with(b"-"));
-    let named = first.and_then(|at| cli.find_subcommand(&args[at]));
-    let named = named.map(|command| command.get_name().to_owned());
+    let (first, named) = first_word(&cli, &args);
     let action = (named.as_deref() == Some("controller"))
         .then(|| first.and_then(|at| args.get(at + 1)))
         .flatten()
         .and_then(|word| word.to_str())
         .filter(|word| !word.starts_with('-'))
+        .filter(|word| {
+            let controller = named.as_deref().and_then(|name| cli.find_subcommand(name));
+            controller.is_some_and(|controller| controller.find_subcommand(word).is_some())
+        })
         .map(str::to_owned);
-    let mut options = args.iter().take_while(|arg| *arg != "--");
-    if options.any(|arg| arg == "-h" || arg == "--help") {
-        return Ok(Command::Print(help(
-            &mut cli,
-            named.as_deref(),
-            action.as_deref(),
-        )));
-    }
-    let before = &args[..first.unwrap_or(args.len())];
-    if before.iter().any(|arg| arg == "-V" || arg == "--version") {
-        let version = format!("pumpkin {}\n", runtime::BUILD);
-        return Ok(Command::Print(version.into()));
+    if let Some(print) = printed("pumpkin", &args, first, || {
+        help(&mut cli, named.as_deref(), action.as_deref())
+    }) {
+        return Ok(print);
     }
     let refusal = |error| Refusal {
         error,
@@ -590,6 +553,38 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     command_of(&mut cli, parsed).map_err(refusal)
 }
 
+/// The first word of `args` that isn't a flag, and the name of `cli`'s command that it names, if
+/// any. `args` are a command line of `cli` without the program's name.
+// clap's error doesn't name the command it was found in; the first word does, as only `-h`,
+// `--help`, `-V` and `--version` may come before it.
+fn first_word(cli: &clap::Command, args: &[OsString]) -> (Option<usize>, Option<String>) {
+    let first = args
+        .iter()
+        .position(|arg| !arg.as_bytes().starts_with(b"-"));
+    let named = first.and_then(|at| cli.find_subcommand(&args[at]));
+    (first, named.map(|command| command.get_name().to_owned()))
+}
+
+/// What `args`, a command line of `program` without its name, ask it to print: `help()` for `-h`
+/// or `--help` before `--`, or its version for `-V` or `--version` before the word at `first`.
+fn printed(
+    program: &str,
+    args: &[OsString],
+    first: Option<usize>,
+    help: impl FnOnce() -> StyledStr,
+) -> Option<Command> {
+    let mut options = args.iter().take_while(|arg| *arg != "--");
+    if options.any(|arg| arg == "-h" || arg == "--help") {
+        return Some(Command::Print(help()));
+    }
+    let before = &args[..first.unwrap_or(args.len())];
+    if before.iter().any(|arg| arg == "-V" || arg == "--version") {
+        let version = format!("{program} {}\n", runtime::BUILD);
+        return Some(Command::Print(version.into()));
+    }
+    None
+}
+
 fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::Error> {
     Ok(match parsed {
         Parsed::Run(run) => Command::Run(run),
@@ -604,27 +599,12 @@ fn command_of(cli: &mut clap::Command, parsed: Parsed) -> Result<Command, clap::
             action: Action::Boot,
         } => Command::Boot,
         Parsed::Controller {
-            action: Action::Cancel(cancel),
-        } => Command::CancelFor(cancel),
-        Parsed::Controller {
             action: Action::Serve { member },
         } => Command::Serve(member),
         Parsed::Controller {
-            action: Action::Policy { principal },
-        } => Command::Print(iam::policy(principal).into()),
-        Parsed::Controller {
-            action:
-                Action::Job {
-                    id,
-                    region,
-                    parameter,
-                    tree,
-                    command,
-                },
+            action: Action::Job { id, tree, command },
         } => Command::Job(Job {
             id,
-            region,
-            parameter,
             tree,
             run: job_run(cli, command)?,
         }),
@@ -645,7 +625,11 @@ fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap:
         | Command::View(_)
         | Command::Job(_)
         | Command::Boot
-        | Command::CancelFor(_)
+        | Command::Install(_)
+        | Command::BootAll
+        | Command::Idle
+        | Command::Members
+        | Command::CheckMembers(_)
         | Command::Serve(_)
         | Command::Print(_) => {
             let problem = "the job's command isn't `run`: give one";
@@ -703,18 +687,22 @@ const STYLES: Styles = Styles::styled()
     .literal(LITERAL)
     .placeholder(PLACEHOLDER);
 
-fn command() -> clap::Command {
-    // No command has a help flag of clap's, so a usage error ends without clap's pointer to it,
-    // and `pumpkin help <command>` is said instead; `parse` answers `-h`, `--help`, `-V` and
-    // `--version`.
+/// Styles `cli` in cargo's palette. Gives it the flags that `parse` answers, `-h`, `--help`, `-V`
+/// and `--version`, in place of clap's own.
+// No command has a help flag of clap's, so a usage error ends without clap's pointer to it, and
+// the command that prints its help is said instead.
+fn flagged(cli: clap::Command) -> clap::Command {
     let help = Arg::new("help").short('h').long("help").global(true);
     let help = help.action(ArgAction::SetTrue).help("Print help");
     let version = Arg::new("version").short('V').long("version");
     let version = version.action(ArgAction::SetTrue).help("Print version");
-    let cli = Parsed::command()
-        .styles(STYLES)
+    cli.styles(STYLES)
         .arg(version)
-        .arg(help.display_order(usize::MAX));
+        .arg(help.display_order(usize::MAX))
+}
+
+fn command() -> clap::Command {
+    let cli = flagged(Parsed::command());
     let width = (cli.get_subcommands())
         .filter(|command| listed(command))
         .map(|command| command.get_name().len())

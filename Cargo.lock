@@ -479,6 +479,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "members"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "serde",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -586,6 +594,7 @@ dependencies = [
  "lang",
  "libc",
  "library",
+ "members",
  "mimalloc",
  "miniz_oxide",
  "modal",

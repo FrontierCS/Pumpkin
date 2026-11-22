@@ -16,8 +16,8 @@ use stdx::process::Environment;
 
 use super::view::Served;
 use super::{
-    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, masked, poll,
-    report, returned, whole_log, workflow, write_record, write_run,
+    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, masked_members,
+    poll, report, returned, whole_log, workflow, write_record, write_run,
 };
 
 const SENT_MODAL: &str = r#"[modal]
@@ -96,18 +96,10 @@ fn job_refusals() {
     );
     let id = id_ago(0, "0b000004");
     let job = |tree: &str| {
-        let args = [
-            "controller",
-            "job",
-            &id,
-            "--region",
-            "us-west-1",
-            "--parameter",
-        ];
-        let settings = ["/pumpkin-alice/settings", "--tree", tree];
+        let args = ["controller", "job", &id, "--tree", tree];
         let mut job = scratch.program(
             controllers(&scratch),
-            &[&args[..], &settings, &["--", "run", "stand-in/task.star"]].concat(),
+            &[&args[..], &["--", "run", "stand-in/task.star"]].concat(),
         );
         job.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
         job
@@ -138,13 +130,13 @@ fn job_refusals() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-            $ env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- run stand-in/task.star
+            $ env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --tree <empty tree> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
-            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- run stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --tree <tree of .pumpkin/runs/planted/record> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: <scratch>/home/store/manifests/<tree of .pumpkin/runs/planted/record>: the manifest's line `f <blob> 8 .pumpkin/runs/planted/record` is refused: `.pumpkin/runs/planted/record` can't be sent to the controller, where a job's `.pumpkin` is the controller's own workspace: leave it out of the task
-            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- run stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --tree <tree of stand-in/notes> -- run stand-in/task.star
             exit status: Some(1)
             pumpkin: the job's working directory, <scratch>, isn't its tree, <scratch>/home/trees/<repository>/<id>, which its start makes: run the job there, as its unit does
             made the file outside a job's tree: false"#]],
@@ -168,43 +160,32 @@ fn boot_without_runs() {
 }
 
 #[test]
-fn boot_registered_builds() {
+fn boot_installed_builds() {
     let scratch = Scratch::new();
     let (_, id, _) = started_job(&scratch);
     write_record(&scratch, &id, true, None);
     move_runs(&scratch, "home/.pumpkin/runs");
-    scratch.write_executable(
-        "home/.pumpkin/legacy/bin/pumpkin",
-        b"#!/bin/sh\ntouch \"$HOME/legacy-ran\"\n",
-    );
+    // An install whose `pumpkin` fails its boot, beside the started job's.
     let broken = scratch.0.join("home/.pumpkin/0/bin");
     fs::create_dir_all(&broken).unwrap();
-    symlink("/bin/false", broken.join("pumpkin-boot")).unwrap();
-    scratch.write_executable(
-        "boot",
-        include_bytes!("../../../../deploy/aws/pumpkin-boot"),
-    );
-    let status = scratch
-        .program(scratch.0.join("boot"), &[])
-        .status()
-        .unwrap();
+    symlink("/bin/false", broken.join("pumpkin")).unwrap();
+    // As the boot's unit runs it, from outside every install.
+    let status = scratch.admin(&["boot-all"]).status().unwrap();
     let home = scratch.0.join("home");
     let log = fs::read_to_string(home.join("boot.log")).unwrap();
     let recovered = home
         .join(format!(".pumpkin/runs/{id}/outcome.json"))
         .is_file();
-    let legacy = home.join("legacy-ran").exists();
     check(
         &scratch,
-        &format!("{status}\n{log}recovered: {recovered}\nlegacy ran: {legacy}"),
+        &format!("{status}\n{log}recovered: {recovered}"),
         &[(&id, "<id>")],
         &expect![[r#"
             exit status: 1
             pumpkin: run <id> was lost, as its driver ended without an outcome.json: it is now recorded as failed
             <id>
-            controller boot failed for <scratch>/home/.pumpkin/0/bin/pumpkin-boot (exit 1)
-            recovered: true
-            legacy ran: false"#]],
+            controller boot failed for <scratch>/home/.pumpkin/0/bin/pumpkin (exit 1)
+            recovered: true"#]],
     );
 }
 
@@ -219,16 +200,19 @@ const KEY: &str = "sk-client-stand-in";
 // Runs the controller command in the test's home, with cuts before the requested byte on either
 // stream. Each before-N action runs just before the Nth connection. A client home with a
 // `.member` is a key that the admin lists under that member, so the command runs as the
-// controller's forced command runs it.
+// controller's forced command runs it. A `refused` file refuses every key, as `sshd` refuses a key
+// that is unlisted.
 const SSH: &str = r#"#!/bin/sh
 dir=${0%/*}
 printf '%s\n' "$@" >> "$dir/argv"
 while :; do
     case $1 in
-        -o|-F|-i|-E) shift 2 ;;
+        -E) diagnostics=$2; shift 2 ;;
+        -o|-F|-i) shift 2 ;;
         *) break ;;
     esac
 done
+at=$1
 shift
 command=$*
 if [ -f "$HOME/.member" ]; then set -- pumpkin --member "$(cat "$HOME/.member")"; else set --; fi
@@ -236,6 +220,10 @@ first=$(printf '%s\n' "$command" | head --lines=1)
 printf '%s\n' "$first" >> "$dir/scripts"
 calls=$(wc --lines < "$dir/scripts")
 if [ -f "$dir/before-$calls" ]; then sh "$dir/before-$calls"; rm "$dir/before-$calls"; fi
+if [ -f "$dir/refused" ]; then
+    echo "$at: Permission denied (publickey)." >> "${diagnostics:-/dev/stderr}"
+    exit 255
+fi
 cd "$dir/../home" || exit 1
 export HOME="$PWD" XDG_RUNTIME_DIR="$dir/../run"
 if mv "$dir/cut-in" "$dir/cut-in-$$" 2>/dev/null; then
@@ -562,7 +550,6 @@ fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
         "id": id, "repo": "tasks",
         "tree": format!("sha256:{EMPTY_TREE}"), "install": format!("sha256:{EMPTY_TREE}"),
         "words": ["--", "task.star"],
-        "region": "us-west-1", "parameter": "/pumpkin-alice/settings",
         "sent": {}, "key_bytes": [], "modal_bytes": modal_bytes,
     })
 }
@@ -586,7 +573,7 @@ fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) ->
         .0
         .join("home")
         .join(format!(".pumpkin/serve/{key}/pumpkin"));
-    let mut process = scratch.program(serve, &["controller", "serve"]);
+    let mut process = scratch.program(serve, &["controller", "serve", "--member", "alice"]);
     process
         .env("PATH", path)
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
@@ -1451,6 +1438,7 @@ fn send_evicted_file() {
 fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
+    scratch.write(&format!("{job}/member"), "alice\n");
     scratch.write(&format!("{job}/out"), &format!("{id}\n"));
     let record = format!("home/.pumpkin/runs/{id}");
     let args = ["stand-in/task.star"];
@@ -1463,28 +1451,6 @@ fn ended_job(scratch: &Scratch, id: &str, log: &str) {
 }
 
 #[test]
-fn shell_client_cancels_with_the_jobs_executable() {
-    let scratch = Scratch::new();
-    let id = id_ago(0, "0c000005");
-    ended_job(&scratch, &id, "");
-    let pumpkin = install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
-    let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
-    symlink(pumpkin, &own).unwrap();
-    let args = ["controller", "cancel", "--modal-config", "modal.toml", &id];
-    let mut cancel = scratch.program(own, &args);
-    let invoked = invocation(&cancel);
-    let output = cancel.output().unwrap();
-    check(
-        &scratch,
-        &report(invoked, &output, &scratch.0, false),
-        &[(&id, "<id>")],
-        &expect![[r#"
-            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --modal-config modal.toml <id>
-            exit status: Some(102)"#]],
-    );
-}
-
-#[test]
 fn cancel_stops_the_unit_once() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);
@@ -1492,6 +1458,7 @@ fn cancel_stops_the_unit_once() {
     served(&scratch);
     let id = id_ago(0, "0c000006");
     scratch.write(&format!("home/jobs/{id}/log"), "a job still building\n");
+    scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     scratch.write(&format!("run/pumpkin/{id}/held"), "");
     let ctl = r#"#!/bin/sh
 echo "$*" >> "${0%/*}/units"
@@ -1529,6 +1496,7 @@ fn cancel_copies_the_record_when_reaping_fails() {
     served(&scratch);
     let id = id_ago(0, "0c000008");
     scratch.write(&format!("home/jobs/{id}/log"), "");
+    scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     write_record(&scratch, &id, true, None);
     scratch.write(&format!("runs/{id}/agents/agent/sandbox.json"), "{}");
     move_runs(&scratch, "home/.pumpkin/runs");
@@ -1657,9 +1625,9 @@ fn frame_bytes(message: &serde_json::Value, body: &[u8]) -> usize {
 }
 
 // Status precedes Follow on the same link. The job is the only one in this controller home, and
-// names no member.
+// is alice's.
 fn named_bytes(id: &str) -> usize {
-    let jobs = json!({ "member": "alice", "jobs": [{ "id": id, "owner": { "type": "nobody" } }] });
+    let jobs = json!({ "member": "alice", "jobs": [{ "id": id, "owner": { "type": "member", "member": "alice" } }] });
     let body = serde_json::to_vec(&jobs).unwrap();
     frame_bytes(&json!({ "type": "jobs", "body_bytes": body.len() }), &[])
         + frame_bytes(&serde_json::Value::Null, &body)
@@ -1717,10 +1685,11 @@ fn silent_build_loses_its_follower() {
     let id = id_ago(0, "0f000007");
     let log = format!("home/jobs/{id}/log");
     scratch.write(&log, "building\n");
+    scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     let active = scratch.0.join("run/pumpkin").join(&id);
     fs::create_dir_all(&active).unwrap();
     let mut child = scratch
-        .program(PUMPKIN, &["controller", "serve"])
+        .program(PUMPKIN, &["controller", "serve", "--member", "alice"])
         .env("XDG_RUNTIME_DIR", scratch.0.join("run"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1773,6 +1742,7 @@ fn follow_repeats_no_milestone() {
     driver.lock().unwrap();
     move_runs(&scratch, "home/.pumpkin/runs");
     scratch.write(&format!("home/jobs/{id}/out"), &id);
+    scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     let hello = frame_bytes(&json!({ "type": "serving" }), &[]);
     let first = format!("following run {id}: ending this command does not stop it");
     let _ = calls(&scratch);
@@ -2125,6 +2095,7 @@ fn ls_answered_there() {
     let unstarted = ["20261107-130200-2c9b0006", "20261106-130300-2c9b0007"];
     for id in [ended, waiting, building].iter().chain(&unstarted) {
         scratch.write(&format!("home/jobs/{id}/log"), "");
+        scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
     }
     scratch.write(&format!("run/pumpkin/{waiting}/waiting"), "");
     fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{building}"))).unwrap();
@@ -2140,7 +2111,7 @@ fn ls_answered_there() {
     let mut steps = [&[][..], &["20261106"]].map(|args| ls_ran(&scratch, &client, args));
     // The rows whose times are relative to now.
     for varying in ["20261107-1201", "20261107-13", "20261106-13"] {
-        steps = steps.map(|ran| masked(&ran, varying));
+        steps = steps.map(|ran| masked_members(&ran, varying, "alice ".len()));
     }
     drop(driver);
     check(
@@ -2148,24 +2119,24 @@ fn ls_answered_there() {
         &steps.join("\n"),
         &[],
         &expect![[r#"
-        $ pumpkin ls
-        exit status: Some(0)
-        pumpkin: controller `alice`: up <t>, 3 jobs, disk <n>% used
-        printed:
-          20261107-110000-0d0c0008 finished          -  -               -  -: score=3 metrics={"solved":3}
-          20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
-          20261107-120100-1b8a0002 publishing      <t>                  -  -
-          20261107-130000-2c9b0004 waiting         <t>                  -  -
-          20261107-130100-2c9b0005 building        <t>                  -  -
-          20261107-130200-2c9b0006 unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261107-130200-2c9b0006
-          6 runs: 1 waiting, 1 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls 20261106
-        $ pumpkin ls 20261106
-        exit status: Some(0)
-        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-        printed:
-          20261106-120000-1b8a0003 failed            -  -               -  -
-          20261106-130300-2c9b0007 unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261106-130300-2c9b0007
-          2 runs: 1 failed, 1 unstarted"#]],
+            $ pumpkin ls
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 3 jobs, disk <n>% used
+            printed:
+              20261107-110000-0d0c0008 -     finished          -  -               -  -: score=3 metrics={"solved":3}
+              20261107-120000-1b8a0001 alice finished          -  -               -  -: score=7 metrics={"solved":3}
+              20261107-120100-1b8a0002 -     publishing      <t>                  -  -
+              20261107-130000-2c9b0004 alice waiting         <t>                  -  -
+              20261107-130100-2c9b0005 alice building        <t>                  -  -
+              20261107-130200-2c9b0006 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261107-130200-2c9b0006
+              6 runs: 1 waiting, 1 building, 1 running, 2 finished, 1 unstarted; 2 runs that ended over a day ago aren't listed: to list them: pumpkin ls 20261106
+            $ pumpkin ls 20261106
+            exit status: Some(0)
+            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+            printed:
+              20261106-120000-1b8a0003 -     failed            -  -               -  -
+              20261106-130300-2c9b0007 alice unstarted       <t>                  -  -: its job ended before the run started: to see why: pumpkin wait 20261106-130300-2c9b0007
+              2 runs: 1 failed, 1 unstarted"#]],
     );
 }
 
@@ -2472,8 +2443,10 @@ fn wait_names_its_run_there() {
     connect(&scratch, &client);
     let hex = served(&scratch);
     // Two runs' jobs, whose runs never started, with a prefix in common.
-    scratch.write("home/jobs/20261107-120000-1b8a0001/log", "");
-    scratch.write("home/jobs/20261107-130000-2c9b0002/log", "");
+    for id in ["20261107-120000-1b8a0001", "20261107-130000-2c9b0002"] {
+        scratch.write(&format!("home/jobs/{id}/log"), "");
+        scratch.write(&format!("home/jobs/{id}/member"), "alice\n");
+    }
     let mut steps = Vec::new();
     for run in ["1b8a", "20261107", "9f"] {
         let output = on_client(&scratch, &client, &["wait", run])
@@ -2559,8 +2532,8 @@ fn members_attributed() {
         &expect![[r#"
             the job's member: "alice\n"
             the job's release is the build's: true
-            the envelopes it takes: "^1.0\n"
-            systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree> -- run -- stand-in/task.star
+            the envelopes it takes: "^1.1\n"
+            systemd-run --user --quiet --expand-environment=no --unit=pumpkin-job-<id> --working-directory=<scratch>/home/trees/repo/<id> --property=ExitType=cgroup --property=ExecStopPost=/usr/bin/rm --recursive --force <scratch>/bin/../run/pumpkin/<id> --property=StandardOutput=append:<scratch>/home/jobs/<id>/out --property=StandardError=append:<scratch>/home/jobs/<id>/log -- <scratch>/home/.pumpkin/<install>/bin/pumpkin controller job <id> --tree <tree> -- run -- stand-in/task.star
             $ pumpkin ls
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
@@ -2674,58 +2647,12 @@ fn cancel_full_id_refused() {
     );
 }
 
-#[test]
-fn unattributed_jobs() {
-    let scratch = Scratch::new();
-    let (_, id, _) = started_job(&scratch);
-    let bob = set_up_member(&scratch, "bob");
-    scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
-    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
-    // As a build from before members leaves a job: no `member` beside its log. Its digits sort
-    // it after the other job, which may share its second.
-    let older = id_ago(0, "ffffffff");
-    scratch.write(&format!("home/jobs/{older}/log"), "");
-    let mut lines = vec![ran_by(
-        &scratch,
-        on_repo(&scratch, "repo-bob", &bob, &["ls"]),
-        &["ls"],
-    )];
-    fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{older}"))).unwrap();
-    let args = ["cancel", "ffff"];
-    lines.push(ran_by(
-        &scratch,
-        on_repo(&scratch, "repo-bob", &bob, &args),
-        &args,
-    ));
-    lines.push(fs::read_to_string(scratch.0.join("bin/units")).unwrap());
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[(&id, "<id>"), (&older, "<older>")],
-        &expect![[r#"
-            $ pumpkin ls
-            exit status: Some(0)
-            pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
-            printed:
-              <id> alice unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <id>
-              <older> -     unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <older>
-              2 runs: 2 unstarted
-            $ pumpkin cancel ffff
-            exit status: Some(0)
-            pumpkin: run <older>'s job on controller `alice` is stopped, before the run started
-            show --property=ActiveState --property=ExecMainStatus --property=ExecMainExitTimestamp pumpkin-boot.service
-            --user stop pumpkin-job-<older>"#]],
-    );
-}
-
-// Jobs yet to start a run, each with the member that `member` names, or none, and its tmpfs
-// directory, so that a cancel stops its unit.
-fn waiting_jobs(scratch: &Scratch, jobs: &[(&str, Option<&str>)]) {
+// Jobs yet to start a run, each with the member that `member` names, and its tmpfs directory, so
+// that a cancel stops its unit.
+fn waiting_jobs(scratch: &Scratch, jobs: &[(&str, &str)]) {
     for (id, member) in jobs {
         scratch.write(&format!("home/jobs/{id}/log"), "");
-        if let Some(member) = member {
-            scratch.write(&format!("home/jobs/{id}/member"), member);
-        }
+        scratch.write(&format!("home/jobs/{id}/member"), member);
         fs::create_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
     }
 }
@@ -2739,10 +2666,7 @@ fn cancel_prefers_own_run() {
     let bob = set_up_member(&scratch, "bob");
     scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
     let (alices, bobs) = (id_ago(0, "0b000001"), id_ago(0, "0b000002"));
-    waiting_jobs(
-        &scratch,
-        &[(&alices, Some("alice\n")), (&bobs, Some("bob\n"))],
-    );
+    waiting_jobs(&scratch, &[(&alices, "alice\n"), (&bobs, "bob\n")]);
     let mut lines = Vec::new();
     for args in [&["cancel", "0b00"][..], &["cancel", "--any-member", "0b00"]] {
         let cancel = on_repo(&scratch, "repo-bob", &bob, args);
@@ -2775,7 +2699,7 @@ fn member_unread() {
     let bob = set_up_member(&scratch, "bob");
     scratch.write_executable("bin/systemctl", SYSTEMCTL_NOTED.as_bytes());
     let (unread, other) = (id_ago(0, "0c000001"), id_ago(0, "0c000002"));
-    waiting_jobs(&scratch, &[(&unread, Some("Bad!\n")), (&other, None)]);
+    waiting_jobs(&scratch, &[(&unread, "Bad!\n"), (&other, "bob\n")]);
     // Ended before its run started, so that its row's time is no clock's.
     fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{other}"))).unwrap();
     let mut lines = vec![ran_by(
@@ -2812,7 +2736,7 @@ fn member_unread() {
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             pumpkin: 1 run can't be listed, as said above
             printed:
-              <other> unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <other>
+              <other> bob unstarted         -                  -  -: its job ended before the run started: to see why: pumpkin wait <other>
               1 run: 1 unstarted
             $ pumpkin cancel <unread>
             exit status: Some(1)
@@ -2859,8 +2783,31 @@ fn serve_refuses_member() {
     );
 }
 
+#[test]
+fn enrolment_refused() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    let _ = fs::remove_file(scratch.0.join("bin/calls"));
+    scratch.write("bin/refused", "");
+    let ls = ran_by(&scratch, on_client(&scratch, &client, &["ls"]), &["ls"]);
+    let key = fs::read_to_string(scratch.0.join("client/.config/pumpkin/ssh/key.pub")).unwrap();
+    let aws = scratch.0.join("bin/calls").exists();
+    let lines = [ls, format!("aws ran: {aws}")];
+    check(
+        &scratch,
+        &lines.join("\n"),
+        &[(key.trim_end(), "<key.pub>")],
+        &expect![[r#"
+            $ pumpkin ls
+            exit status: Some(1)
+            pumpkin: controller `alice` refused this machine's key: ask its admin to add this line under your name in deploy/aws's `members`, and to apply: "<key.pub>". If the key is listed already, run the command again in a minute, once the controller has copied the list
+            aws ran: false"#]],
+    );
+}
+
 fn serve_process(scratch: &Scratch) -> Child {
-    serve_for(scratch, &[])
+    serve_for(scratch, &["--member", "alice"])
 }
 
 // `controller serve` with `args`, such as the `--member` that a forced command gives.
@@ -2875,9 +2822,9 @@ fn serve_for(scratch: &Scratch, args: &[&str]) -> Child {
     serve.spawn().unwrap()
 }
 
-/// What `controller serve` does with `input` on its standard input.
+/// What `controller serve --member alice` does with `input` on its standard input.
 fn serve_fed(scratch: &Scratch, input: &[u8]) -> String {
-    serve_fed_for(scratch, &[], input)
+    serve_fed_for(scratch, &["--member", "alice"], input)
 }
 
 /// As [`serve_fed`], of `controller serve` with `args`.
@@ -3425,7 +3372,7 @@ fn views_the_controllers_runs_over_a_reopened_connection() {
     let scratch = Scratch::new();
     let (client, driver, [ended, live]) = viewed(&scratch);
     served(&scratch);
-    // The ended run's job is a member's; the live one's names none.
+    // The ended run's job is a member's; no job started the live one.
     scratch.write(&format!("home/jobs/{ended}/member"), "alice\n");
     scratch.write("bin/cut-out", "1000");
     let served = Served::of(on_client(&scratch, &client, &["view"]));

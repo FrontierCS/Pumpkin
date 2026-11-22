@@ -271,7 +271,7 @@ struct Reaching {
     reached: BTreeMap<Reachable, Result<Box<dyn Sweep>, String>>,
     configurations: BTreeMap<PathBuf, Result<config::Providers<config::Kind>, String>>,
     /// Modal's configuration file for every provider of kind `modal`, in place of the one that
-    /// a run's configuration names, as `--modal-config` gives it.
+    /// a run's configuration names, as a client sends it with a cancel or a reap.
     modal_config: Option<PathBuf>,
 }
 

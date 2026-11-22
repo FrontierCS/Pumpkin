@@ -16,7 +16,11 @@ use crate::link::Boot;
 // The bound of `systemctl show`, which reads a unit's properties from systemd.
 const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(10);
 
-const BOOT_UNIT: &str = "pumpkin-boot.service";
+/// The unit that reaps at the controller's boot.
+pub(crate) const BOOT_UNIT: &str = "pumpkin-boot.service";
+
+/// The file in the controller user's home that the boot's output is appended to.
+pub(crate) const BOOT_LOG: &str = "boot.log";
 
 /// Reaps what this build's ended or lost runs may have left, using each job's configuration.
 /// Returns the reap's exit status, 0 though a provider can't be reached.
@@ -42,7 +46,7 @@ pub(crate) fn state(home: &Path) -> Boot {
         Some("failed") => match shown.get("ExecMainStatus").map(str::parse) {
             Some(Ok(status)) => Boot::Failed {
                 status,
-                log: boot_log(&home.join("boot.log")).unwrap_or_else(|error| error.to_string()),
+                log: boot_log(&home.join(BOOT_LOG)).unwrap_or_else(|error| error.to_string()),
                 at: shown
                     .get("ExecMainExitTimestamp")
                     .filter(|at| !at.is_empty())
@@ -55,24 +59,17 @@ pub(crate) fn state(home: &Path) -> Boot {
 }
 
 /// Returns the jobs' directory `jobs`, locked as a prune locks it (`super::open_jobs`), once the
-/// boot unit has ended in this boot. The unit has ended when its run has exited or its condition
-/// has skipped it, and no job of it is queued. Returns `None` until then, and while `systemctl`
-/// can't say.
+/// boot unit has run to its end in this boot, with no job of it queued. Returns `None` until then,
+/// and while `systemctl` can't say.
 // The boot's reap of an old build may need what the prune would remove.
 pub(super) fn after(jobs: &Path) -> Result<Option<File>, String> {
     let locked = super::open_jobs(jobs)?;
     locked.lock().context(super::jobs_named(jobs))?;
-    let shown = Shown::of(&[
-        "ActiveState",
-        "Job",
-        "ExecMainExitTimestamp",
-        "ConditionResult",
-        "ConditionTimestamp",
-    ]);
-    let set = |name: &str| shown.get(name).is_some_and(|value| !value.is_empty());
+    let shown = Shown::of(&["ActiveState", "Job", "ExecMainExitTimestamp"]);
     // systemd keeps a unit's times for the boot alone, so an exit time is of this boot's run.
-    let ended = set("ExecMainExitTimestamp")
-        || shown.get("ConditionResult") == Some("no") && set("ConditionTimestamp");
+    let ended = shown
+        .get("ExecMainExitTimestamp")
+        .is_some_and(|value| !value.is_empty());
     let idle = shown.get("Job") == Some("") && shown.get("ActiveState") != Some("activating");
     Ok((ended && idle).then_some(locked))
 }

@@ -36,6 +36,7 @@ mod driver;
 mod fmt;
 mod help;
 mod ls;
+mod members;
 mod policy;
 mod reap;
 mod run;
@@ -214,6 +215,17 @@ impl Scratch {
 
     fn pumpkin(&self, args: &[&str]) -> Command {
         self.program(self.0.join(".pumpkin/bin/pumpkin"), args)
+    }
+
+    /// A `pumpkin-admin` command with `args`. It runs a link to `pumpkin` by that name, outside
+    /// every install, as the host's units run it.
+    fn admin(&self, args: &[&str]) -> Command {
+        let admin = self.0.with_file_name("sbin/pumpkin-admin");
+        if !admin.exists() {
+            fs::create_dir_all(admin.parent().unwrap()).unwrap();
+            fs::hard_link(PUMPKIN, &admin).unwrap();
+        }
+        self.program(admin, args)
     }
 
     fn program(&self, program: impl AsRef<Path>, args: &[&str]) -> Command {
@@ -407,6 +419,8 @@ fn invocation(command: &Command) -> String {
     let program = command.get_program().to_string_lossy();
     let program = if program.contains("/.pumpkin/") && program.ends_with("/bin/pumpkin") {
         Cow::Borrowed("pumpkin")
+    } else if program.ends_with("/sbin/pumpkin-admin") {
+        Cow::Borrowed("pumpkin-admin")
     } else {
         program
     };
@@ -632,13 +646,19 @@ fn alive(pid: i64) -> bool {
 ///
 /// A row is a line that starts with `ids`.
 fn masked(ran: &str, ids: &str) -> String {
+    masked_members(ran, ids, 0)
+}
+
+// As `masked`, of a listing whose rows hold a members' column `members` wide, its padding
+// included, after the id.
+fn masked_members(ran: &str, ids: &str, members: usize) -> String {
     let lines = ran.lines().map(|line| {
         let mut line = line.to_owned();
         // A line under a run's starts 25 columns further in, where its id would end.
         let indent = line.len() - line.trim_start().len();
         let row = line.trim_start().starts_with(ids).then_some(indent);
         if let Some(at) = row.or_else(|| (indent > 25).then(|| indent - 25)) {
-            let at = at + 37;
+            let at = at + members + 37;
             line.replace_range(at..at + 7, "    <t>");
         }
         for (from, to) in [(" answered ", " ago"), ("ends by ", " UTC")] {

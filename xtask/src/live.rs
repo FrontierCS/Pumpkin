@@ -13,8 +13,8 @@ use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream};
 use crate::repo::{Repo, STEP_TIMEOUT};
 use crate::settings::{Provider, Settings};
 use crate::{
-    BUILD_TIMEOUT, Result, install_file, root, sandboxd, star, step, subcommand, target_dir, tools,
-    wait,
+    BUILD_TIMEOUT, Placed, Result, install_file, root, sandboxd, star, step, subcommand,
+    target_dir, tools, wait,
 };
 
 /// The bound of a `./pumpkin` command that xtask runs to its end. pumpkin bounds each of its own
@@ -51,9 +51,14 @@ pub(crate) fn docker() -> Result<()> {
     // contributor's umask makes Cargo's own artifacts executable only by their owner.
     let install = root().join("bin/live");
     fs::create_dir_all(&install).context(format_args!("making {} failed", install.display()))?;
-    let sandboxd = install_file(&install, install::File::Sandboxd.name(), &built, 0o755)?;
+    let sandboxd = install::File::Sandboxd.name();
+    let sandboxd = install_file(&install, sandboxd, Placed::Copy(&built, 0o755))?;
     let boot = install::File::Ec2Boot.name();
-    install_file(&install, boot, &built.with_file_name(boot), 0o755)?;
+    install_file(
+        &install,
+        boot,
+        Placed::Copy(&built.with_file_name(boot), 0o755),
+    )?;
     let test = [
         "nextest",
         "run",

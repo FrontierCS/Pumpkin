@@ -4,10 +4,11 @@
 //! it takes, as Cargo's caret requirement `^M.m` writes them: the minor `M.m` or a later one of
 //! major `M`
 //! (<https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/doc/book/src/reference/specifying-dependencies.md#L51-L57>).
-//! The job's `pumpkin` link names its install. A job of a build from before these has neither
-//! file.
+//! The job's `pumpkin` link names its install.
 
 use std::path::Path;
+
+use crate::whole;
 
 const RELEASE: &str = "release";
 
@@ -18,6 +19,8 @@ pub(super) fn write(job: &Path) -> Result<(), String> {
     // GitHub's runner likewise names its version to the service on each poll. That tells when an
     // older one may be retired:
     // https://github.com/actions/runner/blob/d1eb12d4b115c301201de27d667284e1a80f2ab5/src/Runner.Listener/BrokerMessageListener.cs#L299-L305
-    super::line::write(job, RELEASE, &runtime::BUILD.to_string())?;
-    super::line::write(job, ENVELOPE, &format!("^{}", super::settings::OLDEST))
+    let release = format!("{}\n", runtime::BUILD);
+    whole::replace(&job.join(RELEASE), release.as_bytes(), 0o644)?;
+    let envelope = format!("^{}\n", super::settings::OLDEST);
+    whole::replace(&job.join(ENVELOPE), envelope.as_bytes(), 0o644)
 }
