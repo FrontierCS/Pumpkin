@@ -125,7 +125,7 @@ fn said(name: &Name, health: &Health, jobs: usize) -> String {
         .saturating_sub(*disk_free_bytes)
         .saturating_mul(100);
     let used_percent = used.div_ceil((*disk_size_bytes).max(1)).min(100);
-    let unit = "pumpkin-boot.service";
+    let unit = crate::job::BOOT_UNIT;
     let boot = match boot {
         Boot::Failed { status, at, log } => {
             let at = at

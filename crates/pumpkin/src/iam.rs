@@ -4,15 +4,11 @@
 //! makes its jobs' calls: they run the providers and read their settings. The providers'
 //! other principals make their own calls. A client's calls reach its controller.
 
-use aws::iam::{
-    self, Allow, Call, Condition, Fill, Key, Part, Placeholder, Resource, Test, Values,
-};
+use aws::iam::{self, Allow, Call, Fill, Placeholder, Resource};
 use clap::ValueEnum;
 
-use crate::controller::USER;
-
 /// A principal of a deployment of the controller, or a part of one, whose policy
-/// `pumpkin controller policy` prints.
+/// `pumpkin-admin policy` prints.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Principal {
     /// The controller's role: its jobs' providers and their settings.
@@ -37,16 +33,36 @@ const CONTROLLER: Placeholder = Placeholder::new(
     "the ARN of the controller's instance",
 );
 
+const MEMBERS: Placeholder = Placeholder::new(
+    "members_parameter_arn",
+    "the ARN of the SSM parameter of the controller's members",
+);
+
 /// The calls of a job of its own.
 pub(crate) struct Job {
     /// Its read of its settings.
     pub(crate) settings: Call,
 }
 
+const READ_SETTINGS: Allow = Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&SETTINGS)]);
+
 pub(crate) const JOB: Job = Job {
-    settings: Call::new(
+    settings: Call::new(["ssm", "get-parameter"], READ_SETTINGS),
+};
+
+/// The calls of the controller's host.
+pub(crate) struct Host {
+    /// Reads the settings, whose `[deployment]` names the members' keys.
+    pub(crate) settings: Call,
+    /// Reads the members' keys.
+    pub(crate) members: Call,
+}
+
+pub(crate) const HOST: Host = Host {
+    settings: Call::new(["ssm", "get-parameter"], READ_SETTINGS),
+    members: Call::new(
         ["ssm", "get-parameter"],
-        Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&SETTINGS)]),
+        Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&MEMBERS)]),
     ),
 };
 
@@ -54,7 +70,6 @@ pub(crate) const JOB: Job = Job {
 pub(crate) struct Client {
     pub(crate) describe: Call,
     pub(crate) start: Call,
-    pub(crate) push_key: Call,
 }
 
 pub(crate) const CLIENT: Client = Client {
@@ -66,18 +81,6 @@ pub(crate) const CLIENT: Client = Client {
         ["ec2", "start-instances"],
         Allow::new(&["ec2:StartInstances"], &[Resource::Arn(&CONTROLLER)]),
     ),
-    push_key: Call::new(
-        ["ec2-instance-connect", "send-ssh-public-key"],
-        Allow::new(
-            &["ec2-instance-connect:SendSSHPublicKey"],
-            &[Resource::Arn(&CONTROLLER)],
-        )
-        .when(&[Condition::new(
-            Test::StringEquals,
-            Key::Named("ec2:osuser"),
-            Values::Are(&[Part::Text(USER)]),
-        )]),
-    ),
 };
 
 /// What IAM must allow `principal`.
@@ -88,21 +91,23 @@ fn allows(principal: Principal) -> Vec<&'static Allow> {
     match principal {
         Principal::Controller => {
             let Job { settings } = &JOB;
+            let Host {
+                settings: host_settings,
+                members,
+            } = &HOST;
             (ec2::iam::caller())
                 .chain(modal::iam::caller())
                 .chain(settings.allows())
+                .chain(host_settings.allows())
+                .chain(members.allows())
                 .collect()
         }
         Principal::Timer => ec2::iam::timer().collect(),
         Principal::Sandbox => ec2::iam::sandbox().collect(),
         Principal::ModalPull => modal::iam::puller().collect(),
         Principal::Client => {
-            let Client {
-                describe,
-                start,
-                push_key,
-            } = &CLIENT;
-            [describe, start, push_key]
+            let Client { describe, start } = &CLIENT;
+            [describe, start]
                 .into_iter()
                 .flat_map(Call::allows)
                 .collect()
@@ -116,8 +121,8 @@ pub(crate) fn policy(principal: Principal) -> String {
     iam::policy(&allows(principal))
 }
 
-/// The help of `pumpkin controller policy`'s placeholders. It says what each stands for, and
-/// which each principal's policy holds.
+/// The help of `pumpkin-admin policy`'s placeholders. It says what each stands for, and which
+/// each principal's policy holds.
 pub(crate) fn placeholders() -> String {
     let principals = Principal::value_variants().iter();
     let all: Vec<&Allow> = principals

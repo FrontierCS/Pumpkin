@@ -737,14 +737,20 @@ fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
         .map_err(|error| format!("making {} failed: {error}", bin.display()))?;
     for file in install::File::ALL {
         let from = match file {
-            install::File::Pumpkin => pumpkin.clone(),
-            install::File::Buildifier => buildifier.clone(),
-            install::File::Ec2Boot => sandboxd.with_file_name(file.name()),
-            install::File::Sandboxd => sandboxd.clone(),
-            install::File::ModalHelper | install::File::ModalLock => helper.join(file.name()),
+            install::File::Pumpkin => Some(pumpkin.clone()),
+            install::File::PumpkinAdmin => None,
+            install::File::Buildifier => Some(buildifier.clone()),
+            install::File::Ec2Boot => Some(sandboxd.with_file_name(file.name())),
+            install::File::Sandboxd => Some(sandboxd.clone()),
+            install::File::ModalHelper | install::File::ModalLock => Some(helper.join(file.name())),
         };
         let mode = if file.is_executable() { 0o755 } else { 0o644 };
-        let to = install_file(&bin, file.name(), &from, mode)?;
+        let placed = match &from {
+            Some(from) => Placed::Copy(from, mode),
+            // The table lists `pumpkin` first, so the link has its target.
+            None => Placed::Link(install::File::Pumpkin.name()),
+        };
+        let to = install_file(&bin, file.name(), placed)?;
         println!("{}", to.display());
     }
     let path = env::var_os("PATH").unwrap_or_default();
@@ -757,15 +763,28 @@ fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn install_file(bin: &Path, name: &str, from: &Path, mode: u32) -> Result<PathBuf> {
+/// What [`install_file`] puts in an install.
+#[derive(Clone, Copy)]
+enum Placed<'a> {
+    /// A copy of a file, with these permission bits.
+    Copy(&'a Path, u32),
+    /// A hard link to the file of this name beside it. The install and its archive then hold the
+    /// bytes once.
+    Link(&'a str),
+}
+
+/// Puts `placed` at `name` in `bin`, replacing what is there, and returns its path.
+fn install_file(bin: &Path, name: &str, placed: Placed<'_>) -> Result<PathBuf> {
     let to = bin.join(name);
-    // Linux refuses a write to a running executable. Rename the finished copy into place.
-    let copy = bin.join(format!(".{name}.xtask-build.{}", std::process::id()));
-    let installed = fs::copy(from, &copy)
-        .and_then(|_| fs::set_permissions(&copy, Permissions::from_mode(mode)))
-        .and_then(|()| fs::rename(&copy, &to));
-    if let Err(error) = installed {
-        let _ = fs::remove_file(&copy);
+    // Linux refuses a write to a running executable. Rename the finished file into place.
+    let staged = bin.join(format!(".{name}.xtask-build.{}", std::process::id()));
+    let installed = match placed {
+        Placed::Copy(from, mode) => fs::copy(from, &staged)
+            .and_then(|_| fs::set_permissions(&staged, Permissions::from_mode(mode))),
+        Placed::Link(target) => fs::hard_link(bin.join(target), &staged),
+    };
+    if let Err(error) = installed.and_then(|()| fs::rename(&staged, &to)) {
+        let _ = fs::remove_file(&staged);
         return Err(format!("installing {} failed: {error}", to.display()).into());
     }
     Ok(to)

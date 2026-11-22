@@ -1,7 +1,8 @@
 //! The jobs of a controller: what `pumpkin controller job`, which the unit of each job runs, does
 //! on the controller, and the prune that keeps the controller's volume from filling.
 //!
-//! What they read and write lies below the controller user's home:
+//! They find the controller's settings through the host file (`crate::host::settings`). Everything
+//! else they read and write lies below the controller user's home:
 //!
 //! - the store of the files that clients sent, each named by its SHA-256, as `crate::manifest`
 //!   lays it out;
@@ -30,13 +31,12 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, thread};
 
-use aws::{Bound, Cli};
+use aws::{Cli, ParameterArn};
 use engine::Engine;
 use engine::prune::{Disk, HIGH_PERCENT, Held, REFUSED_PERCENT};
 use provider::RunTag;
 use runtime::Record;
 use schema::ir::{Image, Sha256Digest};
-use serde::Deserialize;
 use stdx::Context as _;
 use stdx::process::Environment;
 
@@ -48,16 +48,18 @@ use crate::{cli, config, say, star};
 
 mod boot;
 mod installs;
-mod line;
 mod member;
+mod parameter;
 mod records;
 mod release;
 mod settings;
 mod start;
 
-pub(crate) use boot::{boot, state as boot_state};
-pub(crate) use member::{member, write_member};
+pub(crate) use boot::{BOOT_LOG, BOOT_UNIT, boot, state as boot_state};
+pub(crate) use member::{member, run_member, write_member};
+pub(crate) use parameter::parameter_value;
 pub(crate) use records::mark_copied;
+pub(crate) use settings::{Deployment, deployment, tables as settings_tables};
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
@@ -72,8 +74,11 @@ pub(crate) fn runs() -> String {
     format!("{}/{}", workspace::DIR, workspace::RUNS)
 }
 
+/// The start of the name of each job's unit, which its id ends.
+pub(crate) const UNIT_PREFIX: &str = "pumpkin-job-";
+
 pub(crate) fn unit_name(id: &RunTag) -> String {
-    format!("pumpkin-job-{}", id.as_str())
+    format!("{UNIT_PREFIX}{}", id.as_str())
 }
 
 // The link in a job's directory to the `pumpkin` that runs it.
@@ -129,13 +134,7 @@ const IMDS_SECONDS: u64 = 10;
 /// It builds the task's images under the controller's build slots. Then it runs the task, as the
 /// job's `run` says. Returns the run's exit status.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
-    let cli::Job {
-        id,
-        region,
-        parameter,
-        tree,
-        run,
-    } = job;
+    let cli::Job { id, tree, run } = job;
     let home = crate::home("run the job as the controller's user")?;
     let working = std::env::current_dir().context("finding the job's working directory failed")?;
     materialize(&home, &id, &tree, &working)?;
@@ -145,7 +144,9 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     fs::create_dir_all(&dir).context(dir.display())?;
     // Record that the unit ran even if its start receipt could not be written.
     point(&dir.join(OWN), &dir.join(format!(".{OWN}")))?;
-    let assembled = assemble(&Cli::connect(region.clone())?, &parameter, &sent)?;
+    let settings = crate::host::settings()?;
+    let region = settings.region().clone();
+    let assembled = assemble(&Cli::connect(region.clone())?, &settings, &sent)?;
     let path = dir.join("pumpkin.toml");
     fs::write(&path, assembled).context(path.display())?;
     let Some(config) = path.to_str().map(str::to_owned) else {
@@ -255,13 +256,6 @@ fn executable(store: &Path, digest: &Sha256Digest) -> Result<PathBuf, String> {
     Ok(copy)
 }
 
-/// Cancels a run for a client that invokes its job's executable over a shell. Exit 102 tells
-/// the client to copy the ended record, 103 to also report that a provider couldn't be reached.
-pub(crate) fn cancel(flags: cli::Cancel) -> Result<ExitCode, String> {
-    let reached = crate::cancelled(flags, crate::Reader::Follower)?.reached?;
-    Ok(ExitCode::from(if reached { 102 } else { 103 }))
-}
-
 /// The directory in tmpfs that holds each job's own directory of what the client sent with it,
 /// `$XDG_RUNTIME_DIR/pumpkin/`, each named by its job's id. Fails if `XDG_RUNTIME_DIR` is unset or
 /// empty, as outside a user's systemd unit.
@@ -333,30 +327,17 @@ fn point(link: &Path, staged: &Path) -> Result<(), String> {
     fs::rename(staged, link).context(link.display())
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct GotParameter {
-    parameter: Parameter,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Parameter {
-    value: String,
-}
-
-/// A job's configuration, as TOML: the controller's settings, which `cli` reads from the SSM
-/// parameter `parameter`, with `[gateway] private` at the controller's private IPv4 address, port
-/// 0; each Modal provider as the client sent it, with the settings' `images`, `dials_from` at the
-/// controller's public IPv4 address, and `config`, the client's Modal file in `sent`, if any; and
-/// the client's `[upstreams]`, each `key_file` its file in `sent`.
+/// A job's configuration, as TOML. It holds the controller's settings, which `cli` reads from SSM
+/// parameter `settings`, with `[gateway] private` set to the controller's private IPv4 address and
+/// port 0. It holds each Modal provider as the client sent it, with the settings' `images`,
+/// `dials_from` at the controller's public IPv4 address, and `config`, the client's Modal file in
+/// `sent`, if any. It holds the client's `[upstreams]`, each `key_file` its file in `sent`.
 ///
 /// Fails if the settings set `gateway` or `upstreams`, which each job sets.
-fn assemble(cli: &Cli, parameter: &str, sent: &Path) -> Result<String, String> {
-    let got: GotParameter = cli.json(&JOB.settings, &["--name", parameter], Bound::Call)?;
-    let named = format!("the controller's settings, SSM parameter `{parameter}`,");
-    let mut tables: toml::Table = toml::from_str(&got.parameter.value)
-        .map_err(|error| format!("{named} aren't TOML: {}", error.to_string().trim_end()))?;
+fn assemble(cli: &Cli, settings: &ParameterArn, sent: &Path) -> Result<String, String> {
+    let value = parameter_value(cli, &JOB.settings, settings.as_str())?;
+    let named = format!("the controller's settings, SSM parameter `{settings}`,");
+    let mut tables = settings::tables(&value, &named)?;
     let envelope = settings::take(&mut tables, &named)?;
     let (private, public) = addresses()?;
     for key in ["gateway", "upstreams"] {

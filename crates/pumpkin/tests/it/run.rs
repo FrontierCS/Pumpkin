@@ -41,6 +41,7 @@ fn usage() {
         ))
     };
     let pumpkin = |args: &[&str]| Step::from(scratch.pumpkin(args));
+    let admin = |args: &[&str]| Step::from(scratch.admin(args));
     // Each path that `wait`, `cancel` and `reap` are given is UTF-8 too, as the commands that
     // `pumpkin` says to run next name them, and each that `run` is given, as its record keeps it.
     let not_utf8 = |shown: &str, args: &[&[u8]]| {
@@ -88,6 +89,9 @@ fn usage() {
         ),
         pumpkin(&["help", "bogus"]),
         same(&["help", "controller"], &["controller", "--help"]),
+        pumpkin(&["controller", "install", "--settings", "arn"]),
+        admin(&["install", "--settings", "/pumpkin-alice/settings"]),
+        admin(&["run", "a.star"]),
     ];
     // What `--version` prints: this build, which names its commit if it was made in a git
     // checkout of Pumpkin's repository.
@@ -253,7 +257,23 @@ fn usage() {
             Usage: pumpkin help [topic]
             pumpkin: to read how to use it: pumpkin help help
             $ pumpkin help controller
-            does what `pumpkin controller --help` does: true"#]],
+            does what `pumpkin controller --help` does: true
+            $ pumpkin controller install --settings arn
+            exit status: Some(2)
+            error: unrecognized subcommand 'install'
+
+            Usage: pumpkin controller <action>
+            pumpkin: to read how to use it: pumpkin help controller
+            $ pumpkin-admin install --settings /pumpkin-alice/settings
+            exit status: Some(2)
+            error: invalid value '/pumpkin-alice/settings' for '--settings <arn>': `/pumpkin-alice/settings` is not an SSM parameter's ARN: use one such as `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`
+            pumpkin: to read how to use it: pumpkin-admin install --help
+            $ pumpkin-admin run a.star
+            exit status: Some(2)
+            error: unrecognized subcommand 'run'
+
+            Usage: pumpkin-admin <command>
+            pumpkin: to read how to use it: pumpkin-admin --help"#]],
     );
 }
 

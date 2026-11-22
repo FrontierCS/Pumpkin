@@ -35,11 +35,6 @@ use crate::{config, manifest, say};
 // https://github.com/moby/buildkit/blob/1d510a3097d9fbd85a42d162d42c3a79eda1f795/util/progress/progressui/printer.go#L93-L101
 const PROGRESS: Duration = Duration::from_secs(15);
 
-/// The name of the SSM parameter that holds the settings of the jobs of controller `name`.
-fn parameter(name: &Name) -> String {
-    format!("/pumpkin-{name}/settings")
-}
-
 /// A task's git repository, as this machine sends it to the controller.
 pub(super) struct Tree {
     /// The files the task reaches, by content.
@@ -206,8 +201,6 @@ pub(super) fn send(
         words: crate::arg_flags(args)
             .chain(["--".to_owned(), tree.entry.clone()])
             .collect(),
-        region: client.controller.region.clone(),
-        parameter: parameter(&client.controller.name),
         sent,
         key_bytes,
         modal_bytes,

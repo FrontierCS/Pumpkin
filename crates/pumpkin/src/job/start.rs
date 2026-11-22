@@ -6,6 +6,7 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use members::Member;
 use provider::RunTag;
 use schema::ir::Sha256Digest;
 use stdx::process::Environment;
@@ -13,7 +14,6 @@ use stdx::{Context as _, Deadline};
 
 use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
 use crate::link::{JobStart, StartAnswer};
-use crate::member::Member;
 use crate::{manifest, workspace};
 
 // The bound on asking systemd to start a job.
@@ -27,7 +27,7 @@ pub(crate) fn start(
     home: &Path,
     start: JobStart,
     body: &[u8],
-    member: Option<&Member>,
+    member: &Member,
 ) -> Result<StartAnswer, String> {
     let id = RunTag::try_from(start.id.clone())?;
     let name = super::unit_name(&id);
@@ -60,16 +60,12 @@ pub(crate) fn start(
     }
     manifest::store::required(&home.join(super::STORE), &start.tree)?;
     let pumpkin = installed(home, &start.install)?;
-    let job = new_job_dir(&home.join(JOBS), id, 0o755)?;
+    let job = new_job(&home.join(JOBS), id, member)?;
     let sent = new_job_dir(&jobs, id, 0o700)?;
     let tree = new_job_dir(&home.join(TREES).join(&start.repo), id, 0o755)?;
     let workspace = home.join(workspace::DIR);
     symlink(&workspace, tree.path().join(workspace::DIR)).context(tree.path().display())?;
     write_sent(&start, sent.path(), body)?;
-    if let Some(member) = member {
-        super::write_member(job.path(), member)?;
-    }
-    super::release::write(job.path())?;
     let answer = launch(&pumpkin, &name, start, tree.path(), sent.path(), job.path())?;
     let job = job.keep();
     drop((sent.keep(), tree.keep()));
@@ -83,6 +79,55 @@ pub(crate) fn start(
         }
     }
     Ok(answer)
+}
+
+/// Makes the job's directory, `id` in `jobs`, which names `member` and this build as soon as it is
+/// there. It is made under a name that no listing reads, then renamed, so that no listing finds the
+/// job without its member. It is removed on a failure before the unit takes it.
+// The caller holds the jobs' lock, under which it found no `id` in `jobs`.
+fn new_job(jobs: &Path, id: &str, member: &Member) -> Result<Made, String> {
+    fs::create_dir_all(jobs).context(jobs.display())?;
+    // A listing reads only names that start with a digit, as each id does.
+    let staged = tempfile::Builder::new()
+        .prefix(".")
+        .permissions(fs::Permissions::from_mode(0o755))
+        .tempdir_in(jobs)
+        .context(jobs.display())?;
+    super::write_member(staged.path(), member)?;
+    super::release::write(staged.path())?;
+    let dir = jobs.join(id);
+    fs::rename(staged.path(), &dir).context(dir.display())?;
+    drop(staged.keep());
+    Ok(Made {
+        path: dir,
+        kept: false,
+    })
+}
+
+/// A directory that the start made, which it removes when dropped, unless it is kept.
+struct Made {
+    path: PathBuf,
+    kept: bool,
+}
+
+impl Made {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn keep(mut self) -> PathBuf {
+        self.kept = true;
+        self.path.clone()
+    }
+}
+
+impl Drop for Made {
+    fn drop(&mut self) {
+        if !self.kept {
+            // A failure here leaves a directory that a start of the same id reports as reserved.
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 // Each directory is made anew, and removed on a failure before the unit takes it.
@@ -134,10 +179,6 @@ fn launch(
             "controller",
             "job",
             &start.id,
-            "--region",
-            start.region.as_str(),
-            "--parameter",
-            &start.parameter,
             "--tree",
             start.tree.hex(),
             "--",
@@ -264,9 +305,6 @@ fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
             };
             fs::hard_link(&source, made.path().join(&entry.path)).context(source.display())?;
         }
-        // Older installs share this layout but their boot may reap another writer's records.
-        let boot = made.path().join("pumpkin-boot");
-        symlink("pumpkin", &boot).context(boot.display())?;
         fs::rename(made.path(), &bin).context(bin.display())?;
     }
     let marked = File::open(&root).and_then(|root| root.set_modified(SystemTime::now()));

@@ -105,7 +105,7 @@ pub(crate) fn wait(
 enum Among {
     /// Every member's.
     Every,
-    /// Those of the member that the link acts for, and those that name no member.
+    /// Those of the member that the link acts for.
     Own,
 }
 
@@ -122,15 +122,9 @@ fn job_id(reached: &mut Reached, run: &str, among: Among) -> Result<(Build, Stri
         jobs.map_err(|message| format!("controller `{name}` refused: {message}"))?;
     let on = format!("on controller `{name}`");
     // Why a job is another member's: it names another, or one that can't be read, which may be.
-    // A job that names none is everyone's, as is every job of a link that names no member.
-    let whose = |job: &Job| match (&member, &job.owner) {
-        (None, _) | (Some(_), Owner::Nobody) => None,
-        (Some(member), Owner::Member { member: owner }) => {
-            (owner != member).then(|| format!("is {owner}'s"))
-        }
-        (Some(_), Owner::Unread { error }) => {
-            Some(format!("names a member that can't be read: {error}"))
-        }
+    let whose = |job: &Job| match &job.owner {
+        Owner::Member { member: owner } => (*owner != member).then(|| format!("is {owner}'s")),
+        Owner::Unread { error } => Some(format!("names a member that can't be read: {error}")),
     };
     let ids = |own: bool| -> Vec<String> {
         let jobs = jobs.iter().filter(|job| !own || whose(job).is_none());

@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, Permissions};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::Path;
 use std::process::Command;
 
@@ -151,8 +151,21 @@ fn check(dir: &Path, commit: &str) -> Result<()> {
     if read_text(&dir.join("commit"))? != format!("{commit}\n") {
         return Err(format!("archived commit differs from the checkout's {commit}").into());
     }
+    let pumpkin = install::File::Pumpkin.name();
     for file in install::File::ALL {
         let name = file.name();
+        if file.is_link() {
+            let inode = |name: &str| {
+                let path = dir.join("bin").join(name);
+                fs::metadata(&path)
+                    .context(path.display())
+                    .map(|it| it.ino())
+            };
+            if inode(name)? != inode(pumpkin)? {
+                return Err(format!("archived bin/{name} is no hard link to bin/{pumpkin}").into());
+            }
+            continue;
+        }
         if !file.is_executable() {
             let path = dir.join("bin").join(name);
             if fs::metadata(&path).context(path.display())?.len() == 0 {
@@ -177,8 +190,17 @@ fn check(dir: &Path, commit: &str) -> Result<()> {
     let bin = dir.join("bin");
     let mut buildifier = program(bin.join(install::File::Buildifier.name()), dir);
     ran(buildifier.arg("--version"), step(STEP_TIMEOUT))?;
-    let mut pumpkin = program(bin.join(install::File::Pumpkin.name()), dir);
-    let version = read(pumpkin.arg("--version"), STEP_TIMEOUT)?;
+    let mut archived = program(bin.join(pumpkin), dir);
+    let version = read(archived.arg("--version"), STEP_TIMEOUT)?;
+    // The link runs as the command that its name names.
+    let admin = install::File::PumpkinAdmin.name();
+    let admin_version = read(program(bin.join(admin), dir).arg("--version"), STEP_TIMEOUT)?;
+    if admin_version.strip_prefix(admin) != version.strip_prefix(pumpkin) {
+        return Err(format!(
+            "archived {admin} reports {admin_version:?}: expected {admin} with {pumpkin}'s version"
+        )
+        .into());
+    }
     if !version.contains(&format!("({commit:.9} ")) {
         return Err(
             format!("archived pumpkin reports {version:?}: expected commit {commit}").into(),

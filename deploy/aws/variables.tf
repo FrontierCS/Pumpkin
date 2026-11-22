@@ -1,5 +1,5 @@
 variable "name" {
-  description = "The person's name, which prefixes every resource's name, such as `pumpkin-<name>-sandbox`."
+  description = "The team's name, which prefixes every resource's name, such as `pumpkin-<name>-sandbox`."
   type        = string
 
   validation {
@@ -24,7 +24,7 @@ variable "subnet_id" {
 }
 
 variable "modal_workspace" {
-  description = "The ID of the person's Modal workspace, `ac-…`, whose tokens alone may assume the Modal pull role."
+  description = "The ID of the team's Modal workspace, `ac-…`, whose tokens alone may assume the Modal pull role."
   type        = string
 
   validation {
@@ -110,8 +110,18 @@ variable "controller_volume_throughput" {
   default     = 500
 }
 
+variable "pumpkin_release" {
+  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install --settings` at its first boot. A later release's install reaches a running controller only when its admin runs it there."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9._-]* [0-9a-f]{40} [0-9a-f]{64}$", var.pumpkin_release))
+    error_message = "The release is not a `pumpkinversion` line, `<tag> <commit> <sha256>`: give the line of a release's `pumpkinversion` asset, as a task repository's `.pumpkinversion` holds it."
+  }
+}
+
 variable "ssh_from" {
-  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as the person's machine's private address as a `/32`: `pumpkin` reaches the controller at its private address, from the controller's VPC or a network routed to it. None by default, so no `pumpkin` reaches the controller."
+  description = "The IPv4 CIDRs that may reach the controller's `sshd`, on port 22, such as each member's machine's private address as a `/32`: `pumpkin` reaches the controller at its private address, from the controller's VPC or a network routed to it. None by default, so no `pumpkin` reaches the controller."
   type        = list(string)
   default     = []
 
@@ -121,8 +131,30 @@ variable "ssh_from" {
   }
 }
 
+variable "members" {
+  description = "The team's members, by name, each with the `ssh-ed25519` lines of their machines' `~/.config/pumpkin/ssh/key.pub`. The controller admits only these keys, and names each key's jobs by its member."
+  type        = map(list(string))
+
+  validation {
+    condition     = length(var.members) > 0
+    error_message = "`members` lists no one, so no key reaches the controller: list each member's key, such as `{ alice = [\"ssh-ed25519 AAAA… alice-laptop\"] }`."
+  }
+
+  validation {
+    condition     = alltrue([for keys in values(var.members) : length(keys) > 0])
+    error_message = "A member lists no key, so they can't reach the controller: list the line of each of their machines' `~/.config/pumpkin/ssh/key.pub`, or leave them out."
+  }
+
+  # The members' list holds a line for each key, so a key with a newline would start a line of its
+  # own, under whatever member it names.
+  validation {
+    condition     = alltrue([for key in flatten(values(var.members)) : !strcontains(key, "\n")])
+    error_message = "A member's key holds a newline, which would list a line of its own: give each key as the one line of its machine's `~/.config/pumpkin/ssh/key.pub`."
+  }
+}
+
 variable "client_roles" {
-  description = "The names of the IAM roles of the person's machine, each of which gets the client policy; leave empty when the roles live elsewhere and an administrator attaches `client_policy_arn` by hand."
+  description = "The names of the IAM roles of the members' machines, each of which gets the client policy; leave empty when the roles live elsewhere and an administrator attaches `client_policy_arn` by hand."
   type        = list(string)
   default     = []
 
@@ -133,7 +165,7 @@ variable "client_roles" {
 }
 
 variable "client_users" {
-  description = "The names of the IAM users of the person's machine, each of which gets the client policy; leave empty when the users live elsewhere and an administrator attaches `client_policy_arn` by hand."
+  description = "The names of the IAM users of the members' machines, each of which gets the client policy; leave empty when the users live elsewhere and an administrator attaches `client_policy_arn` by hand."
   type        = list(string)
   default     = []
 

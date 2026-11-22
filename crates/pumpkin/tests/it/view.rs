@@ -561,7 +561,7 @@ pub(super) struct Piped {
 impl Piped {
     /// Starts it as the user whose home is the scratch directory, and reads its hello.
     pub(super) fn start(scratch: &Scratch) -> Self {
-        let mut command = scratch.pumpkin(&["controller", "serve"]);
+        let mut command = scratch.pumpkin(&["controller", "serve", "--member", "alice"]);
         command.env("HOME", &scratch.0);
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command.spawn().unwrap();

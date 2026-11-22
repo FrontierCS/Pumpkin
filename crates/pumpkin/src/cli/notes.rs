@@ -117,22 +117,12 @@ pub(super) fn reap_notes() -> String {
     )
 }
 
-pub(super) fn cancel_for_notes() -> String {
-    format!(
-        "\
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}102{LITERAL:#}  The run has ended. The client copies its record.
-  {LITERAL}103{LITERAL:#}  The run has ended, but one of its providers can't be reached."
-    )
-}
-
 pub(super) fn controller_notes() -> String {
     format!(
         "\
 {HEADER}Examples:{HEADER:#}
   cd ~/trees/tasks/20261108-000905-126a21e9 && \\
-    pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 \\
-    --parameter /pumpkin-alice/settings \\
+    pumpkin controller job 20261108-000905-126a21e9 \\
     --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 \\
     -- run tasks/bench/task.star --arg model=model-a
   pumpkin controller boot"
@@ -311,14 +301,10 @@ every model it allows.
 
 On a controller, each job reads its configuration from the controller's
 settings, which deploy/aws writes. The job sets [gateway] itself. The client
-sends [upstreams] and [controller.modal]. Before any table, the settings may
-name `envelope`, the version \"M.m\" of the envelope that wrote them. Without
-it, the settings are of 1.0. A job refuses an envelope whose major isn't 1. It
-refuses each key that it doesn't know, unless the envelope is a later minor
-than 1.0, the newest that this release knows. It then ignores the key and names
-it in its log. A minor adds only keys that an older release may safely ignore.
-The admin sets `draining = true` for a cutover. Each job is then refused as it
-starts, and the jobs that run go on to their ends.
+sends [upstreams] and [controller.modal]. The settings name `envelope`, the
+version of the envelope that wrote them. deploy/aws's README says which
+versions a job takes. The admin sets `draining = true` for a cutover. Each job
+is then refused as it starts, and the jobs that run go on to their ends.
 
 [controller] is the person's controller, which deploy/aws makes. `run`, `wait`,
 `ls`, `cancel`, `view` and `reap` go to it, as each one's help says.
@@ -330,8 +316,10 @@ The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the
 task's files and starts its job over SSH to the controller's private address.
 It uses up to four connections for large task uploads. The machine needs a
 route there, and deploy/aws's `ssh_from` must admit it. The first command
-creates a key and enrols it through EC2 Instance Connect. The client keeps that
-key and the pinned host key in $HOME/.config/pumpkin/ssh/.
+creates a key. The controller admits the key once its admin lists it under the
+person's name in deploy/aws's `members`. Until then, each command is refused
+with the line to send the admin. The client keeps that key and the pinned host
+key in $HOME/.config/pumpkin/ssh/.
   name          The `name` that deploy/aws was applied with.
   region        The region it was applied in.
 

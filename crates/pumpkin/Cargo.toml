@@ -19,6 +19,7 @@ gateway = { path = "../gateway" }
 install = { path = "../install" }
 lang = { path = "../lang" }
 library = { path = "../library" }
+members = { path = "../members" }
 modal = { path = "../../providers/modal" }
 provider = { path = "../provider" }
 recipe = { path = "../recipe" }

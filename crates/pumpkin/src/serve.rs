@@ -26,6 +26,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use engine::prune::Disk;
+use members::Member;
 use provider::{RunTag, UnixTime};
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
@@ -39,7 +40,6 @@ use crate::link::{
     ViewRequest,
 };
 use crate::manifest::store::{Missing, PutAnswer};
-use crate::member::Member;
 use crate::progress::{self, Entry, Listing, Row};
 use crate::say;
 use crate::view::Answering;
@@ -55,7 +55,7 @@ const INSTALL_KEPT: Duration = Duration::from_hours(24);
 const UPTIME: &str = "/proc/uptime";
 
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
-pub(crate) fn serve(member: Option<&Member>) -> Result<ExitCode, String> {
+pub(crate) fn serve(member: &Member) -> Result<ExitCode, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
     let install = own_install();
     match &install {
@@ -79,7 +79,7 @@ fn requests(
     output: &mut impl Write,
     home: &Path,
     install: Option<&Path>,
-    member: Option<&Member>,
+    member: &Member,
 ) -> Result<ExitCode, String> {
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home);
@@ -155,7 +155,7 @@ fn requests(
 }
 
 /// The runs' jobs in `home`, each with its member, for a link that acts for `member`.
-fn jobs(home: &Path, member: Option<&Member>) -> Result<Jobs, String> {
+fn jobs(home: &Path, member: &Member) -> Result<Jobs, String> {
     let dir = home.join(JOBS);
     let ids = crate::job::ids(&dir)?;
     let jobs = ids.into_iter().map(|id| {
@@ -163,7 +163,7 @@ fn jobs(home: &Path, member: Option<&Member>) -> Result<Jobs, String> {
         Job { id, owner }
     });
     Ok(Jobs {
-        member: member.cloned(),
+        member: member.clone(),
         jobs: jobs.collect(),
     })
 }
@@ -338,16 +338,21 @@ fn pruned(entry: &DirEntry, own: Option<&OsStr>, now: SystemTime) -> Result<(), 
     }
 }
 
-fn health(home: &Path) -> Result<Health, String> {
+/// The whole seconds since the machine booted.
+pub(crate) fn up_seconds() -> Result<u64, String> {
     let uptime = fs::read_to_string(UPTIME).context(UPTIME)?;
     let seconds = uptime.split(['.', ' ']).next().unwrap_or_default();
-    let up_seconds = seconds.parse().map_err(|_| {
+    seconds.parse().map_err(|_| {
         format!(
             "{UPTIME} holds `{}`: expected the seconds since the machine booted, first, as \
              Linux writes them",
             uptime.trim().escape_debug()
         )
-    })?;
+    })
+}
+
+fn health(home: &Path) -> Result<Health, String> {
+    let up_seconds = up_seconds()?;
     let Disk {
         size_bytes,
         free_bytes,
@@ -374,7 +379,7 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
         let Entry::Row(row) = entry else {
             return true;
         };
-        match crate::job::member(&jobs.join(id)) {
+        match crate::job::run_member(&jobs.join(id)) {
             Ok(member) => {
                 row.member = member;
                 true

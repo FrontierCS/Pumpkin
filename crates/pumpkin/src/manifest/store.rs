@@ -224,7 +224,8 @@ pub(crate) fn put(
     file.rewind().context(path.display())?;
     let matches = super::hash_reader(&file).context(path.display())? == (digest.clone(), size);
     let _held = lock(store)?;
-    // Older collectors remove stale partials without checking their file lock.
+    // An operator or a recovery tool may replace the partial. The rename would then admit a file
+    // whose bytes the digest check never read.
     if !still_named(&file, &path)? {
         return Ok(PutAnswer::OffsetChanged);
     }

@@ -2,6 +2,8 @@
 //! forced is drawn as an SVG and compared with a file in `help/`, which `cargo xtask refill`
 //! rewrites.
 
+use std::process::Command;
+
 use expect_test::{ExpectFile, expect_file};
 
 use super::Scratch;
@@ -17,9 +19,17 @@ use super::Scratch;
 // https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/tests/testsuite/cargo_build/help/mod.rs#L12
 // https://github.com/assert-rs/snapbox/blob/62b0cda401c0d8a49bedb4f1f727eb762775f354/crates/snapbox/src/data/mod.rs#L735-L738
 fn check(args: &[&str], expect: &ExpectFile) {
+    drawn(Scratch::pumpkin, args, expect);
+}
+
+fn admin(args: &[&str], expect: &ExpectFile) {
+    drawn(Scratch::admin, args, expect);
+}
+
+fn drawn(program: fn(&Scratch, &[&str]) -> Command, args: &[&str], expect: &ExpectFile) {
     let scratch = Scratch::new();
     let print = |colour: Option<&str>| {
-        let mut pumpkin = scratch.pumpkin(args);
+        let mut pumpkin = program(&scratch, args);
         pumpkin.env_remove("NO_COLOR").env_remove("CLICOLOR_FORCE");
         pumpkin.envs(colour.map(|forced| ("CLICOLOR_FORCE", forced)));
         let output = pumpkin.output().unwrap();
@@ -104,21 +114,50 @@ fn controller_boot_help() {
 }
 
 #[test]
-fn controller_cancel_help() {
-    let expect = expect_file!["help/controller_cancel.svg"];
-    check(&["controller", "cancel", "--help"], &expect);
-}
-
-#[test]
 fn controller_serve_help() {
     let expect = expect_file!["help/controller_serve.svg"];
     check(&["controller", "serve", "--help"], &expect);
 }
 
 #[test]
-fn controller_policy_help() {
-    let expect = expect_file!["help/controller_policy.svg"];
-    check(&["controller", "policy", "--help"], &expect);
+fn admin_help() {
+    admin(&["--help"], &expect_file!["help/admin.svg"]);
+}
+
+#[test]
+fn admin_install_help() {
+    let expect = expect_file!["help/admin_install.svg"];
+    admin(&["install", "--help"], &expect);
+}
+
+#[test]
+fn admin_policy_help() {
+    let expect = expect_file!["help/admin_policy.svg"];
+    admin(&["policy", "--help"], &expect);
+}
+
+#[test]
+fn admin_boot_all_help() {
+    let expect = expect_file!["help/admin_boot_all.svg"];
+    admin(&["boot-all", "--help"], &expect);
+}
+
+#[test]
+fn admin_idle_help() {
+    let expect = expect_file!["help/admin_idle.svg"];
+    admin(&["idle", "--help"], &expect);
+}
+
+#[test]
+fn admin_members_help() {
+    let expect = expect_file!["help/admin_members.svg"];
+    admin(&["members", "--help"], &expect);
+}
+
+#[test]
+fn admin_check_members_help() {
+    let expect = expect_file!["help/admin_check_members.svg"];
+    admin(&["check-members", "--help"], &expect);
 }
 
 #[test]

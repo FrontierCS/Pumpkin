@@ -1,6 +1,7 @@
-# The person's controller, which builds the tasks' images and runs the drivers, and runs no role.
-# The person reaches it over ssh from `ssh_from`, and it stops itself when idle
-# (controller.yaml), so it costs only its volume between runs.
+# The team's controller. It builds the tasks' images and runs the drivers, and it runs no role.
+# Its members reach it over ssh from `ssh_from`, each with a key that `members` lists. It stops
+# itself when idle, by a unit that `pumpkin-admin install` sets up, so it costs only its volume
+# between runs.
 
 resource "aws_iam_role" "controller" {
   name        = "${local.prefix}-controller"
@@ -82,18 +83,29 @@ resource "aws_iam_instance_profile" "controller" {
 }
 
 # Each job's settings. `pumpkin controller job` reads them as it starts, so an apply that changes
-# them takes effect at the next job. They name the controller's Docker engine, the EC2 provider
-# `aws`, and the `images` of the Modal provider `modal`. A job drops `images` if its client sends no
-# `[controller.modal]`. With `draining`, each job is refused as it starts. Nothing else is here: the
-# rest is each job's own or its client's. The advanced tier holds 8 KB.
+# them takes effect at the next job. Their `[deployment]` names the deployment and the members'
+# parameter. The host's members unit reads it every minute, and each job leaves it out. They name
+# the controller's Docker engine, the EC2 provider `aws`, and the `images` of the Modal provider
+# `modal`. A job drops `images` if its client sends no `[controller.modal]`. With `draining`, each
+# job is refused as it starts. Nothing else is here: the rest is each job's own or its client's.
+# The advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
   tier = "Advanced"
   value = join("\n", concat(
-    # A key of the top, before any table.
-    var.draining ? ["draining = true", ""] : [],
-    ["[docker]", "context = \"default\"", "", "[providers.aws.ec2]"],
+    # Keys of the top, before any table. Envelope 1.1 adds `[deployment]`. The host reads it, and
+    # each job leaves it out.
+    ["envelope = \"1.1\""],
+    var.draining ? ["draining = true"] : [],
+    [
+      "",
+      "[deployment]",
+      "name = ${jsonencode(var.name)}",
+      "members = ${jsonencode(aws_ssm_parameter.members.arn)}",
+      "",
+      "[docker]", "context = \"default\"", "", "[providers.aws.ec2]",
+    ],
     local.ec2_settings,
     ["", "[providers.modal.modal]", local.modal_images],
     [""],
@@ -106,6 +118,25 @@ resource "aws_iam_role_policy" "controller_settings" {
   policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = aws_ssm_parameter.settings.arn }]
+  })
+}
+
+# The members' keys, a line `<member> <key>` for each key that `members` lists. The controller
+# copies them every minute into the file of keys that its `sshd` admits, each with the forced
+# command that names its member. `pumpkin-admin install` sets that up.
+resource "aws_ssm_parameter" "members" {
+  name  = "/${local.prefix}/members"
+  type  = "String"
+  tier  = "Advanced"
+  value = join("", flatten([for member, keys in var.members : [for key in keys : "${member} ${key}\n"]]))
+}
+
+resource "aws_iam_role_policy" "controller_members" {
+  name = "members"
+  role = aws_iam_role.controller.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "ssm:GetParameter", Resource = aws_ssm_parameter.members.arn }]
   })
 }
 
@@ -129,7 +160,6 @@ resource "aws_instance" "controller" {
   user_data = templatefile("${path.module}/controller.yaml", {
     ubuntu_snapshot    = "https://snapshot.ubuntu.com/ubuntu/${local.controller_versions.ubuntu_snapshot}"
     docker_key         = file("${path.module}/docker.asc")
-    boot_script        = file("${path.module}/pumpkin-boot")
     docker_version     = local.controller_versions.docker
     containerd_version = local.controller_versions.containerd
     buildx_version     = local.controller_versions.buildx
@@ -137,7 +167,12 @@ resource "aws_instance" "controller" {
     aws_cli_sha256     = local.controller_versions.aws_cli_sha256
     uv_version         = local.controller_versions.uv
     uv_sha256          = local.controller_versions.uv_sha256
+    pumpkin_release    = var.pumpkin_release
+    settings_arn       = aws_ssm_parameter.settings.arn
   })
+
+  # The first boot's install reads the settings and the members' keys.
+  depends_on = [aws_iam_role_policy.controller_settings, aws_iam_role_policy.controller_members]
 
   # Tokens required, within one hop, so that no build's container reaches the role.
   metadata_options {

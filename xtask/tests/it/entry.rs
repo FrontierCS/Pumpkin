@@ -442,6 +442,7 @@ fn build_root() {
     let printed = printed.replace(&root.display().to_string(), "<root>");
     expect![[r#"
         <root>/bin/pumpkin
+        <root>/bin/pumpkin-admin
         <root>/bin/buildifier
         <root>/bin/ec2-boot
         <root>/bin/sandboxd
@@ -451,7 +452,8 @@ fn build_root() {
     .assert_eq(&printed);
     fs::write(
         root.join("Dockerfile"),
-        "FROM scratch\nCOPY bin/pumpkin /pumpkin\nRUN [\"/pumpkin\", \"--version\"]\n",
+        "FROM scratch\nCOPY bin/pumpkin /pumpkin\nRUN [\"/pumpkin\", \"--version\"]\n\
+         COPY bin/pumpkin-admin /pumpkin-admin\nRUN [\"/pumpkin-admin\", \"--version\"]\n",
     )
     .unwrap();
     let built = test_support::docker()

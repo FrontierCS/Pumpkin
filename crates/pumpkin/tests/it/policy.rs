@@ -1,17 +1,15 @@
-//! `controller policy`: each principal's IAM policy, as the calls of this build's code on AWS
+//! `pumpkin-admin policy`: each principal's IAM policy, as the calls of this build's code on AWS
 //! state it, which a deployment's review reads.
 
 use expect_test::{Expect, expect};
 
 use super::Scratch;
 
-/// Compares what `pumpkin controller policy <arg>` prints with `expect`; it says nothing else,
+/// Compares what `pumpkin-admin policy <arg>` prints with `expect`; it says nothing else,
 /// and succeeds.
 fn check(arg: &str, expect: &Expect) {
     let scratch = Scratch::new();
-    let output = (scratch.pumpkin(&["controller", "policy", arg]))
-        .output()
-        .unwrap();
+    let output = (scratch.admin(&["policy", arg])).output().unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
     expect.assert_eq(&String::from_utf8(output.stdout).unwrap());
@@ -25,6 +23,15 @@ fn controller() {
         &expect![[r#"
         {
           "Statement": [
+            {
+              "Action": [
+                "ssm:GetParameter"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${members_parameter_arn}"
+              ]
+            },
             {
               "Action": [
                 "ecr:BatchCheckLayerAvailability",
@@ -292,22 +299,6 @@ fn client() {
         &expect![[r#"
         {
           "Statement": [
-            {
-              "Action": [
-                "ec2-instance-connect:SendSSHPublicKey"
-              ],
-              "Condition": {
-                "StringEquals": {
-                  "ec2:osuser": [
-                    "pumpkin"
-                  ]
-                }
-              },
-              "Effect": "Allow",
-              "Resource": [
-                "${controller_instance_arn}"
-              ]
-            },
             {
               "Action": [
                 "ec2:StartInstances"

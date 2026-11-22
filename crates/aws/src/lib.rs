@@ -1,5 +1,6 @@
 //! AWS's command line, `aws`, as Pumpkin's providers run it ([`Cli`]), with ECR's repositories
-//! on it, and the IAM roles that providers name in their settings ([`RoleArn`]).
+//! on it, the IAM roles that providers name in their settings ([`RoleArn`]), and SSM's parameters
+//! ([`ParameterArn`]).
 //!
 //! `Cli` runs only a declared [`Call`], which states what IAM must allow of it. So a principal's
 //! policy is what its code's calls state ([`iam::policy`]).
@@ -9,6 +10,7 @@
 //! process's environment, such as `AWS_REGION` or `AWS_PROFILE`, steers `aws` to another region
 //! or account.
 
+use std::fmt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -136,6 +138,75 @@ impl TryFrom<String> for RoleArn {
         };
         let partition = partition.to_owned();
         Ok(Self { arn, partition })
+    }
+}
+
+/// The ARN of an SSM parameter, such as
+/// `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`. SSM's calls take it in
+/// place of the parameter's name, in the parameter's region.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ParameterArn {
+    arn: String,
+    region: Region,
+}
+
+impl ParameterArn {
+    pub fn as_str(&self) -> &str {
+        &self.arn
+    }
+
+    /// The region that holds it. A call on it is made there.
+    pub fn region(&self) -> &Region {
+        &self.region
+    }
+}
+
+impl fmt::Display for ParameterArn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.arn.fmt(f)
+    }
+}
+
+impl From<ParameterArn> for String {
+    fn from(parameter: ParameterArn) -> Self {
+        parameter.arn
+    }
+}
+
+impl TryFrom<String> for ParameterArn {
+    type Error = String;
+
+    fn try_from(arn: String) -> Result<Self, Self::Error> {
+        // `arn:<partition>:ssm:<region>:<account>:parameter/<name>`. The name leaves out its
+        // leading `/`, and holds a-z, A-Z, 0-9, `_`, `.`, `-` and `/`, as SSM's API says of a
+        // name. GetParameter takes an ARN in place of the name:
+        // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/ssm/2014-11-06/service-2.json#L15336
+        // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/ssm/2014-11-06/service-2.json#L9259-L9261
+        let parts: Vec<&str> = arn.splitn(6, ':').collect();
+        let name = |name: &str| {
+            let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"_.-/".contains(&byte);
+            !name.is_empty() && !name.starts_with('/') && name.bytes().all(allowed)
+        };
+        let region = match parts[..] {
+            ["arn", partition, "ssm", region, account, resource]
+                if !partition.is_empty()
+                    && account.len() == 12
+                    && account.bytes().all(|byte| byte.is_ascii_digit())
+                    && resource.strip_prefix("parameter/").is_some_and(name) =>
+            {
+                Region::try_from(region.to_owned()).ok()
+            }
+            _ => None,
+        };
+        let Some(region) = region else {
+            return Err(format!(
+                "`{}` is not an SSM parameter's ARN: use one such as \
+                 `arn:aws:ssm:us-west-1:123456789012:parameter/pumpkin-alice/settings`",
+                arn.escape_debug()
+            ));
+        };
+        Ok(Self { arn, region })
     }
 }
 

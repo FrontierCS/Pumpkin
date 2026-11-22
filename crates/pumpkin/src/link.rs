@@ -21,13 +21,13 @@ pub(crate) mod store;
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use members::Member;
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
 
-use crate::member::Member;
 use crate::progress::Listing;
 use crate::{config, manifest, workspace};
 
@@ -268,10 +268,10 @@ pub(crate) enum JobsHead {
     Jobs { body_bytes: u64 },
 }
 
-/// The jobs there, and the member that `serve` acts for, if the link names one.
+/// The jobs there, and the member that `serve` acts for.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Jobs {
-    pub(crate) member: Option<Member>,
+    pub(crate) member: Member,
     pub(crate) jobs: Vec<Job>,
 }
 
@@ -286,8 +286,6 @@ pub(crate) struct Job {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Owner {
-    /// It names none, as a job that a build from before members started.
-    Nobody,
     Member {
         member: Member,
     },
@@ -297,11 +295,10 @@ pub(crate) enum Owner {
     },
 }
 
-impl From<Result<Option<Member>, String>> for Owner {
-    fn from(member: Result<Option<Member>, String>) -> Self {
+impl From<Result<Member, String>> for Owner {
+    fn from(member: Result<Member, String>) -> Self {
         match member {
-            Ok(None) => Self::Nobody,
-            Ok(Some(member)) => Self::Member { member },
+            Ok(member) => Self::Member { member },
             Err(error) => Self::Unread { error },
         }
     }
@@ -343,8 +340,6 @@ pub(crate) struct JobStart {
     pub(crate) tree: Sha256Digest,
     pub(crate) install: Sha256Digest,
     pub(crate) words: Vec<String>,
-    pub(crate) region: aws::Region,
-    pub(crate) parameter: String,
     pub(crate) sent: config::Sent,
     pub(crate) key_bytes: Vec<usize>,
     pub(crate) modal_bytes: Option<usize>,
@@ -614,7 +609,7 @@ fn installed(digest: &Sha256Digest) -> String {
 /// The command that a link's `ssh` runs on the controller: the `serve` installed there for the
 /// build whose manifest has the SHA-256 `digest`, or the frame of [`Hello::Absent`] if it is
 /// missing. `serve` takes the shell's positional parameters, which the controller's forced
-/// command gives, as `--member <name>`.
+/// command gives ([`members::Members::authorized_keys`]), as `--member <name>`.
 pub(crate) fn command(digest: &Sha256Digest) -> String {
     let mut absent = Vec::new();
     if let Err(error) = frame::write(&mut absent, &Hello::Absent, &[]) {

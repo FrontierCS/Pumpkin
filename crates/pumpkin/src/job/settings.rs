@@ -1,22 +1,25 @@
 //! What a job takes of a controller's settings across the envelopes that make them. The settings
-//! may name the version of the envelope that made them, as `envelope = "M.m"`. They may hold keys
-//! that this build doesn't know. They may say `draining = true`, a key of envelope 1.0, which
-//! refuses each job that starts while they do.
+//! name the version of the envelope that made them, as `envelope = "M.m"`. Their `[deployment]` is
+//! the host's ([`deployment`]), and a job leaves it out. They may hold keys that this build doesn't
+//! know. They may say `draining = true`, which refuses each job that starts while they do.
 //!
 //! A minor adds only keys that a release of an older minor may safely ignore. A key that every
 //! release must honour needs a major. So does any removal or change of what a release relies on. A
-//! job takes settings of its own major alone, of `OLDEST`'s minor or a later one. In settings of
-//! `NEWEST`'s minor or an older one, it refuses a key that it doesn't know, as a typo. In settings
-//! of a later minor, it ignores such a key and names it in its log. Settings without `envelope` are
-//! of 1.0, as every envelope was before settings named theirs.
+//! release takes settings of its own major alone, of `OLDEST`'s minor or a later one. In settings
+//! of `NEWEST`'s minor or an older one, a job refuses a key that it doesn't know, as a typo. In
+//! settings of a later minor, it ignores such a key and names it in its log.
 
 use std::fmt;
 
+use aws::ParameterArn;
+use serde::Deserialize;
+
+use crate::controller::Name;
 use crate::{config, say};
 
 /// A version of the envelope, of the major that this build takes.
 #[derive(Clone, Copy)]
-pub(super) struct Version {
+pub(crate) struct Version {
     major: u32,
     minor: u32,
 }
@@ -34,21 +37,63 @@ impl fmt::Display for Version {
 }
 
 /// The oldest envelope that this build takes. It takes any later minor of its major too.
-pub(super) const OLDEST: Version = Version { major: 1, minor: 0 };
+pub(super) const OLDEST: Version = Version { major: 1, minor: 1 };
 
-// The newest envelope whose keys this build knows.
-const NEWEST: Version = Version { major: 1, minor: 0 };
+// The newest envelope whose keys this build knows: 1.1 adds `[deployment]`.
+const NEWEST: Version = Version { major: 1, minor: 1 };
 
 const _: () = assert!(OLDEST.major == NEWEST.major && !OLDEST.later(NEWEST));
 
-// The version of settings that name none.
-const UNNAMED: Version = Version { major: 1, minor: 0 };
+const DEPLOYMENT: &str = "deployment";
 
-/// Removes the version of the envelope and `draining` from `settings`, a controller's settings
-/// named as `named`, and returns the version. Fails if the version isn't in the form `M.m`, or this
-/// build doesn't take it. Fails too if `draining` isn't a boolean, or is `true`.
-pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
+/// The `[deployment]` of a controller's settings, which the deployment wrote.
+#[derive(Deserialize)]
+pub(crate) struct Deployment {
+    /// The `name` that the deployment was applied with.
+    pub(crate) name: Name,
+    /// The SSM parameter of the members' keys.
+    pub(crate) members: ParameterArn,
+}
+
+/// Parses `value`, the text of a controller's settings named as `named`, as TOML's tables.
+pub(crate) fn tables(value: &str, named: &str) -> Result<toml::Table, String> {
+    toml::from_str(value)
+        .map_err(|error| format!("{named} aren't TOML: {}", error.to_string().trim_end()))
+}
+
+/// Removes the version of the envelope and the `[deployment]` from `settings`, a controller's
+/// settings named as `named`, and returns both. Fails unless the version is in the form `M.m`, and
+/// this build takes it. Fails too if the settings hold no `[deployment]`, or one that lacks a key.
+// A key that a later minor adds to the table is ignored, as a job ignores such keys of the
+// settings.
+pub(crate) fn deployment(
+    settings: &mut toml::Table,
+    named: &str,
+) -> Result<(Version, Deployment), String> {
     let version = envelope(settings, named)?;
+    let Some(deployment) = settings.remove(DEPLOYMENT) else {
+        return Err(format!(
+            "{named} hold no `[deployment]`: the controller's admin applies this release's \
+             deploy/aws, which writes it"
+        ));
+    };
+    let deployment = deployment.try_into().map_err(|error: toml::de::Error| {
+        let error = error.to_string();
+        format!(
+            "{named} hold a `[deployment]` that is refused: {}: write its `name` and `members` \
+             as deploy/aws does",
+            error.trim_end()
+        )
+    })?;
+    Ok((version, deployment))
+}
+
+/// Removes the version of the envelope, `[deployment]` and `draining` from `settings`, a
+/// controller's settings named as `named`, and returns the version. Fails as [`deployment`] does.
+/// Fails too if `draining` isn't a boolean, or is `true`.
+pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
+    // The table is the host's alone, and a job reads none of it.
+    let (version, _) = deployment(settings, named)?;
     let draining = match settings.remove("draining") {
         None => false,
         Some(value) => value.as_bool().ok_or_else(|| {
@@ -69,16 +114,19 @@ pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, S
 }
 
 fn envelope(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
-    let version = match settings.remove("envelope") {
-        None => UNNAMED,
-        Some(value) => value.as_str().and_then(parse).ok_or_else(|| {
-            format!(
-                "{named} hold `envelope = {value}`, which is no envelope's version: expected one \
-                 as \"M.m\", such as \"{OLDEST}\""
-            )
-        })?,
-    };
     let Version { major, minor: _ } = OLDEST;
+    let Some(value) = settings.remove("envelope") else {
+        return Err(format!(
+            "{named} name no `envelope`, where this release takes {major}.x from {OLDEST}: the \
+             controller's admin applies this release's deploy/aws, which writes it"
+        ));
+    };
+    let version = value.as_str().and_then(parse).ok_or_else(|| {
+        format!(
+            "{named} hold `envelope = {value}`, which is no envelope's version: expected one as \
+             \"M.m\", such as \"{OLDEST}\""
+        )
+    })?;
     // A major removes or changes what an older release relies on. So a release refuses each major
     // but its own. Kubernetes likewise removes an API's elements only in a new version of its
     // group:
@@ -86,15 +134,16 @@ fn envelope(settings: &mut toml::Table, named: &str) -> Result<Version, String> 
     if version.major > major {
         return Err(format!(
             "{named} are of envelope {version}, a major that this release, of envelope {major}.x \
-             from {OLDEST}, doesn't know: run a release that takes {}.x, raising \
-             `.pumpkinversion` as the controller's admin says",
+             from {OLDEST}, doesn't know: raise `.pumpkinversion`, or run the `pumpkin-admin`, of \
+             a release that takes {}.x",
             version.major
         ));
     }
     if OLDEST.later(version) {
         return Err(format!(
             "{named} are of envelope {version}, older than this release takes, {major}.x from \
-             {OLDEST}: ask the controller's admin to apply an envelope that it takes"
+             {OLDEST}: the controller's admin applies this release's deploy/aws, which writes \
+             {NEWEST}"
         ));
     }
     Ok(version)
