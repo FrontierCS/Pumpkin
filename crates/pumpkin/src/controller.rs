@@ -12,20 +12,20 @@ mod location;
 mod send;
 mod viewing;
 
+use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::time::Duration;
-use std::{fmt, io};
 
 use ::aws::Region;
 pub(crate) use commands::{cancel, here, reap, run, wait};
 pub(crate) use listing::{ls, scratch};
 use location::{Found, Location};
 use serde::Deserialize;
+use stdx::Context as _;
 use stdx::process::Environment;
-use stdx::{Context as _, Deadline};
 pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, find, kept};
@@ -230,41 +230,5 @@ impl Reached {
             format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()),
         ]);
         words
-    }
-}
-
-/// Runs `command` to its end and returns its standard output, or an error that names the command
-/// as `shown` if it fails or is still running after `timeout`, when it is killed.
-pub(crate) fn bounded(
-    command: &mut Command,
-    shown: &str,
-    timeout: Duration,
-) -> Result<Vec<u8>, String> {
-    finished(
-        stdx::process::output(command, Deadline::after(timeout)),
-        shown,
-        timeout,
-    )
-}
-
-fn finished(
-    output: io::Result<Option<Output>>,
-    shown: &str,
-    timeout: Duration,
-) -> Result<Vec<u8>, String> {
-    match output {
-        Ok(Some(output)) if output.status.success() => Ok(output.stdout),
-        Ok(Some(output)) => {
-            let said = String::from_utf8_lossy(&output.stderr);
-            match said.trim() {
-                "" => Err(format!("`{shown}` failed with {}", output.status)),
-                said => Err(format!("`{shown}` failed with {}: {said}", output.status)),
-            }
-        }
-        Ok(None) => Err(format!(
-            "`{shown}` was still running after {} s, so it was killed",
-            timeout.as_secs()
-        )),
-        Err(error) => Err(format!("`{shown}` didn't run: {error}: install it on PATH")),
     }
 }
