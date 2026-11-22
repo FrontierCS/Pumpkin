@@ -569,7 +569,7 @@ fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
 
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
-    let install = install_manifest(&client_bin(scratch));
+    let install = install_manifest();
     let lacks = json!({"type": "lacks", "manifest": format!("sha256:{key}"), "install": true, "body_bytes": install.len()});
     schema::frame::write(&mut request, &lacks, &[]).unwrap();
     schema::frame::write(&mut request, &(), install.as_bytes()).unwrap();
@@ -890,11 +890,9 @@ fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)>
         .map(|(hex, name)| (hex.clone(), (*name).to_owned()))
         .collect();
     holders.push((EMPTY_TREE.to_owned(), "a tree of no files".to_owned()));
-    let bin = client_bin(scratch);
-    holders.push((key(&bin), "the install".to_owned()));
-    for name in BUILT {
-        let (hex, _) = built_sha256(&bin.join(name));
-        holders.push((hex, format!("the installed {name}")));
+    holders.push((key(), "the install".to_owned()));
+    for (name, hex, _) in built() {
+        holders.push((hex.clone(), format!("the installed {name}")));
     }
     for path in walked(&repo, &[".git", ".pumpkin"]) {
         let at = repo.join(&path);
@@ -983,7 +981,7 @@ fn calls(scratch: &Scratch) -> String {
 }
 
 fn send_calls(scratch: &Scratch) -> String {
-    let key = key(&client_bin(scratch));
+    let key = key();
     calls(scratch).replace(&format!("serve=.pumpkin/serve/{key}/pumpkin"), "serve")
 }
 
@@ -2087,7 +2085,7 @@ fn follow_copies_another_writers_record() {
 
 // As the first `ls` installs it, but as links to the client's files, which write nothing.
 fn served(scratch: &Scratch) -> String {
-    let key = key(&client_bin(scratch));
+    let key = key();
     let dir = scratch.0.join(format!("home/.pumpkin/serve/{key}"));
     if dir.is_dir() {
         return key;
@@ -2106,32 +2104,33 @@ fn client_bin(scratch: &Scratch) -> PathBuf {
     scratch.0.join(format!("repo/.pumpkin/{PINNED}/bin"))
 }
 
-fn install_manifest(bin: &Path) -> String {
-    let mut names = BUILT;
-    names.sort_unstable();
+// The SHA-256 and length of each file that `install` links, in name order: of the files it links
+// from, the same in each install, so that the large `pumpkin` is hashed once per test process.
+fn built() -> &'static [(&'static str, String, u64); 2] {
+    static BUILT_SHA256: LazyLock<[(&str, String, u64); 2]> = LazyLock::new(|| {
+        let hashed = |name, path: &Path| {
+            let (hex, size_bytes) = file_sha256(path);
+            (name, hex, size_bytes)
+        };
+        [
+            hashed("buildifier", &super::buildifier()),
+            hashed("pumpkin", Path::new(PUMPKIN)),
+        ]
+    });
+    &BUILT_SHA256
+}
+
+// The manifest of what `install` lays out, as the client sends it for its install.
+fn install_manifest() -> String {
     let mut text = "pumpkin-tree/1\n".to_owned();
-    for name in names {
-        let (hex, size_bytes) = built_sha256(&bin.join(name));
+    for (name, hex, size_bytes) in built() {
         let _ = writeln!(text, "x {hex} {size_bytes} {name}");
     }
     text
 }
 
-// The SHA-256 and length of the file of `BUILT` at `path`. Each install's `pumpkin` is a link of
-// the one under test, which is large, so that one is hashed once per test process.
-fn built_sha256(path: &Path) -> (String, u64) {
-    static PUMPKIN_SHA256: LazyLock<(String, u64)> =
-        LazyLock::new(|| file_sha256(Path::new(PUMPKIN)));
-    let (file, pumpkin) = (fs::metadata(path).unwrap(), fs::metadata(PUMPKIN).unwrap());
-    if (file.dev(), file.ino()) == (pumpkin.dev(), pumpkin.ino()) {
-        PUMPKIN_SHA256.clone()
-    } else {
-        file_sha256(path)
-    }
-}
-
-fn key(bin: &Path) -> String {
-    sha256(install_manifest(bin).as_bytes())
+fn key() -> String {
+    sha256(install_manifest().as_bytes())
 }
 
 // Whether each file of the install in `bin` is the client's file of its name.
@@ -2304,7 +2303,7 @@ fn ls_installs_its_serve_there() {
         steps.push(ls_ran(&scratch, &client, &[]));
         steps.push(calls(&scratch));
     }
-    let hex = key(&client_bin(&scratch));
+    let hex = key();
     // Sorted as named in the snapshot, as this build's SHA-256 sorts anywhere.
     let mut left: Vec<String> = (modes(&installs).split(", "))
         .map(|install| install.replace(&hex, "<this build>"))
@@ -2610,7 +2609,7 @@ fn members_attributed() {
         format!("systemd-run {}", argv[unit..].join(" ")),
         ls,
     ];
-    let (install, tree) = (key(&client_bin(&scratch)), last_tree(&scratch));
+    let (install, tree) = (key(), last_tree(&scratch));
     let shown = [
         (id.as_str(), "<id>"),
         (&install, "<install>"),
@@ -3689,7 +3688,7 @@ fn view_installs_its_serve_there() {
         steps.push(got(&served, &window, &["end"]));
         steps.push(calls(&scratch));
     }
-    let hex = key(&client_bin(&scratch));
+    let hex = key();
     let install = scratch.0.join(format!("home/.pumpkin/serve/{hex}"));
     steps.push(format!("the install: {}", modes(&install)));
     steps.push(files_of(&scratch, &install));
