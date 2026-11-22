@@ -16,6 +16,8 @@ import {
   STATIC,
   bytes,
   byId,
+  card,
+  cardRows,
   clock,
   count,
   fill,
@@ -23,12 +25,14 @@ import {
   get,
   grip,
   h,
+  keepSetting,
   plural,
   post,
   route,
   sentence,
   setKeys,
   setQuery,
+  setting,
   show,
   span,
   svg,
@@ -146,15 +150,16 @@ export async function runView(id) {
   const result = h("div", { class: "result" });
   const failed = h("div", { class: "failure" });
   const facts = h("div", { class: "facts" });
-  const dropped = h("div", { class: "dropped" });
   const again = h("div", { class: "again" });
   const traces = h("div", { class: "traces" });
   const cancelBox = h("div", { class: "cancel" });
   const unread = h("div", { class: "unread" });
   const startedOver = h("p", { class: "empty" });
   const lanes = h("div", { class: "lanes panel" });
-  const talk = h("div", { class: "talk panel" });
-  const filter = h("div", { class: "filter" }, kinds, search, counted, all);
+  const talk = h("div", { class: "talk" });
+  // How to select, which matters less than what is selected: the card of a mark in the filter.
+  const keys = card(h("span", { class: "keys", tabindex: 0 }, "?"), () => "Select a record (j and k step), a lane or a role, or drag across the lanes to keep the records of a stretch of time; Esc clears them.");
+  const filter = h("div", { class: "filter" }, kinds, search, counted, all, keys);
   const inspector = h("div", { class: "inspector panel" });
   const callList = h("details", {});
   /** @type {RowList<Item>} */
@@ -177,8 +182,13 @@ export async function runView(id) {
     lanes: grip({ name: "run.lanes", across: "y", sized: lanes, on: lanes, property: "--pane", stepPx: lanePx, title: "Drag to size the lanes" }),
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
-  fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(h("section", { class: "head panel" }, verdict, result, failed, facts, dropped, again, traces, cancelBox, unread), startedOver, split);
+  // The diagram of who talks to whom, folded until it is asked for, or the address lights a role;
+  // this browser keeps whether it is open.
+  const diagram = /** @type {HTMLDetailsElement} */ (h("details", { class: "roles panel" }, h("summary", {}, "Who talks to whom"), talk, grips.talk));
+  diagram.open = query.has("role") || setting("run.roles") === "open";
+  diagram.addEventListener("toggle", () => keepSetting("run.roles", diagram.open ? "open" : "shut"));
+  fill(split, h("div", { class: "left" }, lanes, grips.lanes, h("section", { class: "log panel" }, filter, list.node)), grips.side, h("div", { class: "right" }, diagram, inspector));
+  show(h("section", { class: "head panel" }, h("div", { class: "headline" }, verdict, traces, again, cancelBox), facts, failed, result, unread), startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -237,11 +247,8 @@ export async function runView(id) {
     const distance = (/** @type {LogRecord} */ record) => Math.abs((record.when ?? 0) - time);
     if (of.length) select(of.reduce((best, record) => (distance(record) < distance(best) ? record : best)));
   };
-  // The inspector with nothing selected: how to select, and the run's summary.
-  const unselected = () => [
-    h("p", { class: "empty" }, "Select a record (j and k step), a lane or a role, or drag across the lanes to keep the records of a stretch of time; Esc clears them."),
-    state.data && state.data.summary ? h("pre", { class: "summary" }, state.data.summary) : null,
-  ];
+  // The inspector with nothing selected: the run's summary.
+  const unselected = () => (state.data && state.data.summary ? h("pre", { class: "summary" }, state.data.summary) : null);
 
   const pickLane = (/** @type {Lane} */ lane) => {
     const off = route().query.get("lane") === lane.lane;
@@ -331,12 +338,20 @@ export async function runView(id) {
   const drawHeading = () => {
     const data = /** @type {Run} */ (state.data);
     const failure = data.failure;
-    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : failure ? sentence(failure.state) : data.verdict));
+    // How the run ended is its mark's colour; the words are in the mark's card.
+    const [how, more] = verdictOf(data);
+    const mark = card(h("span", { class: "state", tabindex: 0 }, h("span", { class: "mark " + tone(data) })), () =>
+      cardRows([
+        ["State", how],
+        ["", more],
+        ["Run", data.id],
+        ["Made by", data.other_build ? "pumpkin " + data.other_build : null],
+      ]),
+    );
+    fill(verdict, mark, h("span", { class: "task" }, data.task || data.id));
     drawOnce(result, data.result, () => drawResult(result, data.result));
     drawOnce(failed, failure, () => fill(failed, failure ? failureParts(data.id, failure, { base, started: data.times?.started_unix, pick: pickFailure }) : null));
     drawFacts(facts, data);
-    const headers = data.model ? data.model.dropped_headers : [];
-    drawOnce(dropped, [headers, data.model?.more_dropped_headers], () => drawDropped(dropped, headers, !!data.model?.more_dropped_headers));
   };
   // Draws the run: its heading, the command that runs it again, its cancel.
   const drawRun = () => {
@@ -640,9 +655,9 @@ function drawResult(node, result) {
     values.length
       ? h(
           "div",
-          { class: "values" },
+          { class: "values answer" },
           values.map(({ name, value }) =>
-            h("div", { class: "kv" }, h("span", { class: "k" }, name), h("span", { class: typeof value === "number" ? "v num" : "v" }, typeof value === "number" ? shownNumber(value) : typeof value === "string" ? value : String(value))),
+            h("div", { class: "kv tile" }, h("span", { class: typeof value === "number" ? "v num" : "v" }, typeof value === "number" ? shownNumber(value) : typeof value === "string" ? value : String(value)), h("span", { class: "k l" }, name)),
           ),
         )
       : null,
@@ -653,49 +668,70 @@ function drawResult(node, result) {
   );
 }
 
-// The request headers that the route left behind, folded under their count.
-/** @param {HTMLElement} node @param {string[]} headers @param {boolean} more */
-function drawDropped(node, headers, more) {
-  if (!headers.length) return fill(node);
-  fill(node, h("details", {}, h("summary", {}, plural(headers.length, "request header") + (more ? " and more" : "") + " the route dropped"), h("code", {}, headers.join(", ") + (more ? ", and more" : ""))));
-}
 
 function drawFacts(facts, data) {
   const times = data.times;
   const model = data.model;
-  const fact = (/** @type {string} */ name, /** @type {string} */ value, /** @type {string | null} */ title = null) => h("span", { class: "fact", title }, h("span", { class: "name" }, name), h("span", { class: "value" }, value));
+  // A number of the run: the figure, what qualifies it in small beside it, its name below, and a
+  // card of what matters less about it.
+  /** @param {string} name @param {string} value @param {Array<[string, import("./h.js").Child] | null | false>} rows @param {string} [small] @param {string} [tone] */
+  const fact = (name, value, rows, small = "", tone = "") =>
+    card(h("div", { class: "tile fact", tabindex: 0 }, h("div", { class: "v" }, value, small ? h("small", { class: tone }, small) : null), h("div", { class: "l" }, name)), () => cardRows(rows));
   const ran = times && (times.end ?? times.now ?? times.last);
   const failed = model ? model.failed.reduce((sum, f) => sum + f.count, 0) : 0;
   // How long each request in flight has gone unanswered, to now, or to the end of a run that ended.
   const at = times ? (times.now ?? times.end ?? times.last) : 0;
   const flying = model ? [...model.in_flight].sort((a, b) => a.since - b.since) : [];
   const notOk = "not forwarded whole with a 2xx status: cut short, refused, barred or abandoned by the route, or answered with another status";
+  const number = (/** @type {number | null | undefined} */ n) => count(n, "").trimEnd();
+  const dropped = model && model.dropped_headers.length ? model.dropped_headers.join(", ") + (model.more_dropped_headers ? ", and more" : "") : null;
   fill(
     facts,
-    fact("Task", data.task || "-"),
-    times ? fact("Started", utc(times.started_unix, 0).slice(0, 19) + " UTC") : null,
-    fact("Ran", clock(ran), times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null),
-    fact("Hard end", clock(times && times.hard_end)),
+    fact("Ran", clock(ran), [
+      ["Hard end", clock(times && times.hard_end)],
+      ["Used", times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null],
+    ]),
+    times ? fact("Started", utc(times.started_unix, 0).slice(5, 16), [["Started", utc(times.started_unix, 0).slice(0, 19) + " UTC"]], "UTC") : null,
     model
       ? fact(
           "Requests",
-          count(model.requests, "req") + (failed ? ", " + failed + " failed" : "") + (model.not_2xx ? ", " + model.not_2xx.toLocaleString("en-US") + " not 2xx" : ""),
-          [model.failed.map((f) => f.count + " " + f.code).join(", "), model.not_2xx ? plural(model.not_2xx, "answer") + " " + notOk : ""].filter(Boolean).join("; ") || null,
+          number(model.requests),
+          [
+            ["Failed", model.failed.map((f) => f.count + " " + f.code).join(", ")],
+            ["Not 2xx", model.not_2xx ? plural(model.not_2xx, "answer") + " " + notOk : null],
+            ["Median took", model.took.median !== null ? span(model.took.median) + ", of " + plural(model.took.count, "answer") : null],
+            ["First token", model.first_token.median !== null ? span(model.first_token.median) + ", the median of " + plural(model.first_token.count, "answer") : null],
+            ["In flight", flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", ")],
+            ["Headers the route dropped", dropped],
+          ],
+          [failed ? failed + " failed" : "", model.not_2xx ? model.not_2xx.toLocaleString("en-US") + " not 2xx" : ""].filter(Boolean).join(", "),
+          failed ? "error" : "",
         )
       : null,
-    model ? fact("Tokens", count(model.tokens.input, "tok") + " in · " + count(model.tokens.output, "tok") + " out", model.tokens.input === null ? "Unknown: no response reported its tokens" : model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input cached" : null) : null,
-    data.cost ? fact("Cost", data.cost.shown, data.cost.said) : null,
-    model && model.took.median !== null ? fact("Median took", span(model.took.median), "Of " + plural(model.took.count, "answer")) : null,
-    model && model.first_token.median !== null ? fact("First token", span(model.first_token.median), "Median, of " + plural(model.first_token.count, "answer")) : null,
-    flying.length
-      ? fact(
-          "In flight",
-          plural(flying.length, "request") + ", the oldest for " + span(at - flying[0].since),
-          flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", "),
-        )
+    model
+      ? fact("Tokens in · out", number(model.tokens.input) + " · " + number(model.tokens.output), [
+          ["Input", model.tokens.input === null ? "Unknown: no response reported its tokens" : count(model.tokens.input, "tok")],
+          ["Cached", model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input" : null],
+          ["Output", model.tokens.output === null ? null : count(model.tokens.output, "tok")],
+        ])
       : null,
-    data.other_build ? fact("Made by", "pumpkin " + data.other_build) : null,
+    data.cost ? fact("Cost", data.cost.shown, [["Cost", data.cost.said]]) : null,
   );
+}
+
+// A run's verdict in two: a few words, and the rest of the sentence. A run with a result says
+// that; a run that failed, its failure's state, then its verdict; any other, its verdict less the
+// run's id, which the page's address shows, up to its first colon.
+/** @param {Run} data @returns {[string, string]} */
+function verdictOf(data) {
+  if (data.result) return ["Finished with a result", ""];
+  if (data.failure) return [sentence(data.failure.state), data.verdict];
+  const lead = "Run " + data.id + " ";
+  const ended = data.verdict.startsWith(lead);
+  const text = ended ? data.verdict.slice(lead.length).replace(/^(was|is) /, "") : data.verdict;
+  const at = text.indexOf(": ");
+  if (at < 0) return [sentence(text), ""];
+  return [sentence(text.slice(0, at)), ended ? sentence(text.slice(at + 2)) + "." : text.slice(at + 2)];
 }
 
 // The command that runs the run again from here, with a copy button, or why there is none; nothing
@@ -705,12 +741,10 @@ function drawAgain(node, data) {
   node.hidden = data.again === undefined;
   if (data.again === undefined) return;
   const command = data.again.command;
-  if (command === undefined) return fill(node, h("span", { class: "name" }, "Again"), h("span", { class: "why", title: data.again.error ?? "" }, "-"));
+  if (command === undefined) return fill(node, card(h("button", { disabled: true }, "Copy command"), () => data.again?.error ?? "No command runs this run again."));
   fill(
     node,
-    h("span", { class: "name" }, "Again"),
-    h("code", { title: command }, command),
-    h("button", { title: "Copy the command that runs this run again", onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy"),
+    card(h("button", { onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy command"), () => [h("p", { class: "why" }, "The command that runs this run again"), h("code", {}, command)]),
   );
 }
 
