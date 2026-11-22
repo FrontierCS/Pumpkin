@@ -7,9 +7,10 @@ use std::path::Path;
 
 use stdx::Context as _;
 
-/// Writes `line` as the file `file` of the job's directory `job`, whole or not at all whenever the
-/// machine fails: written and synced aside, renamed into place, then the directory synced, as a
-/// run's record replaces a file.
+/// Writes `line` as the file `file` of the job's directory `job`. A reader finds the file whole or
+/// not at all, whenever the machine fails.
+// Written and synced aside, renamed into place, then the directory synced, as a run's record
+// replaces a file.
 pub(super) fn write(job: &Path, file: &str, line: &str) -> Result<(), String> {
     let path = job.join(file);
     let mut aside = tempfile::Builder::new()
