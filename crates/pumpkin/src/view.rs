@@ -3,8 +3,8 @@
 //!
 //! A [`View`] holds each run it has been asked about between requests, as a fold of its log that
 //! is read further on each request, so that a page that polls reads only what the log has grown
-//! by. Its replies are JSON, built here and in [`json`](mod@json), [`talk`] and [`trace`]. The same
-//! replies are answered to the view that asks over a link ([`Answering`]).
+//! by. Its replies are JSON, built here and in [`json`](mod@json), [`talk`] and [`trace`]. The view
+//! that asks over a link gets the same replies ([`Answering`]).
 //!
 //! A run that has ended is listed from its record, read once, as an ended record doesn't change;
 //! one that is lost, whose driver ended without an outcome, is read again until a reap writes it.

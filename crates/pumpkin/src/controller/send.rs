@@ -1,5 +1,5 @@
-//! Sending a run's job to the controller: the task's files, which go by content to
-//! the controller's store, and the command that starts the job from them.
+//! Sending a run's job to the controller. The task's files go by content to the controller's
+//! store, and a command starts the job from them.
 //!
 //! The controller says which blobs of the task's manifest its store lacks, and only those are
 //! sent, each from its held offset. Large task uploads can use up to four links.
@@ -169,7 +169,7 @@ fn needed(
 }
 
 /// Sends the task's `tree` and the client's configuration, keys and Modal configuration to the
-/// controller, and starts the job `id` there, which runs the task with `args`.
+/// controller. Then it starts the job `id` there, which runs the task with `args`.
 /// The keys go on the connection's standard input, to the job's directory in tmpfs, and are not
 /// stored.
 pub(super) fn send(

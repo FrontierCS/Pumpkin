@@ -1325,8 +1325,8 @@ fn unbuilt_on_docker() {
     let invoked = invocation(&run);
     let output = run.output().unwrap();
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
-    // `pumpkin`'s lines and the problems said once the builds stopped; the lines that say each
-    // build started or ended, in any order; and the rest, what each `docker build` wrote.
+    // Three kinds of line: `pumpkin`'s and the problems said once the builds stopped, the lines
+    // that say each build started or ended, in any order, and what each `docker build` wrote.
     let (mut said, mut builds, mut written) = (Vec::new(), Vec::new(), Vec::new());
     let mut problems = false;
     for line in stderr.lines() {
@@ -1825,8 +1825,8 @@ fn ops_on_docker() {
 struct Labelled(String);
 
 impl Drop for Labelled {
-    // Nothing here panics, as a panic while a failed test unwinds would abort the test binary; a
-    // tag that can't be removed is printed.
+    // Nothing here panics: a panic while a failed test unwinds would abort the test binary. It
+    // prints each tag that it can't remove.
     fn drop(&mut self) {
         let filter = format!("label={}", self.0);
         let format = "{{.Repository}}:{{.Tag}}";

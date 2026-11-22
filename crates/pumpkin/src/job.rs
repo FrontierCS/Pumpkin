@@ -1,12 +1,15 @@
 //! The jobs of a controller: what `pumpkin controller job`, which the unit of each job runs, does
 //! on the controller, and the prune that keeps the controller's volume from filling.
 //!
-//! What they read and write lies below the controller user's home: the store of the files that
-//! clients sent, each named by its SHA-256, as `crate::manifest` lays it out; each job's tree,
-//! `trees/<repo>/<id>/`, of links into the store; each run's job in `jobs/<id>/`, with its
-//! configuration, `pumpkin.toml`, which holds no secret, and its unit's standard error and output,
-//! `log` and `out`; the one workspace, `.pumpkin/`, that every tree's `.pumpkin` links to, which
-//! keeps the installed builds, the runs' records, the build slots and `serve`'s installs.
+//! What they read and write lies below the controller user's home:
+//!
+//! - the store of the files that clients sent, each named by its SHA-256, as `crate::manifest`
+//!   lays it out;
+//! - each job's tree, `trees/<repo>/<id>/`, of links into the store;
+//! - each run's job in `jobs/<id>/`. It holds the job's configuration, `pumpkin.toml`, which holds
+//!   no secret, and its unit's standard error and output, `log` and `out`;
+//! - the one workspace, `.pumpkin/`, that every tree's `.pumpkin` links to. It keeps the installed
+//!   builds, the runs' records, the build slots and `serve`'s installs.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
@@ -110,9 +113,9 @@ const IMDS: &str = "http://169.254.169.254/latest";
 // own.
 const IMDS_SECONDS: u64 = 10;
 
-/// Runs job `job`, in its tree and as its unit does. It assembles the job's configuration,
-/// prunes, builds the task's images under the controller's build slots, and then runs the task,
-/// as the job's `run` says. Returns the run's exit status.
+/// Runs job `job` in its tree, as its unit does. It assembles the job's configuration and prunes.
+/// It builds the task's images under the controller's build slots. Then it runs the task, as the
+/// job's `run` says. Returns the run's exit status.
 pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     let cli::Job {
         id,
@@ -691,11 +694,11 @@ fn jobs_named(jobs: &Path) -> String {
     format!("locking {} failed", jobs.display())
 }
 
-/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`, on the engine
-/// of the configuration at `config`, each build as the job's `Admission` admits it, so that the
-/// job's command finds each by its tag; then, if it built one, lets go of the build slot that the
-/// admission took, and prunes. What the job holds, it holds until it ends. Gives the task's
-/// problems, or each build that failed, said.
+/// Builds the images of the task whose entry is `entry`, given `args`, for job `id`. It builds on
+/// the engine of the configuration at `config`. The job's `Admission` admits each build. The
+/// job's command then finds each image by its tag. If the job built one, it lets go of the build
+/// slot that the admission took, and prunes. The job holds what it holds until it ends. Gives the
+/// task's problems, or each build that failed, said.
 fn build_first(
     id: &RunTag,
     home: &Path,
@@ -731,12 +734,14 @@ fn build_first(
     built.map_err(|problems| crate::task_problems(entry, &problems))
 }
 
-/// What admits the builds of job `id` (`star::Admission`): it holds each image that they look up,
-/// by its tag, in the job's `HELD` in its directory in `jobs`, sharing their lock (`open_jobs`),
-/// and once its builds have ended, each image they found or built, by its ID; takes one of the
-/// controller's build slots (`take_slot`) as the first build starts, and keeps it until its holder
-/// lets go; and prunes (`collect`) as each build starts and as each ends while others run, then
-/// refuses to start one while more than `REFUSED_PERCENT` of the volume is used.
+/// What admits the builds of job `id` (`star::Admission`).
+///
+/// It holds each image that the builds look up by its tag. The tag goes in the job's `HELD`, in
+/// its directory in `jobs`, under the shared lock of `jobs` (`open_jobs`). Once the builds have
+/// ended, it holds each image they found or built by its ID too. It takes one of the controller's
+/// build slots (`take_slot`) as the first build starts, and keeps the slot until its holder lets
+/// go. It prunes (`collect`) as each build starts, and as each ends while others run. Then it
+/// refuses to start a build while more than `REFUSED_PERCENT` of the volume is used.
 struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
@@ -870,8 +875,8 @@ fn slots_count() -> NonZeroUsize {
     NonZeroUsize::new(cpus / 2).unwrap_or(NonZeroUsize::MIN)
 }
 
-/// The id of the newest job whose IR names each image that one names, in its run's record's
-/// `ir.json` in `runs`: ids sort as the jobs' starts do.
+/// The id of the newest job whose IR names each image that an IR names. A job's IR is its run's
+/// record's `ir.json` in `runs`. Ids sort as the jobs' starts do.
 fn last_used(home: &Path, runs: &Path) -> Result<BTreeMap<Image, String>, String> {
     let mut last_used = BTreeMap::new();
     for id in ids(&home.join(JOBS))? {
@@ -909,8 +914,8 @@ pub(crate) fn disk(path: &str) -> Result<Disk, String> {
     })
 }
 
-/// The images that the IR at `path` names, none if there is no IR there, as of a job that ended
-/// before its run did.
+/// The images that the IR at `path` names. It names none if there is no IR there, as for a job
+/// that ended before its run started.
 fn images(path: &Path) -> Result<Vec<Image>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,

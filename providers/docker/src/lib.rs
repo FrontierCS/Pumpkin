@@ -65,8 +65,8 @@ pub struct Docker<'e> {
 }
 
 impl<'e> Docker<'e> {
-    /// The provider on `engine`, whose sandboxes are given the CPUs that are online. It refuses an
-    /// engine that can't enforce every container's limits.
+    /// The provider on `engine`. Its sandboxes get the CPUs that are online. It refuses an engine
+    /// that can't enforce every container's limits.
     pub fn connect(engine: &'e Engine) -> Result<Self, String> {
         let report = engine.report();
         let &engine::Host {

@@ -1,8 +1,8 @@
-//! The commands that a machine whose runs go to a controller makes of it: `run`, `wait`,
+//! The commands that a machine makes of its controller when its runs go there: `run`, `wait`,
 //! `cancel` and `reap`.
 //!
-//! A run follows its job over a link. An ended run's record is copied into this
-//! machine's runs directory, where its ending is said.
+//! A run follows its job over a link. The client copies an ended run's record into this machine's
+//! runs directory, and says its ending there.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

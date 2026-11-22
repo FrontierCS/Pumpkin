@@ -48,7 +48,7 @@ const ONLINE: &str = "/sys/devices/system/cpu/online";
 
 const CPUINFO: &str = "/proc/cpuinfo";
 
-/// A set of CPUs, which is written as Linux does: `0-3,8`. One read from a ledger's entry names at
+/// A set of CPUs, written as Linux writes one: `0-3,8`. One read from a ledger's entry names at
 /// least one CPU.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]

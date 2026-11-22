@@ -450,8 +450,8 @@ impl Client {
         (Sent { upstreams, modal }, keys)
     }
 
-    /// The contents of Modal's configuration file, `~/.modal.toml`, or `None` if
-    /// `[controller.modal]` is absent or the file doesn't exist.
+    /// The contents of Modal's configuration file, `~/.modal.toml`. `None` if `[controller.modal]`
+    /// is absent or the file doesn't exist.
     pub(crate) fn modal_file(&self) -> Result<Option<Vec<u8>>, String> {
         if self.controller.modal.is_none() {
             return Ok(None);

@@ -444,8 +444,8 @@ fn caller_of(id: &provider::RunTag, held: &Held, a: u64, b: u64) -> Result<Calle
     Ok(caller)
 }
 
-/// Request `request`'s `part` of `exchanges`, of `record`: its bytes as kept, or the request
-/// rebuilt.
+/// Request `request`'s `part` of `exchanges`, of `record`. The part is its bytes as kept, or the
+/// request rebuilt.
 fn exchange_bytes(
     record: &Record,
     exchanges: &Exchanges,

@@ -343,10 +343,9 @@ fn check(
 }
 
 /// Runs `command` again for up to ten minutes while it fails only because other runs hold the
-/// machine's CPUs, and gives its output without the lines that say an image's build started or
-/// ended.
-// Whether a run builds an image depends on whether the engine has it under its tag already, as
-// an earlier try, or another test's run of the same recipe, leaves it.
+/// machine's CPUs. Gives its output without the lines that say an image's build started or ended.
+// A run builds an image only if the engine lacks it under its tag. An earlier try, or another
+// test's run of the same recipe, may have left it.
 fn with_room(command: &mut Command) -> Output {
     let room = Instant::now() + Duration::from_mins(10);
     loop {

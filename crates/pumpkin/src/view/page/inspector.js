@@ -117,7 +117,7 @@ function sent(text, needle, api, at) {
   return h("div", {}, tools, pre);
 }
 
-// Bytes the record keeps, read on asking, the first `RAW_SHOWN` of them shown as kept.
+// Bytes the record keeps, read on asking. The first `RAW_SHOWN` of them show as kept.
 /** @param {string} label @param {string} path @param {number | null | undefined} size */
 function rawBytes(label, path, size) {
   const shown = h("div", {});

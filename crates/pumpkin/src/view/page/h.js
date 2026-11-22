@@ -1,7 +1,6 @@
 // What the page's views share: making elements, the address, reading the server, following a live
-// run, the units numbers and times are shown in, and the grips that size the panes, whose lengths
-// this browser keeps. Text from a record is only ever set as text, by `h` and `svg`, never as
-// markup.
+// run, the units of numbers and times, and the grips that size the panes. This browser keeps the
+// panes' lengths. Text from a record is only ever set as text, by `h` and `svg`, never as markup.
 //
 // Every word or phrase of the interface (a tab, a button, a menu's option, a column's head, a
 // field's name, a state, a title, a hover's text) is in sentence case: its first letter a capital,
@@ -245,10 +244,11 @@ function unauthorized() {
 
 // ---- following
 
-// What the page says of `error`, a read's, if a later read may well arrive, which it then makes: a
-// reply that didn't arrive whole; a 502, which the server answers alone for a controller that it
-// can't reach; or a 503, which the server answers for a controller that doesn't run. Null for an
-// answer, such as a refusal of a run that doesn't exist, which the page shows.
+// What the page says of `error`, a read's, if a later read may well arrive. The page then makes
+// that read. Such an error is a reply that didn't arrive whole, or a 502 or a 503. The server
+// answers a 502 alone, for a controller that it can't reach, and a 503 for a controller that
+// doesn't run. Null for an answer, such as a refusal of a run that doesn't exist, which the page
+// shows.
 /** @param {unknown} error @returns {string | null} */
 function unreached(error) {
   if (error instanceof Unarrived) return "A reply of this pumpkin view's was cut short or never came, so this page shows what it read last.";

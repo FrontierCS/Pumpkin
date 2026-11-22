@@ -85,8 +85,8 @@ pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled,
         sent.context(format_args!(
             "signalling run {id}'s driver, process {pid}, failed"
         ))?;
-        // A driver that SIGTERM stops deletes the run's sandboxes before it writes the outcome,
-        // which takes a while on a provider whose sandboxes are instances.
+        // A driver that SIGTERM stops deletes the run's sandboxes before it writes the outcome.
+        // That takes a while on a provider whose sandboxes are instances.
         let until = "it ends once its sandboxes are deleted";
         match reader {
             Reader::Operator => say(format_args!(

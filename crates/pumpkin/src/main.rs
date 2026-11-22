@@ -110,8 +110,8 @@ fn finish(done: Result<ExitCode, String>) -> ExitCode {
     }
 }
 
-/// Who reads what a command says of a run: the operator, at this machine, or a
-/// follower of a controller's job, at a client, who follows the run already, and can neither open
+/// Who reads what a command says of a run. The operator reads it at this machine. A follower of
+/// a controller's job reads it at a client: they follow the run already, and can neither open
 /// this machine's paths nor change its setup.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reader {

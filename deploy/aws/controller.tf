@@ -81,10 +81,10 @@ resource "aws_iam_instance_profile" "controller" {
   role = aws_iam_role.controller.name
 }
 
-# Each job's settings, which `pumpkin controller job` reads as it starts, so an apply that
-# changes them takes effect at the next job: the controller's Docker engine, the EC2 provider
-# `aws`, and the `images` of the Modal provider `modal`, which a job drops if its client sends no
-# `[controller.modal]`. Nothing else is here: the rest is each job's own or its client's. The
+# Each job's settings. `pumpkin controller job` reads them as it starts, so an apply that changes
+# them takes effect at the next job. They name the controller's Docker engine, the EC2 provider
+# `aws`, and the `images` of the Modal provider `modal`. A job drops `images` if its client sends
+# no `[controller.modal]`. Nothing else is here: the rest is each job's own or its client's. The
 # advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"

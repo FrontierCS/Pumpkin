@@ -109,8 +109,8 @@ fn stop(id: &RunTag, held: &Path) -> Result<(), String> {
             Ok(())
         };
     }
-    // ExecStopPost, which removes the keys, may not have run whole, as when systemd's stop timeout
-    // killed it.
+    // ExecStopPost removes the keys, but it may not have run whole: systemd's stop timeout kills
+    // it.
     match fs::remove_dir_all(held) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         removed => removed.context(held.display()),

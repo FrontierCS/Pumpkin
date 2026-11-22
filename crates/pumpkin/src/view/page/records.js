@@ -20,7 +20,7 @@ import { bytes, clock, count, h, plural, utc } from "./h.js";
 // Where the log is read: `cursor`, the byte read to.
 /** @typedef {{ cursor: number }} Reading */
 
-// Moves `read` past `window`, and gives its records past those read before.
+// Moves `read` past `window`. Gives the window's records past those read before.
 /** @param {Window} window @param {Reading} read */
 export function pastWindow(window, read) {
   const records = window.records.filter((record) => record.byte >= read.cursor);

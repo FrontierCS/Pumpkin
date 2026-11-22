@@ -33,8 +33,8 @@ pub(super) fn record_json(byte: u64, line: &[u8]) -> Value {
     json!({ "byte": byte, "unread": text })
 }
 
-/// `value` with each string longer than [`STRING_CUT_BYTES`] cut, at a character, and marked with
-/// its length in all.
+/// `value` with each string longer than [`STRING_CUT_BYTES`] cut at a character. Each cut string
+/// is marked with its whole length.
 pub(super) fn cut(value: Value) -> Value {
     match value {
         Value::String(text) if text.len() > STRING_CUT_BYTES => {

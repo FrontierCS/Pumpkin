@@ -1,12 +1,12 @@
 // A run: its verdict and the command that runs it again, its sandboxes' lanes, who talks to whom,
 // its log as a list that draws only the rows in view, and the inspector of what is selected.
 //
-// The log is read from its start in windows (`/log?at=<byte>`) up to the byte that the run's
-// reply was read to, then, while the run is live, polled from where the last read ended
-// (`/since?log=<byte>`): a reply with the run replaces it, and appends the records it holds; one
-// of only `end` and `live` is of a run that ended with no record past those read. A refusal of
-// the byte, or a log shorter than it, means the log started over, and the run is read again from
-// its start.
+// The page reads the log from its start in windows (`/log?at=<byte>`), up to the byte that the
+// run's reply was read to. While the run is live, the page then polls from where the last read
+// ended (`/since?log=<byte>`). A reply with the run replaces it, and appends the records it holds.
+// A reply of only `end` and `live` is of a run that ended with no record past those read. A
+// refusal of the byte, or a log shorter than it, means the log started over. The page then reads
+// the run again from its start.
 
 import { byId, bytes, card, cardRows, clock, count, fill, follow, get, grip, h, plural, POLL_MS, post, Refused, route, sentence, setKeys, setQuery, show, span, span as lasted, tone, typing, utc } from "./h.js";
 import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf } from "./records.js";
@@ -109,9 +109,9 @@ function calls(of) {
 /** @param {string} id */
 export async function runView(id) {
   const base = "/api/runs/" + encodeURIComponent(id);
-  // `cursor` is where the log is read (`Reading`); `open` holds the first record's byte
-  // of each fold opened; `shown` the records the address's filters keep; `selected` the `sel`
-  // last drawn.
+  // `cursor` is where the log is read (`Reading`). `open` holds the first record's byte of each
+  // fold opened. `shown` holds the records that the address's filters keep. `selected` is the
+  // `sel` last drawn.
   /** @type {{ data: Run | null, records: LogRecord[], cursor: number, caught: boolean, drawnAt: number, open: Set<number>, kinds: string, shown: LogRecord[], selected: string | null | undefined, inspected: boolean }} */
   const state = { data: null, records: [], cursor: 0, caught: false, drawnAt: 0, open: new Set(), kinds: "", shown: [], selected: undefined, inspected: false };
   const { query } = route();

@@ -1,6 +1,6 @@
-//! What `cargo xtask live` reads of a configuration that sends runs to the person's controller,
-//! `pumpkin`'s, for a smoke run on one of its providers: the controller's region, and, for Modal,
-//! the profile that reaches the workspace and the GPU of a class there.
+//! What `cargo xtask live` reads of `pumpkin`'s configuration when it sends runs to the person's
+//! controller. A smoke run on one of its providers reads the controller's region. A run on Modal
+//! also reads the profile that reaches the workspace, and the GPU of a class there.
 
 use std::error::Error;
 use std::path::Path;
@@ -17,7 +17,7 @@ pub(crate) struct Settings {
     pub(crate) name: String,
     /// The controller's region, which its EC2 sandboxes and their timers are in.
     pub(crate) region: String,
-    /// For a run on Modal, the workspace's profile and the model of the GPU that the smoke's GPU
+    /// For a run on Modal: the workspace's profile, and the model of the GPU that the smoke's GPU
     /// runner needs.
     pub(crate) modal: Option<Modal>,
 }

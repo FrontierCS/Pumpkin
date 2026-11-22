@@ -201,12 +201,15 @@ fn write_repository(scratch: &Scratch, dir: &str) {
     write("tasks/bench/judge/run", "#!/bin/sh\n");
 }
 
-/// Writes into `scratch` the repository of [`write_repository`], with its trainer's and judge's
-/// images two stages of one recipe, `train` and `eval`, and its agent's image built on the
-/// tools' image, from a recipe whose `FROM` is the arg `base`, and which keeps the arg `note` as
-/// a label, with the toolchain's `/usr/local/go` copied in, a stage `go` of its recipe, which a
-/// later stage that fails follows, as the arg `toolchain` names it; each image labelled
-/// `pumpkin.test=unbuilt`.
+/// Writes into `scratch` the repository of [`write_repository`], with three changes:
+///
+/// - the trainer's and judge's images are two stages of one recipe, `train` and `eval`;
+/// - the agent's image builds on the tools' image. The tools' recipe's `FROM` is the arg `base`,
+///   and it keeps the arg `note` as a label;
+/// - the agent's image copies in the toolchain's `/usr/local/go`. The arg `toolchain` names that
+///   stage, `go`, which a later stage that fails follows.
+///
+/// Each image is labelled `pumpkin.test=unbuilt`.
 fn write_variants(scratch: &Scratch) {
     let label = "pumpkin.test=unbuilt";
     write_repository(scratch, "");
