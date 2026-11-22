@@ -14,7 +14,7 @@
 //! The provider relies on the envelope, and checks none of this on AWS: each launch template, at
 //! the version the settings name, boots an AMI for `x86_64`, the only architecture `sandboxd` is
 //! built for, which runs cloud-init and systemd, as AL2023 does, and holds Docker, ECR's
-//! credential helper and nftables, as the instance's boot installs none; has each network
+//! credential helper, nftables and curl, as the instance's boot installs none; has each network
 //! interface and EBS volume of its instances deleted when the instance is terminated, so that a
 //! sandbox is freed with its instance; serves its instances' metadata only with a token,
 //! within one hop of the instance; and launches an instance type built on the Nitro System, the
@@ -26,17 +26,19 @@ use std::path::{Path, PathBuf};
 
 use aws::{Bound, Cli, Region, Repository, RepositoryName, RoleArn};
 use engine::{Platform, Pusher};
+use identity::Documents;
 use provider::{
-    Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
+    Admits, Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready,
+    Reservation, Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ec2_boot::{BOOT_IN_IMAGE, SANDBOXD_IN_IMAGE};
 use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
-use schema::sandbox::TcpDial;
+use schema::sandbox::PrivateDial;
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod identity;
 mod launch;
 mod user_data;
 
@@ -189,6 +191,8 @@ pub struct Ec2<'e> {
     timer_role: RoleArn,
     /// What [`Provider::ready`] gives: what names the account, and the classes of sandbox.
     ready: Ready,
+    /// The identity documents of the envelope's instances, which admit their sandboxes.
+    documents: Documents,
     dir: PathBuf,
 }
 
@@ -197,7 +201,8 @@ impl<'e> Ec2<'e> {
     /// provider publishes from, once AWS answers to the command line's credentials and describes
     /// the repositories. It writes in `dir`,
     /// made once a launch needs it, each launch's user data, while `aws` reads it. It fails if AWS
-    /// describes no repository that the settings name.
+    /// describes no repository that the settings name, or the region is one that the provider
+    /// holds no key of AWS's for.
     pub fn connect(settings: &Settings, pusher: Pusher<'e>, dir: &Path) -> Result<Self, String> {
         let Settings {
             region,
@@ -207,6 +212,8 @@ impl<'e> Ec2<'e> {
         } = settings;
         let cli = Cli::connect(region.clone())?;
         let Identity { account, arn } = cli.json(&["sts", "get-caller-identity"], Bound::Call)?;
+        // The instances are launched in the caller's account, which their documents name.
+        let documents = Documents::of_region(region.as_str(), account.clone())?;
         let repositories = described_repositories(&cli, repositories)?;
         let Timer { group, role_arn } = timer.clone();
         let report = json!({
@@ -225,6 +232,7 @@ impl<'e> Ec2<'e> {
             repositories,
             timer_role: role_arn,
             ready: ready(report, classes),
+            documents,
             dir: dir.to_owned(),
         })
     }
@@ -307,9 +315,9 @@ impl Provider for Ec2<'_> {
     }
 }
 
-impl Creator<TcpDial> for Ec2<'_> {
-    fn create(&self, create: &Create, dial: TcpDial) -> Result<Created, String> {
-        self.create_instance(create, dial)
+impl Creator<PrivateDial, (Created, Admits)> for Ec2<'_> {
+    fn create(&self, create: &Create, dial: PrivateDial) -> Result<(Created, Admits), String> {
+        self.create_instance(create, dial.gateway)
     }
 }
 

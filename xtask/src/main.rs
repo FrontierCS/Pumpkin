@@ -21,6 +21,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use xshell::{Cmd, Shell, cmd};
 
+mod aws_certificates;
 mod diff;
 mod figure;
 mod live;
@@ -73,6 +74,11 @@ mod flags {
             /// `docs/figures/crates.svg`, of how its crates depend on one another, from
             /// `cargo metadata`.
             cmd figures {}
+
+            /// Rewrites the EC2 provider's table of AWS's identity certificates, in
+            /// `providers/ec2/src/identity/certificates.rs`, from AWS's page of them: the one
+            /// command that reaches the network to keep the table, which `ci` tests as it is.
+            cmd aws-certificates {}
 
             /// Runs the checks that reach a real environment, which `ci` leaves out: `docker`, the
             /// tests that need a Docker engine, the static sandboxd or a server elsewhere, ignored
@@ -172,6 +178,7 @@ mod flags {
         Fmt(Fmt),
         Ci(Ci),
         Figures(Figures),
+        AwsCertificates(AwsCertificates),
         Live(Live),
         OpStats(OpStats),
         Sandboxd(Sandboxd),
@@ -192,6 +199,9 @@ mod flags {
 
     #[derive(Debug)]
     pub struct Figures;
+
+    #[derive(Debug)]
+    pub struct AwsCertificates;
 
     #[derive(Debug)]
     pub struct Live {
@@ -286,6 +296,9 @@ fn try_main() -> Result<()> {
         }
         flags::XtaskCmd::Ci(flags::Ci) => ci(&cargo),
         flags::XtaskCmd::Figures(flags::Figures) => figure::write(&cargo.sh, &metadata(&cargo)?),
+        flags::XtaskCmd::AwsCertificates(flags::AwsCertificates) => {
+            aws_certificates::write(&cargo.sh)
+        }
         flags::XtaskCmd::Live(flags::Live {
             target,
             gpu_model,

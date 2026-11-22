@@ -18,9 +18,9 @@ use schema::sandbox::op::{
     TransferEnd, TransferStatus,
 };
 use schema::sandbox::{
-    Endpoint, ExitStatus, Hello, MAX_OP_PAYLOAD_BYTES, MAX_TRANSFER_BYTES, RegistrationGrant,
-    RelativePath, ToSandbox, command_env, command_stderr, command_stdin, command_stdout,
-    pumpkin_dir, pumpkin_subdirs,
+    Endpoint, ExitStatus, Hello, HelloReply, MAX_ATTESTATION_BYTES, MAX_OP_PAYLOAD_BYTES,
+    MAX_TRANSFER_BYTES, RegistrationGrant, RelativePath, ToSandbox, command_env, command_stderr,
+    command_stdin, command_stdout, pumpkin_dir, pumpkin_subdirs, read_hello,
 };
 use schema::workflow::{Class, Offers, Placement, UsdPerHour, Workflow};
 use schema::{ec2_boot, frame, ir};
@@ -248,6 +248,46 @@ impl Case for HelloJson {
                 json if json == self.0 => format!("{hello:?}"),
                 json => format!("{hello:?}, written back as {json}"),
             },
+        }
+    }
+}
+
+/// A hello's frame, of a message and a body of so many bytes, and what reading it gives. A body
+/// over the most an attestation holds is left out, as a reader refuses it from its length.
+struct HelloFrame(&'static str, usize);
+
+impl Case for HelloFrame {
+    fn outcome(self) -> String {
+        let Self(message, body_bytes) = self;
+        let mut bytes = Vec::new();
+        bytes.extend(u32::try_from(message.len()).unwrap().to_be_bytes());
+        bytes.extend(message.as_bytes());
+        bytes.extend(u32::try_from(body_bytes).unwrap().to_be_bytes());
+        if body_bytes <= MAX_ATTESTATION_BYTES {
+            bytes.resize(bytes.len() + body_bytes, b'a');
+        }
+        let read = match read_hello(&mut &*bytes) {
+            Ok(Some((hello, attestation))) => {
+                let bytes = attestation
+                    .as_ref()
+                    .map(|attestation| attestation.bytes().len());
+                format!("{hello:?}, {attestation:?} of {bytes:?} bytes")
+            }
+            Ok(None) => "nothing".to_owned(),
+            Err(error) => format!("{:?}: {error}", error.kind()),
+        };
+        format!("{message} and {body_bytes} bytes: {read}")
+    }
+}
+
+/// An answer to a hello as JSON, which reads as the answer shown, or is refused.
+struct ReplyJson(&'static str);
+
+impl Case for ReplyJson {
+    fn outcome(self) -> String {
+        match serde_json::from_str::<HelloReply>(self.0) {
+            Ok(reply) => format!("{reply:?}"),
+            Err(error) => error.to_string(),
         }
     }
 }
@@ -587,22 +627,18 @@ fn lease_status_bound() {
 fn hellos_and_frames() {
     check(
         [
-            HelloJson(r#"{"version":2}"#),
+            HelloJson(r#"{"version":3}"#),
             HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeeff"}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899AABBCCDDEEFF"}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddee"}"#),
-            HelloJson(r#"{"version":2,"grant":"00112233445566778899aabbccddeefg"}"#),
-            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
-            HelloJson(r#"{"version":2,"gpus":["NVIDIA A100\u0000"]}"#),
+            HelloJson(r#"{"version":3,"grant":"00112233445566778899aabbccddeeff"}"#),
+            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100-SXM4-80GB","NVIDIA H100 80GB HBM3"]}"#),
+            HelloJson(r#"{"version":3,"gpus":["NVIDIA A100\u0000"]}"#),
         ],
         &expect![[r#"
-            Hello { grant: None, gpus: None }
-            Hello { grant: Some(RegistrationGrant(..)), gpus: None }
-            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            the hello isn't of sandbox protocol 2's form: the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
-            Hello { grant: None, gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
-            the hello isn't of sandbox protocol 2's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
+            Hello { gpus: None }
+            sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does
+            the hello isn't of sandbox protocol 3's form: unknown field `grant`, expected `version` or `gpus`
+            Hello { gpus: Some([GpuModel("NVIDIA A100-SXM4-80GB"), GpuModel("NVIDIA H100 80GB HBM3")]) }
+            the hello isn't of sandbox protocol 3's form: `NVIDIA A100\0` is not a GPU's model: use one as `nvidia-smi` names it, such as `NVIDIA H100 80GB HBM3`"#]],
     );
     check(
         [
@@ -636,6 +672,36 @@ fn hellos_and_frames() {
         &expect![[r#"
         []: None
         [0, 0]: UnexpectedEof"#]],
+    );
+}
+
+#[test]
+fn hello_bodies_and_answers() {
+    check(
+        [
+            HelloFrame(r#"{"version":3}"#, 0),
+            HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES),
+            HelloFrame(r#"{"version":3}"#, MAX_ATTESTATION_BYTES + 1),
+            HelloFrame(r#"{"version":2}"#, MAX_ATTESTATION_BYTES + 1),
+        ],
+        &expect![[r#"
+            {"version":3} and 0 bytes: Hello { gpus: None }, None of None bytes
+            {"version":3} and 4096 bytes: Hello { gpus: None }, Some(Attestation(..)) of Some(4096) bytes
+            {"version":3} and 4097 bytes: InvalidData: the hello's body is 4097 bytes: a hello's holds at most 4096
+            {"version":2} and 4097 bytes: InvalidData: sandboxd speaks sandbox protocol 2: expected 3, which this gateway speaks, as a sandboxd built from the same Pumpkin does"#]],
+    );
+    check(
+        [
+            ReplyJson(r#"{"type":"accepted","grant":"00112233445566778899aabbccddeeff"}"#),
+            ReplyJson(r#"{"type":"accepted","grant":"00112233445566778899AABBCCDDEEFF"}"#),
+            ReplyJson(r#"{"type":"accepted","grant":"00112233445566778899aabbccddee"}"#),
+            ReplyJson(r#"{"type":"accepted","grant":"00112233445566778899aabbccddeefg"}"#),
+        ],
+        &expect![[r#"
+            Accepted { grant: Some(RegistrationGrant(..)) }
+            the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox
+            the registration grant isn't 32 lowercase hexadecimal digits: present the one the gateway issued for the sandbox"#]],
     );
 }
 
@@ -1465,14 +1531,13 @@ impl Case for UserData {
             sandboxd_image: "sandboxd@sha256:bb".to_owned(),
             confinement: vec![],
             gateway: "172.31.0.10:7433".parse().unwrap(),
-            grant: RegistrationGrant::from([0x5a; 16]),
             ops: false,
             model: false,
         };
         match ec2_boot::user_data(self.0, &start) {
             Ok(user_data) => {
                 let read = ec2_boot::start_in(&user_data).unwrap();
-                assert_eq!(read.grant, start.grant);
+                assert_eq!(read.gateway, start.gateway);
                 user_data
             }
             Err(error) => error,
@@ -1501,7 +1566,7 @@ fn ec2_boot_user_data() {
             Content-Type: application/x-pumpkin-ec2-start
 
             pumpkin-ec2 start
-            {"hard_end_unix_seconds":2,"pulls_by_unix_seconds":1,"role_image":"roles@sha256:aa","sandboxd_image":"sandboxd@sha256:bb","confinement":[],"gateway":"172.31.0.10:7433","grant":"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","ops":false,"model":false}
+            {"hard_end_unix_seconds":2,"pulls_by_unix_seconds":1,"role_image":"roles@sha256:aa","sandboxd_image":"sandboxd@sha256:bb","confinement":[],"gateway":"172.31.0.10:7433","ops":false,"model":false}
             --pumpkin-ec2-part--
 
             the user data's cloud-config holds `--pumpkin-ec2-part`, the parts' boundary: expected none"#]],

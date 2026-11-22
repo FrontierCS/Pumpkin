@@ -213,7 +213,7 @@ and bounds are the same with TLS as without it.
 ### `crates/gateway`
 
 The host's end of the sessions that sandboxes open. A sandbox meets the gateway where its
-`Registration` says, which `Sockets`, a `GrantListener` or a `Dialer` issues. The `Session`'s one
+`Registration` says, which `Sockets`, a `Listener` or a `Dialer` issues. The `Session`'s one
 owner moves trees, runs commands (`Process`) and hears of each op, model request and exit as an
 `Arrival`; through `Trees`, another thread moves trees beside it.
 
@@ -224,6 +224,12 @@ until its caller's deadline.
 
 **Architecture Invariant:** it knows no provider and no driver, so every provider's sandboxes have
 the same sessions. It depends on `schema`, `stdx` and `tls` alone.
+
+**Architecture Invariant:** a `Listener`, whose address all of a run's sandboxes on a private
+network share, opens a session only for a hello that the check of a registration it issued admits
+(`Unattested::admitting`), the first such hello alone, and never for one that presents nothing. A
+hello that no check admits holds one of its bounded threads while a registration issued before it
+awaits its check, until that registration's deadline.
 
 ### `crates/sandboxd`
 
@@ -267,7 +273,8 @@ is in this crate's manifest alone. It knows no run: the runtime depends on it, n
 
 The interface every provider implements. `Provider` reserves what a run's roles need
 (`Reservation`), publishes what the run's sandboxes run, says how they meet the gateway
-(`Meeting`, whose `Creator` creates them), and reads their consoles. `Sweep`, its part that lists
+(`Meeting`, whose `Creator` creates them, with the check that admits each sandbox that dials a
+private address, `Admits`), and reads their consoles. `Sweep`, its part that lists
 and deletes a run's sandboxes, is all a reap needs. Its values include `Create`, `Ready`, `Listed`
 and `RunTag`.
 
@@ -354,12 +361,18 @@ keeps none, as the user data configures root's Docker.
 not its instance nor the instance's metadata. `ec2-boot` installs the firewall rules before the
 container starts, and `cargo xtask live ec2` probes them.
 
+**Architecture Invariant:** an instance's user data holds no secret, as `ec2_boot::Start` has
+none. The gateway knows a sandbox by its instance's identity document, which AWS signs: its
+`identity` admits a hello only for the instance that the create launched, from that instance's own
+address, by AWS's key for the region (`IDENTITY_CERTIFICATES`).
+
 ### `providers/ec2/boot`
 
 `ec2-boot`, a static binary that the image of `sandboxd` holds beside it. A systemd unit that the
 instance's user data writes copies it out of that image and runs it with the `Start` the provider
-wrote: it locks the instance's network down, checks its Docker, pulls the role's image and runs the
-role's container, and the unit powers the instance off however it ends.
+wrote: it locks the instance's network down, fetches the instance's identity document, checks its
+Docker, pulls the role's image and runs the role's container, whose `sandboxd` presents the
+document, and the unit powers the instance off however it ends.
 
 **Architecture Invariant:** it depends on `schema` and `stdx` alone of Pumpkin's crates, so it is
 small and static, and the provider's values reach it only as a `Start`.
@@ -546,10 +559,28 @@ each against the grants of the caller's role, and model requests go through the 
 ![The data that flows in a run: between the sandboxes and the gateway, the runtime and the decision core, and from the route to the model provider, each arrow named by the code that carries it, and into the record that the record module lays out, which keeps each sandbox's out and log, and what a job's body got.](docs/figures/run-data.svg)
 
 A sandbox proves which it is by how it meets the gateway. On the host, it dials a socket of its
-own, which only it can reach. Elsewhere, its hello presents a grant (`RegistrationGrant`) that
-the gateway issued for it alone, which only `sandboxd` is given, before anything else runs in the
-sandbox, and which ends with its `Registration`. A session over the Internet runs over TLS, whose
-client trusts the provider's edge only by its certificate.
+own, which only it can reach. On a private network, as an EC2 sandbox does, its hello presents an
+attestation (`Attestation`) that its provider checks: an EC2 sandbox's is its instance's identity
+document, which AWS signs and the instance's metadata serves, and the provider admits it once, for
+the instance that it launched, as SPIRE's `aws_iid` node attestor does, and from the address that
+the document names, as Vault's `token_bound_cidrs` binds a login. Several regions share a key, so
+it is the document's account and instance that pin the sandbox, and the address binding rests on
+the VPC's dropping a packet whose source address isn't its sender's, as EC2's source and
+destination check does. Across the Internet, the gateway dials the sandbox at the endpoint its create
+gives, and the gateway's answer to the hello presents a grant (`RegistrationGrant`) that only that
+`sandboxd` is given, before anything else runs in the sandbox. A session over the Internet runs
+over TLS, whose client trusts the provider's edge only by its certificate.
+
+What an EC2 sandbox's attestation leaves open is what
+[SPIRE says of `aws_iid`](https://github.com/spiffe/spire/blob/a676d95d6e6992ce73715f01c17525e60b50b5e8/doc/plugin_server_nodeattestor_aws_iid.md#L86-L91):
+the document is served to every process on the instance, so whatever runs there before `sandboxd`
+says its hello could say one first, and take the sandbox's session. Only the image's own root
+services, as cloud-init and systemd's units, and the boot run there before it, and the container
+never reaches the metadata. AWS signs this form of the document with
+an RSA key of 1024 bits for each region, fewer than today's minimum for a new key, and states no
+schedule for changing it: the provider checks a signature by the key in the certificate that it
+holds for the region, whatever the certificate's dates, so a key that AWS changes refuses every
+EC2 sandbox of its region until the provider holds its certificate.
 
 No credential is reachable from a sandbox. The model provider's key stays in the host's `Upstream`,
 which adds it to each admitted request, and the harness reaches the model at the endpoint `sandboxd`
@@ -703,4 +734,5 @@ so the core, the gateway, the route and the runtime are tested with Pumpkin's ow
 loopback sockets and a simulated host and provider. No test runs against an invented model of a
 cloud. The conformance suite runs on the runtime's simulated provider in `ci` and on the Docker
 provider in `live docker`; the EC2 and Modal providers have no test of their own but the smoke
-run.
+run, and the EC2 provider's tests of how it decides whether an identity document admits a hello,
+and of the certificates of AWS's keys that it holds.

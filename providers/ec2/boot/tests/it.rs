@@ -1,5 +1,5 @@
 //! `ec2-boot`, against [`STAND_IN`], a stand-in for the commands an instance runs it with,
-//! `docker`, `nft` and `busctl`, which records each call, so these tests need no instance.
+//! `docker`, `nft`, `busctl` and `curl`, which records each call, so these tests need no instance.
 //! Each runs `ec2-boot start` in a directory of its own, below which it keeps its files, as it
 //! keeps them below `/` on an instance.
 
@@ -14,19 +14,19 @@ use std::{env, fs, iter};
 
 use expect_test::{Expect, expect};
 use schema::ec2_boot::{Start, USER_DATA_FILE, user_data};
-use schema::sandbox::RegistrationGrant;
 use stdx::process::Environment;
 use test_support::TestDir;
 
 /// A time far past every test, in seconds since the Unix epoch.
 const LATER: u64 = 4_102_444_800;
 
-/// The stand-in for `docker`, `nft` and `busctl`, which a boot runs through links to it, each
-/// named as its command, in `bin`: it answers as each would on an instance whose Docker is 29.1.3
-/// and supports every limit, and records each call in `calls`, its command and then its
+/// The stand-in for `docker`, `nft`, `busctl` and `curl`, which a boot runs through links to it,
+/// each named as its command, in `bin`: it answers as each would on an instance whose Docker is
+/// 29.1.3 and supports every limit, and records each call in `calls`, its command and then its
 /// arguments, a line each, the call ended by an empty line. `nft` keeps what it reads in
 /// `nft-rules`; `docker cp` writes the path it copies from to the file it copies to; `docker run`
-/// writes, to `env-file`, the mode and the text of the file that its `--env-file` names.
+/// writes, to `env-file`, the mode and the text of the file that its `--env-file` names; `curl`
+/// prints nothing.
 const STAND_IN: &str = r#"#!/bin/sh
 dir=${0%/*}
 name=${0##*/}
@@ -46,6 +46,8 @@ case "$name $1" in
         { printf 'mode 0%s: ' "$(stat --format=%a -- "$file")"; cat -- "$file"; } > "$dir/env-file"
         echo 5f3c ;;
     "docker wait") echo 0 ;;
+    # What the instance's metadata answers is left to `cargo xtask live ec2`.
+    "curl "*) ;;
     "docker logs") echo 'a line on standard error' >&2; echo 'a line on standard output' ;;
     *) echo "the stand-in doesn't know \`$name $*\`" >&2; exit 1 ;;
 esac
@@ -67,7 +69,7 @@ impl Instance {
         let stand_in = dir.path().join("stand-in");
         fs::write(&stand_in, STAND_IN).unwrap();
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
-        for command in ["docker", "nft", "busctl"] {
+        for command in ["docker", "nft", "busctl", "curl"] {
             std::os::unix::fs::symlink(&stand_in, dir.path().join("bin").join(command)).unwrap();
         }
         Self { dir }
@@ -126,20 +128,17 @@ impl Instance {
 }
 
 /// Boots with `user_data`, and compares the console, the calls and the files left with `expect`.
-/// Whatever the user data holds, the boot makes the grant's directory root's alone, and shows no
-/// grant.
+/// Whatever the user data holds, the boot makes the attestation's directory root's alone.
 fn check(user_data: &str, expect: &Expect) {
     let instance = Instance::new();
     let mut lines = instance.boot(user_data);
-    let grant_dir = fs::metadata(instance.root("/run/pumpkin")).unwrap();
-    assert_eq!(grant_dir.permissions().mode() & 0o777, 0o700);
-    let grant = start().grant.digits();
-    assert!(!lines.iter().any(|line| line.contains(&grant)));
+    let attestation_dir = fs::metadata(instance.root("/run/pumpkin")).unwrap();
+    assert_eq!(attestation_dir.permissions().mode() & 0o777, 0o700);
     lines.push("calls:".to_owned());
     lines.extend(instance.calls().iter().map(|call| format!("  {call}")));
     lines.push(instance.file("bin/nft-rules"));
     lines.push(instance.file("bin/env-file"));
-    lines.push(instance.file("root/run/pumpkin/grant.env"));
+    lines.push(instance.file("root/run/pumpkin/attestation.env"));
     lines.push(instance.file("root/opt/pumpkin/sandboxd"));
     expect.assert_eq(&lines.join("\n"));
 }
@@ -158,7 +157,6 @@ fn start() -> Start {
             .to_owned(),
         confinement: vec!["--user=4242:4243".to_owned(), "--cap-drop=ALL".to_owned()],
         gateway: "172.31.0.10:7433".parse().unwrap(),
-        grant: RegistrationGrant::from([0x5a; 16]),
         ops: true,
         model: true,
     }
@@ -170,6 +168,7 @@ fn boots() {
         &user_data(CLOUD_CONFIG, &start()).unwrap(),
         &expect![[r#"
             exit status: Some(0)
+              pumpkin-ec2: read the instance's identity document
               pumpkin-ec2: docker 29.1.3
               pumpkin-ec2: pulled 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa: 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa
               pumpkin-ec2: pulled 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb: 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb
@@ -180,6 +179,9 @@ fn boots() {
               pumpkin-ec2: sandboxd: a line on standard error
             calls:
               nft --file -
+              curl --fail --silent --show-error --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
+              curl --fail --silent --show-error --max-time 10 --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/document
+              curl --fail --silent --show-error --max-time 10 --header X-aws-ec2-metadata-token:  http://169.254.169.254/latest/dynamic/instance-identity/signature
               docker info --format {{.MemoryLimit}} {{.SwapLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}
               docker version --format {{.Server.Version}}
               docker pull --quiet 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa
@@ -188,7 +190,7 @@ fn boots() {
               docker create --entrypoint=/ 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/sandboxd@sha256:bb
               docker cp c0ffee:/sandboxd opt/pumpkin/sandboxd
               docker rm c0ffee
-              docker run --detach --name=pumpkin-sandbox --user=4242:4243 --cap-drop=ALL --cgroupns=private --network=bridge --dns=127.0.0.1 --dns-search=. --env-file=<dir>/root/run/pumpkin/grant.env --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/sandboxd,readonly --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/bin/sandboxctl,readonly --entrypoint=/.pumpkin/sandboxd -- 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa 172.31.0.10:7433 --ops --model
+              docker run --detach --name=pumpkin-sandbox --user=4242:4243 --cap-drop=ALL --cgroupns=private --network=bridge --dns=127.0.0.1 --dns-search=. --env-file=<dir>/root/run/pumpkin/attestation.env --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/sandboxd,readonly --mount=type=bind,source=<dir>/root/opt/pumpkin/sandboxd,target=/.pumpkin/bin/sandboxctl,readonly --entrypoint=/.pumpkin/sandboxd -- 123456789012.dkr.ecr.us-west-1.amazonaws.com/pumpkin/roles@sha256:aa 172.31.0.10:7433 --ops --model
               busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ScheduleShutdown st poweroff 4102444800000000
               docker wait 5f3c
               docker logs --tail 20 5f3c
@@ -204,9 +206,9 @@ fn boots() {
                 }
             }
 
-            bin/env-file: mode 0600: SANDBOXD_GRANT=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
+            bin/env-file: mode 0600: SANDBOXD_ATTESTATION={"document":"","signature":""}
 
-            root/run/pumpkin/grant.env: missing
+            root/run/pumpkin/attestation.env: missing
             root/opt/pumpkin/sandboxd: copied from c0ffee:/sandboxd
         "#]],
     );
@@ -215,7 +217,7 @@ fn boots() {
 #[test]
 fn refuses_a_start_it_cant_read() {
     // A start that doesn't parse, which fails the boot before it runs a command, with its directory
-    // root's alone and no grant on the console.
+    // root's alone.
     let user_data = user_data(CLOUD_CONFIG, &start()).unwrap();
     let unread = user_data.replacen("{\"hard_end", "{\"registry\":\"\",\"hard_end", 1);
     check(
@@ -226,7 +228,7 @@ fn refuses_a_start_it_cant_read() {
             calls:
             bin/nft-rules: missing
             bin/env-file: missing
-            root/run/pumpkin/grant.env: missing
+            root/run/pumpkin/attestation.env: missing
             root/opt/pumpkin/sandboxd: missing"#]],
     );
 }

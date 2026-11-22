@@ -38,7 +38,10 @@ images go to the envelope's private ECR repositories, and each instance pulls it
 its own role, through ECR's credential helper, which keeps no login. An instance's firewall lets its
 container reach the gateway's address and port and nothing else, not the instance nor its metadata.
 Each instance's termination is scheduled at its run's hard end, outside the instance, so it ends
-even if the driver dies.
+even if the driver dies. Its user data holds no secret: a sandbox proves which it is by its
+instance's identity document, which AWS signs, and the gateway admits it once, for the instance
+that the run launched, from that instance's address. The provider holds AWS's certificate of the
+signing key for each region that AWS lists, and refuses a region it holds none for as it connects.
 
 ## The Modal provider
 

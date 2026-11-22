@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use docker::{CpuList, Docker};
 use ec2::Ec2;
 use engine::Engine;
-use gateway::{Dialer, GrantListener};
+use gateway::{Dialer, Listener};
 use modal::Modal;
 use provider::{Meeting, Provider, RunTag};
 use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
@@ -149,7 +149,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<ExitCode, String> {
     // The task, `sandboxd`, the configuration and its upstream's key are checked before the engine
     // is reached, so a mistake in one needs no engine and makes no record. The roles are placed
     // in the classes that the providers offer once they are reached, before the record is begun,
-    // and before the grant listener is bound, so a role that fits none is refused before anything
+    // and before the private listener is bound, so a role that fits none is refused before anything
     // is reserved. What only a provider refuses, such as a `sandboxd` it can't mount, is refused
     // once the record exists.
     let (runs, _) = runs_dir(runs)?;
@@ -398,7 +398,7 @@ fn listen(
     placed_on: &ByProvider<&Connected<'_>>,
     gateway: &config::Gateway,
     config: &Path,
-) -> Result<Option<GrantListener>, String> {
+) -> Result<Option<Listener>, String> {
     let mut private = Vec::new();
     for (name, connected) in placed_on.iter() {
         match connected.provider().meeting() {
@@ -419,7 +419,7 @@ fn listen(
             private.join(", ")
         ));
     };
-    let bound = GrantListener::bind(address, HELLO_TIMEOUT).map_err(|error| {
+    let bound = Listener::bind(address, HELLO_TIMEOUT).map_err(|error| {
         format!(
             "{}: {error}: name in `[gateway] private` an address of this machine's where no other \
              run listens",

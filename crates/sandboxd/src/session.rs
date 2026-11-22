@@ -16,8 +16,8 @@ use std::{fmt, thread};
 use schema::frame;
 use schema::ir::GpuModel;
 use schema::sandbox::{
-    FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant,
-    SANDBOXD_GRANT, ToSandbox, read_hello_reply,
+    Attestation, FromSandbox, HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, RegistrationGrant,
+    SANDBOXD_ATTESTATION, SANDBOXD_GRANT, ToSandbox, read_hello_reply,
 };
 use stdx::process::Environment;
 use stdx::{Context, Deadline, unpoisoned};
@@ -32,8 +32,8 @@ use crate::until::Until;
 pub(crate) enum Gateway {
     /// At a Unix socket of the sandbox's own, which identifies the sandbox.
     Socket(PathBuf),
-    /// At a TCP address, where the hello presents the grant that identifies the sandbox.
-    Tcp(SocketAddr, RegistrationGrant),
+    /// At a TCP address, where the hello presents the attestation that identifies the sandbox.
+    Tcp(SocketAddr, Attestation),
     /// At a TCP address of the sandbox's own, where it listens, and the gateway's answer to the
     /// hello presents the grant that identifies the gateway; until the deadline, past which no
     /// gateway will.
@@ -109,8 +109,9 @@ fn gpus() -> Option<Vec<GpuModel>> {
     let mut nvidia_smi = stdx::process::command("nvidia-smi", Environment::Inherited);
     nvidia_smi
         .args(["--query-gpu=name", "--format=csv,noheader"])
-        // It runs as a command would, which has no grant.
-        .env_remove(SANDBOXD_GRANT);
+        // It runs as a command would, which has neither a grant nor an attestation.
+        .env_remove(SANDBOXD_GRANT)
+        .env_remove(SANDBOXD_ATTESTATION);
     let output = stdx::process::output(&mut nvidia_smi, Deadline::after(GPUS_TIMEOUT));
     let output = output.ok()?.filter(|output| output.status.success())?;
     let names = String::from_utf8(output.stdout).ok()?;
@@ -121,18 +122,15 @@ fn gpus() -> Option<Vec<GpuModel>> {
         .filter(|gpus| !gpus.is_empty())
 }
 
-/// The hello that presents `grant` and names `gpus`, unless their names would make it longer
-/// than `MAX_HELLO_BYTES`, which the gateway would refuse.
-fn hello(grant: Option<RegistrationGrant>, gpus: Option<Vec<GpuModel>>) -> Hello {
-    let named = Hello { grant, gpus };
+/// The hello that names `gpus`, unless their names would make it longer than `MAX_HELLO_BYTES`,
+/// which the gateway would refuse.
+fn hello(gpus: Option<Vec<GpuModel>>) -> Hello {
+    let named = Hello { gpus };
     let fits = serde_json::to_vec(&named).is_ok_and(|json| json.len() <= MAX_HELLO_BYTES);
     if fits {
         return named;
     }
-    Hello {
-        gpus: None,
-        ..named
-    }
+    Hello { gpus: None }
 }
 
 /// Listens at `address` until a peer's answer to `hello` presents `grant`, and returns that
@@ -200,7 +198,7 @@ fn greet(
     // No later than `by`, past which no gateway claims the sandbox.
     let left = by.remaining().unwrap_or_default();
     let mut peer = Until::new(stream, Deadline::after(left.min(HELLO_TIMEOUT)));
-    open(&mut peer, hello, Some(grant))?;
+    open(&mut peer, (hello, None), Some(grant))?;
     let lifted = stream
         .set_read_timeout(None)
         .and_then(|()| stream.set_write_timeout(None));
@@ -211,13 +209,13 @@ fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Write
     let connecting = format_args!("connecting to the gateway at {gateway} failed");
     let opening = format_args!("opening the session with the gateway at {gateway} failed");
     match gateway {
-        Gateway::Listen(address, grant, by) => listen(address, grant, *by, &hello(None, gpus)),
+        Gateway::Listen(address, grant, by) => listen(address, grant, *by, &hello(gpus)),
         Gateway::Socket(socket) => {
             let stream = UnixStream::connect(socket).context(connecting)?;
-            open(&mut &stream, &hello(None, gpus), None).context(opening)?;
+            open(&mut &stream, (&hello(gpus), None), None).context(opening)?;
             halves(stream, UnixStream::try_clone)
         }
-        Gateway::Tcp(address, grant) => {
+        Gateway::Tcp(address, attestation) => {
             // One dial, as at a socket: the gateway listens before the sandbox starts, so a retry
             // would meet no gateway that this dial missed, and the kernel's own retries of the
             // handshake ride out lost packets. An exit then ends the sandbox's start before the
@@ -225,18 +223,17 @@ fn meet(gateway: &Gateway, gpus: Option<Vec<GpuModel>>) -> Result<(Reader, Write
             let stream = TcpStream::connect(address).context(connecting)?;
             stdx::net::set_options(&stream)
                 .context("setting the options of the connection to the gateway failed")?;
-            let hello = hello(Some(grant.clone()), gpus);
-            open(&mut &stream, &hello, None).context(opening)?;
+            open(&mut &stream, (&hello(gpus), Some(attestation)), None).context(opening)?;
             halves(stream, TcpStream::try_clone)
         }
     }
 }
 
-/// Says `hello` to `peer`, and returns once its answer accepts the session, presenting
-/// `expected`; or why not, saying what `it`, the peer, did.
+/// Says `hello` to `peer`, with `attestation` in its body, and returns once its answer accepts the
+/// session, presenting `expected`; or why not, saying what `it`, the peer, did.
 fn open(
     peer: &mut (impl Read + Write),
-    hello: &Hello,
+    (hello, attestation): (&Hello, Option<&Attestation>),
     expected: Option<&RegistrationGrant>,
 ) -> Result<(), String> {
     let late = |error: io::Error| match error.kind() {
@@ -247,7 +244,7 @@ fn open(
         ),
         _ => error.to_string(),
     };
-    frame::write(peer, hello, &[])
+    frame::write(peer, hello, attestation.map_or(&[], Attestation::bytes))
         .map_err(late)
         .context("sending the hello failed")?;
     // Unbuffered, as a frame is read to its end and no further, so that the session's reads,

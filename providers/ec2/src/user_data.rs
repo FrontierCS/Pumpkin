@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use schema::ec2_boot::{self, BOOT_IN_IMAGE, CONSOLE_PREFIX, GRANT_DIR, Start};
+use schema::ec2_boot::{self, ATTESTATION_DIR, BOOT_IN_IMAGE, CONSOLE_PREFIX, Start};
 use serde_json::{Value, json};
 
 const BOOT: &str = include_str!("pumpkin-ec2-boot.service");
@@ -31,7 +31,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const _: () = assert!(
     is_literal(BOOT_IN_IMAGE)
         && is_literal(CONSOLE_PREFIX)
-        && is_literal(GRANT_DIR)
+        && is_literal(ATTESTATION_DIR)
         && is_literal(BOOTS_ONCE_UNIT)
 );
 
@@ -63,7 +63,7 @@ pub(crate) fn user_data(start: &Start, registry: &str) -> Result<String, String>
     let boot = (filled.iter()).fold(BOOT.to_owned(), |unit, (placeholder, value)| {
         unit.replace(placeholder, value)
     });
-    let boots_once = BOOTS_ONCE.replace("@GRANT_DIR@", GRANT_DIR);
+    let boots_once = BOOTS_ONCE.replace("@ATTESTATION_DIR@", ATTESTATION_DIR);
     // Docker asks ECR's credential helper for the registry's token on each pull, by the
     // instance's role. In user data, not in the AMI, as a configured helper makes `docker login`
     // fail, which the boots of other builds run: Docker stores the login through the helper,
