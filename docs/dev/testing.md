@@ -9,10 +9,9 @@ The rules for writing Pumpkin's tests and their snapshots.
 - PREFER testing a decision as a function of values to running it through a stand-in
 - START a snapshot as `expect![[""]]`, fill it with
   `cargo xtask refill --package <crate> [<test>]`, and read the diff before keeping it
-- SNAPSHOT each command's help, and each help topic's, in a file of its own, as cargo and
-  rustup do: one test in `crates/pumpkin/tests/it/help.rs` draws the styled standard output as
-  an SVG with `anstyle-svg`. It compares the drawing with `help/<name>.svg` through
-  `expect_file!`. Fill the file with `cargo xtask refill`, and read the diff before keeping it
+- SNAPSHOT each command's help, and each help topic's, as an SVG of its own in
+  `crates/pumpkin/tests/it/help/`. Fill it with `cargo xtask refill`, and read the diff before
+  keeping it
 - ASSERT in a file's `check` helper what holds of every case, such as files left or modes; show
   in the snapshot what the test is about, and what departs from that
 - MAKE the state that a reader of Pumpkin's own format reads with Pumpkin's writer, or build a
