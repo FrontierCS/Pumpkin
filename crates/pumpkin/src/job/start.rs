@@ -4,7 +4,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use provider::RunTag;
 use schema::ir::Sha256Digest;
@@ -231,7 +231,8 @@ fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> 
 }
 
 /// Keeps the build that a job runs at the same location as a locally built install, under its
-/// own digest. Older clients prune the serve installs after a day, even while its jobs still run.
+/// own digest. Marks the install as handed out now. Older clients prune the serve installs after a
+/// day, even while its jobs still run.
 fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
     let exe = workspace::exe("expected the build whose job is starting")?;
     if exe.parent().and_then(Path::file_name) != Some(install.hex().as_ref()) {
@@ -267,5 +268,7 @@ fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
         symlink("pumpkin", &boot).context(boot.display())?;
         fs::rename(made.path(), &bin).context(bin.display())?;
     }
+    let marked = File::open(&root).and_then(|root| root.set_modified(SystemTime::now()));
+    marked.context(root.display())?;
     Ok(pumpkin)
 }
