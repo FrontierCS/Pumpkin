@@ -12,6 +12,8 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
+use anstream::{AutoStream, ColorChoice};
+use clap::builder::StyledStr;
 use driver::ARGV0;
 use engine::{ContextName, Engine};
 use provider::UnixTime;
@@ -83,7 +85,9 @@ fn main() -> ExitCode {
         Ok(cli::Command::Boot) => job::boot(),
         Ok(cli::Command::CancelFor(flags)) => job::cancel(flags),
         Ok(cli::Command::Serve(member)) => serve::serve(member.as_ref()),
-        Ok(cli::Command::Print(text)) => print(text.as_bytes())
+        // clap's own printing writes the help in many pieces. `head` can close the pipe between two
+        // of them, and the next write fails. `print` writes the help in one `write_all`.
+        Ok(cli::Command::Print(text)) => print(styled(&text).as_bytes())
             .context("printing to the standard output failed")
             .map(|()| ExitCode::SUCCESS),
         Err(refusal) => return usage_error(refusal),
@@ -473,6 +477,18 @@ fn print(bytes: &[u8]) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(bytes)?;
     stdout.flush()
+}
+
+/// `text`, without its ANSI styles where clap would print its own help without them.
+fn styled(text: &StyledStr) -> String {
+    // clap decides through anstream, as here.
+    // https://github.com/clap-rs/clap/blob/13f2db5072d600c11d8d6298e4e9ba53ffc6c1ab/clap_builder/src/output/fmt.rs#L36-L57
+    match AutoStream::choice(&io::stdout()) {
+        ColorChoice::Never => text.to_string(),
+        ColorChoice::Auto | ColorChoice::AlwaysAnsi | ColorChoice::Always => {
+            text.ansi().to_string()
+        }
+    }
 }
 
 fn advise(to: &str, command: &str) {

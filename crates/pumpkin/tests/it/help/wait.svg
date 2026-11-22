@@ -1,0 +1,101 @@
+<svg width="852px" height="704px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Wait for a run to end and say how it ended.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>While the run goes on, `wait` says each of its milestones on the standard error. Once the run has</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>ended, `wait` says its summary and the command that runs it again. Ending `wait` doesn't stop the</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>run, but `pumpkin cancel` does.</tspan>
+</tspan>
+    <tspan x="10px" y="118px">
+</tspan>
+    <tspan x="10px" y="136px"><tspan>With `[controller]` in the configuration and no `--runs`, `wait` follows the run on the controller.</tspan>
+</tspan>
+    <tspan x="10px" y="154px"><tspan>It then copies the record into the default runs directory.</tspan>
+</tspan>
+    <tspan x="10px" y="172px">
+</tspan>
+    <tspan x="10px" y="190px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin wait</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;run&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="208px">
+</tspan>
+    <tspan x="10px" y="226px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-cyan">&lt;run&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>          The run's id, a prefix of the id or of its last 8 digits that no other run shares, or its</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>          record's path with a `/`</tspan>
+</tspan>
+    <tspan x="10px" y="298px">
+</tspan>
+    <tspan x="10px" y="316px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--runs</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>          The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)</tspan>
+</tspan>
+    <tspan x="10px" y="370px">
+</tspan>
+    <tspan x="10px" y="388px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--outcome</tspan>
+</tspan>
+    <tspan x="10px" y="406px"><tspan>          Print the run's outcome.json on the standard output once it ends, even if it failed to</tspan>
+</tspan>
+    <tspan x="10px" y="424px"><tspan>          start</tspan>
+</tspan>
+    <tspan x="10px" y="442px">
+</tspan>
+    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="496px">
+</tspan>
+    <tspan x="10px" y="514px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="532px"><tspan>  pumpkin wait 20261108-000905-126a21e9</tspan>
+</tspan>
+    <tspan x="10px" y="550px"><tspan>  pumpkin wait 126a</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>  pumpkin wait runs/20261108-000905-126a21e9</tspan>
+</tspan>
+    <tspan x="10px" y="586px"><tspan>  pumpkin wait --outcome 126a &gt; outcome.json</tspan>
+</tspan>
+    <tspan x="10px" y="604px">
+</tspan>
+    <tspan x="10px" y="622px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+</tspan>
+    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  The run finished with a result.</tspan>
+</tspan>
+    <tspan x="10px" y="658px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">1</tspan><tspan>  The run failed, was interrupted or was lost, or another error.</tspan>
+</tspan>
+    <tspan x="10px" y="676px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  The run finished without a result.</tspan>
+</tspan>
+    <tspan x="10px" y="694px">
+</tspan>
+  </text>
+
+</svg>

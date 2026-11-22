@@ -1,0 +1,75 @@
+<svg width="852px" height="470px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Run the controller's own commands.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>These actions run on the controller. `serve` answers a client's `ssh` link and starts each `job` in</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>a unit of its own. The controller's boot runs `boot`.</tspan>
+</tspan>
+    <tspan x="10px" y="100px">
+</tspan>
+    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin controller</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;action&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="136px">
+</tspan>
+    <tspan x="10px" y="154px"><tspan class="fg-bright-green bold">Actions:</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">job</tspan><tspan>     Run a client's `run` as a job</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">boot</tspan><tspan>    Reap what lost runs left, at the controller's boot</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">cancel</tspan><tspan>  Cancel a run for a client</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">serve</tspan><tspan>   Answer a client on the standard input and output</tspan>
+</tspan>
+    <tspan x="10px" y="244px">
+</tspan>
+    <tspan x="10px" y="262px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="316px">
+</tspan>
+    <tspan x="10px" y="334px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="352px"><tspan>  cd ~/trees/tasks/20261108-000905-126a21e9 &amp;&amp; \</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>    pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 \</tspan>
+</tspan>
+    <tspan x="10px" y="388px"><tspan>    --parameter /pumpkin-alice/settings \</tspan>
+</tspan>
+    <tspan x="10px" y="406px"><tspan>    --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 \</tspan>
+</tspan>
+    <tspan x="10px" y="424px"><tspan>    -- run tasks/bench/task.star --arg model=model-a</tspan>
+</tspan>
+    <tspan x="10px" y="442px"><tspan>  pumpkin controller boot</tspan>
+</tspan>
+    <tspan x="10px" y="460px">
+</tspan>
+  </text>
+
+</svg>

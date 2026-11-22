@@ -17,7 +17,8 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
 use aws::Region;
-use clap::builder::{OsStringValueParser, TypedValueParser};
+use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
+use clap::builder::{OsStringValueParser, StyledStr, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{
     Arg, ArgAction, ArgMatches, Args, CommandFactory as _, FromArgMatches, Parser, Subcommand,
@@ -26,8 +27,8 @@ use provider::RunTag;
 use schema::ir::Sha256Digest;
 
 use self::notes::{
-    CANCEL_FOR_NOTES, CANCEL_NOTES, CHECK_NOTES, CONFIG, CONTROLLER_NOTES, FMT_NOTES, HELP_NOTES,
-    LS_NOTES, REAP_NOTES, RUN_NOTES, VIEW_NOTES, WAIT_NOTES,
+    CONFIG, cancel_for_notes, cancel_notes, check_notes, controller_notes, fmt_notes, help_notes,
+    ls_notes, reap_notes, run_notes, view_notes, wait_notes,
 };
 use crate::ending::Printed;
 use crate::member::Member;
@@ -55,7 +56,7 @@ enum Parsed {
     /// lints the files it read. It says every problem in every task, and prints nothing when it
     /// finds none. It reads only files below each task's root. It reaches no Docker engine,
     /// network or configuration, so an image's build can still fail.
-    #[command(after_help = CHECK_NOTES)]
+    #[command(after_help = check_notes())]
     Check(Check),
     /// Format `.star` files.
     ///
@@ -64,7 +65,7 @@ enum Parsed {
     /// directory, it skips names that start with `.` and anything a symbolic link leads to. If a
     /// file can't be formatted, `fmt` says why and formats the others. It prints nothing on
     /// success.
-    #[command(after_help = FMT_NOTES)]
+    #[command(after_help = fmt_notes())]
     Fmt(Fmt),
     /// Build a task and start a run of it.
     ///
@@ -75,7 +76,7 @@ enum Parsed {
     /// With `[controller]` in the configuration, `run` sends the task to the controller, which
     /// builds and runs it. `run` then prints the id at once and returns before the build.
     /// `pumpkin wait` follows the build and the run. `--runs` and `--sandboxd` are refused.
-    #[command(after_help = RUN_NOTES)]
+    #[command(after_help = run_notes())]
     Run(Run),
     /// Wait for a run to end and say how it ended.
     ///
@@ -85,7 +86,7 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `wait` follows the run on the
     /// controller. It then copies the record into the default runs directory.
-    #[command(after_help = WAIT_NOTES)]
+    #[command(after_help = wait_notes())]
     Wait(Wait),
     /// List runs and their states.
     ///
@@ -95,7 +96,7 @@ enum Parsed {
     /// gives its state, how long it ran and its result's values. If a run can't be listed, `ls`
     /// says why and lists the others. With `[controller]` in the configuration and no `--runs`,
     /// `ls` lists the controller's runs beside this machine's copies.
-    #[command(after_help = LS_NOTES)]
+    #[command(after_help = ls_notes())]
     Ls(Ls),
     /// Stop a run and remove what it left.
     ///
@@ -105,7 +106,7 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the
     /// controller. It then copies a started run's record here, as `pumpkin wait` does.
-    #[command(after_help = CANCEL_NOTES)]
+    #[command(after_help = cancel_notes())]
     Cancel(CancelRun),
     /// Serve the runs to this machine's browser.
     ///
@@ -115,12 +116,12 @@ enum Parsed {
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
     /// runs.
-    #[command(after_help = VIEW_NOTES)]
+    #[command(after_help = view_notes())]
     View(View),
     /// Print the help of a command or a topic.
     ///
     /// Without a command or a topic, `help` prints what `pumpkin --help` does.
-    #[command(after_help = HELP_NOTES)]
+    #[command(after_help = help_notes())]
     Help {
         /// A command, or the topic `config`.
         #[arg(value_name = "topic")]
@@ -135,13 +136,13 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `reap` reaps the controller's
     /// runs that this build made.
-    #[command(hide = true, after_help = REAP_NOTES)]
+    #[command(hide = true, after_help = reap_notes())]
     Reap(Reap),
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
     /// `job` in a unit of its own. The controller's boot runs `boot`.
-    #[command(hide = true, after_help = CONTROLLER_NOTES)]
+    #[command(hide = true, after_help = controller_notes())]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
     Controller {
@@ -185,7 +186,7 @@ enum Action {
     /// Cancel a run for a client.
     ///
     /// The client then says how the run ended, from its copy of the record.
-    #[command(after_help = CANCEL_FOR_NOTES)]
+    #[command(after_help = cancel_for_notes())]
     Cancel(Cancel),
     /// Answer a client on the standard input and output.
     ///
@@ -214,7 +215,7 @@ pub(crate) enum Command {
     Boot,
     CancelFor(Cancel),
     Serve(Option<Member>),
-    Print(String),
+    Print(StyledStr),
 }
 
 const ARG: &str = "arg";
@@ -549,7 +550,8 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
     }
     let before = &args[..first.unwrap_or(args.len())];
     if before.iter().any(|arg| arg == "-V" || arg == "--version") {
-        return Ok(Command::Print(format!("pumpkin {}\n", runtime::BUILD)));
+        let version = format!("pumpkin {}\n", runtime::BUILD);
+        return Ok(Command::Print(version.into()));
     }
     let refusal = |error| Refusal {
         error,
@@ -646,7 +648,7 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
         return Ok(Command::Print(help(cli, None, None)));
     };
     if topic == "config" {
-        return Ok(Command::Print(CONFIG.to_owned()));
+        return Ok(Command::Print(CONFIG.into()));
     }
     let names: Vec<String> = (cli.get_subcommands())
         .filter(|command| listed(command))
@@ -670,6 +672,20 @@ fn listed(command: &clap::Command) -> bool {
     !command.is_hide_set() || RARE.contains(&command.get_name())
 }
 
+// cargo's palette for its help. rustup uses it too, as clap-cargo's.
+// https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/crates/cargo-util-terminal/src/style.rs#L4-L7
+// https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/src/bin/cargo/cli.rs#L592-L601
+// https://github.com/crate-ci/clap-cargo/blob/8c8b15fe2abd24034ae0d8015ba8ec38f3c40591/src/style.rs#L10-L13
+// https://github.com/rust-lang/rustup/blob/08f60b0a9f445bf25153692139700a2cbc1a869b/src/cli/rustup_mode.rs#L88
+const HEADER: Style = AnsiColor::BrightGreen.on_default().effects(Effects::BOLD);
+const LITERAL: Style = AnsiColor::BrightCyan.on_default().effects(Effects::BOLD);
+const PLACEHOLDER: Style = AnsiColor::Cyan.on_default();
+const STYLES: Styles = Styles::styled()
+    .header(HEADER)
+    .usage(HEADER)
+    .literal(LITERAL)
+    .placeholder(PLACEHOLDER);
+
 fn command() -> clap::Command {
     // No command has a help flag of clap's, so a usage error ends without clap's pointer to it,
     // and `pumpkin help <command>` is said instead; `parse` answers `-h`, `--help`, `-V` and
@@ -679,6 +695,7 @@ fn command() -> clap::Command {
     let version = Arg::new("version").short('V').long("version");
     let version = version.action(ArgAction::SetTrue).help("Print version");
     let cli = Parsed::command()
+        .styles(STYLES)
         .arg(version)
         .arg(help.display_order(usize::MAX));
     let width = (cli.get_subcommands())
@@ -690,9 +707,12 @@ fn command() -> clap::Command {
         .filter(|command| RARE.contains(&command.get_name()))
         .map(|command| {
             let about = command.get_about().map(ToString::to_string);
+            let name = command.get_name();
+            // The padding is unstyled, as in clap's own list of commands.
+            let pad = width - name.len();
             format!(
-                "  {:width$}  {}\n",
-                command.get_name(),
+                "  {LITERAL}{name}{LITERAL:#}{:pad$}  {}\n",
+                "",
                 about.unwrap_or_default()
             )
         })
@@ -700,32 +720,32 @@ fn command() -> clap::Command {
     let rare = rare.concat();
     cli.after_help(format!(
         "\
-Rarely needed:
+{HEADER}Rarely needed:{HEADER:#}
 {rare}
-Topics:
-  {:width$}  The machine's configuration, pumpkin.toml
+{HEADER}Topics:{HEADER:#}
+  {LITERAL}config{LITERAL:#}{:pad$}  The machine's configuration, pumpkin.toml
 
-Exit status:
-  0  Success.
-  1  An error. A `pumpkin:` line on the standard error says why.
-  2  A usage error.
-  3  An outcome that the help of `wait`, `cancel` and `reap` says.
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}0{LITERAL:#}  Success.
+  {LITERAL}1{LITERAL:#}  An error. A `pumpkin:` line on the standard error says why.
+  {LITERAL}2{LITERAL:#}  A usage error.
+  {LITERAL}3{LITERAL:#}  An outcome that the help of `wait`, `cancel` and `reap` says.
 
 `pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`
 prints a topic. The guide to running workflows is docs/running.md:
 https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md",
-        "config"
+        "",
+        pad = width - "config".len()
     ))
 }
 
-fn help(cli: &mut clap::Command, name: Option<&str>, action: Option<&str>) -> String {
+fn help(cli: &mut clap::Command, name: Option<&str>, action: Option<&str>) -> StyledStr {
     cli.build();
-    let help = match name.and_then(|name| cli.find_subcommand_mut(name)) {
+    match name.and_then(|name| cli.find_subcommand_mut(name)) {
         Some(command) => match action.and_then(|action| command.find_subcommand_mut(action)) {
             Some(action) => action.render_long_help(),
             None => command.render_long_help(),
         },
         None => cli.render_long_help(),
-    };
-    help.to_string()
+    }
 }

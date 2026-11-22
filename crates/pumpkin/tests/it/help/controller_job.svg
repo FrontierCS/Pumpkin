@@ -1,0 +1,79 @@
+<svg width="886px" height="506px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Run a client's `run` as a job.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>`job` makes the job's tree in its working directory, which is `~/trees/&lt;repository&gt;/&lt;id&gt;`. It then</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>runs the command there.</tspan>
+</tspan>
+    <tspan x="10px" y="100px">
+</tspan>
+    <tspan x="10px" y="118px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin controller job</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--region</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;region&gt;</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--parameter</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--tree</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;sha256&gt;</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;id&gt;</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">--</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;command&gt;...</tspan>
+</tspan>
+    <tspan x="10px" y="136px">
+</tspan>
+    <tspan x="10px" y="154px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>  </tspan><tspan class="fg-cyan">&lt;id&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>          The job's id, which its run takes</tspan>
+</tspan>
+    <tspan x="10px" y="208px">
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-cyan">&lt;command&gt;...</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>          `run` with its arguments, but not `--config`, which the job writes</tspan>
+</tspan>
+    <tspan x="10px" y="262px">
+</tspan>
+    <tspan x="10px" y="280px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--region</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;region&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>          The controller's AWS region</tspan>
+</tspan>
+    <tspan x="10px" y="334px">
+</tspan>
+    <tspan x="10px" y="352px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--parameter</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;name&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>          The SSM parameter that holds the controller's settings</tspan>
+</tspan>
+    <tspan x="10px" y="388px">
+</tspan>
+    <tspan x="10px" y="406px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--tree</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;sha256&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="424px"><tspan>          The SHA-256 of the manifest of the job's tree in the controller's store</tspan>
+</tspan>
+    <tspan x="10px" y="442px">
+</tspan>
+    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="496px">
+</tspan>
+  </text>
+
+</svg>

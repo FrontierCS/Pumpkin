@@ -1,0 +1,109 @@
+<svg width="844px" height="776px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Run workflows of agents in sandboxes.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>In each run, an agent works in a sandbox and a final call judges what it submits. The repository's</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>`.pumpkin` directory holds the runs' records and the state of builds and providers. A command's</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>`--runs` names another directory for the records.</tspan>
+</tspan>
+    <tspan x="10px" y="118px">
+</tspan>
+    <tspan x="10px" y="136px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;command&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="154px">
+</tspan>
+    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Commands:</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">check</tspan><tspan>   Check tasks without building or running them</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">fmt</tspan><tspan>     Format `.star` files</tspan>
+</tspan>
+    <tspan x="10px" y="226px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">run</tspan><tspan>     Build a task and start a run of it</tspan>
+</tspan>
+    <tspan x="10px" y="244px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">wait</tspan><tspan>    Wait for a run to end and say how it ended</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">ls</tspan><tspan>      List runs and their states</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">cancel</tspan><tspan>  Stop a run and remove what it left</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">view</tspan><tspan>    Serve the runs to this machine's browser</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">help</tspan><tspan>    Print the help of a command or a topic</tspan>
+</tspan>
+    <tspan x="10px" y="334px">
+</tspan>
+    <tspan x="10px" y="352px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="370px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-V</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--version</tspan>
+</tspan>
+    <tspan x="10px" y="388px"><tspan>          Print version</tspan>
+</tspan>
+    <tspan x="10px" y="406px">
+</tspan>
+    <tspan x="10px" y="424px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="442px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="460px">
+</tspan>
+    <tspan x="10px" y="478px"><tspan class="fg-bright-green bold">Rarely needed:</tspan>
+</tspan>
+    <tspan x="10px" y="496px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">reap</tspan><tspan>        Remove what ended runs left</tspan>
+</tspan>
+    <tspan x="10px" y="514px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">controller</tspan><tspan>  Run the controller's own commands</tspan>
+</tspan>
+    <tspan x="10px" y="532px">
+</tspan>
+    <tspan x="10px" y="550px"><tspan class="fg-bright-green bold">Topics:</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">config</tspan><tspan>      The machine's configuration, pumpkin.toml</tspan>
+</tspan>
+    <tspan x="10px" y="586px">
+</tspan>
+    <tspan x="10px" y="604px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+</tspan>
+    <tspan x="10px" y="622px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Success.</tspan>
+</tspan>
+    <tspan x="10px" y="640px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">1</tspan><tspan>  An error. A `pumpkin:` line on the standard error says why.</tspan>
+</tspan>
+    <tspan x="10px" y="658px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">2</tspan><tspan>  A usage error.</tspan>
+</tspan>
+    <tspan x="10px" y="676px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  An outcome that the help of `wait`, `cancel` and `reap` says.</tspan>
+</tspan>
+    <tspan x="10px" y="694px">
+</tspan>
+    <tspan x="10px" y="712px"><tspan>`pumpkin help &lt;command&gt;` prints a command's help, and `pumpkin help &lt;topic&gt;`</tspan>
+</tspan>
+    <tspan x="10px" y="730px"><tspan>prints a topic. The guide to running workflows is docs/running.md:</tspan>
+</tspan>
+    <tspan x="10px" y="748px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md</tspan>
+</tspan>
+    <tspan x="10px" y="766px">
+</tspan>
+  </text>
+
+</svg>

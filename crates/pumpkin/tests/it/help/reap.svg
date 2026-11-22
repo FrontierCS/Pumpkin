@@ -1,0 +1,83 @@
+<svg width="860px" height="542px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Remove what ended runs left.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>For each run whose driver has ended, `reap` deletes the sandboxes that remain on each provider it</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>ran on. It removes the run's socket directories and records a lost run as failed. It leaves a live</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>run to its driver. If a run can't be reaped, `reap` says why and reaps the others. It prints the ids</tspan>
+</tspan>
+    <tspan x="10px" y="118px"><tspan>of the runs it cleaned.</tspan>
+</tspan>
+    <tspan x="10px" y="136px">
+</tspan>
+    <tspan x="10px" y="154px"><tspan>With `[controller]` in the configuration and no `--runs`, `reap` reaps the controller's runs that</tspan>
+</tspan>
+    <tspan x="10px" y="172px"><tspan>this build made.</tspan>
+</tspan>
+    <tspan x="10px" y="190px">
+</tspan>
+    <tspan x="10px" y="208px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin reap</tspan><tspan> </tspan><tspan class="fg-cyan">[OPTIONS]</tspan>
+</tspan>
+    <tspan x="10px" y="226px">
+</tspan>
+    <tspan x="10px" y="244px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>      </tspan><tspan class="fg-bright-cyan bold">--runs</tspan><tspan class="fg-cyan"> </tspan><tspan class="fg-cyan">&lt;dir&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>          The directory of the runs to reap (default: `runs` in the repository's `.pumpkin`)</tspan>
+</tspan>
+    <tspan x="10px" y="298px">
+</tspan>
+    <tspan x="10px" y="316px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="352px">
+</tspan>
+    <tspan x="10px" y="370px"><tspan class="fg-bright-green bold">Examples:</tspan>
+</tspan>
+    <tspan x="10px" y="388px"><tspan>  pumpkin reap</tspan>
+</tspan>
+    <tspan x="10px" y="406px"><tspan>  pumpkin reap --runs runs</tspan>
+</tspan>
+    <tspan x="10px" y="424px">
+</tspan>
+    <tspan x="10px" y="442px"><tspan class="fg-bright-green bold">Exit status:</tspan>
+</tspan>
+    <tspan x="10px" y="460px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">0</tspan><tspan>  Nothing that the runs left remains.</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  `reap` can't reach a provider of a run, which it names, and nothing else</tspan>
+</tspan>
+    <tspan x="10px" y="496px"><tspan>     failed. What the run left there may remain. The provider's Docker context</tspan>
+</tspan>
+    <tspan x="10px" y="514px"><tspan>     may be gone, or the configuration may no longer name the provider.</tspan>
+</tspan>
+    <tspan x="10px" y="532px">
+</tspan>
+  </text>
+
+</svg>

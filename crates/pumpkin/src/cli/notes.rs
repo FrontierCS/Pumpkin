@@ -1,94 +1,143 @@
 //! The examples that end each command's help, below its options, with the exit statuses of the
 //! commands that depart from those of `pumpkin --help`, and the topics that `pumpkin help` prints.
+//! Each heading has clap's header style. Each exit status has the literal style, as in rustup's
+//! help:
+//! <https://github.com/rust-lang/rustup/blob/08f60b0a9f445bf25153692139700a2cbc1a869b/src/cli/help.rs#L219-L226>.
 
-pub(super) const CHECK_NOTES: &str = "\
-Examples:
+use super::{HEADER, LITERAL};
+
+pub(super) fn check_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin check tasks/bench/task.star --arg model=model-a
   pumpkin check tasks/*/task.star --arg model=model-a
 
-The lint's rules: https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint";
+The lint's rules: https://github.com/FrontierCS/Pumpkin/blob/main/docs/language.md#formatting-and-the-lint"
+    )
+}
 
-pub(super) const FMT_NOTES: &str = "\
-Examples:
+pub(super) fn fmt_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin fmt
-  pumpkin fmt --check lib tasks/bench/task.star";
+  pumpkin fmt --check lib tasks/bench/task.star"
+    )
+}
 
-pub(super) const RUN_NOTES: &str = "\
-Examples:
+pub(super) fn run_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin run tasks/bench/task.star --arg model=model-a
   pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome \\
     > outcome.json
 
 How a run is placed and how it outlives a logout:
-https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running";
+https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running"
+    )
+}
 
-pub(super) const WAIT_NOTES: &str = "\
-Examples:
+pub(super) fn wait_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin wait 20261108-000905-126a21e9
   pumpkin wait 126a
   pumpkin wait runs/20261108-000905-126a21e9
   pumpkin wait --outcome 126a > outcome.json
 
-Exit status:
-  0  The run finished with a result.
-  1  The run failed, was interrupted or was lost, or another error.
-  3  The run finished without a result.";
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}0{LITERAL:#}  The run finished with a result.
+  {LITERAL}1{LITERAL:#}  The run failed, was interrupted or was lost, or another error.
+  {LITERAL}3{LITERAL:#}  The run finished without a result."
+    )
+}
 
-pub(super) const LS_NOTES: &str = "\
-Examples:
+pub(super) fn ls_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin ls
   pumpkin ls 20261110-1
   pumpkin ls --runs runs
 
-The phases and states: https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs";
+The phases and states: https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#following-and-listing-runs"
+    )
+}
 
-pub(super) const CANCEL_NOTES: &str = "\
-Examples:
+pub(super) fn cancel_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin cancel 126a
 
-Exit status:
-  0  The run has ended, and nothing that it left remains.
-  3  The run has ended, but one of its providers can't be reached.
-     What the run left there may remain.";
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}0{LITERAL:#}  The run has ended, and nothing that it left remains.
+  {LITERAL}3{LITERAL:#}  The run has ended, but one of its providers can't be reached.
+     What the run left there may remain."
+    )
+}
 
-pub(super) const VIEW_NOTES: &str = "\
-Examples:
+pub(super) fn view_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin view
   pumpkin view --runs runs --port 8080
 
 `view` serves until a signal stops it, so it never exits 0.
 
-What the page shows: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page";
+What the page shows: https://github.com/FrontierCS/Pumpkin/blob/main/docs/record.md#the-page"
+    )
+}
 
-pub(super) const HELP_NOTES: &str = "\
-Examples:
+pub(super) fn help_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin help run
-  pumpkin help config";
+  pumpkin help config"
+    )
+}
 
-pub(super) const REAP_NOTES: &str = "\
-Examples:
+pub(super) fn reap_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   pumpkin reap
   pumpkin reap --runs runs
 
-Exit status:
-  0  Nothing that the runs left remains.
-  3  `reap` can't reach a provider of a run, which it names, and nothing else
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}0{LITERAL:#}  Nothing that the runs left remains.
+  {LITERAL}3{LITERAL:#}  `reap` can't reach a provider of a run, which it names, and nothing else
      failed. What the run left there may remain. The provider's Docker context
-     may be gone, or the configuration may no longer name the provider.";
+     may be gone, or the configuration may no longer name the provider."
+    )
+}
 
-pub(super) const CANCEL_FOR_NOTES: &str = "\
-Exit status:
-  102  The run has ended. The client copies its record.
-  103  The run has ended, but one of its providers can't be reached.";
+pub(super) fn cancel_for_notes() -> String {
+    format!(
+        "\
+{HEADER}Exit status:{HEADER:#}
+  {LITERAL}102{LITERAL:#}  The run has ended. The client copies its record.
+  {LITERAL}103{LITERAL:#}  The run has ended, but one of its providers can't be reached."
+    )
+}
 
-pub(super) const CONTROLLER_NOTES: &str = "\
-Examples:
+pub(super) fn controller_notes() -> String {
+    format!(
+        "\
+{HEADER}Examples:{HEADER:#}
   cd ~/trees/tasks/20261108-000905-126a21e9 && \\
     pumpkin controller job 20261108-000905-126a21e9 --region us-west-1 \\
     --parameter /pumpkin-alice/settings \\
     --tree 5d0c5f0e83a3c40be3e7f2b4d1f9a2b6c8e7d6a5b4c3d2e1f0a9b8c7d6e5f4a3 \\
     -- run tasks/bench/task.star --arg model=model-a
-  pumpkin controller boot";
+  pumpkin controller boot"
+    )
+}
 
 pub(super) const CONFIG: &str = "\
 pumpkin.toml is the machine's configuration, which `pumpkin run` reads. It is
