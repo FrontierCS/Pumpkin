@@ -8,7 +8,8 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File, Permissions, TryLockError};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -271,6 +272,117 @@ fn prepare() {
             refused: the clock reads before 1970-01-01: set the system clock; runs directory made: false
             refused: reserving on provider `simulated`: the run needs 1100 simulated CPUs, and 0 of the 1024 are held: run it once others end; runs directory made: false"#]],
     );
+}
+
+/// What becomes of a run of [`WORKFLOW`], with no model route, prepared into `runs`, below `dir`:
+/// the record it is begun in, or why it is refused; `dir` is shown as `<dir>`.
+fn prepared_in(dir: &Path, runs: &str) -> String {
+    let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
+    let agent = ir["roles"][0]["runtime"]["agent"].as_object_mut().unwrap();
+    agent.remove("egress");
+    let ir: ir::Workflow = serde_json::from_value(ir).unwrap();
+    let sim = Sim::new();
+    let placed = placed(&ir, sim.ready()).unwrap();
+    let on = providers_of(&placed, |_| &sim);
+    let (args, unpriced, sources) = (Vec::new(), BTreeMap::new(), BTreeMap::new());
+    let recorded = Recorded {
+        args: &args,
+        prices: &unpriced,
+        sources: &sources,
+    };
+    let servings = agent_servings(placed.workflow(), dir, "http://127.0.0.1:9", None);
+    let budgets = runtime::budgets(placed.workflow(), &unpriced).unwrap();
+    let models = ModelRoutes {
+        servings: &servings,
+        budgets,
+    };
+    let id = new_id(UNIX_EPOCH + Duration::from_secs(1_767_225_599)).unwrap();
+    let prepared = Run::prepare(&System, placed, on, &dir.join(runs), id, models, recorded);
+    let shown = match prepared {
+        Ok(run) => format!(
+            "{runs}: begun in {}/<id>",
+            run.dir().parent().unwrap().display()
+        ),
+        Err(reason) => format!("{runs}: refused: {reason}"),
+    };
+    shown.replace(&dir.display().to_string(), "<dir>")
+}
+
+// A directory on the way to the record that another user may write lets them rename the record,
+// or one above it, and put one of their own in its place; a sticky one, as `/tmp` is, doesn't.
+#[test]
+fn refuses_runs_below_a_directory_another_may_write() {
+    let scratch = TestDir::new();
+    let dir = fs::canonicalize(scratch.path()).unwrap();
+    // A temporary directory may be setgid, or its mode follow a umask such as 002.
+    fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
+    let dirs = [
+        ("shared", 0o757),
+        ("shared/sealed", 0o555),
+        ("sticky", 0o1777),
+        ("own", 0o755),
+        ("grouped", 0o775),
+    ];
+    for (name, mode) in dirs {
+        fs::create_dir(dir.join(name)).unwrap();
+        fs::set_permissions(dir.join(name), Permissions::from_mode(mode)).unwrap();
+    }
+    symlink("own", dir.join("link")).unwrap();
+    let cases = ["shared/runs", "shared/sealed", "sticky/runs", "link/runs"];
+    let mut lines: Vec<String> = cases.map(|runs| prepared_in(&dir, runs)).into();
+    for runs in ["shared/runs", "shared/sealed"] {
+        let left = fs::read_dir(dir.join(runs)).map_or(0, Iterator::count);
+        lines.push(format!("records left in {runs}: {left}"));
+    }
+    expect![[r#"
+        shared/runs: refused: `<dir>/shared` is writable by others: expected a directory that only its owner, or a group that holds only this process's user, may write, or a sticky one, as `chmod o-w <dir>/shared` makes it
+        shared/sealed: refused: `<dir>/shared` is writable by others: expected a directory that only its owner, or a group that holds only this process's user, may write, or a sticky one, as `chmod o-w <dir>/shared` makes it
+        sticky/runs: begun in <dir>/sticky/runs/<id>
+        link/runs: begun in <dir>/own/runs/<id>
+        records left in shared/runs: 0
+        records left in shared/sealed: 0"#]].assert_eq(&lines.join("\n"));
+    // Writable by its group, which is refused unless that group holds this process's user alone.
+    let grouped = prepared_in(&dir, "grouped/runs");
+    if is_private_group(&dir.join("grouped")) {
+        assert_eq!(grouped, "grouped/runs: begun in <dir>/grouped/runs/<id>");
+    } else {
+        let refused = "grouped/runs: refused: `<dir>/grouped` is writable by its group:";
+        assert!(grouped.starts_with(refused), "{grouped}");
+    }
+}
+
+/// Whether the group of `dir` is the private group of its owner, the test's user, by
+/// `/etc/passwd` and `/etc/group`: that user's primary group and no other user's, which
+/// `/etc/group` lists with no member but that user.
+fn is_private_group(dir: &Path) -> bool {
+    // Field `n` of `entry`: its name first, its id third, and fourth a user's primary group, or
+    // a group's members.
+    fn field(entry: &[String], n: usize) -> Option<&str> {
+        entry.get(n).map(String::as_str)
+    }
+    let entries = |file| -> Vec<Vec<String>> {
+        let text = fs::read_to_string(file).unwrap();
+        (text.lines())
+            .map(|line| line.split(':').map(str::to_owned).collect())
+            .collect()
+    };
+    let metadata = fs::metadata(dir).unwrap();
+    let (uid, gid) = (metadata.uid().to_string(), metadata.gid().to_string());
+    let (uid, gid) = (Some(uid.as_str()), Some(gid.as_str()));
+    let (users, groups) = (entries("/etc/passwd"), entries("/etc/group"));
+    let Some(user) = (users.iter()).find(|user| field(user, 2) == uid) else {
+        return false;
+    };
+    let others = (users.iter()).any(|other| field(other, 2) != uid && field(other, 3) == gid);
+    let members: Vec<&str> = (groups.iter())
+        .filter(|group| field(group, 2) == gid)
+        .map(|group| field(group, 3).unwrap_or(""))
+        .collect();
+    field(user, 3) == gid
+        && !others
+        && !members.is_empty()
+        && (members.iter().flat_map(|members| members.split(',')))
+            .all(|member| member.is_empty() || member == user[0])
 }
 
 #[test]

@@ -12,7 +12,6 @@
 )]
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::fmt::{Display, Write as _};
 use std::fs::Permissions;
 use std::io::Read;
@@ -96,7 +95,10 @@ fn copy_tree(from: &Path, to: &Path) {
 /// A test's own directory, with a copy of `pumpkin` in `.pumpkin/bin`.
 ///
 /// Field `0` is its canonical path.
-struct Scratch(PathBuf, TestDir);
+struct Scratch(
+    PathBuf,
+    #[expect(dead_code, reason = "the directory is held for its drop")] TestDir,
+);
 
 /// A now function's body, which a task that [`Scratch::write_task_in`] writes loads.
 const SUBMIT: &str = "def submit(run, payload, finalize: bool = False):
@@ -126,10 +128,6 @@ impl Scratch {
         fs::create_dir(&guard).unwrap();
         symlink("/bin/false", guard.join("aws")).unwrap();
         scratch
-    }
-
-    fn engine_id(&self) -> &str {
-        self.1.path().file_name().unwrap().to_str().unwrap()
     }
 
     fn write(&self, name: &str, contents: &(impl Display + ?Sized)) {
@@ -1150,33 +1148,6 @@ fn workflow(image: &str, argv: &[&str]) -> Value {
     ir
 }
 
-/// The number of CPUs, hardware threads included, that the machine has online.
-fn machine_cpus() -> u64 {
-    cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap()).len() as u64
-}
-
-/// The number of cores that the machine has online, each counted once for its hardware threads.
-fn machine_cores() -> u64 {
-    let online = cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online").unwrap());
-    let cores: BTreeSet<BTreeSet<u32>> = online.into_iter().map(siblings).collect();
-    cores.len() as u64
-}
-
-fn cpu_list(text: &str) -> BTreeSet<u32> {
-    let ranges = text.trim().split(',').filter(|range| !range.is_empty());
-    ranges
-        .flat_map(|range| {
-            let (first, last) = range.split_once('-').unwrap_or((range, range));
-            first.parse::<u32>().unwrap()..=last.parse().unwrap()
-        })
-        .collect()
-}
-
-fn siblings(cpu: u32) -> BTreeSet<u32> {
-    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
-    cpu_list(&fs::read_to_string(path).unwrap())
-}
-
 /// Sends the signal `name` to `target`, a process ID or a process group's negated, and returns
 /// whether it was delivered.
 fn signal(name: &str, target: i64) -> bool {
@@ -1199,30 +1170,26 @@ repositories = { roles = "pumpkin/roles", sandboxd = "pumpkin/sandboxd" }
 timer = { group = "pumpkin", role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer" }
 "#;
 
-const MODAL: &str = r#"[providers.gpus.modal]
-profile = "pumpkin"
-dials_from = "203.0.113.7"
-images = { region = "us-west-1", repository = "pumpkin/roles", role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull" }
-classes = { h100 = { gpu = "H100!", gpu_model = "NVIDIA H100 80GB HBM3", cpu_millis = 4000, memory_bytes = 17179869184, startup_seconds = 1800 } }
-"#;
-
 fn install(scratch: &Scratch, dir: &str) -> PathBuf {
     let dir = scratch.0.join(dir);
     fs::create_dir_all(&dir).unwrap();
     // A link, which writes nothing where a copy would write the whole executable; `pumpkin` finds
     // its workspace by the path it runs from, this one.
     fs::hard_link(PUMPKIN, dir.join("pumpkin")).unwrap();
-    // The pinned formatter, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin`
-    // that runs, by the link that `.cargo/config.toml` names.
+    fs::hard_link(buildifier(), dir.join("buildifier")).unwrap();
+    dir.join("pumpkin")
+}
+
+// The pinned formatter, which `pumpkin fmt` and `pumpkin check` run from beside the `pumpkin` that
+// runs, by the link that `.cargo/config.toml` names.
+fn buildifier() -> PathBuf {
     let link = env!("PUMPKIN_BUILDIFIER");
-    let buildifier = fs::canonicalize(link).unwrap_or_else(|error| {
+    fs::canonicalize(link).unwrap_or_else(|error| {
         panic!(
             "{link} doesn't lead to the formatter ({error}): make it with `cargo xtask \
              install-tools`"
         )
-    });
-    fs::hard_link(buildifier, dir.join("buildifier")).unwrap();
-    dir.join("pumpkin")
+    })
 }
 
 fn engine(scratch: &Scratch, context: &str) -> Engine {
@@ -1236,134 +1203,6 @@ fn containers(context: &str) -> Reached {
 
 fn machine(context: &str) -> String {
     format!("{}\n{LOCAL}", docker_table(context))
-}
-
-// What a recipe holds that the stand-in `docker` builds.
-const BUILDS: &str = "# The stand-in builds this recipe.";
-
-// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
-// on a host of 8 GiB of memory, and keeps its images in the containerd image store.
-const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
-
-const IMAGE: &str = r#"{"Os":"linux","Architecture":"amd64","Descriptor":{"mediaType":"application/vnd.oci.image.manifest.v1+json"}}"#;
-
-/// A stand-in for `docker` in the scratch directory, with the tasks `stand-in`, `lacking` and
-/// `unbuilt`.
-///
-/// Its answers hold the calls of one command, such as `image`, between `hold` and `release`.
-/// The stand-in's CPU ledger lives outside the scratch directory, and dropping it removes that.
-struct StandIn<'a> {
-    scratch: &'a Scratch,
-}
-
-impl<'a> StandIn<'a> {
-    fn new(scratch: &'a Scratch) -> Self {
-        Self::with(scratch, INFO, IMAGE)
-    }
-
-    #[expect(clippy::too_many_lines, reason = "most of it is the stand-in's script")]
-    fn with(scratch: &'a Scratch, info: &str, image: &str) -> Self {
-        let id = scratch.engine_id();
-        let info = info.replace(r#""MemTotal""#, &format!(r#""ID":"{id}","MemTotal""#));
-        let dir = scratch.0.display();
-        let digest = format!("sha256:{}", "0".repeat(64));
-        let absent = format!("sha256:{}", "1".repeat(64));
-        let built = format!("sha256:{}", "2".repeat(64));
-        let docker = format!(
-            r#"#!/bin/sh
-touch "{dir}/docker.ran"
-# `--context=<name>` comes first.
-shift
-# The build's look for an image by its tag, `image inspect --format {{{{.Id}}}} -- <tag>`, is a
-# command of its own to hold.
-name=$1
-case "$1 $2 $4" in
-    "image inspect "*.Id*) name=lookup ;;
-    "image inspect "*.Size*) name=size ;;
-esac
-if [ -e "{dir}/hold-$name" ]; then
-    echo $PPID > "{dir}/at-$name.tmp" && mv "{dir}/at-$name.tmp" "{dir}/at-$name"
-    # At most the minute that `poll` waits, so that the driver of a test killed meanwhile ends.
-    i=0
-    while [ -e "{dir}/hold-$name" ] && kill -0 $PPID 2>/dev/null && [ $i -lt 1200 ]; do
-        sleep 0.05; i=$((i + 1))
-    done
-fi
-case $1 in
-    context) echo unix:///stand-in.sock ;;
-    info) echo '{info}' ;;
-    version) echo linux/amd64 ;;
-    # `image ls --all --no-trunc --quiet`, `image inspect --format <format> -- <image>`, which
-    # says it has no image that the engine lacks, or for
-    # the tag `pumpkin/lacking:<digest>`, the image that the engine lacks, `image inspect --format
-    # {{{{.Id}}}} -- <tag>`; for the tag `pumpkin/unbuilt:<digest>`, no image, which a build
-    # then fails to make; and `image inspect --format {{{{.Size}}}} -- <image>`
-    image) case $2 in
-        ls) echo {digest}; cut --delimiter=' ' --fields=1 "{dir}/images" 2>/dev/null || true ;;
-        rm) echo "docker $*" >> "{dir}/docker.pruned" ;;
-        *) case $name in
-            lookup) case $6 in
-                pumpkin/lacking:*) echo {absent} ;;
-                pumpkin/built:*) grep --quiet --line-regexp --fixed-strings "$6" "{dir}/tagged" 2>/dev/null && echo {built} ||
-                    {{ echo "Error: No such image: $6" >&2; exit 1; }} ;;
-                pumpkin/unbuilt:*) echo "Error: No such image: $6" >&2; exit 1 ;;
-                *) echo {digest} ;;
-            esac ;;
-            size) sed --quiet "s/^$6 //p" "{dir}/images" 2>/dev/null | grep . || echo 0 ;;
-            *) if [ "$6" = {absent} ]; then echo "Error response from daemon: No such image: $6" >&2; exit 1; fi
-               echo '{image}' ;;
-        esac ;;
-    esac ;;
-    container) ;;
-    builder) echo "docker $*" >> "{dir}/docker.pruned" ;;
-    # `build ... --file <recipe> --iidfile <file> -- <stage>`, which writes the image's ID there.
-    build) for arg; do
-        case $previous in
-            --file) grep --quiet --fixed-strings "{BUILDS}" "$arg" || {{ echo "the stand-in creates nothing" >&2; exit 1; }} ;;
-            --iidfile) echo {built} > "$arg" ;;
-        esac
-        previous=$arg
-    done ;;
-    # `tag -- <image> <tag>`.
-    tag) echo "$4" >> "{dir}/tagged" ;;
-    *) echo "the stand-in creates nothing" >&2; exit 1 ;;
-esac
-"#
-        );
-        scratch.write("bin/docker", &docker);
-        let mode = Permissions::from_mode(0o755);
-        fs::set_permissions(scratch.0.join("bin/docker"), mode).unwrap();
-        scratch.write_sandboxd("sandboxd");
-        scratch.write("pumpkin.toml", &machine("default"));
-        scratch.write_task("stand-in", &workflow(&digest, &["true"]));
-        scratch.write_task("lacking", &workflow(&absent, &["true"]));
-        scratch.write_task("unbuilt", &workflow(&digest, &["true"]));
-        Self { scratch }
-    }
-
-    fn hold(&self, command: &str) {
-        self.scratch.write(&format!("hold-{command}"), "");
-    }
-
-    fn held(&self, command: &str) -> i64 {
-        let at = self.scratch.0.join(format!("at-{command}"));
-        poll(|| fs::read_to_string(&at).ok()?.trim().parse().ok())
-    }
-
-    fn release(&self, command: &str) {
-        let _ = fs::remove_file(self.scratch.0.join(format!("hold-{command}")));
-    }
-
-    fn run(&self, entry: &str, rest: &[&str]) -> Command {
-        signals_at_default();
-        let mut run = (self.scratch).pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
-        run.args(["--runs", "runs", "--config", "pumpkin.toml"])
-            .args(rest);
-        let bin = self.scratch.0.join("bin");
-        run.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-        run.process_group(0);
-        run
-    }
 }
 
 /// `command` run by a shell after `setup`, in a process group of its own.
@@ -1382,41 +1221,4 @@ fn through_shell(command: &Command, setup: &str) -> Command {
     }
     shell.process_group(0);
     shell
-}
-
-/// Panics if this thread ignores or blocks `SIGINT` or `SIGTERM`, which a child would inherit.
-fn signals_at_default() {
-    let status = fs::read_to_string("/proc/thread-self/status").unwrap();
-    let mask = |field: &str| {
-        let hex = status
-            .lines()
-            .find_map(|line| line.strip_prefix(field))
-            .unwrap();
-        u64::from_str_radix(hex.trim(), 16).unwrap()
-    };
-    let signals = [libc::SIGINT, libc::SIGTERM].map(|number| 1_u64 << (number - 1));
-    let signals = signals.into_iter().fold(0, |all, signal| all | signal);
-    let (ignored, blocked) = (mask("SigIgn:") & signals, mask("SigBlk:") & signals);
-    assert!(
-        ignored == 0 && blocked == 0,
-        "the test ignores SIGINT or SIGTERM ({ignored:#x}) or blocks them ({blocked:#x}), and \
-         `pumpkin run` would inherit that: run the tests from a terminal's foreground job, as \
-         `cargo xtask ci` there does"
-    );
-}
-
-impl Drop for StandIn<'_> {
-    fn drop(&mut self) {
-        for command in ["context", "image", "create"] {
-            self.release(command);
-        }
-        let _ = fs::remove_dir_all(ledger(self.scratch));
-    }
-}
-
-/// The directory of the CPU ledger that `StandIn`'s engine uses, which is named by its ID.
-///
-/// The engine is the scratch directory's own, so that the stand-in's runs never wait for others.
-fn ledger(scratch: &Scratch) -> PathBuf {
-    Path::new("/var/tmp/pumpkin-cpus").join(scratch.engine_id())
 }

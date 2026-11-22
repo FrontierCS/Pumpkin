@@ -13,64 +13,16 @@ use expect_test::{Expect, expect};
 use schema::ir::Sha256Digest;
 use serde_json::json;
 use stdx::process::Environment;
-use test_support::BUSYBOX;
 
 use super::view::Served;
 use super::{
-    BUILDS, EC2, IMAGE, INFO, LOCAL, MODAL, PUMPKIN, Prices, Scratch, StandIn, asked, cpu_list,
-    cut, docker_table, ended, install, invocation, lease_places, masked, older_finished, poll,
+    PUMPKIN, Prices, Scratch, asked, cut, ended, install, invocation, lease_places, masked, poll,
     report, returned, whole_log, workflow, write_record, write_run,
 };
-
-fn parameter() -> String {
-    let images = MODAL
-        .lines()
-        .find(|line| line.starts_with("images"))
-        .unwrap();
-    format!(
-        "{}\n{EC2}\n[providers.gpus.modal]\n{images}\n",
-        docker_table("default")
-    )
-}
 
 const SENT_MODAL: &str = r#"[modal]
 profile = "alice"
 classes = { a100 = { gpu = "A100-80GB", gpu_model = "NVIDIA A100-SXM4-80GB", cpu_millis = 8000, memory_bytes = 68719476736, startup_seconds = 1800 } }
-"#;
-
-// Notes each call in `calls`, and answers only `--version` and `ssm get-parameter`.
-const AWS: &str = r#"#!/bin/sh
-{ echo aws; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
-case "$*" in
-    --version) echo aws-cli/2.38.1 Python/3.14.6 Linux/7.0.0 exe/x86_64.stand-in ;;
-    "ssm get-parameter "*) cat "${0%/*}/parameter.json" ;;
-    *) echo "the stand-in aws answers only \`--version\` and \`ssm get-parameter\`" >&2; exit 1 ;;
-esac
-"#;
-
-fn write_parameter(scratch: &Scratch, text: &str) {
-    let parameter = json!({ "Parameter": { "Name": "/pumpkin-alice/settings", "Type": "String", "Value": text } });
-    scratch.write("bin/parameter.json", &parameter);
-}
-
-const CURL: &str = r#"#!/bin/sh
-{ echo curl; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
-for url; do :; done
-case $url in
-    */api/token) echo stand-in-token ;;
-    */meta-data/local-ipv4) echo 172.31.5.6 ;;
-    */meta-data/public-ipv4) echo 198.51.100.9 ;;
-    *) echo "curl: (22) The requested URL returned error: 404" >&2; exit 22 ;;
-esac
-"#;
-
-// Answers the size and the bytes available that `disk` holds; a `disk.next` then replaces `disk`,
-// so that the space changes between two reads.
-const DF: &str = r#"#!/bin/sh
-{ echo df; printf '%s\n' "$@"; echo; } >> "${0%/*}/calls"
-echo '1B-blocks Avail'
-cat "${0%/*}/disk"
-[ ! -e "${0%/*}/disk.next" ] || mv "${0%/*}/disk.next" "${0%/*}/disk"
 "#;
 
 fn id_ago(days: u64, random: &str) -> String {
@@ -86,46 +38,12 @@ fn image(digit: char) -> String {
     format!("sha256:{}", digit.to_string().repeat(64))
 }
 
-fn set_up(scratch: &Scratch) {
-    scratch.write_executable("bin/aws", AWS.as_bytes());
-    scratch.write_executable("bin/curl", CURL.as_bytes());
-    scratch.write_executable("bin/df", DF.as_bytes());
-    scratch.write("bin/disk", "1000 500\n");
-    write_parameter(scratch, &parameter());
-    install(scratch, &format!("home/.pumpkin/{PINNED}/bin"));
-    fs::create_dir_all(scratch.0.join("run")).unwrap();
-    let empty = format!("home/store/manifests/{EMPTY_TREE}");
-    scratch.write(&empty, "pumpkin-tree/1\n");
-}
-
 const EMPTY_TREE: &str = "dff3cfced0b99bbac128797b268e1756972cb1285a305e2dc1b9d96e97e6eb5e";
 
 fn controllers(scratch: &Scratch) -> PathBuf {
     scratch
         .0
         .join(format!("home/.pumpkin/{PINNED}/bin/pumpkin"))
-}
-
-fn on_controller(scratch: &Scratch, args: &[&str]) -> Command {
-    let mut command = scratch.program(controllers(scratch), args);
-    command.env("XDG_RUNTIME_DIR", scratch.0.join("run")).env(
-        "PATH",
-        format!("{}:/usr/bin:/bin", scratch.0.join("bin").display()),
-    );
-    command
-}
-
-fn send(scratch: &Scratch, id: &str, config: &str, modal: bool) {
-    let sent = format!("run/pumpkin/{id}");
-    scratch.write(&format!("{sent}/config.toml"), config);
-    scratch.write(&format!("{sent}/gateway.key"), "sk-stand-in\n");
-    if modal {
-        scratch.write(
-            &format!("{sent}/modal.toml"),
-            "[pumpkin]\ntoken_id = \"ak-x\"\n",
-        );
-    }
-    fs::set_permissions(scratch.0.join(sent), Permissions::from_mode(0o700)).unwrap();
 }
 
 const UPSTREAMS: &str = r#"[upstreams.gateway]
@@ -135,18 +53,12 @@ models = [{ name = "model-a", upstream_name = "provider/model-a" }]
 "#;
 
 fn noted(scratch: &Scratch) -> Vec<String> {
-    let taken = |file: &str| {
-        let path = scratch.0.join(file);
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let _ = fs::remove_file(path);
-        text
-    };
-    let calls = taken("bin/calls");
+    let path = scratch.0.join("bin/calls");
+    let calls = fs::read_to_string(&path).unwrap_or_default();
+    let _ = fs::remove_file(path);
     let calls =
         (calls.split_terminator("\n\n")).map(|call| call.lines().collect::<Vec<_>>().join(" "));
-    let mut lines: Vec<String> = calls.collect();
-    lines.extend(taken("docker.pruned").lines().map(str::to_owned));
-    lines
+    calls.collect()
 }
 
 fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect) {
@@ -172,328 +84,37 @@ fn check(scratch: &Scratch, text: &str, shown: &[(&str, &str)], expect: &Expect)
     expect.assert_eq(&lines.collect::<Vec<String>>().join("\n"));
 }
 
+// Refused before the job reads its settings: outside a user's systemd unit, a file below the
+// controller's `.pumpkin`, which a job's `.pumpkin` links to, and a tree not the job's own.
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the configuration's snapshot"
-)]
-fn job() {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    let modal = MODAL.replace("dials_from = \"203.0.113.7\"\n", "");
-    let parameter = format!("{}\n{EC2}\n{modal}", docker_table("default"));
-    write_parameter(&scratch, &parameter);
-    let id = id_ago(0, "0b000001");
-    let (recent, old) = (id_ago(3, "0b000002"), id_ago(30, "0b000003"));
-    let (built, failed) = (id_ago(1, "0b000007"), id_ago(2, "0b000008"));
-    send(&scratch, &id, &format!("{UPSTREAMS}\n{SENT_MODAL}"), true);
-    let ir = |digits: &str| {
-        let roles = digits.chars().map(|digit| json!({ "image": image(digit) }));
-        json!({ "roles": roles.collect::<Vec<_>>() })
-    };
-    for (run, digits) in [(&recent, "0a"), (&old, "b")] {
-        scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), "");
-        let record = format!("home/.pumpkin/runs/{run}");
-        scratch.write(&format!("{record}/ir.json"), &ir(digits));
-    }
-    let (stale, fresh) = (id_ago(30, "0b00000a"), id_ago(1, "0b00000b"));
-    for unstarted in [&stale, &fresh] {
-        scratch.write(&format!("home/jobs/{unstarted}/log"), "");
-    }
-    scratch.write(&format!("home/builds/{built}/out"), &ir("c"));
-    scratch.write(&format!("home/builds/{failed}/out"), "");
-    let held = format!("pumpkin/held:{}", "c".repeat(64));
-    let sized = ['0', 'a', 'b', 'c', 'd'].map(|digit| match digit {
-        'c' => format!("{} 100 {held}\n", image(digit)),
-        _ => format!("{} 100\n", image(digit)),
-    });
-    scratch.write("images", &sized.concat());
-    scratch.write("bin/disk", "1000 150\n");
-    for tree in [&recent, &old, &".pumpkin".to_owned()] {
-        scratch.write(&format!("home/trees/tasks/{tree}/pumpkin"), "");
-    }
-    let mut job = on_controller(
-        &scratch,
-        &[
-            "controller",
-            "job",
-            &id,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "build",
-            "stand-in/task.star",
-        ],
-    );
-    // As its unit's `StandardOutput=` does.
-    fs::create_dir_all(scratch.0.join(format!("home/builds/{id}"))).unwrap();
-    let out = scratch.0.join(format!("home/builds/{id}/out"));
-    job.stdout(File::create(&out).unwrap());
-    let invoked = invocation(&job);
-    let mut lines = vec![report(invoked, &job.output().unwrap(), &scratch.0, false)];
-    let ir = fs::read_to_string(&out).unwrap();
-    lines.push(format!("out names the image: {}", ir.contains(&image('0'))));
-    let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
-    lines.push(format!("pumpkin.toml:\n{}", config.unwrap()));
-    lines.extend(noted(&scratch));
-    let names = |dir: &str| {
-        let entries = fs::read_dir(scratch.0.join(dir)).unwrap();
-        let mut names: Vec<String> = entries
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names.join(", ")
-    };
-    lines.push(format!("trees: {}", names("home/trees/tasks")));
-    lines.push(format!("jobs: {}", names("home/jobs")));
-    // Another job is running, its run started, and the volume is full.
-    send(&scratch, &recent, UPSTREAMS, false);
-    let log = format!("home/.pumpkin/runs/{recent}/log.jsonl");
-    scratch.write(&log, "");
-    scratch.write("bin/disk", "1000 0\n");
-    for started in [true, false] {
-        if !started {
-            fs::remove_file(scratch.0.join(&log)).unwrap();
-            scratch.write(&format!("run/pumpkin/{recent}/held"), &format!("{held}\n"));
-        }
-        send(&scratch, &id, UPSTREAMS, false);
-        let mut again = on_controller(
-            &scratch,
-            &[
-                "controller",
-                "job",
-                &id,
-                "--region",
-                "us-west-1",
-                "--parameter",
-                "/pumpkin-alice/settings",
-                "--tree",
-                EMPTY_TREE,
-                "--",
-                "build",
-                "stand-in/task.star",
-            ],
-        );
-        again.stdout(Stdio::null());
-        let invoked = invocation(&again);
-        lines.push(format!("another job's run started: {started}"));
-        lines.push(report(invoked, &again.output().unwrap(), &scratch.0, false));
-        lines.extend(
-            noted(&scratch)
-                .into_iter()
-                .filter(|line| line.starts_with("docker")),
-        );
-    }
-    // Full as the prune begins, and no longer once it has the lock.
-    scratch.write("bin/disk", "1000 0\n");
-    scratch.write("bin/disk.next", "1000 500\n");
-    send(&scratch, &id, UPSTREAMS, false);
-    let mut freed = on_controller(
-        &scratch,
-        &[
-            "controller",
-            "job",
-            &id,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "build",
-            "stand-in/task.star",
-        ],
-    );
-    freed.stdout(Stdio::null());
-    let invoked = invocation(&freed);
-    lines.push("freed while the prune waited for the lock:".to_owned());
-    lines.push(report(invoked, &freed.output().unwrap(), &scratch.0, false));
-    lines.extend(
-        noted(&scratch)
-            .into_iter()
-            .filter(|line| line.starts_with("docker") || line.starts_with("df")),
-    );
-    let config = fs::read_to_string(scratch.0.join(format!("home/builds/{id}/pumpkin.toml")));
-    let config: toml::Table = toml::from_str(&config.unwrap()).unwrap();
-    let providers: Vec<&String> = config["providers"].as_table().unwrap().keys().collect();
-    lines.push(format!("the providers: {providers:?}"));
-    let shown = [
-        (id.as_str(), "<id>"),
-        (recent.as_str(), "<recent>"),
-        (old.as_str(), "<old>"),
-        (built.as_str(), "<built>"),
-        (failed.as_str(), "<failed>"),
-        (stale.as_str(), "<stale>"),
-        (fresh.as_str(), "<fresh>"),
-    ];
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &shown,
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(0)
-            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
-            out names the image: true
-            pumpkin.toml:
-            [docker]
-            context = "default"
-
-            [gateway]
-            private = "172.31.5.6:0"
-
-            [providers.aws.ec2]
-            region = "us-west-1"
-
-            [providers.aws.ec2.classes.agent]
-            memory_mib = 262144
-            template = "lt-0aaaaaaaaaaaaaaaa"
-            vcpus = 32
-            version = 7
-
-            [providers.aws.ec2.classes.judge]
-            memory_mib = 16384
-            template = "lt-0bbbbbbbbbbbbbbbb"
-            vcpus = 8
-            version = 2
-
-            [providers.aws.ec2.repositories]
-            roles = "pumpkin/roles"
-            sandboxd = "pumpkin/sandboxd"
-
-            [providers.aws.ec2.timer]
-            group = "pumpkin"
-            role_arn = "arn:aws:iam::123456789012:role/pumpkin-timer"
-
-            [providers.gpus.modal]
-            config = "<scratch>/run/pumpkin/<id>/modal.toml"
-            dials_from = "198.51.100.9"
-            profile = "alice"
-
-            [providers.gpus.modal.classes.a100]
-            cpu_millis = 8000
-            gpu = "A100-80GB"
-            gpu_model = "NVIDIA A100-SXM4-80GB"
-            memory_bytes = 68719476736
-            startup_seconds = 1800
-
-            [providers.gpus.modal.images]
-            region = "us-west-1"
-            repository = "pumpkin/roles"
-            role_arn = "arn:aws:iam::123456789012:role/pumpkin-modal-pull"
-
-            [upstreams.gateway]
-            key_file = "<scratch>/run/pumpkin/<id>/gateway.key"
-            url = "https://gateway.example/v1"
-
-            [[upstreams.gateway.models]]
-            name = "model-a"
-            upstream_name = "provider/model-a"
-
-            aws --version
-            aws ssm get-parameter --name /pumpkin-alice/settings --no-cli-pager --output json --region us-west-1
-            curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
-            curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-            df --block-size=1 --output=size,avail -- /
-            df --block-size=1 --output=size,avail -- /
-            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
-            docker builder prune --force --min-free-space 400
-            trees: .pumpkin, <recent>
-            jobs: <old>, <recent>, <fresh>
-            another job's run started: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(0)
-            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
-            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-            docker image rm --force sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-            docker builder prune --force --min-free-space 400
-            another job's run started: false
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(0)
-            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
-            docker image rm --force sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-            docker image rm --force sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-            docker image rm --force sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-            docker builder prune --force --min-free-space 400
-            freed while the prune waited for the lock:
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(0)
-            df --block-size=1 --output=size,avail -- /
-            df --block-size=1 --output=size,avail -- /
-            the providers: ["aws"]"#]],
-    );
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the cases and their snapshot"
-)]
 fn job_refusals() {
     let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
+    install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
+    scratch.write(
+        &format!("home/store/manifests/{EMPTY_TREE}"),
+        "pumpkin-tree/1\n",
+    );
     let id = id_ago(0, "0b000004");
-    let job = |scratch: &Scratch, tree: &str| {
-        on_controller(
-            scratch,
-            &[
-                "controller",
-                "job",
-                &id,
-                "--region",
-                "us-west-1",
-                "--parameter",
-                "/pumpkin-alice/settings",
-                "--tree",
-                tree,
-                "--",
-                "build",
-                "stand-in/task.star",
-            ],
-        )
+    let job = |tree: &str| {
+        let args = [
+            "controller",
+            "job",
+            &id,
+            "--region",
+            "us-west-1",
+            "--parameter",
+        ];
+        let settings = ["/pumpkin-alice/settings", "--tree", tree];
+        let mut job = scratch.program(
+            controllers(&scratch),
+            &[&args[..], &settings, &["--", "build", "stand-in/task.star"]].concat(),
+        );
+        job.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
+        job
     };
-    let mut lines = Vec::new();
-    let cases = [
-        (
-            "a parameter with [gateway]",
-            format!("{}\n[gateway]\nprivate = \"10.0.0.1:0\"\n", parameter()),
-            UPSTREAMS.to_owned(),
-        ),
-        (
-            "a parameter with no Modal provider",
-            format!("{}\n{EC2}", docker_table("default")),
-            format!("{UPSTREAMS}\n{SENT_MODAL}"),
-        ),
-        (
-            "a sent [docker]",
-            parameter(),
-            format!("{UPSTREAMS}\n[docker]\ncontext = \"elsewhere\"\n"),
-        ),
-    ];
-    for (case, parameter, sent) in cases {
-        write_parameter(&scratch, &parameter);
-        send(&scratch, &id, &sent, false);
-        let mut job = job(&scratch, EMPTY_TREE);
-        lines.push(format!("{case}:"));
-        let invoked = invocation(&job);
-        lines.push(report(invoked, &job.output().unwrap(), &scratch.0, false));
-    }
-    let mut unset = job(&scratch, EMPTY_TREE);
+    let mut unset = job(EMPTY_TREE);
     unset.env_remove("XDG_RUNTIME_DIR");
-    let invoked = invocation(&unset);
-    lines.push(report(invoked, &unset.output().unwrap(), &scratch.0, false));
-    // Trees that no job makes: a file below the controller's `.pumpkin`, and one outside any tree.
+    let mut lines = vec![super::ran(unset, &scratch.0, false)];
     let planted = sha256(b"planted\n");
     scratch.write(&format!("home/store/{planted}"), "planted\n");
     let mut shown = vec![
@@ -504,14 +125,7 @@ fn job_refusals() {
         let text = format!("pumpkin-tree/1\nf {planted} 8 {path}\n");
         let tree = sha256(text.as_bytes());
         scratch.write(&format!("home/store/manifests/{tree}"), &text);
-        let mut refused = job(&scratch, &tree);
-        let invoked = invocation(&refused);
-        lines.push(report(
-            invoked,
-            &refused.output().unwrap(),
-            &scratch.0,
-            false,
-        ));
+        lines.push(super::ran(job(&tree), &scratch.0, false));
         shown.push((tree, format!("<tree of {path}>")));
     }
     let made = scratch.0.join("stand-in/notes").exists();
@@ -524,598 +138,16 @@ fn job_refusals() {
         &lines.join("\n"),
         &shown,
         &expect![[r#"
-            a parameter with [gateway]:
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, hold `[gateway]`, which each job sets: remove it from them
-            a parameter with no Modal provider:
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(1)
-            pumpkin: the controller's settings, SSM parameter `/pumpkin-alice/settings`, name no Modal provider, whose `images` the client's `[controller.modal]` needs: apply `deploy/aws`, whose settings name one
-            a sent [docker]:
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
-            exit status: Some(1)
-            pumpkin: what the run sent, config.toml, is refused: TOML parse error at line 6, column 2
-              |
-            6 | [docker]
-              |  ^^^^^^
-            unknown field `docker`, expected `upstreams` or `modal`
-            $ PATH=<scratch>/bin:/usr/bin:/bin env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
+            $ env --unset=XDG_RUNTIME_DIR pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <empty tree> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: XDG_RUNTIME_DIR is unset or empty: run the job in a unit of the user's systemd, as the controller target starts it
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- build stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of .pumpkin/runs/planted/record> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: <scratch>/home/store/manifests/<tree of .pumpkin/runs/planted/record>: the manifest's line `f <blob> 8 .pumpkin/runs/planted/record` is refused: `.pumpkin/runs/planted/record` can't be sent to the controller, where a job's `.pumpkin` is the controller's own workspace: leave it out of the task
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- build stand-in/task.star
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller job <id> --region us-west-1 --parameter /pumpkin-alice/settings --tree <tree of stand-in/notes> -- build stand-in/task.star
             exit status: Some(1)
             pumpkin: the job's working directory, <scratch>, isn't its tree, <scratch>/home/trees/<repository>/<id>, which its start makes: run the job there, as its unit does
             made the file outside a job's tree: false"#]],
-    );
-}
-
-// A job's build slots are one for every two CPUs it may use, and one at least: on one CPU there
-// is one, so a second job waits.
-fn on_one_cpu(scratch: &Scratch, id: &str) -> Child {
-    let status = fs::read_to_string("/proc/self/status").unwrap();
-    let allowed = status
-        .lines()
-        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"));
-    let cpu = cpu_list(allowed.unwrap()).into_iter().next().unwrap();
-    let job = on_controller(
-        scratch,
-        &[
-            "controller",
-            "job",
-            id,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "build",
-            "built/task.star",
-        ],
-    );
-    let mut on_one = stdx::process::command("taskset", Environment::Inherited);
-    on_one.args(["--cpu-list", &cpu.to_string()]);
-    on_one.arg(job.get_program()).args(job.get_args());
-    for (name, value) in job.get_envs() {
-        on_one.env(name, value.unwrap());
-    }
-    on_one.current_dir(job.get_current_dir().unwrap());
-    on_one.stdout(Stdio::piped()).stderr(Stdio::piped());
-    on_one.spawn().unwrap()
-}
-
-fn job_ended(child: Child, stderr: impl Read, said: String) -> String {
-    let output = ended(child, stderr, said);
-    let mut lines = vec![format!("exit status: {:?}", output.status.code())];
-    lines.extend(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .lines()
-            .map(str::to_owned),
-    );
-    let printed = String::from_utf8(output.stdout).unwrap();
-    let built = format!("sha256:{}", "2".repeat(64));
-    lines.push(format!(
-        "printed the IR of the image built: {}",
-        printed.contains(&built)
-    ));
-    lines.join("\n")
-}
-
-fn job_ended_whole(mut child: Child) -> String {
-    let stderr = child.stderr.take().unwrap();
-    job_ended(child, stderr, String::new())
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the jobs' steps and the snapshot"
-)]
-fn job_admission() {
-    let scratch = Scratch::new();
-    let stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    scratch.write_task("built", &workflow(&image('0'), &["true"]));
-    let recipe = format!("FROM {BUSYBOX}\n{BUILDS}\n");
-    scratch.write("built/Dockerfile", &recipe);
-    let [first, second, third] =
-        ["0ad00001", "0ad00002", "0ad00003"].map(|random| id_ago(0, random));
-    for id in [&first, &second, &third] {
-        send(&scratch, id, UPSTREAMS, false);
-    }
-    let mut lines = Vec::new();
-    let marks = |id: &str| {
-        let dir = scratch.0.join(format!("run/pumpkin/{id}"));
-        let mut names: Vec<String> = (fs::read_dir(dir).unwrap())
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        names.sort();
-        names.join(", ")
-    };
-    stand_in.hold("build");
-    let building = on_one_cpu(&scratch, &first);
-    stand_in.held("build");
-    let held = scratch.0.join(format!("run/pumpkin/{first}/held"));
-    let held = fs::read_to_string(held).unwrap();
-    lines.push(format!("the first holds: {}", held.trim()));
-    lines.push(format!(
-        "the first's directory while it builds: {}",
-        marks(&first)
-    ));
-    let tag = held.lines().next().unwrap().to_owned();
-    scratch.write(
-        "images",
-        &format!(
-            "{} 100 {tag}\n{} 100 pumpkin/other:{}\n",
-            image('e'),
-            image('f'),
-            "f".repeat(64)
-        ),
-    );
-    scratch.write("bin/disk", "1000 150\n");
-    let mut waiting = on_one_cpu(&scratch, &second);
-    let mut stderr = BufReader::new(waiting.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("waiting for a build slot") {
-        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
-    }
-    lines.push(format!(
-        "the second's directory while it waits: {}",
-        marks(&second)
-    ));
-    lines.push("the second's prune, while the first builds:".to_owned());
-    lines.extend(
-        noted(&scratch)
-            .into_iter()
-            .filter(|line| line.starts_with("docker")),
-    );
-    scratch.write("bin/disk", "1000 500\n");
-    stand_in.release("build");
-    lines.push(format!("the first:\n{}", job_ended_whole(building)));
-    let held = scratch.0.join(format!("run/pumpkin/{first}/held"));
-    let held = fs::read_to_string(held).unwrap();
-    lines.push(format!(
-        "the first holds once built: {}",
-        held.trim().replace('\n', " ")
-    ));
-    let waited = job_ended(waiting, stderr, said);
-    lines.push(format!("the second:\n{waited}"));
-    lines.push(format!(
-        "the second's directory once it ended: {}",
-        marks(&second)
-    ));
-    for id in [&first, &second] {
-        fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
-    }
-    fs::remove_file(scratch.0.join("tagged")).unwrap();
-    scratch.write("bin/disk", "1000 100\n");
-    let refused = on_one_cpu(&scratch, &third);
-    lines.push(format!("the third:\n{}", job_ended_whole(refused)));
-    lines.extend(
-        noted(&scratch)
-            .into_iter()
-            .filter(|line| line.starts_with("docker")),
-    );
-    // How long the second waited varies.
-    let mut text = lines.join("\n");
-    let at = text.find("after waiting ").unwrap() + "after waiting ".len();
-    let seconds = text[at..].split(' ').next().unwrap().to_owned();
-    text.replace_range(at..at + seconds.len(), "<n>");
-    check(
-        &scratch,
-        &text,
-        &[
-            (first.as_str(), "<first>"),
-            (second.as_str(), "<second>"),
-            (third.as_str(), "<third>"),
-            (tag.strip_prefix("pumpkin/built:").unwrap(), "<hex>"),
-        ],
-        &expect![[r#"
-            the first holds: pumpkin/built:<hex>
-            the first's directory while it builds: building, config.toml, gateway.key, held
-            the second's directory while it waits: config.toml, gateway.key, held, waiting
-            the second's prune, while the first builds:
-            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-            docker builder prune --force --min-free-space 400
-            the first:
-            exit status: Some(0)
-            pumpkin: building an image in pumpkin/built
-            pumpkin: built an image in pumpkin/built
-            printed the IR of the image built: true
-            the first holds once built: pumpkin/built:<hex> sha256:2222222222222222222222222222222222222222222222222222222222222222
-            the second:
-            exit status: Some(0)
-            pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            pumpkin: waiting for a build slot: all 1 held, by jobs <first>
-            pumpkin: took a build slot after waiting <n> s
-            printed the IR of the image built: true
-            the second's directory once it ended: config.toml, gateway.key, held
-            the third:
-            exit status: Some(1)
-            pumpkin: the volume is more than 80% used: the prune removed 3 images, least recently used first
-            pumpkin: the volume is more than 80% used: the prune removed 1 image, least recently used first
-            built/task.star:5:9: building the image failed: the controller's volume is 90% used, past the 85% at which a build is refused, though the prune has removed what no job holds: free space there, or let the jobs that run end, then run the task again
-                5 | IMAGE = image("Dockerfile")
-                  |         ^^^^^^^^^^^^^^^^^^^
-            pumpkin: built/task.star: the task has 1 problem
-            printed the IR of the image built: false
-            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
-            docker image rm --force sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-            docker builder prune --force --min-free-space 400
-            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-            docker builder prune --force --min-free-space 400"#]],
-    );
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the jobs' steps and the snapshot"
-)]
-fn job_publish_wait() {
-    let scratch = Scratch::new();
-    // The controller's engine is rootful, of which the job says nothing.
-    let rootful = INFO.replace(r#","name=rootless""#, "");
-    let _stand_in = StandIn::with(&scratch, &rootful, IMAGE);
-    set_up(&scratch);
-    write_parameter(
-        &scratch,
-        &format!("{}\n[providers.local.docker]\n", docker_table("default")),
-    );
-    scratch.write_sandboxd(&format!("home/.pumpkin/{PINNED}/bin/sandboxd"));
-    scratch.write_task("built", &workflow(&image('0'), &["true"]));
-    scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
-    let [run, other] = ["0ad00011", "0ad00012"].map(|random| id_ago(0, random));
-    for id in [&run, &other] {
-        send(&scratch, id, UPSTREAMS, false);
-    }
-    // Each of the engine's 4 publish slots held, as by other runs that publish.
-    let slots = scratch.0.join("home/.pumpkin/docker/publish-slots");
-    fs::create_dir_all(&slots).unwrap();
-    let held: Vec<File> = (0..4)
-        .map(|index| {
-            let slot = File::create(slots.join(index.to_string())).unwrap();
-            slot.lock().unwrap();
-            slot
-        })
-        .collect();
-    let mut job = on_controller(
-        &scratch,
-        &[
-            "controller",
-            "job",
-            &run,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "run",
-            "built/task.star",
-        ],
-    );
-    let mut publishing = (job.stdout(Stdio::piped()).stderr(Stdio::piped()))
-        .spawn()
-        .unwrap();
-    let mut stderr = BufReader::new(publishing.stderr.take().unwrap());
-    let mut said = String::new();
-    while !said.contains("waiting for a publish slot") {
-        assert!(stderr.read_line(&mut said).unwrap() > 0, "{said}");
-    }
-    let mut lines = vec![format!("the run's job, as it waits:\n{}", said.trim_end())];
-    let named = fs::read_to_string(scratch.0.join(format!("run/pumpkin/{run}/held"))).unwrap();
-    lines.push(format!("it holds: {}", named.trim().replace('\n', " ")));
-    let hex = named
-        .lines()
-        .next()
-        .unwrap()
-        .trim_start_matches("pumpkin/built:");
-    let hex = hex.to_owned();
-    scratch.write(
-        "images",
-        &format!(
-            "{} 100\n{} 100 pumpkin/other:{}\n",
-            image('2'),
-            image('f'),
-            "f".repeat(64)
-        ),
-    );
-    scratch.write("bin/disk", "1000 150\n");
-    noted(&scratch);
-    let mut pruning = on_controller(
-        &scratch,
-        &[
-            "controller",
-            "job",
-            &other,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "build",
-            "stand-in/task.star",
-        ],
-    );
-    let pruned = pruning.stdout(Stdio::null()).output().unwrap();
-    lines.push(format!(
-        "the other job's prune:\n{}",
-        String::from_utf8(pruned.stderr).unwrap().trim_end()
-    ));
-    lines.extend(
-        noted(&scratch)
-            .into_iter()
-            .filter(|line| line.starts_with("docker")),
-    );
-    scratch.write("bin/disk", "1000 500\n");
-    drop(held);
-    let output = ended(publishing, stderr, String::new());
-    let record = scratch.0.join(format!("home/.pumpkin/runs/{run}"));
-    let ir = fs::read_to_string(record.join("ir.json")).unwrap();
-    lines.extend([
-        format!("the run's job: exit status {:?}", output.status.code()),
-        format!("the run started: {}", record.join("log.jsonl").exists()),
-        format!("its IR names the image: {}", ir.contains(&image('2'))),
-    ]);
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[
-            (run.as_str(), "<run>"),
-            (other.as_str(), "<other>"),
-            (&hex, "<hex>"),
-        ],
-        &expect![[r#"
-            the run's job, as it waits:
-            pumpkin: building an image in pumpkin/built
-            pumpkin: built an image in pumpkin/built
-            pumpkin: waiting for a publish slot: all 4 held, by 0, 1, 2, 3
-            it holds: pumpkin/built:<hex> sha256:2222222222222222222222222222222222222222222222222222222222222222
-            the other job's prune:
-            pumpkin: the volume is more than 80% used: the prune removed 2 images, least recently used first
-            docker image rm --force sha256:0000000000000000000000000000000000000000000000000000000000000000
-            docker image rm --force sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-            docker builder prune --force --min-free-space 400
-            the run's job: exit status Some(0)
-            the run started: true
-            its IR names the image: true"#]],
-    );
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the job's command line and the snapshot"
-)]
-fn job_publish_fails() {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    let publish = "[publish]\nbucket = \"pumpkin-alice-public\"\ndistribution = \"E2STANDIN\"\n\
-                   address = \"https://runs.example\"\nsince = 2026-11-01T00:00:00Z\n";
-    write_parameter(
-        &scratch,
-        &format!(
-            "{}\n[providers.local.docker]\n{publish}",
-            docker_table("default")
-        ),
-    );
-    scratch.write_sandboxd(&format!("home/.pumpkin/{PINNED}/bin/sandboxd"));
-    scratch.write_task("built", &workflow(&image('0'), &["true"]));
-    scratch.write("built/Dockerfile", &format!("FROM {BUSYBOX}\n{BUILDS}\n"));
-    let run = id_ago(0, "0ad00021");
-    send(&scratch, &run, UPSTREAMS, false);
-    let mut job = on_controller(
-        &scratch,
-        &[
-            "controller",
-            "job",
-            &run,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            EMPTY_TREE,
-            "--",
-            "run",
-            "built/task.star",
-        ],
-    );
-    let output = job.stdout(Stdio::null()).output().unwrap();
-    let mut lines = vec![format!(
-        "the run's job: exit status {:?}",
-        output.status.code()
-    )];
-    // Once while the run is live, if it still is, and once as it has ended.
-    let mut said: Vec<String> = String::from_utf8(output.stderr)
-        .unwrap()
-        .lines()
-        .map(|line| match line.split_once("upload 1 of ") {
-            Some((before, after)) => {
-                let rest = after.split_once(' ').map_or("", |(_, rest)| rest);
-                format!("{before}upload 1 of <n> {rest}")
-            }
-            None => line.to_owned(),
-        })
-        .collect();
-    said.dedup();
-    lines.extend(said);
-    let mut noted = noted(&scratch);
-    noted.dedup_by(|call, last| call.contains(" s3 ") && last.contains(" s3 "));
-    lines.extend(
-        noted
-            .into_iter()
-            .map(|call| match call.split_once("/public/") {
-                Some((before, _)) if call.contains(" s3 ") => format!("{before}/public/…"),
-                _ => call,
-            }),
-    );
-    let record = scratch.0.join(format!("home/.pumpkin/runs/{run}"));
-    let ended = record.join("outcome.json").exists();
-    lines.push(format!("the run ended: {ended}"));
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[(run.as_str(), "<run>")],
-        &expect![[r#"
-        the run's job: exit status Some(0)
-        pumpkin: building an image in pumpkin/built
-        pumpkin: built an image in pumpkin/built
-        pumpkin: run <run> started
-        pumpkin: to stop it: pumpkin cancel <run>
-        pumpkin: publishing the runs at https://runs.example every 60 s while the run is live
-        pumpkin: publishing the runs failed: upload 1 of <n> to s3://pumpkin-alice-public: `aws s3 sync` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what it reports; the next publish uploads what this one didn't
-        aws --version
-        aws ssm get-parameter --name /pumpkin-alice/settings --no-cli-pager --output json --region us-west-1
-        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        df --block-size=1 --output=size,avail -- /
-        curl --disable --silent --show-error --fail --max-time 10 --request PUT --header X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/local-ipv4
-        curl --disable --silent --show-error --fail --max-time 10 --header X-aws-ec2-metadata-token: stand-in-token http://169.254.169.254/latest/meta-data/public-ipv4
-        aws --version
-        aws s3 sync <scratch>/home/.pumpkin/public/…
-        the run ended: true"#]],
-    );
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is the records and the snapshot"
-)]
-fn boot() {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    let home = scratch.0.join("home");
-    let (clean, local, lost, older, older_left) = (
-        id_ago(2, "0b000007"),
-        id_ago(1, "0b000005"),
-        id_ago(1, "0b000008"),
-        id_ago(2, "0b000009"),
-        id_ago(1, "0b00000a"),
-    );
-    let runs = [
-        (&clean, "local", Some(returned(1.0)), true),
-        (&local, "local", None, false),
-        (&lost, "aws", None, false),
-        // On a provider that the boot can't reach, so that a reap of it would say so.
-        (&older, "aws", Some(older_finished()), true),
-        (&older_left, "local", None, false),
-    ];
-    for (run, provider, outcome, deleted) in runs {
-        let config = match provider {
-            "local" => docker_table("default") + LOCAL,
-            _ => format!("{}\n{EC2}", docker_table("default")),
-        };
-        let path = home.join(format!("jobs/{run}/pumpkin.toml"));
-        scratch.write(&format!("home/jobs/{run}/pumpkin.toml"), &config);
-        let record = format!("home/.pumpkin/runs/{run}");
-        let args = ["--config".to_owned(), path.display().to_string()];
-        let writer = if run == &older_left {
-            json!({ "version": "1.2.3" })
-        } else {
-            super::this_build()
-        };
-        let header =
-            json!({ "record_version": "pumpkin.record/v1", "pumpkin": writer, "args": args });
-        scratch.write(&format!("{record}/record.json"), &header);
-        scratch.write(&format!("{record}/driver.pid"), "4242\n");
-        let ir = json!({ "roles": [{ "name": "solver", "image": image('a') }] });
-        scratch.write(&format!("{record}/ir.json"), &ir);
-        let report = match provider {
-            "local" => json!({ "context": "default" }),
-            _ => json!({ "region": "us-west-1" }),
-        };
-        scratch.write(
-            &format!("{record}/provider.json"),
-            &json!({ "providers": { provider: { "report": report } } }),
-        );
-        let mut sandbox =
-            json!({ "provider": provider, "id": format!("sandbox-{run}"), "report": {} });
-        if deleted {
-            sandbox["delete"] = json!({ "state": "deleted" });
-        }
-        if let Some(outcome) = outcome {
-            scratch.write(&format!("{record}/outcome.json"), &outcome);
-        }
-        scratch.write(&format!("{record}/agents/solver/sandbox.json"), &sandbox);
-    }
-    let foreign = format!("home/.pumpkin/runs/{}/record.json", id_ago(1, "0e000001"));
-    scratch.write(
-        &foreign,
-        &json!({ "record_version": "future", "pumpkin": { "version": "9.9.9" } }),
-    );
-    // The image of a job that a client started as the controller came up, which no IR names yet.
-    scratch.write("images", &format!("{}\n{}\n", image('a'), image('b')));
-    send(&scratch, &id_ago(0, "0b000006"), UPSTREAMS, false);
-    let mut boot = on_controller(&scratch, &["controller", "boot"]);
-    // As its unit has it: systemd's `/run/user/%U` names root's, the system manager's user's.
-    boot.env("XDG_RUNTIME_DIR", scratch.0.join("root-run"));
-    let invoked = invocation(&boot);
-    let mut lines = vec![report(invoked, &boot.output().unwrap(), &scratch.0, false)];
-    lines.extend(noted(&scratch));
-    for run in [&clean, &local, &lost] {
-        let outcome = format!("home/.pumpkin/runs/{run}/outcome.json");
-        let outcome = fs::read_to_string(scratch.0.join(outcome)).unwrap();
-        lines.push(format!("{run}'s outcome.json: {outcome}"));
-    }
-    let foreign_outcome = home.join(format!(".pumpkin/runs/{older_left}/outcome.json"));
-    lines.push(format!(
-        "{older_left}'s outcome.json exists: {}",
-        foreign_outcome.exists()
-    ));
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[
-            (clean.as_str(), "<clean>"),
-            (local.as_str(), "<local>"),
-            (lost.as_str(), "<lost>"),
-            (older.as_str(), "<older>"),
-            (older_left.as_str(), "<older left>"),
-        ],
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/root-run pumpkin controller boot
-            exit status: Some(0)
-            pumpkin: run <local>'s sandbox sandbox-<local> on provider `local` had ended, as it isn't listed there now: what it left there is now removed
-            pumpkin: run <local> was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            pumpkin: run <lost>'s sandboxes on provider `aws`, if it left any, end by the run's hard end, as the boot can't reach it: `aws sts get-caller-identity` failed with exit status: 1: the stand-in aws answers only `--version` and `ssm get-parameter`: fix what it reports
-            pumpkin: run <lost> was lost, as its driver ended without an outcome.json: it is now recorded as failed
-            printed:
-              <local>
-              <lost>
-            aws --version
-            aws sts get-caller-identity --no-cli-pager --output json --region us-west-1
-            <clean>'s outcome.json: {"agents":[{"role":"solver","submission":{"finalized":true,"payload":{"digest":"sha256:44778d82365e4af681c40d5f0eef5cf6f5899d3f0ac335050a7ed6779cf3f674","size":3}},"work_end":{"kind":"agent_exited","status":{"code":0}}}],"state":"finished","verdict":{"kind":"returned","result":{"values":[{"name":"score","value":1.0},{"name":"metrics","value":{"solved":3}}]}}}
-            <local>'s outcome.json: {
-              "reason": "its driver ended without an outcome",
-              "state": "failed"
-            }
-
-            <lost>'s outcome.json: {
-              "reason": "its driver ended without an outcome",
-              "state": "failed"
-            }
-
-            <older left>'s outcome.json exists: false"#]],
     );
 }
 
@@ -1123,13 +155,14 @@ fn boot() {
 fn boot_without_runs() {
     let scratch = Scratch::new();
     install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
-    let boot = on_controller(&scratch, &["controller", "boot"]);
+    let mut boot = scratch.program(controllers(&scratch), &["controller", "boot"]);
+    boot.env("XDG_RUNTIME_DIR", scratch.0.join("run"));
     check(
         &scratch,
         &super::ran(boot, &scratch.0, false),
         &[],
         &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin XDG_RUNTIME_DIR=<scratch>/run pumpkin controller boot
+            $ XDG_RUNTIME_DIR=<scratch>/run pumpkin controller boot
             exit status: Some(0)"#]],
     );
 }
@@ -1536,7 +569,7 @@ fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
 
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
-    let install = install_manifest(&client_bin(scratch));
+    let install = install_manifest();
     let lacks = json!({"type": "lacks", "manifest": format!("sha256:{key}"), "install": true, "body_bytes": install.len()});
     schema::frame::write(&mut request, &lacks, &[]).unwrap();
     schema::frame::write(&mut request, &(), install.as_bytes()).unwrap();
@@ -1635,45 +668,6 @@ fn retry_start() {
     );
     fs::remove_dir_all(home.join(format!(".pumpkin/serve/{key}"))).unwrap();
     assert!(BUILT.iter().all(|name| bin.join(name).is_file()));
-}
-
-#[test]
-fn interrupted_launch_keeps_the_job() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    let key = served(&scratch);
-    scratch.write(
-        &format!("home/store/manifests/{EMPTY_TREE}"),
-        "pumpkin-tree/1\n",
-    );
-    scratch.write_executable("bin/systemd-run", b"#!/bin/sh\nkill -TERM $$\n");
-    let id = id_ago(0, "0777abcd");
-    let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
-    let unconfirmed = ask(b"first");
-    assert_eq!(unconfirmed["type"], "unconfirmed");
-    assert!(
-        unconfirmed["message"]
-            .as_str()
-            .unwrap()
-            .contains("systemctl --user status")
-    );
-    scratch.write_executable("bin/systemd-run", SYSTEMD_RUN.as_bytes());
-    assert_eq!(ask(b"second")["type"], "unconfirmed");
-    assert_eq!(
-        fs::read(scratch.0.join(format!("run/pumpkin/{id}/modal.toml"))).unwrap(),
-        b"first"
-    );
-    // A reboot loses the tmpfs even when the server died before submitting the unit.
-    fs::remove_dir_all(scratch.0.join(format!("run/pumpkin/{id}"))).unwrap();
-    assert_eq!(ask(b"third")["type"], "unconfirmed");
-    // The link that controller job writes survives the unit, including an older install's job.
-    symlink(
-        scratch.0.join(format!("home/.pumpkin/{key}/bin/pumpkin")),
-        scratch.0.join(format!("home/builds/{id}/pumpkin")),
-    )
-    .unwrap();
-    assert_eq!(ask(b"fourth")["type"], "already_started");
-    assert!(!scratch.0.join("bin/argv").exists());
 }
 
 #[test]
@@ -1896,11 +890,9 @@ fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)>
         .map(|(hex, name)| (hex.clone(), (*name).to_owned()))
         .collect();
     holders.push((EMPTY_TREE.to_owned(), "a tree of no files".to_owned()));
-    let bin = client_bin(scratch);
-    holders.push((key(&bin), "the install".to_owned()));
-    for name in BUILT {
-        let (hex, _) = built_sha256(&bin.join(name));
-        holders.push((hex, format!("the installed {name}")));
+    holders.push((key(), "the install".to_owned()));
+    for (name, hex, _) in built() {
+        holders.push((hex.clone(), format!("the installed {name}")));
     }
     for path in walked(&repo, &[".git", ".pumpkin"]) {
         let at = repo.join(&path);
@@ -1989,7 +981,7 @@ fn calls(scratch: &Scratch) -> String {
 }
 
 fn send_calls(scratch: &Scratch) -> String {
-    let key = key(&client_bin(scratch));
+    let key = key();
     calls(scratch).replace(&format!("serve=.pumpkin/serve/{key}/pumpkin"), "serve")
 }
 
@@ -1998,162 +990,6 @@ fn last_tree(scratch: &Scratch) -> String {
     let lines: Vec<&str> = argv.lines().collect();
     let at = lines.iter().rposition(|line| *line == "--tree").unwrap();
     lines[at + 1].to_owned()
-}
-
-fn job_of(scratch: &Scratch, id: &str, tree: &str) -> std::process::Output {
-    let mut job = on_controller(
-        scratch,
-        &[
-            "controller",
-            "job",
-            id,
-            "--region",
-            "us-west-1",
-            "--parameter",
-            "/pumpkin-alice/settings",
-            "--tree",
-            tree,
-            "--",
-            "build",
-            "stand-in/task.star",
-        ],
-    );
-    job.current_dir(scratch.0.join(format!("home/trees/repo/{id}")));
-    job.output().unwrap()
-}
-
-fn write_files(scratch: &Scratch) {
-    scratch.write_executable("repo/stand-in/run.sh", b"#!/bin/sh\necho run\n");
-    symlink("Dockerfile", scratch.0.join("repo/stand-in/CLAUDE.md")).unwrap();
-    scratch.write("repo/stand-in/with space.txt", "spaced\n");
-    scratch.write("repo/stand-in/empty", "");
-    scratch.write("repo/stand-in/gone", "");
-    let added = stdx::process::command("git", Environment::Only(&["HOME", "PATH"]))
-        .args(["-C", "repo", "add", "stand-in/gone"])
-        .current_dir(&scratch.0)
-        .status();
-    assert!(added.unwrap().success());
-    fs::remove_file(scratch.0.join("repo/stand-in/gone")).unwrap();
-}
-
-fn tree_files(scratch: &Scratch, dir: &Path) -> Vec<String> {
-    let store = scratch.0.join("home/store");
-    let mut lines = vec!["the job's tree:".to_owned()];
-    for path in walked(dir, &[".pumpkin"]) {
-        let at = dir.join(&path);
-        let metadata = fs::symlink_metadata(&at).unwrap();
-        let line = if metadata.is_symlink() {
-            format!(
-                "a symbolic link to {}",
-                fs::read_link(&at).unwrap().display()
-            )
-        } else {
-            let hex = sha256(&fs::read(&at).unwrap());
-            let linked = |name: String| {
-                let blob = fs::metadata(store.join(name));
-                blob.is_ok_and(|blob| blob.ino() == metadata.ino())
-            };
-            let of = if linked(hex.clone()) {
-                "its blob"
-            } else if linked(format!("{hex}.x")) {
-                "its blob's copy to run"
-            } else {
-                "nothing of the store's"
-            };
-            let mode = metadata.permissions().mode() & 0o7777;
-            format!("a link of {of}, {mode:o}")
-        };
-        lines.push(format!("  {}: {line}", path.display()));
-    }
-    lines
-}
-
-// The job's build refuses the link in its context, once it has made the tree.
-#[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
-fn send_by_content() {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    let client = set_up_client(&scratch);
-    write_files(&scratch);
-    let (id, first) = start(&scratch, &client);
-    let mut lines = vec![first, send_calls(&scratch)];
-    let tree = [(last_tree(&scratch), "the task's tree")];
-    lines.extend(stored(&scratch, &holders(&scratch, &tree)));
-    job_of(&scratch, &id, &last_tree(&scratch));
-    let dir = scratch.0.join(format!("home/trees/repo/{id}"));
-    lines.extend(tree_files(&scratch, &dir));
-    let (_, again) = start(&scratch, &client);
-    lines.extend([again, send_calls(&scratch)]);
-    scratch.write("repo/stand-in/with space.txt", "spaced again\n");
-    let (_, changed) = start(&scratch, &client);
-    lines.extend([changed, send_calls(&scratch)]);
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[],
-        &expect![[r#"
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-            exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks all 10 of the task's files: sending 3.0 KiB
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
-            the calls: serve
-            the store:
-              PUMPKIN.star: 444, 1 link
-              lib/train.star: 444, 1 link
-              stand-in/CLAUDE.md: 444, 1 link
-              stand-in/Dockerfile: 444, 1 link
-              stand-in/empty: 444, 1 link
-              stand-in/final.star: 444, 1 link
-              stand-in/run.sh: 444, 1 link
-              stand-in/submit.star: 444, 1 link
-              stand-in/task.star: 444, 1 link
-              stand-in/with space.txt: 444, 1 link
-              the installed buildifier, to run: 555, 2 links
-              the installed pumpkin, to run: 555, 2 links
-              a manifest: a tree of no files
-              a manifest: the install
-              a manifest: the task's tree
-              incoming/: none
-            the job's tree:
-              .pumpkin: a symbolic link to <scratch>/home/.pumpkin
-              PUMPKIN.star: a link of its blob, 444
-              lib/train.star: a link of its blob, 444
-              stand-in/CLAUDE.md: a symbolic link to Dockerfile
-              stand-in/Dockerfile: a link of its blob, 444
-              stand-in/empty: a link of its blob, 444
-              stand-in/final.star: a link of its blob, 444
-              stand-in/run.sh: a link of its blob's copy to run, 555
-              stand-in/submit.star: a link of its blob, 444
-              stand-in/task.star: a link of its blob, 444
-              stand-in/with space.txt: a link of its blob, 444
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-            exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` holds all 10 of the task's files
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
-            the calls: serve
-            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
-            exit status: Some(0)
-            pumpkin: run <id> goes to controller `alice`
-            pumpkin: controller `alice` lacks 1 of the task's 10 files: sending 13 bytes
-            pumpkin: run <id> is a job on controller `alice`, which builds it, then runs it
-            pumpkin: to follow it: pumpkin wait <id>
-            pumpkin: to stop it: pumpkin cancel <id>
-            printed:
-              <id>
-            the calls: serve"#]],
-    );
 }
 
 #[test]
@@ -2612,150 +1448,6 @@ fn send_evicted_file() {
     );
 }
 
-#[test]
-#[expect(clippy::too_many_lines, reason = "most of it is the snapshot")]
-fn store_collection() {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    set_up(&scratch);
-    let client = set_up_client(&scratch);
-    let mut named = Vec::new();
-    let mut trees = Vec::new();
-    for notes in ["first", "second", "third"] {
-        scratch.write("repo/stand-in/notes", notes);
-        let (id, ran) = start(&scratch, &client);
-        assert!(ran.contains("exit status: Some(0)"), "{ran}");
-        named.push((
-            sha256(notes.as_bytes()),
-            format!("stand-in/notes, as the {notes} sent it"),
-        ));
-        named.push((
-            last_tree(&scratch),
-            format!("the tree that the {notes} sent"),
-        ));
-        trees.push((id, last_tree(&scratch)));
-    }
-    // The first's job makes its tree, which links its files; the second's never starts.
-    let (first, tree) = &trees[0];
-    assert!(job_of(&scratch, first, tree).status.success());
-    let two_days_ago = SystemTime::now() - Duration::from_hours(48);
-    for (_, tree) in &trees[..2] {
-        let manifest = scratch.0.join(format!("home/store/manifests/{tree}"));
-        File::open(manifest)
-            .unwrap()
-            .set_modified(two_days_ago)
-            .unwrap();
-    }
-    for (bytes, when) in [
-        ("of two days ago", two_days_ago),
-        ("of now", SystemTime::now()),
-    ] {
-        let hex = sha256(bytes.as_bytes());
-        let piece = format!("home/store/incoming/{hex}.part");
-        scratch.write(&piece, bytes);
-        File::open(scratch.0.join(piece))
-            .unwrap()
-            .set_modified(when)
-            .unwrap();
-        named.push((hex, format!("a blob {bytes}")));
-    }
-    let active_hex = sha256(b"uploading");
-    let active_path = format!("home/store/incoming/{active_hex}.part");
-    scratch.write(&active_path, "up");
-    let active = File::open(scratch.0.join(active_path)).unwrap();
-    active.lock().unwrap();
-    active.set_modified(two_days_ago).unwrap();
-    named.push((active_hex, "an active upload".to_owned()));
-    let bundle = "a bundle from an older client";
-    let digest = sha256(bundle.as_bytes());
-    let older = format!("pumpkin-tree/1\nb {digest} {} {PINNED}\n", bundle.len());
-    let older_name = sha256(older.as_bytes());
-    let old_blob = format!("home/store/{digest}");
-    scratch.write(&old_blob, bundle);
-    fs::set_permissions(scratch.0.join(old_blob), Permissions::from_mode(0o444)).unwrap();
-    scratch.write(&format!("home/store/manifests/{older_name}"), &older);
-    named.push((older_name, "an earlier client's manifest".to_owned()));
-    named.push((digest, "its bundle".to_owned()));
-    // Of a later Pumpkin's, say, which may name any blob.
-    let foreign = "pumpkin-tree/2\nwhat a later form holds\n";
-    let foreign_hex = sha256(foreign.as_bytes());
-    let planted = format!("home/store/manifests/{foreign_hex}");
-    scratch.write(&planted, foreign);
-    named.push((foreign_hex.clone(), "a manifest of another form".to_owned()));
-    let (third, tree) = &trees[2];
-    let built = job_of(&scratch, third, tree);
-    assert!(built.status.success(), "{built:?}");
-    let named: Vec<(String, &str)> = (named.iter())
-        .map(|(hex, name)| (hex.clone(), name.as_str()))
-        .collect();
-    let said = String::from_utf8(built.stderr).unwrap();
-    let mut lines: Vec<String> = (said.lines())
-        .filter(|line| line.contains("keeps every blob"))
-        .map(str::to_owned)
-        .collect();
-    let shown = ["second", "manifest", "incoming"];
-    lines.extend(
-        (stored(&scratch, &holders(&scratch, &named)).into_iter())
-            .filter(|line| shown.iter().any(|name| line.contains(name))),
-    );
-    drop(active);
-    fs::remove_file(scratch.0.join(planted)).unwrap();
-    let (fourth, ran) = start(&scratch, &client);
-    assert!(ran.contains("exit status: Some(0)"), "{ran}");
-    let built = job_of(&scratch, &fourth, tree);
-    assert!(built.status.success(), "{built:?}");
-    lines.extend(stored(&scratch, &holders(&scratch, &named)));
-    let config = scratch.0.join(format!("home/builds/{fourth}/pumpkin.toml"));
-    let mut here = on_controller(
-        &scratch,
-        &[
-            "build",
-            "--config",
-            config.to_str().unwrap(),
-            "stand-in/task.star",
-        ],
-    );
-    let here = here.current_dir(scratch.0.join("repo")).output().unwrap();
-    assert!(here.status.success(), "{here:?}");
-    lines.push(format!(
-        "the job built the IR that the repository builds: {}",
-        built.stdout == here.stdout
-    ));
-    check(
-        &scratch,
-        &lines.join("\n"),
-        &[(&foreign_hex, "<another form>")],
-        &expect![[r#"
-            pumpkin: <scratch>/home/store/manifests/<another form>: the manifest doesn't start with `pumpkin-tree/1`: expected a manifest of this Pumpkin's form; so the prune keeps every blob of the store, which it may name
-              stand-in/notes, as the second sent it: 444, 1 link
-              a manifest: a manifest of another form
-              a manifest: a tree of no files
-              a manifest: an earlier client's manifest
-              a manifest: the install
-              a manifest: the tree that the third sent
-              incoming/: partial an active upload, 2 bytes
-              incoming/: partial a blob of now, 6 bytes
-            the store:
-              PUMPKIN.star: 444, 4 links
-              its bundle: 444, 1 link
-              lib/train.star: 444, 4 links
-              stand-in/Dockerfile: 444, 4 links
-              stand-in/final.star: 444, 4 links
-              stand-in/notes, as the first sent it: 444, 2 links
-              stand-in/notes, as the third sent it: 444, 3 links
-              stand-in/submit.star: 444, 4 links
-              stand-in/task.star: 444, 4 links
-              the installed buildifier, to run: 555, 2 links
-              the installed pumpkin, to run: 555, 2 links
-              a manifest: a tree of no files
-              a manifest: an earlier client's manifest
-              a manifest: the install
-              a manifest: the tree that the third sent
-              incoming/: partial a blob of now, 6 bytes
-            the job built the IR that the repository builds: true"#]],
-    );
-}
-
 fn ended_job(scratch: &Scratch, id: &str, log: &str) {
     let job = format!("home/jobs/{id}");
     scratch.write(&format!("{job}/log"), log);
@@ -2834,43 +1526,6 @@ echo "$*" >> "${0%/*}/units"
         exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
         --user kill --signal=KILL pumpkin-job-<id>
         --user stop pumpkin-job-<id>"#]],
-    );
-}
-
-#[test]
-fn cancel_another_builds_job() {
-    let scratch = Scratch::new();
-    let client = set_up_client(&scratch);
-    connect(&scratch, &client);
-    served(&scratch);
-    let id = id_ago(0, "0c000007");
-    ended_job(&scratch, &id, "running a different build\n");
-    let dir = format!("home/.pumpkin/runs/{id}");
-    let foreign = json!({ "record_version": "another format", "pumpkin": { "version": "1.2.3" } });
-    scratch.write(&format!("{dir}/record.json"), &foreign);
-    scratch.write(&format!("{dir}/outcome.json"), "the other build's outcome");
-    scratch.write(&format!("run/pumpkin/{id}/held"), "");
-    let ctl = r#"#!/bin/sh
-echo "$*" >> "${0%/*}/units"
-rm -r -- "$XDG_RUNTIME_DIR/pumpkin/${3#pumpkin-job-}"
-"#;
-    scratch.write_executable("bin/systemctl", ctl.as_bytes());
-    let cancel = on_client(&scratch, &client, &["cancel", &id])
-        .output()
-        .unwrap();
-    let copied = scratch
-        .0
-        .join(format!("repo/.pumpkin/runs/{id}/outcome.json"));
-    assert_eq!(
-        fs::read_to_string(copied).unwrap(),
-        "the other build's outcome"
-    );
-    let said = String::from_utf8_lossy(&cancel.stderr);
-    assert!(said.contains("1.2.3"), "{said}");
-    assert!(cancel.status.success(), "{said}");
-    assert_eq!(
-        fs::read_to_string(scratch.0.join("bin/units")).unwrap(),
-        format!("--user stop pumpkin-job-{id}\n")
     );
 }
 
@@ -3430,7 +2085,7 @@ fn follow_copies_another_writers_record() {
 
 // As the first `ls` installs it, but as links to the client's files, which write nothing.
 fn served(scratch: &Scratch) -> String {
-    let key = key(&client_bin(scratch));
+    let key = key();
     let dir = scratch.0.join(format!("home/.pumpkin/serve/{key}"));
     if dir.is_dir() {
         return key;
@@ -3449,32 +2104,33 @@ fn client_bin(scratch: &Scratch) -> PathBuf {
     scratch.0.join(format!("repo/.pumpkin/{PINNED}/bin"))
 }
 
-fn install_manifest(bin: &Path) -> String {
-    let mut names = BUILT;
-    names.sort_unstable();
+// The SHA-256 and length of each file that `install` links, in name order: of the files it links
+// from, the same in each install, so that the large `pumpkin` is hashed once per test process.
+fn built() -> &'static [(&'static str, String, u64); 2] {
+    static BUILT_SHA256: LazyLock<[(&str, String, u64); 2]> = LazyLock::new(|| {
+        let hashed = |name, path: &Path| {
+            let (hex, size_bytes) = file_sha256(path);
+            (name, hex, size_bytes)
+        };
+        [
+            hashed("buildifier", &super::buildifier()),
+            hashed("pumpkin", Path::new(PUMPKIN)),
+        ]
+    });
+    &BUILT_SHA256
+}
+
+// The manifest of what `install` lays out, as the client sends it for its install.
+fn install_manifest() -> String {
     let mut text = "pumpkin-tree/1\n".to_owned();
-    for name in names {
-        let (hex, size_bytes) = built_sha256(&bin.join(name));
+    for (name, hex, size_bytes) in built() {
         let _ = writeln!(text, "x {hex} {size_bytes} {name}");
     }
     text
 }
 
-// The SHA-256 and length of the file of `BUILT` at `path`. Each install's `pumpkin` is a link of
-// the one under test, which is large, so that one is hashed once per test process.
-fn built_sha256(path: &Path) -> (String, u64) {
-    static PUMPKIN_SHA256: LazyLock<(String, u64)> =
-        LazyLock::new(|| file_sha256(Path::new(PUMPKIN)));
-    let (file, pumpkin) = (fs::metadata(path).unwrap(), fs::metadata(PUMPKIN).unwrap());
-    if (file.dev(), file.ino()) == (pumpkin.dev(), pumpkin.ino()) {
-        PUMPKIN_SHA256.clone()
-    } else {
-        file_sha256(path)
-    }
-}
-
-fn key(bin: &Path) -> String {
-    sha256(install_manifest(bin).as_bytes())
+fn key() -> String {
+    sha256(install_manifest().as_bytes())
 }
 
 // Whether each file of the install in `bin` is the client's file of its name.
@@ -3647,7 +2303,7 @@ fn ls_installs_its_serve_there() {
         steps.push(ls_ran(&scratch, &client, &[]));
         steps.push(calls(&scratch));
     }
-    let hex = key(&client_bin(&scratch));
+    let hex = key();
     // Sorted as named in the snapshot, as this build's SHA-256 sorts anywhere.
     let mut left: Vec<String> = (modes(&installs).split(", "))
         .map(|install| install.replace(&hex, "<this build>"))
@@ -3953,7 +2609,7 @@ fn members_attributed() {
         format!("systemd-run {}", argv[unit..].join(" ")),
         ls,
     ];
-    let (install, tree) = (key(&client_bin(&scratch)), last_tree(&scratch));
+    let (install, tree) = (key(), last_tree(&scratch));
     let shown = [
         (id.as_str(), "<id>"),
         (&install, "<install>"),
@@ -5032,7 +3688,7 @@ fn view_installs_its_serve_there() {
         steps.push(got(&served, &window, &["end"]));
         steps.push(calls(&scratch));
     }
-    let hex = key(&client_bin(&scratch));
+    let hex = key();
     let install = scratch.0.join(format!("home/.pumpkin/serve/{hex}"));
     steps.push(format!("the install: {}", modes(&install)));
     steps.push(files_of(&scratch, &install));
