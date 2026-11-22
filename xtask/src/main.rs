@@ -717,10 +717,10 @@ fn executables(mut build: Command) -> Result<Vec<serde_json::Value>> {
     Ok(executables)
 }
 
-/// Builds the files of an install, which [`install::File`] lists, with `pumpkin` for `target`, and
-/// installs them in `<root>/bin`, made if need be, replacing what is there: `root` made
-/// absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a `root`, says
-/// if `<root>/bin` is not on `PATH`.
+/// Builds the files of an install, which [`install::File`] lists, with `pumpkin` for `target`.
+/// Installs them in `<root>/bin`, made if need be, and replaces what is there. `<root>` is `root`
+/// made absolute, or this checkout's `.pumpkin`. Prints each one's path. Without a `root`, says if
+/// `<root>/bin` is not on `PATH`.
 fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));

@@ -14,9 +14,10 @@ use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
-/// This build's files, which the controller installs whole and runs the `pumpkin` of as `serve`:
-/// its executable, and whichever of an install's other files lie beside it, as they are, so that
-/// a `pumpkin` run from cargo's `target/debug` brings that directory's debug builds.
+/// This build's files, which the controller installs whole. The controller runs their `pumpkin`
+/// as `serve`. They are this build's executable, and whichever of an install's other files lie
+/// beside it, as they are. So a `pumpkin` run from cargo's `target/debug` brings that directory's
+/// debug builds.
 pub(super) struct Build {
     files: Vec<(&'static str, PathBuf)>,
     pub(super) hashed: manifest::Hashed,

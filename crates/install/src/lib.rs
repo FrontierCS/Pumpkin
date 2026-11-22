@@ -1,11 +1,11 @@
-//! The files of a Pumpkin install, the unit that a release archives and a controller installs
-//! whole: `pumpkin` and the files beside it, in one directory, `bin/`. `cargo xtask build` lays
-//! the install out, and `pumpkin` sends its own to a controller.
+//! The files of a Pumpkin install: `pumpkin` and the files beside it, in one directory, `bin/`. A
+//! release archives an install, and a controller installs it whole. `cargo xtask build` lays the
+//! install out. `pumpkin` sends its own install to a controller.
 #![no_std]
 
-/// Declares `File`, `File::ALL` and each file's name and kind from the one table that follows,
-/// so that a file added to the table is in all of them. A kind is `executable`, a static
-/// executable, or `data`, which other programs read.
+/// Declares `File`, `File::ALL` and each file's name and kind from the one table that follows. So
+/// a file added to the table is in all of them. A kind is `executable`, a static executable, or
+/// `data`, which other programs read.
 macro_rules! files {
     (@is_executable executable) => {
         true
@@ -31,8 +31,8 @@ macro_rules! files {
                 }
             }
 
-            /// Whether it is a static executable, which an install keeps executable; the others
-            /// are read by other programs.
+            /// Whether it is a static executable, which an install keeps executable. Other programs
+            /// read the rest.
             pub const fn is_executable(self) -> bool {
                 match self {
                     $(Self::$file => files!(@is_executable $kind),)*
@@ -49,7 +49,7 @@ files! {
     Sandboxd = "sandboxd", executable;
     /// The Modal provider's helper, a script that `uv` runs.
     ModalHelper = "pumpkin-modal.py", data;
-    // `uv` takes the lock's name from the helper's, which it appends `.lock` to.
+    // `uv` names the lock after the helper, with `.lock` appended.
     /// The lock of the helper's packages.
     ModalLock = "pumpkin-modal.py.lock", data;
 }

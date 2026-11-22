@@ -97,9 +97,8 @@ Ctrl-C reaches it, and its command alone is killed at the bound.
 
 The files of an install, `pumpkin` and those beside it in `bin/` (`File`): which files there are,
 their names, and which are executable. `xtask` takes them from here to lay an install out
-(`build`), to check its archived copy (`release`) and to place files for its checks, and
-`pumpkin` takes them to find the files beside itself and to hash its own install to send to a
-controller.
+(`build`), to check its archived copy (`release`) and to place files for its checks. `pumpkin`
+takes them to find the files beside itself, and to hash its own install to send to a controller.
 
 **Architecture Invariant:** it holds data and does no I/O, as `recipe` and `library` do. It is
 `#![no_std]`, and its manifest names no dependency.
