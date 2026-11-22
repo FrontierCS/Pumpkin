@@ -1,7 +1,7 @@
 //! What IAM must allow of the provider's calls, and of the envelope's other principals.
 //!
-//! The provider's calls are made with the credentials of the process that runs it ([`caller`]);
-//! its sandboxes rely on the timer's role ([`timer`]) and the sandbox instances' ([`sandbox`]).
+//! The provider's calls are made with the credentials of the process that runs it ([`caller`]).
+//! Its sandboxes rely on the timer's role ([`timer`]) and the sandbox instances' ([`sandbox`]).
 
 use aws::iam::{Allow, Call, Condition, Ecr, Key, List, Part, Placeholder, Resource, Test, Values};
 
@@ -45,8 +45,8 @@ const REPOSITORIES: &[Resource] = &[
 
 const INSTANCES: &[Resource] = &[Resource::In("ec2", &[Part::Text("instance/*")])];
 
-/// The provider's own instances: each a run launched, with its run's tag, from the envelope's
-/// templates, whose instance profile is the sandboxes'.
+/// The provider's own instances. A run launched each, with its run's tag, from the envelope's
+/// templates. The templates' instance profile is the sandboxes'.
 const SANDBOXES: &[Condition] = &[
     Condition::new(
         Test::Null,
@@ -175,16 +175,16 @@ pub fn caller() -> impl Iterator<Item = &'static Allow> {
     calls.into_iter().flat_map(Call::allows).chain(ECR.allows())
 }
 
-/// What IAM must allow the timer's role, with which each schedule's target terminates its
-/// instance (`launch::Ec2::set_timer`).
+/// What IAM must allow the timer's role. Each schedule's target terminates its instance with it
+/// (`launch::Ec2::set_timer`).
 pub fn timer() -> impl Iterator<Item = &'static Allow> {
     [&TERMINATE].into_iter()
 }
 
-/// What IAM must allow the sandbox instances' role, with which ECR's credential helper, as the
-/// instance's user data configures it, gets a token for each pull of the role's image and of
+/// What IAM must allow the sandbox instances' role. ECR's credential helper, as the instance's user
+/// data configures it, gets a token with it for each pull. It pulls the role's image and
 /// `sandboxd`'s.
-// AWS's `AmazonEC2ContainerRegistryPullOnly` but `ecr:BatchImportUpstreamImage`, which only a
+// AWS's `AmazonEC2ContainerRegistryPullOnly` without `ecr:BatchImportUpstreamImage`, which only a
 // pull-through cache needs:
 // https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEC2ContainerRegistryPullOnly.html
 pub fn sandbox() -> impl Iterator<Item = &'static Allow> {

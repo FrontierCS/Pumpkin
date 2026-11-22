@@ -337,14 +337,14 @@ unless a stage that pins each download by its checksum, with `ADD --checksum`, s
 
 AWS's command line as Pumpkin runs it, `Cli`, in one region, with ECR's repositories on it, a push
 from the operator's engine named by its digest (`Cli::publish`), and the IAM roles that settings
-name (`RoleArn`). `iam` is what IAM must allow of each call (`Call`), ECR's among them (`Ecr`),
-and a principal's policy from what its calls need (`iam::policy`).
+name (`RoleArn`). `iam` states what IAM must allow of each call (`Call`), ECR's among them
+(`Ecr`). It composes a principal's policy from what its calls need (`iam::policy`).
 
-**Architecture Invariant:** a principal's policy is what the calls of the shipped binaries
-state. `Cli` runs only a `Call`, which names what IAM must allow of it, its actions, resources and
+**Architecture Invariant:** a principal's policy is what the calls of the shipped binaries state.
+`Cli` runs only a `Call`, which names what IAM must allow of it: its actions, resources and
 conditions, as AWS's Service Authorization Reference gives them. Each crate that makes calls
-declares them in its `iam` module, which lists each in the policy of the principal that makes it,
-and `pumpkin controller policy` prints each policy. `xtask`'s own `aws` commands are a
+declares them in its `iam` module. That module lists each call in the policy of the principal that
+makes it. `pumpkin controller policy` prints each policy. `xtask`'s own `aws` commands are a
 contributor's, and in no policy.
 
 **Architecture Invariant:** every call that `Cli` makes is in its region, with no variable of this

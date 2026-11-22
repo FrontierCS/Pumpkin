@@ -1,13 +1,14 @@
-//! What IAM must allow of each command that [`Cli`](crate::Cli) runs ([`Call`]), ECR's among
-//! them ([`Ecr`]), and a principal's policy, from what IAM must allow of each call that it makes
+//! What IAM must allow of each command that [`Cli`](crate::Cli) runs ([`Call`]), ECR's among them
+//! ([`Ecr`]). A principal's policy follows from what IAM must allow of each call that it makes
 //! ([`policy`]).
 //!
 //! A statement ([`Allow`]) names actions, the resources they act on and the conditions that the
-//! policy keys on, as AWS's Service Authorization Reference gives them for the command's
-//! operation: <https://docs.aws.amazon.com/service-authorization/latest/reference/>. A call whose
-//! operation needs more than its own action, such as a launch that tags what it launches, states
-//! each. A value that only a deployment knows, such as the account, is a [`Placeholder`], or a
-//! [`List`] of values, which a policy leaves for Terraform's `templatefile` to fill.
+//! policy keys on. It names them as AWS's Service Authorization Reference gives them for the
+//! command's operation: <https://docs.aws.amazon.com/service-authorization/latest/reference/>. A
+//! call whose operation needs more than its own action states each action, as a launch that tags
+//! what it launches does. A value that only a deployment knows, such as the account, is a
+//! [`Placeholder`], or a [`List`] of values. A policy leaves them for Terraform's `templatefile` to
+//! fill.
 
 pub use self::policy::{Fill, placeholders, policy};
 
@@ -30,8 +31,8 @@ pub struct Placeholder {
 impl Placeholder {
     /// # Panics
     ///
-    /// If `name` is empty or holds a byte but an ASCII lowercase letter and `_`, which a
-    /// Terraform variable's name may hold, as a placeholder in a `const` fails to compile.
+    /// If `name` is empty, or holds a byte other than an ASCII lowercase letter or `_`. A
+    /// Terraform variable's name may hold those. A placeholder in a `const` then fails to compile.
     pub const fn new(name: &'static str, about: &'static str) -> Self {
         let bytes = name.as_bytes();
         assert!(!bytes.is_empty(), "a placeholder's name is empty");
@@ -48,8 +49,8 @@ impl Placeholder {
     }
 }
 
-/// A list of strings that a deployment fills in, as a [`Placeholder`] names and describes it,
-/// which only a condition's values take ([`Values::Listed`]).
+/// A list of strings that a deployment fills in, as a [`Placeholder`] names and describes it.
+/// Only a condition's values take one ([`Values::Listed`]).
 #[derive(Debug)]
 pub struct List(Placeholder);
 
@@ -71,9 +72,9 @@ pub enum Part {
 }
 
 /// The resources that a statement allows actions on.
-// By the ARN formats of the Service Authorization Reference, as Policy Sentry reads them: an
-// action's resource types, each with its ARN format and its condition keys, and the actions that
-// it depends on, which a `Call` states as `also`.
+// By the ARN formats of the Service Authorization Reference, as Policy Sentry reads them. It reads
+// an action's resource types, each with its ARN format and its condition keys. It also reads the
+// actions that the action depends on, which a `Call` states as `also`.
 // https://github.com/salesforce/policy_sentry/blob/2357c69171c2733150e99cc03340e662bc40382c/policy_sentry/querying/actions.py#L35-L95
 #[derive(Debug)]
 pub enum Resource {
@@ -127,8 +128,8 @@ impl Condition {
     }
 }
 
-/// A statement of a policy: `actions`, such as `ec2:RunInstances`, on `resources`, under every
-/// one of its conditions.
+/// A statement of a policy. It allows `actions`, such as `ec2:RunInstances`, on `resources`,
+/// under every one of its conditions.
 #[derive(Debug)]
 pub struct Allow {
     actions: &'static [&'static str],
@@ -161,7 +162,7 @@ pub struct Call {
 }
 
 impl Call {
-    /// `command`, its service and operation as `aws` names them, which `allow` allows.
+    /// `command`, its service and operation as `aws` names them. `allow` allows it.
     pub const fn new(command: [&'static str; 2], allow: Allow) -> Self {
         Self {
             command,
@@ -181,7 +182,7 @@ impl Call {
         }
     }
 
-    /// This call, which needs what `also` allows besides, such as the actions of the resources
+    /// This call, which also needs what `also` allows. That may be the actions of the resources
     /// that its operation makes.
     #[must_use]
     pub const fn also(self, also: &'static [Allow]) -> Self {
@@ -200,9 +201,9 @@ impl Call {
 
 /// The calls on ECR of a user of some repositories, and what IAM must allow of them.
 ///
-/// They describe the repositories ([`Cli::repositories`](crate::Cli::repositories)) and publish
-/// an image to one ([`Cli::publish`](crate::Cli::publish)), whose push the engine makes with the
-/// password of a login to ECR.
+/// They describe the repositories ([`Cli::repositories`](crate::Cli::repositories)). They
+/// publish an image to one ([`Cli::publish`](crate::Cli::publish)). The engine makes that push
+/// with the password of a login to ECR.
 #[derive(Debug)]
 pub struct Ecr {
     pub(crate) describe: Call,

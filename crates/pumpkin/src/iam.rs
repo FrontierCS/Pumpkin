@@ -1,8 +1,8 @@
 //! The calls that `pumpkin`'s own code makes on AWS, and each principal's policy ([`policy`]).
 //!
-//! A principal's policy is what IAM must allow of each call that it makes: the controller's, as
-//! its jobs run the providers and read their settings; the providers' other principals;
-//! and a client's, as it reaches its controller.
+//! A principal's policy is what IAM must allow of each call that it makes. The controller's role
+//! makes its jobs' calls: they run the providers and read their settings. The providers'
+//! other principals make their own calls. A client's calls reach its controller.
 
 use aws::iam::{
     self, Allow, Call, Condition, Fill, Key, Part, Placeholder, Resource, Test, Values,
@@ -15,15 +15,15 @@ use crate::controller::USER;
 /// `pumpkin controller policy` prints.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Principal {
-    #[value(help = "The controller's role: its jobs' providers and their settings")]
+    /// The controller's role: its jobs' providers and their settings.
     Controller,
-    #[value(help = "The role of the EC2 timer, which terminates instances")]
+    /// The role of the EC2 timer, which terminates instances.
     Timer,
-    #[value(help = "The EC2 provider's instances' role, which pulls their images")]
+    /// The EC2 provider's instances' role, which pulls their images.
     Sandbox,
-    #[value(help = "The role that Modal assumes to import the roles' images")]
+    /// The role that Modal assumes to import the roles' images.
     ModalPull,
-    #[value(help = "What a machine whose configuration names `[controller]` needs")]
+    /// What a machine whose configuration names `[controller]` needs.
     Client,
 }
 
@@ -81,8 +81,8 @@ pub(crate) const CLIENT: Client = Client {
 };
 
 /// What IAM must allow `principal`.
-// A call that its crate declares but lists in no principal's statements compiles all the same,
-// and IAM refuses it, which `cargo xtask live ec2` and `cargo xtask live modal` show as AWS's
+// A call that its crate declares but lists in no principal's statements compiles all the same.
+// IAM then refuses it. `cargo xtask live ec2` and `cargo xtask live modal` show that as AWS's
 // `AccessDenied` once a deployment applies these policies.
 fn allows(principal: Principal) -> Vec<&'static Allow> {
     match principal {
@@ -116,8 +116,8 @@ pub(crate) fn policy(principal: Principal) -> String {
     iam::policy(&allows(principal))
 }
 
-/// The help of `pumpkin controller policy`'s placeholders: what each stands for, and which each
-/// principal's policy holds.
+/// The help of `pumpkin controller policy`'s placeholders. It says what each stands for, and
+/// which each principal's policy holds.
 pub(crate) fn placeholders() -> String {
     let principals = Principal::value_variants().iter();
     let all: Vec<&Allow> = principals
@@ -152,8 +152,8 @@ pub(crate) fn placeholders() -> String {
     lines.join("\n")
 }
 
-/// `words` after `head`, a space between each two, in lines of 80 columns at most but for a
-/// word longer, each line after the first indented by 4.
+/// `words` after `head`, a space between each two, in lines of 80 columns at most. A longer word
+/// takes a line of its own. Each line after the first is indented by 4.
 fn wrapped<'a>(head: &str, words: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut lines = vec![head.to_owned()];
     for word in words {

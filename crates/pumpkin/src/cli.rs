@@ -214,7 +214,7 @@ enum Action {
 }
 
 /// What a command line asks for. `Job` and the variants after it are the controller's own side,
-/// `pumpkin controller <action>`; `Print` holds help, the version or a policy, for the standard
+/// `pumpkin controller <action>`. `Print` holds help, the version or a policy, for the standard
 /// output.
 pub(crate) enum Command {
     Run(Run),

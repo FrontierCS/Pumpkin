@@ -1,5 +1,5 @@
-//! A policy as IAM's JSON, which Terraform's `templatefile` fills: a placeholder as `${name}`,
-//! and a list as `${jsonencode(name)}`, in the place of a condition's whole array of values:
+//! A policy as IAM's JSON, which Terraform's `templatefile` fills. A placeholder is `${name}`. A
+//! list is `${jsonencode(name)}`, in the place of a condition's whole array of values:
 //! <https://developer.hashicorp.com/terraform/language/functions/templatefile>.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,8 +10,8 @@ use super::{
     ACCOUNT, Allow, Condition, Key, List, PARTITION, Part, Placeholder, REGION, Resource, Values,
 };
 
-/// A placeholder of a policy, as [`placeholders`] gives it: what it stands for, and whether for a
-/// list.
+/// A placeholder of a policy, as [`placeholders`] gives it. It says what it stands for, and
+/// whether for a list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
     pub about: &'static str,
@@ -21,10 +21,10 @@ pub struct Fill {
 /// The policy that allows each statement of `allows`, as IAM's JSON, with each placeholder as
 /// `templatefile` takes it.
 ///
-/// Statements of the same resources and conditions are one, with each of their actions, ordered
-/// by those resources and conditions.
-// As `controller-gen rbac` merges the rules of the same resources, and iamlive the statements of
-// the same resources, whatever their conditions, as its statements have none:
+/// Statements of the same resources and conditions are one, with each of their actions. They are
+/// ordered by those resources and conditions.
+// `controller-gen rbac` likewise merges the rules of the same resources. iamlive merges the
+// statements of the same resources, whatever their conditions, as its statements have none:
 // https://github.com/kubernetes-sigs/controller-tools/blob/9d91b2512c200fb64555b0e5b5c4d4ee76894ef3/pkg/rbac/parser.go#L184-L213
 // https://github.com/iann0036/iamlive/blob/d8e67a2d9a422a00c9246531b3a5f3892c465585/iamlivecore/logger.go#L149-L167
 pub fn policy(allows: &[&'static Allow]) -> String {
@@ -170,9 +170,9 @@ fn part_text(part: &Part) -> String {
     }
 }
 
-/// `text`, which `templatefile` gives back as it is: each `${` and `%{`, which would begin its
-/// own interpolation or directive, escaped, so that an IAM policy variable such as
-/// `${aws:username}` reaches IAM.
+/// `text`, escaped so that `templatefile` gives it back as it is. Each `${` and `%{` would begin
+/// an interpolation or directive of `templatefile`'s, so it is escaped. So an IAM policy variable
+/// such as `${aws:username}` reaches IAM.
 // https://developer.hashicorp.com/terraform/language/expressions/strings
 fn literal(text: &str) -> String {
     text.replace("${", "$${").replace("%{", "%%{")

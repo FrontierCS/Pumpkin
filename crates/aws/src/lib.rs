@@ -1,7 +1,7 @@
 //! AWS's command line, `aws`, as Pumpkin's providers run it ([`Cli`]), with ECR's repositories
 //! on it, and the IAM roles that providers name in their settings ([`RoleArn`]).
 //!
-//! `Cli` runs only a declared [`Call`], which states what IAM must allow of it, so a principal's
+//! `Cli` runs only a declared [`Call`], which states what IAM must allow of it. So a principal's
 //! policy is what its code's calls state ([`iam::policy`]).
 //!
 //! Every call `aws` makes is in the region its [`Cli`] was made for, with the credentials that
@@ -282,7 +282,7 @@ impl Cli {
     }
 
     /// Runs `call` with `args`, its options, killed at `bound`, and returns what it prints on
-    /// standard output, or `None` if AWS reports that what it names doesn't exist
+    /// standard output. Returns `None` if AWS reports that what it names doesn't exist
     /// (`ResourceNotFoundException`).
     pub fn run_found(
         &self,
@@ -299,8 +299,9 @@ impl Cli {
         }
     }
 
-    /// The repositories that `names` name, in their order, each described by one call of
-    /// `ecr`'s, on which each is published, or why AWS described none of that name.
+    /// The repositories that `names` name, in their order. One call of `ecr`'s describes each.
+    /// Each keeps `ecr`'s calls, with which an image is published to it. Fails if AWS describes
+    /// none of a name, and says why.
     pub fn repositories<const N: usize>(
         &self,
         ecr: &'static Ecr,
