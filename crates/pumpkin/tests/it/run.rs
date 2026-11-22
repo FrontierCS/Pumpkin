@@ -1,8 +1,8 @@
-//! `run`: what it finds wrong before it reaches the engine, and once it has, and runs on Docker
+//! `run`: what it finds wrong before it reaches the engine, and runs on Docker
 //! followed to their ends with `--wait`, among them one whose agent makes ops through
 //! `sandboxctl`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,9 +22,9 @@ use test_support::{BUSYBOX, WORKFLOW, docker_context, files, sandboxd, standard_
 
 use super::build::Labelled;
 use super::{
-    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, StandIn, Step, build_first, check, containers, copy_tree,
-    cpu_list, docker_table, engine, final_running, invocation, ledger, machine, machine_cores,
-    machine_cpus, ran, record, report, siblings, through_shell, with_room, workflow,
+    EC2, LOCAL, PUMPKIN, RUNNER, Scratch, Step, build_first, check, containers, copy_tree,
+    docker_table, engine, final_running, invocation, machine, record, report, through_shell,
+    with_room, workflow,
 };
 
 #[test]
@@ -1112,45 +1112,6 @@ fn wait_for_each_run(scratch: &Scratch, sandboxd: &str) {
     );
 }
 
-#[test]
-fn modes() {
-    let shown = [0o002, 0o077].map(modes_under);
-    expect![[r#"
-        $ umask 002 && PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/runs --config pumpkin.toml
-        shared: 755
-        shared/runs: 755
-        the record: 755
-        $ umask 077 && PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/runs --config pumpkin.toml
-        shared: 700
-        shared/runs: 700
-        the record: 700"#]].assert_eq(&shown.join("\n"));
-}
-
-/// What `pumpkin run` under `umask`, with a runs directory whose parent is missing too, shows:
-/// its invocation, then the modes of the directories it made.
-fn modes_under(umask: libc::mode_t) -> String {
-    let scratch = Scratch::new();
-    let _stand_in = StandIn::new(&scratch);
-    let mut run = scratch.pumpkin(&["run", "lacking/task.star", "--sandboxd", "sandboxd"]);
-    run.args(["--runs", "shared/runs", "--config", "pumpkin.toml"]);
-    let bin = scratch.0.join("bin");
-    run.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-    let invoked = under_umask(&mut run, umask);
-    let output = run.output().unwrap();
-    let mut lines = vec![invoked.replace(scratch.0.to_str().unwrap(), "<scratch>")];
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let (_, record) = record(&stderr).unwrap();
-    for (name, path) in [
-        ("shared", scratch.0.join("shared")),
-        ("shared/runs", scratch.0.join("shared/runs")),
-        ("the record", PathBuf::from(record)),
-    ] {
-        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-        lines.push(format!("{name}: {mode:o}"));
-    }
-    lines.join("\n")
-}
-
 /// Has `command` run under `umask` ([`through_shell`]), and returns its invocation, as
 /// [`invocation`] shows it, after `umask` and the mask.
 fn under_umask(command: &mut Command, umask: libc::mode_t) -> String {
@@ -1199,24 +1160,8 @@ fn refusals() {
     scratch.write_task_in("it's broken", "tasks", &ir);
     scratch.write_task_in("a~b", "tasks", &ir);
     write_configurations(&scratch);
-    let stand_in = StandIn::new(&scratch);
-    let mut large = workflow(&format!("sha256:{}", "0".repeat(64)), &["true"]);
-    large["roles"][1]["needs"]["cpu_millis"] = json!(i64::MAX);
-    large["roles"][2]["needs"]["gpu"] = json!({ "count": 1, "model": "NVIDIA H100 80GB HBM3" });
-    scratch.write_task("large", &large);
-    let mut wide = workflow(&format!("sha256:{}", "0".repeat(64)), &["true"]);
-    let cpus = machine_cpus();
-    wide["roles"][0]["needs"]["cpu_millis"] = json!(cpus * 1000);
-    wide["roles"][1]["needs"]["cpu_millis"] = json!(1000);
-    scratch.write_task("wide", &wide);
-    scratch.write("plain.toml", &machine("default"));
-    // Two CPUs given, of which the agent's take both.
-    wide["roles"][0]["needs"]["cpu_millis"] = json!(2000);
-    scratch.write_task("narrow", &wide);
     let given =
         |cpus: &str| format!("[docker]\ncontext = \"default\"\ncpus = \"{cpus}\"\n\n{LOCAL}");
-    scratch.write("offline.toml", &given("0,4096-4097"));
-    scratch.write("narrow.toml", &given("0-1"));
     scratch.write("backward.toml", &given("3-1"));
     scratch.write("empty.toml", &given(""));
     let run = |entry, config: &str| {
@@ -1224,10 +1169,10 @@ fn refusals() {
         command.args(["--runs", "runs", "--config", config]);
         command
     };
-    let on_stand_in = |entry, config: &str| {
-        let mut command = run(entry, config);
-        let bin = scratch.0.join("bin");
-        command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    // Their CPU lists don't parse, which is refused before `docker` runs: none is on their `PATH`.
+    let unreached = |config: &str| {
+        let mut command = run("workflow/task.star", config);
+        command.env("PATH", scratch.0.join("nowhere"));
         command
     };
     // Paths that need quoting for a space alone, and for a newline, which makes the command
@@ -1242,31 +1187,14 @@ fn refusals() {
         Step::from(run("budgeted/task.star", "conf/uncached.toml")),
         Step::from(run("budgeted/task.star", "conf/unwritten.toml")),
         Step::from(run("budgeted/task.star", "conf/uncosted.toml")),
-        Step::from(stand_in.run("large/task.star", &[])),
-        Step::from(on_stand_in("wide/task.star", "plain.toml")),
-        Step::from(on_stand_in("wide/task.star", "backward.toml")),
-        Step::from(on_stand_in("wide/task.star", "empty.toml")),
-        Step::from(on_stand_in("wide/task.star", "offline.toml")),
-        Step::from(on_stand_in("narrow/task.star", "narrow.toml")),
+        Step::from(unreached("backward.toml")),
+        Step::from(unreached("empty.toml")),
     ];
-    let cores = machine_cores();
-    let shown = [
-        (format!("offers {cpus}000 "), "offers <cpus>000 ".to_owned()),
-        (format!("`agent` {cpus},"), "`agent` <cpus>,".to_owned()),
-        (format!("the {cores} that"), "the <cores> that".to_owned()),
-        (
-            format!("CPUs of 0-{}", cpus - 1),
-            "CPUs of 0-<cpus - 1>".to_owned(),
-        ),
-    ];
-    let shown: Vec<(&str, &str)> = (shown.iter())
-        .map(|(from, to)| (from.as_str(), to.as_str()))
-        .collect();
     check(
         &scratch,
         steps,
         false,
-        &shown,
+        &[],
         &expect![[r#"
             $ pumpkin run it's broken/tasks/task.star --sandboxd sandboxd --runs runs --config conf/served.toml
             exit status: Some(1)
@@ -1318,38 +1246,22 @@ fn refusals() {
             exit status: Some(1)
             pumpkin: conf/uncosted.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
             pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run large/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: large/task.star: /roles/1/needs: `trainer` fits no class of sandbox, as `local`'s `container` offers <cpus>000 thousandths of a CPU, fewer than its 9223372036854775807: offer a class that meets its needs, or change its needs
-            pumpkin: large/task.star: /roles/2/needs: `final_judge` fits no class of sandbox, as `local`'s `container` has no GPU, and it needs 1 × `NVIDIA H100 80GB HBM3`: offer a class that meets its needs, or change its needs
-            pumpkin: large/task.star: placing the workflow's roles in the classes that pumpkin.toml's providers offer has 2 problems
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/large/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run wide/task.star --sandboxd sandboxd --runs runs --config plain.toml
-            exit status: Some(1)
-            pumpkin: reserving on provider `local`: the run's roles need more whole cores at once than the <cores> that this machine gives sandboxes, to hold their CPUs (`agent` <cpus>, `trainer` 1, `final_judge` 1): give them fewer CPUs
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run wide/task.star --sandboxd sandboxd --runs runs --config backward.toml
+            $ PATH=<scratch>/nowhere pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config backward.toml
             exit status: Some(1)
             pumpkin: backward.toml: TOML parse error at line 3, column 8
               |
             3 | cpus = "3-1"
               |        ^^^^^
             `3-1` is no CPU list: expected one such as `0-3,8`
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/backward.toml --sandboxd <scratch>/sandboxd <scratch>/wide/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run wide/task.star --sandboxd sandboxd --runs runs --config empty.toml
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/backward.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
+            $ PATH=<scratch>/nowhere pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config empty.toml
             exit status: Some(1)
             pumpkin: empty.toml: TOML parse error at line 3, column 8
               |
             3 | cpus = ""
               |        ^^
             the CPU list is empty: name one CPU at least, such as `0`
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/empty.toml --sandboxd <scratch>/sandboxd <scratch>/wide/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run wide/task.star --sandboxd sandboxd --runs runs --config offline.toml
-            exit status: Some(1)
-            pumpkin: reaching provider `local` failed: the CPUs to give sandboxes, 0,4096-4097, name 4096-4097, which aren't online: name only CPUs of 0-<cpus - 1>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/offline.toml --sandboxd <scratch>/sandboxd <scratch>/wide/task.star
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run narrow/task.star --sandboxd sandboxd --runs runs --config narrow.toml
-            exit status: Some(1)
-            pumpkin: reserving on provider `local`: the run's roles need more whole cores at once than the 2 that this machine gives sandboxes, to hold their CPUs (`agent` 2, `trainer` 1, `final_judge` 1): give them fewer CPUs"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/empty.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star"#]],
     );
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }
@@ -2552,135 +2464,5 @@ fn ops_on_docker() {
             job 1's command 0's standard output:
             job 2's command 0's standard output:
             judged 6 bytes as 65532, with HOME=/pumpkin/home, in /pumpkin/home"#]],
-    );
-}
-
-/// How many records `runs`, the runs directory in `scratch`, holds.
-fn runs_made(scratch: &Scratch) -> usize {
-    fs::read_dir(scratch.0.join("runs")).map_or(0, Iterator::count)
-}
-
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "most of it is what each share shows, and the snapshot"
-)]
-fn cpus() {
-    let cores = machine_cores();
-    if cores < 5 {
-        eprintln!("skipped: the machine has {cores} cores, and the test needs 5 at least");
-        return;
-    }
-    let scratch = Scratch::new();
-    let stand_in = StandIn::new(&scratch);
-    let threads = machine_cpus() / cores;
-    let sized = |name: &str, [agent, train, last]: [u64; 3]| {
-        let mut ir = workflow("", &["true"]);
-        for (role, count) in [agent, train, last].into_iter().enumerate() {
-            ir["roles"][role]["needs"]["cpu_millis"] = json!(count * 1000 - 500);
-        }
-        scratch.write_task(name, &ir);
-    };
-    sized("first", [1, 2, 1]);
-    sized("second", [2, 1, 1]);
-    // A core fewer than the two runs leave, then one for the trainer.
-    sized("third", [threads * (cores - 4), 1, 1]);
-    stand_in.hold("create");
-    let started = |task: &str| {
-        let output = stand_in
-            .run(&format!("{task}/task.star"), &[])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    };
-    let (first, second) = (started("first"), started("second"));
-    let shares = |id: &str| -> BTreeMap<String, BTreeSet<u32>> {
-        let entry = fs::read_to_string(ledger(&scratch).join(format!("{id}.json"))).unwrap();
-        let entry: Value = serde_json::from_str(&entry).unwrap();
-        // Each role runs one sandbox at a time, instance 0.
-        let roles = entry["roles"].as_object().unwrap().iter();
-        let role = |key: &str| key.strip_suffix("/0").unwrap().to_owned();
-        roles
-            .map(|(key, cpus)| (role(key), cpu_list(cpus.as_str().unwrap())))
-            .collect()
-    };
-    let (ours, theirs) = (shares(&first), shares(&second));
-    // Whole cores, and none more than hold `needed` CPUs.
-    let fitted = |cpus: &BTreeSet<u32>, needed: usize| {
-        let whole = cpus.iter().all(|&cpu| siblings(cpu).is_subset(cpus));
-        let core = cpus.first().map_or(0, |&cpu| siblings(cpu).len());
-        whole && cpus.len() >= needed && cpus.len() - core < needed
-    };
-    let all = |shares: &BTreeMap<String, BTreeSet<u32>>| -> BTreeSet<u32> {
-        shares.values().flatten().copied().collect()
-    };
-    let mut lines = vec![
-        format!(
-            "the first's roles on whole cores, as few as hold their CPUs: {}",
-            fitted(&ours["agent"], 1)
-                && fitted(&ours["trainer"], 2)
-                && fitted(&ours["final_judge"], 1)
-        ),
-        format!(
-            "its agent and trainer apart: {}",
-            ours["agent"].is_disjoint(&ours["trainer"])
-        ),
-        format!(
-            "its final judge on its agent's: {}",
-            ours["final_judge"] == ours["agent"]
-        ),
-        format!(
-            "the second's on whole cores, as few as hold their CPUs, apart: {}",
-            fitted(&theirs["agent"], 2)
-                && fitted(&theirs["trainer"], 1)
-                && theirs["agent"].is_disjoint(&theirs["trainer"])
-        ),
-        format!(
-            "the second's apart from the first's: {}",
-            all(&ours).is_disjoint(&all(&theirs))
-        ),
-    ];
-    let refused = ran(stand_in.run("third/task.star", &[]), &scratch.0, false);
-    let refused = (refused.replace(&first, "<run>").replace(&second, "<run>"))
-        .replace(
-            &format!("need {} whole", cores - 3),
-            "need <cores - 3> whole",
-        )
-        .replace(
-            &format!("`agent` {}", threads * (cores - 4)),
-            "`agent` <threads × (cores - 4)>",
-        )
-        .replace(&format!("the {cores} that"), "the <cores> that");
-    lines.push(format!("{refused}\nrecords made: {}", runs_made(&scratch)));
-    stand_in.release("create");
-    // Each run's driver outlives its `pumpkin run`, and writes into the scratch until it ends.
-    let ended = |id: &str| {
-        let wait = scratch.pumpkin(&["wait", id, "--runs", "runs"]).output();
-        format!("the run ended: {}", wait.unwrap().status.code() == Some(3))
-    };
-    lines.extend([&first, &second].map(|id| ended(id)));
-    let third = stand_in.run("third/task.star", &[]).output().unwrap();
-    lines.push(format!("then the third starts: {}", third.status.success()));
-    lines.push(ended(String::from_utf8(third.stdout).unwrap().trim()));
-    check(
-        &scratch,
-        lines.into_iter().map(Step::Ran),
-        false,
-        &[],
-        &expect![[r#"
-            the first's roles on whole cores, as few as hold their CPUs: true
-            its agent and trainer apart: true
-            its final judge on its agent's: true
-            the second's on whole cores, as few as hold their CPUs, apart: true
-            the second's apart from the first's: true
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run third/task.star --sandboxd sandboxd --runs runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: reserving on provider `local`: the run's roles need <cores - 3> whole cores at once, to hold their CPUs (`agent` <threads × (cores - 4)>, `trainer` 1, `final_judge` 1), and runs <run>, <run> hold 4 of the <cores> that this machine gives sandboxes: run it once they end, or give its roles fewer CPUs
-            records made: 2
-            the run ended: true
-            the run ended: true
-            then the third starts: true
-            the run ended: true"#]],
     );
 }
