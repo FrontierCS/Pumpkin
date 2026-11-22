@@ -6,15 +6,14 @@
 //! process's environment, such as `AWS_REGION` or `AWS_PROFILE`, steers `aws` to another region
 //! or account.
 
-use std::io::ErrorKind;
-use std::process::{Command, Output};
+use std::process::Command;
 use std::time::Duration;
 
 use engine::{Login, MANIFEST_TYPES, Pusher};
 use schema::ir::Image;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use stdx::process::Environment;
+use stdx::process::{self, Echo, Environment, Failure, Run};
 use stdx::{Context as _, Deadline};
 
 // Every command a provider runs is one AWS answers at once, in one page. Throttled, `aws` tries
@@ -225,9 +224,23 @@ struct ImageId {
 impl Cli {
     /// The command line, run in `region`, with the version `aws --version` printed.
     pub fn connect(region: Region) -> Result<Self, String> {
-        let shown = "aws --version";
-        let stdout = succeeded(output(aws().arg("--version"), shown, Bound::Call)?, shown)?;
-        let version = String::from_utf8_lossy(&stdout).trim().to_owned();
+        let how = bounded(Bound::Call).named("aws --version");
+        let output = process::run(aws().arg("--version"), how).map_err(|failure| {
+            match failure {
+                // Version 1, which some package managers install, takes none of the options that
+                // every other command gives, such as `--no-cli-pager`.
+                Failure::Unstarted { name, error, .. } => Failure::Unstarted {
+                    name,
+                    error,
+                    expected: "install AWS CLI v2 on `PATH`".to_owned(),
+                },
+                failure @ (Failure::Unwatched { .. }
+                | Failure::Unended { .. }
+                | Failure::Exited { .. }) => failure,
+            }
+            .to_string()
+        })?;
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         Ok(Self { region, version })
     }
 
@@ -248,21 +261,20 @@ impl Cli {
 
     /// Runs `aws` with `args`, killed at `bound`, and returns what it prints on standard output.
     pub fn run(&self, args: &[&str], bound: Bound) -> Result<Vec<u8>, String> {
-        let shown = format!("aws {}", subcommand(args));
-        succeeded(output(&mut self.command(args), &shown, bound)?, &shown)
+        let output = process::run(&mut self.command(args), bounded(bound));
+        Ok(output.map_err(|failure| failure.to_string())?.stdout)
     }
 
     /// Runs `aws` with `args`, killed at `bound`, and returns what it prints on standard output,
     /// or `None` if AWS reports that what it names doesn't exist (`ResourceNotFoundException`).
     pub fn run_found(&self, args: &[&str], bound: Bound) -> Result<Option<Vec<u8>>, String> {
-        let shown = format!("aws {}", subcommand(args));
-        let output = output(&mut self.command(args), &shown, bound)?;
         // How AWS CLI v2 writes the code of an error that AWS reports.
         let absent = "An error occurred (ResourceNotFoundException)";
-        if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(absent) {
-            return Ok(None);
+        match process::run(&mut self.command(args), bounded(bound)) {
+            Ok(output) => Ok(Some(output.stdout)),
+            Err(failure) if failure.reported().contains(absent) => Ok(None),
+            Err(failure) => Err(failure.to_string()),
         }
-        succeeded(output, &shown).map(Some)
     }
 
     /// The repositories that `names` name, in their order, each described by one call, or why
@@ -391,14 +403,17 @@ impl Cli {
 
     fn command(&self, args: &[&str]) -> Command {
         let mut command = aws();
-        command.args([
+        // After `args`, so that a failure is named by the command they give, as `aws` takes its
+        // global options anywhere: its parser of them reads every argument, and leaves the rest
+        // to the command.
+        // https://github.com/aws/aws-cli/blob/7372e144ac4a20def37cc46ba60f1bcce4aec215/awscli/clidriver.py#L454-L460
+        command.args(args).args([
             "--no-cli-pager",
             "--output",
             "json",
             "--region",
             &self.region.0,
         ]);
-        command.args(args);
         command
     }
 }
@@ -409,54 +424,13 @@ fn aws() -> Command {
     command
 }
 
-/// What `output`, that of an `aws` command, printed on standard output, unless the command
-/// failed. `shown` is how an error shows the command.
-fn succeeded(output: Output, shown: &str) -> Result<Vec<u8>, String> {
-    if output.status.success() {
-        return Ok(output.stdout);
-    }
-    let reported = String::from_utf8_lossy(&output.stderr);
-    // AWS's messages end with a period, which the error's own punctuation follows.
-    let reported = reported.trim().trim_end_matches('.');
-    if reported.is_empty() {
-        return Err(format!(
-            "`{shown}` failed with {} and wrote nothing to standard error",
-            output.status
-        ));
-    }
-    Err(format!(
-        "`{shown}` failed with {}: {reported}: fix what `aws` reports",
-        output.status
-    ))
-}
-
-/// Runs `command`, which [`aws`] made, and returns its output, killing it at `bound`. `shown` is
-/// how an error shows it.
-fn output(command: &mut Command, shown: &str, bound: Bound) -> Result<Output, String> {
-    let by = match bound {
-        Bound::Call => Deadline::after(CALL_TIMEOUT),
-        Bound::Create(by) => by,
+/// A silent run of an `aws` command, killed at `bound`.
+fn bounded(bound: Bound) -> Run<'static> {
+    let bound = match bound {
+        Bound::Call => process::Bound::Within(CALL_TIMEOUT),
+        Bound::Create(by) => process::Bound::By(by),
     };
-    match stdx::process::output(command, by) {
-        Ok(Some(output)) => Ok(output),
-        Ok(None) => Err(format!(
-            "`{shown}` hadn't ended by its deadline, so it was killed, if it had started: \
-             expected AWS to answer by then"
-        )),
-        Err(error) => {
-            // A spawn fails so when it finds no `aws`, or one it can't execute; any other error,
-            // such as a failed read of its output, isn't one that installing `aws` would mend.
-            let missing = matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::PermissionDenied
-            );
-            Err(if missing {
-                format!("`aws` didn't run: {error}: install AWS CLI v2 on `PATH`")
-            } else {
-                format!("running `{shown}` failed: {error}")
-            })
-        }
-    }
+    Run::new(bound, Echo::Silent)
 }
 
 /// The command `args` give, such as `ec2 describe-images`, without its options, which can be
