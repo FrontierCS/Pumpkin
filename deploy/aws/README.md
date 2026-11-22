@@ -134,6 +134,10 @@ The controller's settings are of a version of the envelope, `M.m`. Each job read
   ([compatibility](https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/consul/v1.22.x/content/docs/upgrade/compatibility.mdx#L22-L33)).
 - A release that reads no `envelope` refuses settings that hold a key it doesn't know, `envelope`
   among them. So the module writes the key only once no pinned release is that old.
+- Each job's directory on the controller is `~pumpkin/jobs/<id>/`. Its `release` names the release
+  that runs it, as `pumpkin --version` does. Its `envelope` names the envelopes it takes, such as
+  `^1.0`, Cargo's caret requirement: 1.0 or a later 1.x. Step 2 of a cutover, below, lists the ids
+  of the jobs that run. A release from before these files writes neither.
 
 A cutover that a running job would meet drains the controller first. Such a cutover is a major, a
 change to the host's software or a replaced controller. Nomad likewise drains a node and lets its

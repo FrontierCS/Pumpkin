@@ -69,6 +69,7 @@ pub(crate) fn start(
     if let Some(member) = member {
         super::write_member(job.path(), member)?;
     }
+    super::release::write(job.path())?;
     let answer = launch(&pumpkin, &name, start, tree.path(), sent.path(), job.path())?;
     let job = job.keep();
     drop((sent.keep(), tree.keep()));
