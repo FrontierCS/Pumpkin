@@ -46,16 +46,16 @@ pub(super) fn send(
     linked: &mut Linked,
     reached: &Reached,
     hashed: &manifest::Hashed,
-    mut peer: Option<(&Build, &Located)>,
+    peer: (&Build, &Located),
     previous: &mut Option<u64>,
     advanced: &mut (dyn FnMut() + Send),
 ) -> Result<(), Unlinked> {
-    let install = peer.is_none();
+    // Set to `None` once the peer's link is cut, so that the rest goes on the open one.
+    let mut peer = Some(peer);
     let text = hashed.manifest.text();
     let request = || Lacks {
         manifest: manifest::sha256(&text),
         body_bytes: text.len(),
-        install,
     };
     'lacks: loop {
         let mut missing = linked.ask_with_body(reached, request(), &text)??;
@@ -66,15 +66,7 @@ pub(super) fn send(
         {
             advanced();
         }
-        if !install || !missing.is_empty() {
-            say(holds(
-                &reached.name,
-                &hashed.manifest,
-                &missing,
-                bytes,
-                install,
-            ));
-        }
+        say(holds(&reached.name, &hashed.manifest, &missing, bytes));
         let mut count = counting(&reached.name, bytes);
         let width = connections(&missing);
         if let Some((build, at)) = peer

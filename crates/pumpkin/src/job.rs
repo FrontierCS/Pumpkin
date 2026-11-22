@@ -9,23 +9,24 @@
 //! - each job's tree, `trees/<repo>/<id>/`, of links into the store;
 //! - each run's job in `jobs/<id>/`. It holds the job's configuration, `pumpkin.toml`, which holds
 //!   no secret, and its unit's standard error and output, `log` and `out`;
-//! - the one workspace, `.pumpkin/`, that every tree's `.pumpkin` links to. It keeps the installed
-//!   builds, the runs' records, the build slots and `serve`'s installs.
+//! - the one workspace, `.pumpkin/`, that every tree's `.pumpkin` links to. It keeps each build's
+//!   install, `<sha256>/bin/`. The install's `pumpkin` is the build's `serve`, and each of the
+//!   build's jobs runs it. The workspace also keeps the runs' records and the build slots.
 //!
 //! What the client sent with a job (`SENT_CONFIG`, `SENT_MODAL` and the upstreams' key files) is
 //! in the job's directory below `$XDG_RUNTIME_DIR/pumpkin/`, a tmpfs that the job's unit removes
 //! as it ends, so a job that still runs is one whose directory is there, as is what images the
-//! job holds (`HELD`): what a job holds goes with it, however it ends. Which of these a prune may
-//! remove is `ARCHITECTURE.md`'s invariant on the prune.
+//! job holds (`HELD`): what a job holds goes with it, however it ends. This module reads these for
+//! the prune, and `retention` decides which of them it removes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
@@ -42,7 +43,7 @@ use stdx::process::Environment;
 
 use crate::controller::bounded;
 use crate::iam::JOB;
-use crate::manifest::{self, Entry, INCOMING, Kind, MANIFESTS, Manifest};
+use crate::manifest::{Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
 use crate::{cli, config, say, star};
 
@@ -54,6 +55,7 @@ mod records;
 mod release;
 mod settings;
 mod start;
+mod store;
 
 pub(crate) use boot::{BOOT_LOG, BOOT_UNIT, boot, state as boot_state};
 pub(crate) use member::{member, run_member, write_member};
@@ -99,21 +101,6 @@ const BUILDING: &str = "building";
 // The file of a job's tmpfs directory that exists while the job waits for a build slot, so that
 // `ls` lists it as waiting.
 pub(crate) const WAITING: &str = "waiting";
-
-// How long a job's tree and directory last, by the time in its id. An install lasts as long after
-// a start last handed it out. A run's record lasts as long after its member last copied it. A
-// run's record names its entry in its tree, to run it again. A tree is links into the store, so it
-// holds no bytes of its own.
-pub(crate) const KEPT_DAYS: u64 = 14;
-
-pub(crate) const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
-
-// How long a manifest or a partial blob lasts in the store, and so what no tree links of the
-// files a manifest names. A day is long enough that a send cut off, or a start that failed,
-// carries on the next day from what had arrived, and short enough that what no tree links, as of
-// an edit made and undone, is gone soon. A tree, which a run's record names, keeps its files for
-// `KEPT` by its links.
-const STORE_KEPT: Duration = Duration::from_hours(24);
 
 // The path on the controller's one volume, which holds the engine's images and build cache, the
 // store, the trees and the records, as `deploy/aws` makes it.
@@ -528,37 +515,44 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-/// Prunes what the jobs keep on the controller's volume. It removes, in this order:
-/// - each tree in `home` older than `KEPT`;
-/// - each install that `installs::collect` finds idle, given the jobs in `jobs`;
-/// - what of the store no tree or install links or needs (`collect_store`);
-/// - the directory of each run's job older than `KEPT` whose run has no record, which `ls` lists
-///   until then;
-/// - once the volume is full, the images and the build cache of the engine of the configuration
-///   at `config` (`collect`), sparing what the jobs in `jobs` hold.
+/// Prunes what the jobs in `home` keep on the controller's volume. A job that runs has its
+/// directory in `jobs`.
+///
+/// It removes, in this order, the trees, the installs (`installs::collect`), the store's files
+/// (`store::collect`) and the jobs' directories that `retention` picks. Then, once the volume is
+/// full, it removes the images and the build cache of the engine that the configuration at `config`
+/// names (`collect`). It spares what the jobs hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     let runs = PathBuf::from(crate::default_runs()?);
-    let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
-    let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
+    let now = SystemTime::now();
     for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
         let repo = repo.context("listing the trees failed")?.path();
-        for id in ids(&repo)?.into_iter().filter(old) {
-            let tree = repo.join(id);
-            fs::remove_dir_all(&tree).context(tree.display())?;
+        for id in ids(&repo)? {
+            if retention::jobs::expired(started(&id), now) {
+                let tree = repo.join(id);
+                fs::remove_dir_all(&tree).context(tree.display())?;
+            }
         }
     }
-    // Before the store's prune, so that it frees the blobs that only a removed install linked.
     if let Err(error) = installs::collect(home, jobs) {
         say(format_args!("pruning the installs failed: {error}"));
     }
-    collect_store(&home.join(STORE))?;
-    for id in ids(&home.join(JOBS))?.into_iter().filter(old) {
-        // A run's record names its job's configuration, to run it again.
+    store::collect(&home.join(STORE))?;
+    let mut observed = Vec::new();
+    // Only an expired job's directory may go, so only those are read.
+    let expired = |id: &String| retention::jobs::expired(started(id), now);
+    for id in ids(&home.join(JOBS))?.into_iter().filter(expired) {
         let record = runs.join(&id);
-        if !record.try_exists().context(record.display())? {
-            let job = home.join(JOBS).join(id);
-            fs::remove_dir_all(&job).context(job.display())?;
-        }
+        let recorded = record.try_exists().context(record.display())?;
+        observed.push(retention::jobs::Job {
+            started: started(&id),
+            id,
+            recorded,
+        });
+    }
+    for job in retention::jobs::removed(&observed, now) {
+        let dir = home.join(JOBS).join(&job.id);
+        fs::remove_dir_all(&dir).context(dir.display())?;
     }
     // The engine is reached only once there may be something to remove.
     if !disk(VOLUME)?.full() {
@@ -567,109 +561,9 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
     collect(home, &engine(config)?, jobs)
 }
 
-/// Removes, of `store`, under its lock, each manifest older than `STORE_KEPT`, each file of its
-/// `incoming/` older than that, then each blob that no tree links and no manifest left names,
-/// unless a manifest left is of a form this Pumpkin can't read, which it says.
-// By reference, as Nix collects its store from its roots, of which a fresh manifest is one, as
-// Nix's temporary roots are of a build under way:
-// https://github.com/NixOS/nix/blob/d1ecb78bf7a1c5604726bd72651bd2169c14163d/src/libstore/store-api.cc#L1028
-fn collect_store(store: &Path) -> Result<(), String> {
-    let now = SystemTime::now();
-    let old = |path: &Path, metadata: &fs::Metadata| {
-        let modified = metadata.modified().context(path.display())?;
-        Ok::<_, String>(now.duration_since(modified).unwrap_or_default() > STORE_KEPT)
-    };
-    let path = store.join(manifest::LOCK);
-    let lock = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path);
-    let lock = match lock {
-        Ok(lock) => lock,
-        // No store yet, as no client has sent this controller anything.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).context(path.display()),
-    };
-    lock.lock().context(path.display())?;
-    let mut named = BTreeSet::new();
-    let mut unread = None;
-    for (path, metadata) in files(&store.join(MANIFESTS))? {
-        if old(&path, &metadata)? {
-            removed(&path)?;
-            continue;
-        }
-        match manifest::referenced(&fs::read(&path).context(path.display())?) {
-            Ok(digests) => named.extend(digests),
-            Err(error) => unread = Some(format!("{}: {error}", path.display())),
-        }
-    }
-    for (path, metadata) in files(&store.join(INCOMING))? {
-        if old(&path, &metadata)? {
-            let file = match File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error).context(path.display()),
-            };
-            match file.try_lock() {
-                // A live upload may have waited for a frame since before the cutoff.
-                Err(fs::TryLockError::WouldBlock) => {}
-                Err(fs::TryLockError::Error(error)) => return Err(error).context(path.display()),
-                Ok(()) => removed(&path)?,
-            }
-        }
-    }
-    // Of another Pumpkin's, which may name any blob.
-    if let Some(unread) = unread {
-        say(format_args!(
-            "{unread}; so the prune keeps every blob of the store, which it may name"
-        ));
-        return Ok(());
-    }
-    for (path, metadata) in files(store)? {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        // A blob, or its copy at 0555; not the store's lock.
-        let Some(digest) = manifest::digest(name.strip_suffix(".x").unwrap_or(name)) else {
-            continue;
-        };
-        if metadata.nlink() == 1 && !named.contains(&digest) {
-            removed(&path)?;
-        }
-    }
-    Ok(())
-}
-
-fn files(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>, String> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", dir.display())),
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let path = entry.context(dir.display())?.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            // Moved since it was listed, as a start moves a copy to run out of `incoming/`.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error).context(path.display()),
-        };
-        if metadata.is_file() {
-            files.push((path, metadata));
-        }
-    }
-    Ok(files)
-}
-
-/// Removes the file `path`, unless it is gone, as a start may move it at once.
-fn removed(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error).context(path.display()),
-        _ => Ok(()),
-    }
+/// When job `id` started, or `None` if its id says no time.
+pub(crate) fn started(id: &str) -> Option<SystemTime> {
+    runtime::minted(id).and_then(|since| SystemTime::UNIX_EPOCH.checked_add(since))
 }
 
 fn engine(config: &Path) -> Result<Engine, String> {

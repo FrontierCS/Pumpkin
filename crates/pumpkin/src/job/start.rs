@@ -1,4 +1,4 @@
-//! Starts a job of the build that received its request, once for the id the client chose.
+//! Starts a job of the build that the start names, once for the id the client chose.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -8,12 +8,13 @@ use std::time::{Duration, SystemTime};
 
 use members::Member;
 use provider::RunTag;
+use retention::KEPT_DAYS;
 use schema::ir::Sha256Digest;
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
 use super::{JOBS, OWN, SENT_CONFIG, SENT_MODAL, TREES};
-use crate::link::{JobStart, StartAnswer};
+use crate::link::{self, JobStart, StartAnswer};
 use crate::{manifest, workspace};
 
 // The bound on asking systemd to start a job.
@@ -272,40 +273,19 @@ fn write_sent(start: &JobStart, sent: &Path, body: &[u8]) -> Result<(), String> 
     Ok(())
 }
 
-/// Keeps the build that a job runs at the same location as a locally built install, under its
-/// own digest. Marks the install as handed out now. Older clients prune the serve installs after a
-/// day, even while its jobs still run.
+/// The `pumpkin` of build `install`'s install in the workspace in `home`. Fails if the install is
+/// missing. Marks the install as used now, and the prune of installs reads that mark.
 fn installed(home: &Path, install: &Sha256Digest) -> Result<PathBuf, String> {
-    let exe = workspace::exe("expected the build whose job is starting")?;
-    if exe.parent().and_then(Path::file_name) != Some(install.hex().as_ref()) {
-        return Err(format!(
-            "{} is outside the install named by this start: link to the client's build",
-            exe.display()
-        ));
-    }
-    let root = home.join(workspace::DIR).join(install.hex());
-    let bin = root.join("bin");
-    let pumpkin = bin.join("pumpkin");
+    let root = home.join(link::install(install));
+    let pumpkin = root.join("bin").join(install::File::Pumpkin.name());
+    // The lock of the jobs' directory is held, so no prune of installs removes the install before
+    // the mark below.
     if !pumpkin.try_exists().context(pumpkin.display())? {
-        let store = home.join(super::STORE);
-        let path = store.join(manifest::MANIFESTS).join(install.hex());
-        let manifest = manifest::Manifest::parse(&fs::read(&path).context(path.display())?)?;
-        fs::create_dir_all(&root).context(root.display())?;
-        let made = tempfile::tempdir_in(&root).context(root.display())?;
-        for entry in manifest.entries() {
-            let source = match entry.kind {
-                manifest::Kind::Executable => super::executable(&store, &entry.digest)?,
-                manifest::Kind::File => store.join(entry.digest.hex()),
-                manifest::Kind::Link => {
-                    return Err(
-                        "an install contains a symbolic link: expected the build's files"
-                            .to_owned(),
-                    );
-                }
-            };
-            fs::hard_link(&source, made.path().join(&entry.path)).context(source.display())?;
-        }
-        fs::rename(made.path(), &bin).context(bin.display())?;
+        return Err(format!(
+            "{} is missing, as a prune removes an install that none used for {KEPT_DAYS} days: \
+             run the command again to install it there",
+            pumpkin.display()
+        ));
     }
     let marked = File::open(&root).and_then(|root| root.set_modified(SystemTime::now()));
     marked.context(root.display())?;

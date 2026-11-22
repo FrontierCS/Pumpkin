@@ -411,9 +411,7 @@ fn start(scratch: &Scratch, client: &[(String, String); 2]) -> (String, String) 
 
 // As `start`, from the repository `repo`, whose workspace has found the controller.
 fn start_in(scratch: &Scratch, repo: &str, client: &[(String, String); 2]) -> (String, String) {
-    if !scratch.0.join("home/.pumpkin/serve").is_dir() {
-        served(scratch);
-    }
+    served(scratch);
     let mut run = on_repo(scratch, repo, client, &["run", "stand-in/task.star"]);
     let invoked = invocation(&run);
     let ran = run.output().unwrap();
@@ -556,10 +554,6 @@ fn start_job(id: &str, modal_bytes: usize) -> serde_json::Value {
 
 fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) -> serde_json::Value {
     let mut request = Vec::new();
-    let install = install_manifest();
-    let lacks = json!({"type": "lacks", "manifest": format!("sha256:{key}"), "install": true, "body_bytes": install.len()});
-    schema::frame::write(&mut request, &lacks, &[]).unwrap();
-    schema::frame::write(&mut request, &(), install.as_bytes()).unwrap();
     let credential_bytes = body.len();
     let mut start = start_job(id, credential_bytes);
     start["install"] = json!(format!("sha256:{key}"));
@@ -572,7 +566,7 @@ fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) ->
     let serve = scratch
         .0
         .join("home")
-        .join(format!(".pumpkin/serve/{key}/pumpkin"));
+        .join(format!(".pumpkin/{key}/bin/pumpkin"));
     let mut process = scratch.program(serve, &["controller", "serve", "--member", "alice"]);
     process
         .env("PATH", path)
@@ -590,11 +584,6 @@ fn ask_start(scratch: &Scratch, key: &str, path: &str, id: &str, body: &[u8]) ->
     let _hello = schema::frame::read::<serde_json::Value>(&mut frames)
         .unwrap()
         .unwrap();
-    for _ in 0..2 {
-        schema::frame::read::<serde_json::Value>(&mut frames)
-            .unwrap()
-            .unwrap();
-    }
     let (answer, _) = schema::frame::read::<serde_json::Value>(&mut frames)
         .unwrap()
         .unwrap();
@@ -609,6 +598,8 @@ fn retry_start() {
     let home = scratch.0.join("home");
     let id = id_ago(0, "0123abcd");
     let ask = |body: &[u8]| ask_start(&scratch, &key, &client[1].1, &id, body);
+    // The store exists, as another tree's upload makes it.
+    fs::create_dir_all(home.join("store")).unwrap();
     let absent = ask(b"no tree yet");
     assert_eq!(absent["type"], "refused");
     assert!(absent["message"].as_str().unwrap().contains(EMPTY_TREE));
@@ -648,13 +639,8 @@ fn retry_start() {
             .count(),
         1
     );
-    let bin = home.join(format!(".pumpkin/{key}/bin"));
-    assert!(
-        argv.lines()
-            .any(|line| Path::new(line) == bin.join("pumpkin"))
-    );
-    fs::remove_dir_all(home.join(format!(".pumpkin/serve/{key}"))).unwrap();
-    assert!(BUILT.iter().all(|name| bin.join(name).is_file()));
+    let pumpkin = home.join(format!(".pumpkin/{key}/bin/pumpkin"));
+    assert!(argv.lines().any(|line| Path::new(line) == pumpkin));
 }
 
 #[test]
@@ -666,15 +652,9 @@ fn start_after_a_cut() {
     assert!(first.contains("exit status: Some(0)"), "{first}");
     let mut replies = Vec::new();
     schema::frame::write(&mut replies, &json!({ "type": "serving" }), &[]).unwrap();
-    for _ in 0..2 {
-        schema::frame::write(
-            &mut replies,
-            &json!({"type":"missing", "body_bytes":2}),
-            &[],
-        )
-        .unwrap();
-        schema::frame::write(&mut replies, &(), b"[]").unwrap();
-    }
+    let missing = json!({"type":"missing", "body_bytes":2});
+    schema::frame::write(&mut replies, &missing, &[]).unwrap();
+    schema::frame::write(&mut replies, &(), b"[]").unwrap();
     fs::write(cut, (replies.len() + 1).to_string()).unwrap();
     let (id, ran) = start(&scratch, &client);
     assert!(ran.contains("exit status: Some(0)"), "{ran}");
@@ -877,10 +857,6 @@ fn holders(scratch: &Scratch, named: &[(String, &str)]) -> Vec<(String, String)>
         .map(|(hex, name)| (hex.clone(), (*name).to_owned()))
         .collect();
     holders.push((EMPTY_TREE.to_owned(), "a tree of no files".to_owned()));
-    holders.push((key(), "the install".to_owned()));
-    for (name, hex, _) in built() {
-        holders.push((hex.clone(), format!("the installed {name}")));
-    }
     for path in walked(&repo, &[".git", ".pumpkin"]) {
         let at = repo.join(&path);
         let bytes = match fs::read_link(&at) {
@@ -969,7 +945,7 @@ fn calls(scratch: &Scratch) -> String {
 
 fn send_calls(scratch: &Scratch) -> String {
     let key = key();
-    calls(scratch).replace(&format!("serve=.pumpkin/serve/{key}/pumpkin"), "serve")
+    calls(scratch).replace(&format!("serve=.pumpkin/{key}/bin/pumpkin"), "serve")
 }
 
 fn last_tree(scratch: &Scratch) -> String {
@@ -1113,16 +1089,16 @@ fn cut_during_group_answers() {
         frame_bytes(&json!({"type":"missing","body_bytes":body.len()}), &[])
             + frame_bytes(&serde_json::Value::Null, body)
     };
-    let install = frame_bytes(&json!({"type":"serving"}), &[]) + missing(b"[]");
+    let hello = frame_bytes(&json!({"type":"serving"}), &[]);
     // Cut inside the tree query, then inside the second Stored on the next connection.
     let tree = missing(&serde_json::to_vec(&blobs).unwrap());
     let stored = frame_bytes(&json!({"type":"stored"}), &[]);
-    scratch.write("bin/cut-out", &(install + 1));
+    scratch.write("bin/cut-out", &(hello + 1));
     scratch.write(
         "bin/before-2",
         &format!(
             "echo {} > '{}/bin/cut-out'",
-            install + tree + stored + 1,
+            hello + tree + stored + 1,
             scratch.0.display()
         ),
     );
@@ -1986,7 +1962,7 @@ fn follow_copies_another_writers_record() {
 // As the first `ls` installs it, but as links to the client's files, which write nothing.
 fn served(scratch: &Scratch) -> String {
     let key = key();
-    let dir = scratch.0.join(format!("home/.pumpkin/serve/{key}"));
+    let dir = scratch.0.join(format!("home/.pumpkin/{key}/bin"));
     if dir.is_dir() {
         return key;
     }
@@ -2186,33 +2162,25 @@ fn ls_installs_its_serve_there() {
         Some(returned(7.0)),
     );
     move_runs(&scratch, "home/.pumpkin/runs");
-    // Another build's install, and what an install left, that none used for two days, and the
-    // install of a build used since.
-    let installs = scratch.0.join("home/.pumpkin/serve");
-    for (name, days) in [
-        ("a".repeat(64), 2),
-        (".made.Xy12Zq".to_owned(), 2),
-        ("b".repeat(64), 0),
-    ] {
-        let path = installs.join(name);
-        fs::create_dir_all(&path).unwrap();
-        fs::set_permissions(&path, Permissions::from_mode(0o775)).unwrap();
-        days_ago(&path, days);
-    }
+    let hex = key();
+    let install = scratch.0.join(format!("home/.pumpkin/{hex}"));
     let mut steps = Vec::new();
-    for _ in 0..2 {
+    for first in [true, false] {
         steps.push(ls_ran(&scratch, &client, &[]));
         steps.push(calls(&scratch));
+        if first {
+            // Set it past what the prune of installs keeps, so that the next `serve`'s mark shows.
+            days_ago(&install, 15);
+        }
     }
-    let hex = key();
-    // Sorted as named in the snapshot, as this build's SHA-256 sorts anywhere.
-    let mut left: Vec<String> = (modes(&installs).split(", "))
-        .map(|install| install.replace(&hex, "<this build>"))
-        .collect();
-    left.sort();
-    steps.push(format!("installs: {}", left.join(", ")));
-    steps.push(format!("the install: {}", modes(&installs.join(&hex))));
-    steps.push(files_of(&scratch, &installs.join(&hex)));
+    let modified = fs::metadata(&install).unwrap().modified().unwrap();
+    let marked = modified.elapsed().unwrap() < Duration::from_hours(24);
+    steps.push(format!(
+        "the second serve marked the install as used: {marked}"
+    ));
+    steps.push(format!("the install: {}", modes(&install)));
+    steps.push(format!("its bin: {}", modes(&install.join("bin"))));
+    steps.push(files_of(&scratch, &install.join("bin")));
     check(
         &scratch,
         &steps.join("\n"),
@@ -2225,16 +2193,17 @@ fn ls_installs_its_serve_there() {
             printed:
               20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
               1 run: 1 finished
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
+            the calls: serve=.pumpkin/<this build>/bin/pumpkin, install=.pumpkin/<this build>, serve=.pumpkin/<this build>/bin/pumpkin
             $ pumpkin ls
             exit status: Some(0)
             pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
             printed:
               20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
               1 run: 1 finished
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin
-            installs: <this build> 700, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 775
-            the install: buildifier 555, pumpkin 555
+            the calls: serve=.pumpkin/<this build>/bin/pumpkin
+            the second serve marked the install as used: true
+            the install: bin 700
+            its bin: buildifier 555, pumpkin 555
             its files:
               pumpkin: the client's pumpkin
               buildifier: the client's buildifier"#]],
@@ -2269,7 +2238,7 @@ fn ls_carries_on_after_a_cut() {
             printed:
               20261107-120000-1b8a0001 finished          -  -               -  -: score=7 metrics={"solved":3}
               1 run: 1 finished
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
+            the calls: serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin"#]],
     );
 }
 
@@ -2476,7 +2445,7 @@ fn wait_names_its_run_there() {
             $ pumpkin wait 9f
             exit status: Some(1)
             pumpkin: no run on controller `alice` matches `9f`: name an id, a unique prefix of an id or of its random digits, or a record's path
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin"#]],
+            the calls: serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin"#]],
     );
 }
 
@@ -3153,12 +3122,12 @@ fn record_copy() {
             unread:
             wait: exit status: 1
               pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/jobs/0/secret: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
               noted as copied: false
             whole:
             wait: exit status: 0
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin
               written: jobs/0/secret, record.json
               noted as copied: true
               model/marked: 755
@@ -3166,26 +3135,26 @@ fn record_copy() {
             unchanged:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin
               written: 
               noted as copied: true
             changed:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin
               written: log.jsonl, model/added
               noted as copied: true
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1
               pumpkin: controller `alice` didn't answer: ended within the answer: copying run <id>'s record again now, attempt 2 of 7
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin
               written: model/big-1
             cut:
             cancel: exit status: 0
               pumpkin: controller `alice` didn't answer: ended within the answer: copying run <id>'s record again now, attempt 2 of 7
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
-              the calls: serve=.pumpkin/serve/<this build>/pumpkin, serve=.pumpkin/serve/<this build>/pumpkin
+              the calls: serve=.pumpkin/<this build>/bin/pumpkin, serve=.pumpkin/<this build>/bin/pumpkin
               written: model/big-2, model/big-3
             the copy (but `jobs/0/out`) is the record's:
               driver.pid 644
@@ -3213,7 +3182,7 @@ fn copy_with_unreadable_directories() {
     let id = id_ago(0, "0d000003");
     ended_job(&scratch, &id, "built\n");
     symlink(
-        scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin")),
+        scratch.0.join(format!("home/.pumpkin/{hex}/bin/pumpkin")),
         scratch.0.join(format!("home/jobs/{id}/pumpkin")),
     )
     .unwrap();
@@ -3454,7 +3423,7 @@ fn view_answers_502_for_a_reply_it_cant_read() {
     fs::write(scratch.0.join("hello"), hello).unwrap();
     // Unlinked first, as it is a link to this build. It says its hello, takes the request's
     // length, which is all that the link needs of it, and sends the reply.
-    let exe = format!("home/.pumpkin/serve/{hex}/pumpkin");
+    let exe = format!("home/.pumpkin/{hex}/bin/pumpkin");
     fs::remove_file(scratch.0.join(&exe)).unwrap();
     let script = format!(
         "#!/bin/sh\ncat {0}/hello\nhead --bytes=4 > /dev/null\ncat {0}/reply\n",
@@ -3506,13 +3475,10 @@ fn view_asks_ec2_once_no_link_opens() {
     let served = Served::of(on_client(&scratch, &client, &["view"]));
     // A `serve` that ends before its hello, so that no link opens; then EC2 is asked, which the
     // stand-in `aws` refuses.
-    let exe = scratch.0.join(format!("home/.pumpkin/serve/{hex}/pumpkin"));
+    let exe = scratch.0.join(format!("home/.pumpkin/{hex}/bin/pumpkin"));
     let aside = scratch.0.join("aside");
     fs::rename(&exe, &aside).unwrap();
-    scratch.write_executable(
-        &format!("home/.pumpkin/serve/{hex}/pumpkin"),
-        b"#!/bin/sh\n",
-    );
+    scratch.write_executable(&format!("home/.pumpkin/{hex}/bin/pumpkin"), b"#!/bin/sh\n");
     let window = format!("/api/runs/{ended}/log?at=0");
     let mut steps = vec![got(&served, &window, &["end"])];
     fs::rename(&aside, &exe).unwrap();
@@ -3582,7 +3548,7 @@ fn view_installs_its_serve_there() {
         steps.push(calls(&scratch));
     }
     let hex = key();
-    let install = scratch.0.join(format!("home/.pumpkin/serve/{hex}"));
+    let install = scratch.0.join(format!("home/.pumpkin/{hex}/bin"));
     steps.push(format!("the install: {}", modes(&install)));
     steps.push(files_of(&scratch, &install));
     drop(driver);
@@ -3594,7 +3560,7 @@ fn view_installs_its_serve_there() {
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 310332
-            the calls: serve=.pumpkin/serve/<this build>/pumpkin, installs=.pumpkin/serve, serve=.pumpkin/serve/<this build>/pumpkin
+            the calls: serve=.pumpkin/<this build>/bin/pumpkin, install=.pumpkin/<this build>, serve=.pumpkin/<this build>/bin/pumpkin
             GET /api/runs/<ended>/log?at=0
             HTTP/1.1 200 OK
             end: 310332

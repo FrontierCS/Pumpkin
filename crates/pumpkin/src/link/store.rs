@@ -20,7 +20,6 @@ use crate::manifest::store::{Missing, PutAnswer};
 pub(crate) struct Lacks {
     pub(crate) manifest: Sha256Digest,
     pub(crate) body_bytes: usize,
-    pub(crate) install: bool,
 }
 
 #[derive(Serialize, Deserialize)]

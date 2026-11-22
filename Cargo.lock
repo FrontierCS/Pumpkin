@@ -600,6 +600,7 @@ dependencies = [
  "modal",
  "provider",
  "recipe",
+ "retention",
  "route",
  "runtime",
  "rustix",
@@ -626,6 +627,13 @@ dependencies = [
 
 [[package]]
 name = "recipe"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+]
+
+[[package]]
+name = "retention"
 version = "0.0.0"
 dependencies = [
  "expect-test",
