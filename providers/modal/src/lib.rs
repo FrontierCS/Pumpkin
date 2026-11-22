@@ -65,7 +65,7 @@ fn memory_mib(role: &Role) -> Result<u64, String> {
 /// They name the workspace's profile, and Modal's configuration file that holds it, the images'
 /// repository, the address the gateway dials from, and the classes of sandbox.
 // Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
-// version adds, and one that refuses such a key finds it through `serde_ignored`.
+// version adds. A reader that refuses such a key finds it through `serde_ignored`.
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     profile: Profile,

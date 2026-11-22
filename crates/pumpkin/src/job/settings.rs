@@ -1,13 +1,13 @@
-//! What a job takes of a controller's settings across the envelopes that make them: the version
-//! of the envelope that made them, their `envelope = "M.m"`, and the keys that this build doesn't
-//! know.
+//! What a job takes of a controller's settings across the envelopes that make them. The settings
+//! may name the version of the envelope that made them, as `envelope = "M.m"`. They may hold keys
+//! that this build doesn't know.
 //!
-//! A minor adds only keys that a release of an older minor may safely ignore; a key that every
-//! release must honour, or any removal or change of what a release relies on, needs a major. A
-//! job takes settings of its major alone, of `OLDEST`'s minor or a later one. It refuses a key
-//! that it doesn't know in settings of `NEWEST`'s minor or an older one, as a typo, and ignores
-//! one in settings of a later minor, naming it in its log. Settings without `envelope` are of
-//! 1.0, as every envelope was before they named theirs.
+//! A minor adds only keys that a release of an older minor may safely ignore. A key that every
+//! release must honour needs a major. So does any removal or change of what a release relies on. A
+//! job takes settings of its own major alone, of `OLDEST`'s minor or a later one. In settings of
+//! `NEWEST`'s minor or an older one, it refuses a key that it doesn't know, as a typo. In settings
+//! of a later minor, it ignores such a key and names it in its log. Settings without `envelope` are
+//! of 1.0, as every envelope was before settings named theirs.
 
 use std::fmt;
 
@@ -32,7 +32,7 @@ impl fmt::Display for Version {
     }
 }
 
-// The oldest envelope that this build takes; it takes any later minor of its major too.
+// The oldest envelope that this build takes. It takes any later minor of its major too.
 const OLDEST: Version = Version { major: 1, minor: 0 };
 
 // The newest envelope whose keys this build knows.
@@ -43,8 +43,8 @@ const _: () = assert!(OLDEST.major == NEWEST.major && !OLDEST.later(NEWEST));
 // The version of settings that name none.
 const UNNAMED: Version = Version { major: 1, minor: 0 };
 
-/// The version of the envelope that made `settings`, a controller's settings named as `named`,
-/// removed from them. Fails if it isn't in the form `M.m`, or this build doesn't take it.
+/// Removes the version of the envelope from `settings`, a controller's settings named as `named`,
+/// and returns it. Fails if it isn't in the form `M.m`, or this build doesn't take it.
 pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, String> {
     let version = match settings.remove("envelope") {
         None => UNNAMED,
@@ -56,8 +56,8 @@ pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, S
         })?,
     };
     let Version { major, minor: _ } = OLDEST;
-    // A major removes or changes what an older release relies on, so a release refuses each
-    // major but its own, as Kubernetes removes an API's elements only in a new version of its
+    // A major removes or changes what an older release relies on. So a release refuses each major
+    // but its own. Kubernetes likewise removes an API's elements only in a new version of its
     // group:
     // https://github.com/kubernetes/website/blob/b2fed83accab4d0a607783d21740e7de43551369/content/en/docs/reference/deprecation-policy.md#L53-L59
     if version.major > major {
@@ -77,10 +77,10 @@ pub(super) fn take(settings: &mut toml::Table, named: &str) -> Result<Version, S
     Ok(version)
 }
 
-/// Removes from `tables`, a job's configuration made of `named`, of envelope `version`, the keys
-/// that no table of a configuration takes, which settings of a later minor than `NEWEST` may
-/// hold, and says which in the job's log. Fails if settings of `NEWEST` or an older minor hold
-/// any, or if `tables` isn't a configuration once they are gone.
+/// Removes from `tables` the keys that no table of a configuration takes, and names them in the
+/// job's log. `tables` is a job's configuration made of `named`, of envelope `version`. Settings of
+/// a later minor than `NEWEST` may hold such keys. Fails if settings of `NEWEST` or an older minor
+/// hold any. Fails too if `tables` isn't a configuration once they are gone.
 pub(super) fn remove_unknown(
     tables: &mut toml::Table,
     named: &str,

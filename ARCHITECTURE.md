@@ -508,9 +508,9 @@ otherwise. This prevents accidents, not members: each member's build runs as the
 one user.
 
 **Architecture Invariant:** a job takes the controller's settings of its own envelope major alone.
-It refuses a key that no table takes in settings of a minor it knows, and leaves one out of its
-configuration, naming it in its log, in settings of a later minor, which adds only keys that an
-older release may safely ignore; a machine's `pumpkin.toml` refuses such a key all the same.
+In settings of a minor it knows, it refuses a key that no table takes. In settings of a later minor,
+it leaves such a key out of its configuration and names it in its log. A later minor adds only keys
+that an older release may safely ignore. A machine's `pumpkin.toml` refuses such a key all the same.
 `config` tells the keys apart through `serde_ignored`, so no table that the settings hold has
 `deny_unknown_fields`.
 

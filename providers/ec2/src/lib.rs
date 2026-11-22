@@ -63,7 +63,7 @@ const MIB: NonZeroU64 = NonZeroU64::new(1 << 20).unwrap();
 /// classes.cpu = { template = "lt-0123456789abcdef0", version = 1, vcpus = 8, memory_mib = 8192 }
 /// ```
 // Without `deny_unknown_fields`, so that a reader of settings may ignore a key that a later
-// version adds, and one that refuses such a key finds it through `serde_ignored`.
+// version adds. A reader that refuses such a key finds it through `serde_ignored`.
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     /// The region of the envelope, which every call to AWS names.

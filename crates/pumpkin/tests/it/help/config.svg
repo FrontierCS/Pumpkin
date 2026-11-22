@@ -356,19 +356,19 @@
 </tspan>
     <tspan x="10px" y="3070px"><tspan>On a controller, each job reads its configuration from the controller's</tspan>
 </tspan>
-    <tspan x="10px" y="3088px"><tspan>settings, which deploy/aws writes, but [gateway], which the job sets, and</tspan>
+    <tspan x="10px" y="3088px"><tspan>settings, which deploy/aws writes. The job sets [gateway] itself. The client</tspan>
 </tspan>
-    <tspan x="10px" y="3106px"><tspan>[upstreams] and [controller.modal], which the client sends. Before any table,</tspan>
+    <tspan x="10px" y="3106px"><tspan>sends [upstreams] and [controller.modal]. Before any table, the settings may</tspan>
 </tspan>
-    <tspan x="10px" y="3124px"><tspan>the settings name `envelope`, the version "M.m" of the envelope that wrote</tspan>
+    <tspan x="10px" y="3124px"><tspan>name `envelope`, the version "M.m" of the envelope that wrote them. Without</tspan>
 </tspan>
-    <tspan x="10px" y="3142px"><tspan>them; absent, "1.0". A job refuses an envelope whose major isn't 1, and each</tspan>
+    <tspan x="10px" y="3142px"><tspan>it, the settings are of 1.0. A job refuses an envelope whose major isn't 1. It</tspan>
 </tspan>
-    <tspan x="10px" y="3160px"><tspan>key that it doesn't know, unless the envelope is a later minor than 1.0, which</tspan>
+    <tspan x="10px" y="3160px"><tspan>refuses each key that it doesn't know, unless the envelope is a later minor</tspan>
 </tspan>
-    <tspan x="10px" y="3178px"><tspan>this release knows; then it ignores the key, naming it in its log. A minor adds</tspan>
+    <tspan x="10px" y="3178px"><tspan>than 1.0, the newest that this release knows. It then ignores the key and names</tspan>
 </tspan>
-    <tspan x="10px" y="3196px"><tspan>only keys that an older release may safely ignore.</tspan>
+    <tspan x="10px" y="3196px"><tspan>it in its log. A minor adds only keys that an older release may safely ignore.</tspan>
 </tspan>
     <tspan x="10px" y="3214px">
 </tspan>

@@ -39,9 +39,8 @@ enum Target {
     Controller(Client),
 }
 
-// Each table that a controller's settings hold is without `deny_unknown_fields`, so that a job can
-// ignore a key of a newer envelope's (`remove_unknown`), and a machine refuses it all the same
-// (`target`).
+// No table that a controller's settings hold has `deny_unknown_fields`. So a job can ignore a key
+// of a newer envelope's (`remove_unknown`). A machine still refuses it (`target`).
 #[derive(Deserialize)]
 struct Tables {
     docker: Option<Docker>,
@@ -433,8 +432,8 @@ fn target(path: &Path, text: &str) -> Result<Target, String> {
     }))
 }
 
-/// Fails, naming `path`, if `unknown`, the keys that no table of the configuration `text` takes,
-/// name any.
+/// Fails if `unknown` names any key, naming `path` and each key. `unknown` holds the keys that no
+/// table of the configuration `text` takes.
 fn known(path: &Path, text: &str, unknown: &[Vec<Step>]) -> Result<(), String> {
     if unknown.is_empty() {
         return Ok(());
@@ -450,10 +449,10 @@ fn known(path: &Path, text: &str, unknown: &[Vec<Step>]) -> Result<(), String> {
     ))
 }
 
-/// Removes from `tables`, a machine's configuration but for keys that no table takes, each such
-/// key, and returns their names, as [`removed`] gives them. Fails if `tables` isn't a
-/// configuration once they are gone, saying where as `toml` does: by the keys that lead there, but
-/// an enum's variant, such as a provider's kind.
+/// Removes from `tables` each key that no table of a configuration takes, and returns their names,
+/// as [`removed`] gives them. Fails if `tables` isn't a configuration once they are gone. The error
+/// says where as `toml` does: by the keys that lead there, without an enum's variant, such as a
+/// provider's kind.
 pub(crate) fn remove_unknown(tables: &mut toml::Table) -> Result<Vec<String>, String> {
     // `toml` puts the keys on a line of their own, and ends with a newline.
     let shown = |error: toml::de::Error| error.to_string().trim_end().replace('\n', " ");
@@ -467,8 +466,8 @@ pub(crate) fn remove_unknown(tables: &mut toml::Table) -> Result<Vec<String>, St
     Ok(names)
 }
 
-// A step from a value into one it holds: by a table's key, by an array's index, or into the value
-// of an enum's variant, which is its table's one key.
+// A step from a value into one it holds. It goes by a table's key, by an array's index, or into the
+// value of an enum's variant. An enum's variant is its table's one key.
 enum Step {
     Key(String),
     Index(usize),
@@ -481,7 +480,8 @@ fn tables<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<(Tables, Vec<Vec<Step>>), D::Error> {
     let mut unknown = Vec::new();
-    // As Cargo reads a manifest, whose keys that it doesn't know it warns of rather than refuses:
+    // Cargo reads a manifest this way, and warns of the keys it doesn't know rather than refusing
+    // them:
     // https://github.com/rust-lang/cargo/blob/111443f3dc4d82a65e2306a93028f122406401c1/src/workspace/parser/mod.rs#L192-L206
     let tables = serde_ignored::deserialize(deserializer, |path| {
         let mut steps = Vec::new();
@@ -511,9 +511,9 @@ fn tables<'de, D: Deserializer<'de>>(
     Ok((tables, unknown))
 }
 
-/// Removes from `document` each key that `unknown` leads to, as [`tables`] found them there, and
-/// returns their names: the keys from the top, joined by `.`, an array's index in `[]`, each set
-/// as code.
+/// Removes from `document` each key that `unknown` leads to, as [`tables`] found them there.
+/// Returns their names, each set as code. A name joins the keys from the top by `.`, with an
+/// array's index in `[]`.
 fn removed(document: &mut toml::Value, unknown: &[Vec<Step>]) -> Vec<String> {
     let mut names = Vec::new();
     for steps in unknown {
