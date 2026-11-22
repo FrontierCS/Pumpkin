@@ -1,0 +1,123 @@
+<svg width="827px" height="902px" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .fg { fill: #AAAAAA }
+    .bg { fill: #000000 }
+    .fg-bright-cyan { fill: #55FFFF }
+    .fg-bright-green { fill: #55FF55 }
+    .fg-cyan { fill: #00AAAA }
+    .container {
+      padding: 0 10px;
+      line-height: 18px;
+    }
+    .bold { font-weight: bold; }
+    tspan {
+      font: 14px SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+      white-space: pre;
+      line-height: 18px;
+    }
+  </style>
+
+  <rect width="100%" height="100%" y="0" rx="4.5" class="bg" />
+
+  <text xml:space="preserve" class="container fg">
+    <tspan x="10px" y="28px"><tspan>Print the IAM policy of a principal of the controller's deployment.</tspan>
+</tspan>
+    <tspan x="10px" y="46px">
+</tspan>
+    <tspan x="10px" y="64px"><tspan>`policy` prints the policy as IAM's JSON. It holds each statement that this build's calls on AWS</tspan>
+</tspan>
+    <tspan x="10px" y="82px"><tspan>need as that principal, and nothing else. A value that only the deployment knows, such as its</tspan>
+</tspan>
+    <tspan x="10px" y="100px"><tspan>account, is a placeholder that Terraform's `templatefile` fills.</tspan>
+</tspan>
+    <tspan x="10px" y="118px">
+</tspan>
+    <tspan x="10px" y="136px"><tspan class="fg-bright-green bold">Usage:</tspan><tspan> </tspan><tspan class="fg-bright-cyan bold">pumpkin controller policy</tspan><tspan> </tspan><tspan class="fg-cyan">&lt;principal&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="154px">
+</tspan>
+    <tspan x="10px" y="172px"><tspan class="fg-bright-green bold">Arguments:</tspan>
+</tspan>
+    <tspan x="10px" y="190px"><tspan>  </tspan><tspan class="fg-cyan">&lt;principal&gt;</tspan>
+</tspan>
+    <tspan x="10px" y="208px"><tspan>          The principal whose policy to print</tspan>
+</tspan>
+    <tspan x="10px" y="226px">
+</tspan>
+    <tspan x="10px" y="244px"><tspan>          Possible values:</tspan>
+</tspan>
+    <tspan x="10px" y="262px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">controller</tspan><tspan>: The controller's role: its jobs' providers and their settings</tspan>
+</tspan>
+    <tspan x="10px" y="280px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">timer</tspan><tspan>:      The role of the EC2 timer, which terminates instances</tspan>
+</tspan>
+    <tspan x="10px" y="298px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">sandbox</tspan><tspan>:    The EC2 provider's instances' role, which pulls their images</tspan>
+</tspan>
+    <tspan x="10px" y="316px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">modal-pull</tspan><tspan>: The role that Modal assumes to import the roles' images</tspan>
+</tspan>
+    <tspan x="10px" y="334px"><tspan>          - </tspan><tspan class="fg-bright-cyan bold">client</tspan><tspan>:     What a machine whose configuration names `[controller]` needs</tspan>
+</tspan>
+    <tspan x="10px" y="352px">
+</tspan>
+    <tspan x="10px" y="370px"><tspan class="fg-bright-green bold">Options:</tspan>
+</tspan>
+    <tspan x="10px" y="388px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">-h</tspan><tspan>, </tspan><tspan class="fg-bright-cyan bold">--help</tspan>
+</tspan>
+    <tspan x="10px" y="406px"><tspan>          Print help</tspan>
+</tspan>
+    <tspan x="10px" y="424px">
+</tspan>
+    <tspan x="10px" y="442px"><tspan>Placeholders, which `templatefile` fills with a string where a policy holds</tspan>
+</tspan>
+    <tspan x="10px" y="460px"><tspan>${name}, and with a list where it holds ${jsonencode(name)}:</tspan>
+</tspan>
+    <tspan x="10px" y="478px"><tspan>  account: the ID of the deployment's account</tspan>
+</tspan>
+    <tspan x="10px" y="496px"><tspan>  controller_instance_arn: the ARN of the controller's instance</tspan>
+</tspan>
+    <tspan x="10px" y="514px"><tspan>  launch_template_arns: a list of the ARNs of the envelope's launch templates</tspan>
+</tspan>
+    <tspan x="10px" y="532px"><tspan>  modal_repository_arn: the ARN of the repository that Modal imports images from</tspan>
+</tspan>
+    <tspan x="10px" y="550px"><tspan>  partition: the AWS partition, such as `aws`</tspan>
+</tspan>
+    <tspan x="10px" y="568px"><tspan>  region: the AWS region of the deployment</tspan>
+</tspan>
+    <tspan x="10px" y="586px"><tspan>  roles_repository_arn: the ARN of the roles' images' repository</tspan>
+</tspan>
+    <tspan x="10px" y="604px"><tspan>  sandbox_profile_arn: the ARN of the sandbox instances' instance profile</tspan>
+</tspan>
+    <tspan x="10px" y="622px"><tspan>  sandbox_role_arn: the ARN of the sandbox instances' role</tspan>
+</tspan>
+    <tspan x="10px" y="640px"><tspan>  sandboxd_repository_arn: the ARN of the repository of the images of `sandboxd`</tspan>
+</tspan>
+    <tspan x="10px" y="658px"><tspan>  settings_parameter_arn: the ARN of the SSM parameter of the controller's</tspan>
+</tspan>
+    <tspan x="10px" y="676px"><tspan>    settings</tspan>
+</tspan>
+    <tspan x="10px" y="694px"><tspan>  timer_group: the name of the timer's schedule group</tspan>
+</tspan>
+    <tspan x="10px" y="712px"><tspan>  timer_role_arn: the ARN of the timer's role</tspan>
+</tspan>
+    <tspan x="10px" y="730px">
+</tspan>
+    <tspan x="10px" y="748px"><tspan>Each principal's placeholders:</tspan>
+</tspan>
+    <tspan x="10px" y="766px"><tspan>  controller: account, launch_template_arns, modal_repository_arn, partition,</tspan>
+</tspan>
+    <tspan x="10px" y="784px"><tspan>    region, roles_repository_arn, sandbox_profile_arn, sandbox_role_arn,</tspan>
+</tspan>
+    <tspan x="10px" y="802px"><tspan>    sandboxd_repository_arn, settings_parameter_arn, timer_group, timer_role_arn</tspan>
+</tspan>
+    <tspan x="10px" y="820px"><tspan>  timer: account, partition, region, sandbox_profile_arn</tspan>
+</tspan>
+    <tspan x="10px" y="838px"><tspan>  sandbox: roles_repository_arn, sandboxd_repository_arn</tspan>
+</tspan>
+    <tspan x="10px" y="856px"><tspan>  modal-pull: modal_repository_arn</tspan>
+</tspan>
+    <tspan x="10px" y="874px"><tspan>  client: controller_instance_arn</tspan>
+</tspan>
+    <tspan x="10px" y="892px">
+</tspan>
+  </text>
+
+</svg>
