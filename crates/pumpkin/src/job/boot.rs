@@ -6,8 +6,8 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
-use stdx::process::Environment;
-use stdx::{Context as _, Deadline};
+use stdx::Context as _;
+use stdx::process::{Bound, Echo, Environment, Run};
 
 use crate::cli::{self, Exit};
 use crate::link::Boot;
@@ -83,10 +83,10 @@ impl Shown {
         systemctl.arg("show");
         systemctl.args(properties.iter().map(|name| format!("--property={name}")));
         systemctl.arg(BOOT_UNIT);
-        let deadline = Deadline::after(SYSTEMCTL_TIMEOUT);
-        match stdx::process::output(&mut systemctl, deadline) {
-            Ok(Some(output)) => Self(String::from_utf8_lossy(&output.stdout).into_owned()),
-            Ok(None) | Err(_) => Self(String::new()),
+        let how = Run::new(Bound::Within(SYSTEMCTL_TIMEOUT), Echo::Silent);
+        match stdx::process::run(&mut systemctl, how) {
+            Ok(output) => Self(String::from_utf8_lossy(&output.stdout).into_owned()),
+            Err(_) => Self(String::new()),
         }
     }
 

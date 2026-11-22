@@ -619,7 +619,7 @@ fn retry_start() {
         failed["message"]
             .as_str()
             .unwrap()
-            .contains("systemd-run could not start")
+            .contains("`systemd-run` didn't start")
     );
     for path in [
         &tmpfs,
