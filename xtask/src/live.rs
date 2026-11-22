@@ -93,11 +93,17 @@ pub(crate) fn docker() -> Result<()> {
 /// probe passed, every sandbox was deleted and nothing of the run is left on the provider. It
 /// first runs `pumpkin-admin check` on the controller's deployment, and fails if that finds a
 /// problem. With `lost`, it loses the run instead, and checks that its sandboxes end by
-/// themselves and that a reap removes the rest. `again` names the command that repeats it.
+/// themselves and that a reap removes the rest.
 pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> Result<()> {
-    let again = match provider {
-        Provider::Ec2 => "cargo xtask live ec2",
-        Provider::Modal => "cargo xtask live modal",
+    let target = match provider {
+        Provider::Ec2 => "ec2",
+        Provider::Modal => "modal",
+    };
+    let again = format!("cargo xtask live {target}");
+    let suite = if lost {
+        format!("{target}-lost")
+    } else {
+        target.to_owned()
     };
     let home =
         env::var_os("HOME").ok_or("HOME is unset: set it, as the configuration is below it")?;
@@ -112,10 +118,10 @@ pub(crate) fn smoke(provider: Provider, gpu_model: Option<&str>, lost: bool) -> 
     let settings = Settings::parse(&text, &config, provider, gpu_model)?;
     reached(&settings)?;
     let commit = head_commit()?;
-    let repo = task_repository()?;
-    checked_deployment(&settings, &repo, again)?;
+    let repo = task_repository(&suite)?;
+    checked_deployment(&settings, &repo, &again)?;
     if lost {
-        return self::lost(&settings, &repo, again);
+        return self::lost(&settings, &repo, &again);
     }
     let mut run = pumpkin(&repo);
     run.args(["run", "--wait"]);
@@ -428,11 +434,13 @@ fn head_commit() -> Result<String> {
     Ok(commit)
 }
 
-/// The task repository that the smoke runs in, `live/repo` in cargo's target directory, which
-/// keeps its `.git` and `.pumpkin` from one live run to the next. The executable is installed
-/// from this checkout so an unpublished change can be exercised.
-fn task_repository() -> Result<PathBuf> {
-    let repo = target_dir()?.join("live/repo");
+/// The task repository that the smoke of `suite` runs in, `live/<suite>/repo` in cargo's target
+/// directory, which keeps its `.git` and `.pumpkin` from one live run of `suite` to the next. The
+/// executable is installed from this checkout so an unpublished change can be exercised.
+// A run deletes the last run's copy of `examples`. A repository of each suite's own lets the
+// suites run at once.
+fn task_repository(suite: &str) -> Result<PathBuf> {
+    let repo = target_dir()?.join("live").join(suite).join("repo");
     let made =
         |path: &Path, error: std::io::Error| format!("writing {} failed: {error}", path.display());
     fs::create_dir_all(&repo).map_err(|error| made(&repo, error))?;

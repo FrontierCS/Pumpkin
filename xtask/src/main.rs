@@ -82,15 +82,15 @@ mod flags {
             /// without reaching the network.
             cmd aws-certificates {}
 
-            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker`
-            /// runs the ignored tests, which need a Docker engine, the static sandboxd or a server
+            /// Runs the checks that reach a real environment, which `ci` leaves out. `docker` runs
+            /// the ignored tests, which need a Docker engine, the static sandboxd or a server
             /// elsewhere. They use the context that `PUMPKIN_DOCKER_CONTEXT` names, or `default`.
             /// `ec2` and `modal` cost money. Each runs `pumpkin-admin check`, then `examples/smoke`
-            /// on that provider through the controller that `~/.config/pumpkin/pumpkin.toml`
-            /// names, with Pumpkin at `HEAD`, which `./pumpkin` builds below the target directory.
-            /// Every probe of a sandbox's confinement must pass, and every sandbox must be deleted.
-            /// If anything tagged with the run is left on EC2, EventBridge Scheduler or Modal, the
-            /// check fails and runs `pumpkin cancel` to remove it.
+            /// on that provider through the controller that `~/.config/pumpkin/pumpkin.toml` names,
+            /// with Pumpkin at `HEAD`. Each target has a task repository of its own, so different
+            /// targets can run at once. Every probe of a sandbox's confinement must pass, and every
+            /// sandbox must be deleted. If anything tagged with the run is left on EC2, EventBridge
+            /// Scheduler or Modal, the check fails and runs `pumpkin cancel` to remove it.
             cmd live {
                 /// `docker`, `ec2` or `modal`.
                 required target: String
@@ -100,7 +100,9 @@ mod flags {
                 /// With `ec2` or `modal`, kills the run's job on the controller once the agent
                 /// holds a lease of each grant. Checks that each sandbox ends by itself at the
                 /// run's hard end, about 95 minutes after its start, and that `pumpkin reap` then
-                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal.
+                /// removes what is left. Costs at most about $1 on EC2 and $4 on Modal. A run with
+                /// `--lost` has a task repository of its own too. The reap takes every ended or
+                /// lost run on the controller, so run one `--lost` at a time.
                 optional --lost
             }
 
