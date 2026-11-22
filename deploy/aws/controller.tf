@@ -103,9 +103,16 @@ resource "aws_ssm_parameter" "members" {
 
 # Canonical's Ubuntu 24.04 LTS, as its public parameter names the current release, whose Docker
 # comes from Docker's own repository, as builds need Docker 28 or later with the containerd
-# image store, and Buildx. An apply never replaces the controller for a newer release.
+# image store, and Buildx. A controller takes the Ubuntu release that is current when it is made.
 data "aws_ssm_parameter" "ubuntu" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+}
+
+# The release that the controller's first boot installs. `replace_triggered_by` takes only a
+# resource's change, so this holds the variable, and a change to it replaces the controller
+# (https://github.com/hashicorp/web-unified-docs/blob/4ec2d604280fff09cfca1d2648fed5cb51f81f14/content/terraform/v1.16.x/docs/language/meta-arguments/lifecycle.mdx#L112-L145).
+resource "terraform_data" "pumpkin_release" {
+  input = var.pumpkin_release
 }
 
 resource "aws_instance" "controller" {
@@ -153,12 +160,15 @@ resource "aws_instance" "controller" {
   # The tag by which `pumpkin` finds the controller of `[controller] name`.
   tags = { Name = "${local.prefix}-controller", "pumpkin:controller" = var.name }
 
-  # An apply never replaces or stops the controller under live runs: cloud-init runs the user
-  # data at the instance's first boot alone.
+  # cloud-init runs the user data at the instance's first boot alone. So a new `pumpkin_release`
+  # replaces the controller, and the new one's first boot installs it.
   lifecycle {
     # A stopped instance reads as having no public address, and a change to it replaces the
     # instance, its volume and the records on it with it. The controller stops itself when idle.
     ignore_changes = [ami, user_data, associate_public_ip_address]
+    # On the release, not on the user data, so that a change to the rest of the user data replaces
+    # nothing.
+    replace_triggered_by = [terraform_data.pumpkin_release]
   }
 }
 

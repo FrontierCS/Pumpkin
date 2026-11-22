@@ -2,8 +2,7 @@
 # The controller's first boot, on Ubuntu 24.04 LTS. It installs what the jobs need, at the
 # versions that controller.tf names. Then it runs the `pumpkin-admin install` of the release that
 # `pumpkin_release` pins. That install sets up what Pumpkin relies on there: its user, its units,
-# `sshd`'s settings and the members' keys. An admin upgrades them by running a later release's
-# install.
+# `sshd`'s settings and the members' keys.
 
 # Over HTTPS, the one way out the controller's security group allows.
 apt:

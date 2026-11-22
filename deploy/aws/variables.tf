@@ -104,7 +104,7 @@ variable "controller_volume_throughput" {
 }
 
 variable "pumpkin_release" {
-  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install --settings` at its first boot. A later release's install reaches a running controller only when its admin runs it there."
+  description = "A Pumpkin release's `pumpkinversion` line: its tag, its commit and its archive's SHA-256. The controller runs that release's `pumpkin-admin install --settings` at its first boot. An apply that changes it replaces the controller: change it in a cutover, as the module's README says under Versions."
   type        = string
 
   validation {
