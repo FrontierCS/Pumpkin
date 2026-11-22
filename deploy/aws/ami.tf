@@ -79,6 +79,12 @@ resource "aws_imagebuilder_infrastructure_configuration" "pumpkin" {
   subnet_id                     = var.subnet_id
   security_group_ids            = [aws_security_group.sandbox.id]
   terminate_instance_on_failure = true
+
+  # Tokens required, within one hop, as Image Builder's security best practices ask.
+  instance_metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 }
 
 # A new image leaves the old AMI registered, as README.md's teardown says.

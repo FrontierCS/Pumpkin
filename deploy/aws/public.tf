@@ -107,19 +107,29 @@ resource "aws_cloudfront_distribution" "public" {
   }
 }
 
+# Every request over TLS, as S3's security best practices ask.
 resource "aws_s3_bucket_policy" "public" {
   count = var.public_page ? 1 : 0
 
   bucket = aws_s3_bucket.public[0].id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "cloudfront.amazonaws.com" }
-      Action    = "s3:GetObject"
-      Resource  = "${aws_s3_bucket.public[0].arn}/*"
-      Condition = { StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.public[0].arn } }
-    }]
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "cloudfront.amazonaws.com" }
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.public[0].arn}/*"
+        Condition = { StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.public[0].arn } }
+      },
+      {
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource  = [aws_s3_bucket.public[0].arn, "${aws_s3_bucket.public[0].arn}/*"]
+        Condition = { Bool = { "aws:SecureTransport" = "false" } }
+      },
+    ]
   })
 
   # S3 refuses a second change to one bucket's settings while another is in progress.
