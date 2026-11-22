@@ -26,13 +26,14 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use engine::prune::Disk;
-use provider::UnixTime;
+use provider::{RunTag, UnixTime};
 use rustix::event::{self, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use schema::frame;
 use stdx::Context as _;
 
 use crate::job::{JOBS, WAITING};
+use crate::link::copy::CopiedRequest;
 use crate::link::{
     self, Ask, Health, HealthRequest, Hello, Job, Jobs, JobsRequest, ListRequest, Listed, Owner,
     ViewRequest,
@@ -97,6 +98,9 @@ fn requests(
         };
         let written = match ask {
             Ask::Copy(request) => copy::answer(output, home, request, &body),
+            Ask::Copied(request) => link::answer(output, request, |CopiedRequest { id }| {
+                crate::job::mark_copied(home, &RunTag::try_from(id)?, member)
+            }),
             Ask::Lacks(request) => {
                 link::answer(output, request, |request| missing(home, &request, &body))
             }

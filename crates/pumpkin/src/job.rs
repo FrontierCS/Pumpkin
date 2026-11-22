@@ -48,10 +48,12 @@ use crate::{cli, config, say, star};
 mod boot;
 mod installs;
 mod member;
+mod records;
 mod start;
 
 pub(crate) use boot::{boot, state as boot_state};
 pub(crate) use member::{member, write_member};
+pub(crate) use records::mark_copied;
 pub(crate) use start::start;
 
 pub(crate) const JOBS: &str = "jobs";
@@ -90,9 +92,12 @@ const BUILDING: &str = "building";
 pub(crate) const WAITING: &str = "waiting";
 
 // How long a job's tree and directory last, by the time in its id. An install lasts as long after
-// a start last handed it out. A run's record names its entry in its tree, to run it again. A tree
-// is links into the store, so it holds no bytes of its own.
-const KEPT: Duration = Duration::from_hours(14 * 24);
+// a start last handed it out. A run's record lasts as long after its member last copied it. A
+// run's record names its entry in its tree, to run it again. A tree is links into the store, so it
+// holds no bytes of its own.
+pub(crate) const KEPT_DAYS: u64 = 14;
+
+pub(crate) const KEPT: Duration = Duration::from_hours(KEPT_DAYS * 24);
 
 // How long a manifest or a partial blob lasts in the store, and so what no tree links of the
 // files a manifest names. A day is long enough that a send cut off, or a start that failed,
@@ -146,7 +151,11 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
             path.display()
         ));
     };
-    // Before the build, so that it has room.
+    // Before the build, so that it has room. The records go first, so that the prune then removes
+    // the directory of each run's job whose record went.
+    if let Err(error) = records::collect(&home, &jobs) {
+        say(format_args!("the prune of the records failed: {error}"));
+    }
     if let Err(error) = prune(&home, &path, &jobs) {
         say(format_args!("the prune at the job's start failed: {error}"));
     }
@@ -513,6 +522,7 @@ pub(crate) fn ids(dir: &Path) -> Result<Vec<String>, String> {
 /// - once the volume is full, the images and the build cache of the engine of the configuration
 ///   at `config` (`collect`), sparing what the jobs in `jobs` hold.
 fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
+    let runs = PathBuf::from(crate::default_runs()?);
     let cutoff = crate::unix_now().since_epoch().saturating_sub(KEPT);
     let old = |id: &String| runtime::minted(id).is_some_and(|minted| minted < cutoff);
     for repo in fs::read_dir(home.join(TREES)).into_iter().flatten() {
@@ -527,7 +537,6 @@ fn prune(home: &Path, config: &Path, jobs: &Path) -> Result<(), String> {
         say(format_args!("pruning the installs failed: {error}"));
     }
     collect_store(&home.join(STORE))?;
-    let runs = PathBuf::from(crate::default_runs()?);
     for id in ids(&home.join(JOBS))?.into_iter().filter(old) {
         // A run's record names its job's configuration, to run it again.
         let record = runs.join(&id);
@@ -736,7 +745,8 @@ fn build_first(
 /// ended, it holds each image they found or built by its ID too. It takes one of the controller's
 /// build slots (`take_slot`) as the first build starts, and keeps the slot until its holder lets
 /// go. It prunes (`collect`) as each build starts, and as each ends while others run. Then it
-/// refuses to start a build while more than `REFUSED_PERCENT` of the volume is used.
+/// refuses to start a build while more than `REFUSED_PERCENT` of the volume is used. The refusal
+/// names the records that their members haven't copied, which no prune removes.
 struct Admission<'j> {
     id: &'j RunTag,
     home: &'j Path,
@@ -801,10 +811,11 @@ impl engine::Admit for Admission<'_> {
             let used = (used_bytes.saturating_mul(100))
                 .checked_div(disk.size_bytes)
                 .unwrap_or(100);
+            let uncopied = records::uncopied(self.home, self.jobs);
             return Err(format!(
                 "the controller's volume is {used}% used, past the {REFUSED_PERCENT}% at which a \
                  build is refused, though the prune has removed what no job holds: free space \
-                 there, or let the jobs that run end, then run the task again"
+                 there, or let the jobs that run end, then run the task again{uncopied}"
             ));
         }
         Ok(())

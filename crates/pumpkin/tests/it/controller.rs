@@ -2971,7 +2971,7 @@ fn serve_refusals() {
             a message that is no request:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
-              {"message":"unknown variant `absent_request`, expected one of `copy`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put`, `puts` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
+              {"message":"unknown variant `absent_request`, expected one of `copy`, `copied`, `follow`, `health`, `jobs`, `list`, `view`, `start`, `cancel`, `reap`, `lacks`, `put`, `puts` at line 1 column 24: expected a request of this pumpkin","type":"refused"}, and a body of 0 bytes
             an incomplete request body:
             exit status: 1
               {"type":"serving"}, and a body of 0 bytes
@@ -3125,6 +3125,8 @@ fn record_copy() {
             "wait"
         };
         lines.extend(copied_record(&scratch, &client, &[command, &id], &copy));
+        let copied = scratch.0.join(format!("home/jobs/{id}/copied"));
+        lines.push(format!("  noted as copied: {}", copied.exists()));
         if step == "whole" {
             let marked = fs::metadata(copy.join("model/marked")).unwrap().mode();
             lines.push(format!("  model/marked: {:o}", marked & 0o7777));
@@ -3197,10 +3199,12 @@ fn record_copy() {
               pumpkin: controller `alice` copying run <id>: <scratch>/home/.pumpkin/runs/<id>/jobs/0/secret: Permission denied (os error 13): the copy keeps the files that came whole. Once the controller can read the record, copy it again
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: driver.pid, jobs/0/out, log.jsonl, model/a\nb, model/a b, model/marked, outcome.json
+              noted as copied: false
             whole:
             wait: exit status: 0
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: jobs/0/secret, record.json
+              noted as copied: true
               model/marked: 755
               jobs: 0, 2
             unchanged:
@@ -3208,11 +3212,13 @@ fn record_copy() {
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: 
+              noted as copied: true
             changed:
             cancel: exit status: 0
               pumpkin: stopped job <id> on controller `alice`; copied its record to <scratch>/repo/.pumpkin/runs/<id>: read it with the pumpkin that made it
               the calls: serve=.pumpkin/serve/<this build>/pumpkin
               written: log.jsonl, model/added
+              noted as copied: true
             only here: jobs/0/out
             cut, then refused:
             cancel: exit status: 1

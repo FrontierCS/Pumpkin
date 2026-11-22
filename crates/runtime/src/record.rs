@@ -284,8 +284,8 @@ fn fill(
     Ok(Lock { _file: pid })
 }
 
-/// A run's record on disk, which only [`Record::reap`] writes. Its methods read the files as they
-/// are, which change while the run lives.
+/// A run's record on disk, which only [`Record::reap`] writes and [`Record::remove`] removes. Its
+/// methods read the files as they are, which change while the run lives.
 #[derive(Debug)]
 pub struct Record {
     id: String,
@@ -300,7 +300,7 @@ pub struct Record {
 /// A line is `{"at_ns": t, "provider": p, "id": i, "reaped": "removed"}`: at `t` nanoseconds since
 /// the Unix epoch, a decimal string, as the run log gives times, the reap deleted sandbox `i` of
 /// provider `p`, as `p` listed it or the record held it undeleted.
-const REAPS: &str = "reaps.jsonl";
+pub(crate) const REAPS: &str = "reaps.jsonl";
 
 /// What [`Record::reap`] deleted.
 #[derive(Debug)]
@@ -390,9 +390,9 @@ impl Record {
         Ok(records)
     }
 
-    /// The names of the directories in `runs` that may hold a record, in order, which is by id,
-    /// oldest first, but for those that start with `.`, each a record in the making, which isn't
-    /// there yet.
+    /// The names of the directories in `runs` that may hold a record, in order of id, oldest
+    /// first. Leaves out the names that start with `.`, each a record in the making or being
+    /// removed.
     pub fn names(runs: &Path) -> Result<Vec<String>, String> {
         names(runs)
     }

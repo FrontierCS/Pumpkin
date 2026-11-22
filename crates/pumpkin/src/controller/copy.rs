@@ -15,9 +15,9 @@ use tempfile::NamedTempFile;
 
 use super::Reached;
 use super::linking::Build;
-use crate::link::copy::{CopyRequest, Item, Stamp, held};
+use crate::link::copy::{CopiedRequest, CopyRequest, Item, Stamp, held};
 use crate::link::{Ask, Link, MAX_REQUEST_BODY_BYTES, Unanswered};
-use crate::say;
+use crate::{next, say};
 
 // Match tempfile's default suffix so a copy recognizes scratch directories left by older copies.
 // https://github.com/Stebalien/tempfile/blob/5c8fa12eb584931b4f1bccfde87eb72fbfa7dc61/src/lib.rs#L195
@@ -58,13 +58,29 @@ impl Reached {
                 receive(link, &copy, scratch.path(), progress)
             })
         })?;
-        answer.map_err(|message| {
+        let writer = answer.map_err(|message| {
             format!(
                 "controller `{}` copying run {}: {message}",
                 self.name,
                 id.as_str()
             )
-        })
+        })?;
+        // Only once the copy is whole. The controller then removes its record in time.
+        let what = format!("noting the copy of run {}'s record", id.as_str());
+        let noted = self.asked(build, &what, |reached, linked| {
+            let id = id.as_str().to_owned();
+            linked.ask(reached, CopiedRequest { id })
+        });
+        if let Err(error) | Ok(Err(error)) = noted {
+            say(format_args!(
+                "controller `{}` didn't note the copy, so it keeps run {id}'s record until it \
+                 notes one: {error}; to copy it again: {}",
+                self.name,
+                next::of_run("wait", None, id.as_str()),
+                id = id.as_str()
+            ));
+        }
+        Ok(writer)
     }
 }
 

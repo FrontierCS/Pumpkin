@@ -3,13 +3,15 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use schema::ir::Mode;
 use serde::{Deserialize, Serialize};
 use stdx::Context as _;
+
+use super::{Ask, Link, Request, Unanswered};
 
 // Keep the ceiling set from the largest controller record measured for the original copy.
 // https://github.com/FrontierCS/Pumpkin/pull/121
@@ -19,6 +21,37 @@ const RECORD_ENTRIES: usize = 100_000;
 pub(crate) struct CopyRequest {
     pub(crate) id: String,
     pub(crate) held_bytes: usize,
+}
+
+/// That the client holds a whole copy of run `id`'s record, for the member that its link acts for.
+/// If that member is the run's, the controller keeps its record `crate::job::KEPT` from then.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CopiedRequest {
+    pub(crate) id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum CopiedHead {
+    Noted,
+}
+
+impl Request for CopiedRequest {
+    type Answer = ();
+    type Head = CopiedHead;
+
+    fn ask(self) -> Ask {
+        Ask::Copied(self)
+    }
+
+    fn sent((): ()) -> io::Result<(CopiedHead, Vec<u8>)> {
+        Ok((CopiedHead::Noted, Vec::new()))
+    }
+
+    fn received(head: CopiedHead, _: &mut Link) -> Result<(), Unanswered> {
+        let CopiedHead::Noted = head;
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
