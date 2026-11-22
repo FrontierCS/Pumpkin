@@ -5,10 +5,10 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use stdx::process::{self, Bound, Echo, Environment, Run, Stream};
+use stdx::process::{self, Environment};
 
 use crate::repo::{Repo, STEP_TIMEOUT};
-use crate::{Cargo, Result, tidy, tools};
+use crate::{Result, ran, step, tidy, tools};
 
 /// Where the `.star` files are that [`check`] leaves as they are: the language's test fixtures,
 /// whose expected outputs pin lines and columns, and the conformance files of other
@@ -20,18 +20,18 @@ const UNCHECKED: &str = "crates/lang/tests/";
 const LINK: &str = env!("PUMPKIN_BUILDIFIER");
 
 /// The pinned buildifier, fetched on first use ([`tools::fetched`]).
-pub(crate) fn buildifier(cargo: &Cargo) -> Result<PathBuf> {
-    tools::fetched(cargo, tools::BUILDIFIER)
+pub(crate) fn buildifier() -> Result<PathBuf> {
+    tools::fetched(tools::BUILDIFIER)
 }
 
 /// Replaces what is at [`LINK`] with the pinned buildifier, and returns that path. It fetches
 /// buildifier first if the cache lacks it.
-pub(crate) fn link(cargo: &Cargo) -> Result<PathBuf> {
+pub(crate) fn link() -> Result<PathBuf> {
     let link = Path::new(LINK);
     let Some(dir) = link.parent() else {
         return Err(format!("PUMPKIN_BUILDIFIER names `{LINK}`: give the path of a file").into());
     };
-    let buildifier = buildifier(cargo)?;
+    let buildifier = buildifier()?;
     fs::create_dir_all(dir).map_err(|error| format!("making {} failed: {error}", dir.display()))?;
     // The tests hard-link it again, so it must lie on the checkout's filesystem.
     tools::replace(link, |made| linked(&buildifier, made))?;
@@ -74,10 +74,5 @@ pub(crate) fn check(repo: &Repo<'_>, pumpkin: &Path) -> Result<()> {
     fmt.current_dir(repo.root)
         .args(["fmt", "--check", "--"])
         .args(files);
-    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line)
-        .stdout(Stream::Inherited)
-        .stderr(Stream::Inherited)
-        .named("pumpkin fmt");
-    process::run(&mut fmt, how).map_err(|failure| failure.to_string())?;
-    Ok(())
+    ran(&mut fmt, step(STEP_TIMEOUT).named("pumpkin fmt")).map(drop)
 }

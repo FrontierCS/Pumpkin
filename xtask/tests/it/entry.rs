@@ -1,6 +1,7 @@
 //! The release launcher against pinned archives read through curl, and the static install.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -8,8 +9,9 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use expect_test::{Expect, expect};
+use sha2::{Digest as _, Sha256};
+use stdx::process::{self, Environment};
 use test_support::TestDir;
-use xshell::Shell;
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../dist/pumpkin");
 const RELEASES: &str = "https://github.com/FrontierCS/Pumpkin/releases/download";
@@ -74,13 +76,10 @@ struct Fixture<'a> {
 
 impl<'a> Fixture<'a> {
     fn new(scratch: &'a Path, release: Release, lacking: bool) -> Self {
-        let sh = Shell::new().unwrap();
         let checksum = match release {
             Release::None => WRONG_SHA.to_owned(),
-            Release::WrongCommit => archive(&sh, scratch, WRONG_COMMIT),
-            Release::Current | Release::Cached | Release::Concurrent => {
-                archive(&sh, scratch, COMMIT)
-            }
+            Release::WrongCommit => archive(scratch, WRONG_COMMIT),
+            Release::Current | Release::Cached | Release::Concurrent => archive(scratch, COMMIT),
         };
         let xdg = matches!(release, Release::Cached).then(|| scratch.join("cache"));
         let cache = match &xdg {
@@ -122,26 +121,21 @@ impl<'a> Fixture<'a> {
             )
             .unwrap();
         }
-        let sh = Shell::new().unwrap();
-        sh.change_dir(subdir);
-        let call = sh
-            .cmd("sh")
+        let mut call = process::command("sh", Environment::Inherited);
+        call.current_dir(subdir)
             .args(["../pumpkin", "check", "task with spaces.star"])
             .env("HOME", self.scratch.join("home"))
             .env("PATH", &self.path);
-        let call = if let Some(root) = &self.xdg {
-            call.env("XDG_CACHE_HOME", root)
-        } else {
-            call.env_remove("XDG_CACHE_HOME")
+        match &self.xdg {
+            Some(root) => call.env("XDG_CACHE_HOME", root),
+            None => call.env_remove("XDG_CACHE_HOME"),
         };
-        let call = if let Some([flock, curl]) = &self.probes {
+        if let Some([flock, curl]) = &self.probes {
             call.env("PROBES", self.scratch)
                 .env("REAL_FLOCK", flock)
-                .env("REAL_CURL", curl)
-        } else {
-            call
-        };
-        call.ignore_status().quiet().output().unwrap()
+                .env("REAL_CURL", curl);
+        }
+        call.output().unwrap()
     }
 
     fn warm_cache(&self) {
@@ -264,7 +258,7 @@ fn listed(dir: &Path) -> String {
     }
 }
 
-fn archive(sh: &Shell, scratch: &Path, commit: &str) -> String {
+fn archive(scratch: &Path, commit: &str) -> String {
     let file = scratch.join("releases/download/v1/pumpkin-v1-x86_64-unknown-linux-musl.tar.xz");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     let tree = scratch.join("tree");
@@ -280,16 +274,24 @@ printf 'workspace: %s\narg: %s\narg: %s\n' "$PUMPKIN_WORKSPACE" "$1" "$2"
     .unwrap();
     fs::write(tree.join("commit"), format!("{commit}\n")).unwrap();
     fs::set_permissions(pumpkin, fs::Permissions::from_mode(0o755)).unwrap();
-    sh.cmd("tar")
+    let tarred = process::command("tar", Environment::Inherited)
         .args(["--create", "--xz", "--file"])
         .arg(&file)
         .arg("--directory")
         .arg(tree)
         .args(["bin", "commit"])
-        .run()
+        .output()
         .unwrap();
-    let output = sh.cmd("sha256sum").arg(file).read().unwrap();
-    output.split_whitespace().next().unwrap().to_owned()
+    assert!(
+        tarred.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tarred.stderr)
+    );
+    let mut hex = String::new();
+    for byte in Sha256::digest(fs::read(file).unwrap()) {
+        write!(hex, "{byte:02x}").unwrap();
+    }
+    hex
 }
 
 #[test]
@@ -425,17 +427,19 @@ fn release_cached_commit() {
 fn build_root() {
     let held = TestDir::new();
     let root = held.path();
-    let sh = Shell::new().unwrap();
-    let printed = sh
-        .cmd(env!("CARGO_BIN_EXE_xtask"))
+    let built = process::command(env!("CARGO_BIN_EXE_xtask"), Environment::Inherited)
         .arg("build")
         .arg("--root")
-        .arg(root);
-    let printed = printed
-        .read()
-        .unwrap()
-        .replace(&root.display().to_string(), "<root>")
-        + "\n";
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let printed = String::from_utf8(built.stdout).unwrap();
+    let printed = printed.replace(&root.display().to_string(), "<root>");
     expect![[r#"
         <root>/bin/pumpkin
         <root>/bin/buildifier

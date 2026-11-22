@@ -13,14 +13,16 @@
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Output};
+use std::time::Duration;
 
-use repo::Repo;
-use xshell::{Cmd, Shell, cmd};
+use repo::{Repo, STEP_TIMEOUT};
+use stdx::Context as _;
+use stdx::process::{self, Bound, Echo, Environment, Failure, Run, Stream, printed};
 
 mod aws_certificates;
 mod diff;
@@ -286,21 +288,21 @@ fn main() -> ExitCode {
 }
 
 /// xflags exits by itself on `--help`, with 0, and on a command line it can't parse, with 2.
+// Each command is a function of its own, given its flags, as each of TigerBeetle's scripts is:
+// https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/scripts.zig#L86-L93
 fn try_main() -> Result<()> {
     let flags = flags::Xtask::from_env_or_exit();
-    let cargo = Cargo::new()?;
     match flags.subcommand {
         flags::XtaskCmd::Fmt(flags::Fmt { check }) => {
-            let fmt = cargo.fmt()?;
-            let fmt = if check { fmt.arg("--check") } else { fmt };
-            fmt.run()?;
-            Ok(())
+            let mut fmt = fmt()?;
+            if check {
+                fmt.arg("--check");
+            }
+            ran(&mut fmt, step(STEP_TIMEOUT)).map(drop)
         }
-        flags::XtaskCmd::Ci(flags::Ci) => ci(&cargo),
-        flags::XtaskCmd::Figures(flags::Figures) => figure::write(root(), &metadata(&cargo)?),
-        flags::XtaskCmd::AwsCertificates(flags::AwsCertificates) => {
-            aws_certificates::write(&cargo.sh)
-        }
+        flags::XtaskCmd::Ci(flags::Ci) => ci(),
+        flags::XtaskCmd::Figures(flags::Figures) => figure::write(root(), &metadata()?),
+        flags::XtaskCmd::AwsCertificates(flags::AwsCertificates) => aws_certificates::write(),
         flags::XtaskCmd::Live(flags::Live {
             target,
             gpu_model,
@@ -310,7 +312,7 @@ fn try_main() -> Result<()> {
                 "docker" if lost => {
                     return Err("`--lost` is for `ec2` and `modal`: leave it out".into());
                 }
-                "docker" => return live::docker(&cargo),
+                "docker" => return live::docker(),
                 "ec2" => settings::Provider::Ec2,
                 "modal" => settings::Provider::Modal,
                 _ => {
@@ -325,76 +327,93 @@ fn try_main() -> Result<()> {
                     "`--gpu-model` is for `cargo xtask live modal` alone: leave it out".into(),
                 );
             }
-            live::smoke(&cargo, provider, gpu_model.as_deref(), lost)
+            live::smoke(provider, gpu_model.as_deref(), lost)
         }
         flags::XtaskCmd::OpStats(flags::OpStats { run_dir, caller }) => {
             op_stats::report(&run_dir, caller.as_deref())
         }
         flags::XtaskCmd::Sandboxd(flags::Sandboxd) => {
-            println!("{}", sandboxd(&cargo)?.display());
+            println!("{}", sandboxd()?.display());
             Ok(())
         }
         flags::XtaskCmd::Build(flags::Build { root, target }) => {
-            build(&cargo, root, target.as_deref().unwrap_or(MUSL))
+            build(root, target.as_deref().unwrap_or(MUSL))
         }
-        flags::XtaskCmd::Release(flags::Release { tag, publish }) => {
-            release::run(&cargo, &tag, publish)
-        }
+        flags::XtaskCmd::Release(flags::Release { tag, publish }) => release::run(&tag, publish),
         flags::XtaskCmd::Mutants(flags::Mutants { paths, in_diff }) => {
-            mutants(&cargo, &paths, in_diff.as_deref())
+            mutants(&paths, in_diff.as_deref())
         }
         flags::XtaskCmd::Refill(flags::Refill { package, filter }) => {
-            refill(&cargo, &package, filter.as_deref())
+            refill(&package, filter.as_deref())
         }
         flags::XtaskCmd::InstallTools(flags::InstallTools) => {
-            tools::install(&cargo)?;
-            star::link(&cargo).map(drop)
+            tools::install()?;
+            star::link().map(drop)
         }
     }
 }
 
-/// Builds the cargo commands xtask runs, at the workspace's root, without the variables that
-/// `cargo run` sets for xtask's own package ([`stdx::process::cargo_package_vars`]). The others
-/// stay, such as `CARGO` and rustup's, which name the toolchain a child cargo is to use. xshell's
-/// `Shell` can set a variable for all its commands but not remove one, so each command removes
-/// them.
-struct Cargo {
-    sh: Shell,
-    package_vars: Vec<OsString>,
+/// The bound of a step that builds or tests the workspace. A cold build on a busy machine takes
+/// far longer than [`STEP_TIMEOUT`]. A step that outlasts the bound counts as hung, and xtask
+/// kills it.
+// GitHub Actions' default bound of a job:
+// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes
+const BUILD_TIMEOUT: Duration = Duration::from_hours(6);
+
+/// The bound of a run of cargo-mutants. cargo-mutants bounds the build and the tests of each
+/// mutant itself. A run of a few crates whole takes many hours, so this bound only ends a
+/// cargo-mutants that hangs.
+// cargo-mutants' own timeouts: https://mutants.rs/timeouts.html
+const MUTANTS_TIMEOUT: Duration = Duration::from_hours(7 * 24);
+
+/// How xtask runs a step. It echoes the command and gives it this process's standard output and
+/// error. It kills the command at `bound`.
+fn step(bound: Duration) -> Run<'static> {
+    Run::new(Bound::Within(bound), Echo::Line)
+        .stdout(Stream::Inherited)
+        .stderr(Stream::Inherited)
 }
 
-impl Cargo {
-    fn new() -> Result<Self> {
-        let sh = Shell::new()?;
-        sh.change_dir(root());
-        let package_vars = stdx::process::cargo_package_vars();
-        Ok(Self { sh, package_vars })
-    }
+/// Runs `command` as `how` says, and fails with the message of its failure.
+fn ran(command: &mut Command, how: Run<'_>) -> Result<Output> {
+    Ok(process::run(command, how).map_err(|failure| failure.to_string())?)
+}
 
-    fn cmd(&self, args: &[&str]) -> Cmd<'_> {
-        let cmd = self.sh.cmd("cargo").args(args);
-        self.package_vars.iter().fold(cmd, Cmd::env_remove)
-    }
+/// What `command` printed, as text less its trailing newline. Its standard error goes to this
+/// process's. It is killed at `bound`.
+fn read(command: &mut Command, bound: Duration) -> Result<String> {
+    let how = Run::new(Bound::Within(bound), Echo::Silent).stderr(Stream::Inherited);
+    let output = ran(command, how)?;
+    let shown = process::shown(command);
+    Ok(printed(output).context(format_args!("reading what `{shown}` printed failed"))?)
+}
 
-    /// The command that runs `release`'s cargo subcommand, such as `nextest`. It runs the pinned
-    /// release, not whichever one cargo finds, and fetches the release on first use. `args` begin
-    /// with the subcommand's name, as cargo passes it.
-    fn subcommand(&self, release: tools::Release, args: &[&str]) -> Result<Cmd<'_>> {
-        let binary = tools::fetched(self, release)?;
-        let cmd = self.sh.cmd(binary).args(args);
-        Ok(self.package_vars.iter().fold(cmd, Cmd::env_remove))
-    }
+/// A `cargo` with `args`, at the workspace's root. It gets this process's environment but the
+/// variables that `cargo run` set for xtask's own package. The others stay, such as `CARGO` and
+/// rustup's, which name the toolchain that it is to use.
+fn cargo(args: &[&str]) -> Command {
+    let mut cargo = process::command("cargo", Environment::Cargo);
+    cargo.current_dir(root()).args(args);
+    cargo
+}
 
-    /// The pinned formatter. It installs the toolchain on first use, so that rustup never
-    /// installs the whole default profile implicitly. It ignores an inherited binary override.
-    fn fmt(&self) -> Result<Cmd<'_>> {
-        tools::rustfmt(&self.sh)?;
-        let toolchain = format!("+{}", tools::RUSTFMT_TOOLCHAIN);
-        Ok(self
-            .cmd(&[&toolchain, "fmt", "--all"])
-            .env("RUSTUP_AUTO_INSTALL", "0")
-            .env_remove("RUSTFMT"))
-    }
+/// The command that runs `release`'s cargo subcommand, such as `nextest`, as [`cargo`] runs. It
+/// runs the pinned release, not whichever one cargo finds, and fetches the release on first use.
+/// `args` begin with the subcommand's name, as cargo passes it.
+fn subcommand(release: tools::Release, args: &[&str]) -> Result<Command> {
+    let mut command = process::command(tools::fetched(release)?, Environment::Cargo);
+    command.current_dir(root()).args(args);
+    Ok(command)
+}
+
+/// The pinned formatter. It installs the toolchain on first use, so that rustup never installs
+/// the whole default profile implicitly. It ignores an inherited binary override.
+fn fmt() -> Result<Command> {
+    tools::rustfmt()?;
+    let toolchain = format!("+{}", tools::RUSTFMT_TOOLCHAIN);
+    let mut fmt = cargo(&[&toolchain, "fmt", "--all"]);
+    fmt.env("RUSTUP_AUTO_INSTALL", "0").env_remove("RUSTFMT");
+    Ok(fmt)
 }
 
 fn root() -> &'static Path {
@@ -411,101 +430,101 @@ fn root() -> &'static Path {
 
 /// Runs the checks every change must pass, in order, and stops at the first that fails. The
 /// tests leave out those ignored, which [`live::docker`] runs.
-fn ci(cargo: &Cargo) -> Result<()> {
-    cargo.fmt()?.arg("--check").run()?;
+fn ci() -> Result<()> {
+    ran(fmt()?.arg("--check"), step(STEP_TIMEOUT))?;
     let repo = Repo { root: root() };
     tidy::check(&repo)?;
-    figure::check(root(), &metadata(cargo)?)?;
-    let clippy = cargo.cmd(&["clippy", "--workspace", "--all-targets", "--locked"]);
-    clippy.args(["--", "--deny", "warnings"]).run()?;
-    let doc = cargo.cmd(&["doc", "--no-deps", "--workspace", "--locked"]);
-    doc.env("RUSTDOCFLAGS", "--deny warnings").run()?;
-    page::check(cargo)?;
-    let buildifier = star::link(cargo)?;
-    let pumpkin = tests_pumpkin(cargo)?;
+    figure::check(root(), &metadata()?)?;
+    let mut clippy = cargo(&["clippy", "--workspace", "--all-targets", "--locked"]);
+    ran(
+        clippy.args(["--", "--deny", "warnings"]),
+        step(BUILD_TIMEOUT),
+    )?;
+    let mut doc = cargo(&["doc", "--no-deps", "--workspace", "--locked"]);
+    ran(
+        doc.env("RUSTDOCFLAGS", "--deny warnings"),
+        step(BUILD_TIMEOUT),
+    )?;
+    page::check()?;
+    let buildifier = star::link()?;
+    let pumpkin = tests_pumpkin()?;
     star::place(&buildifier, &pumpkin)?;
     star::check(&repo, &pumpkin)?;
-    let test = cargo.subcommand(
+    let mut test = subcommand(
         tools::NEXTEST,
         &["nextest", "run", "--workspace", "--locked"],
     )?;
-    let doctests = cargo.cmd(&["test", "--doc", "--workspace", "--locked"]);
+    let mut doctests = cargo(&["test", "--doc", "--workspace", "--locked"]);
     // ci checks snapshots, never rewrites them.
-    tests(
-        test.env_remove("UPDATE_EXPECT"),
-        doctests.env_remove("UPDATE_EXPECT"),
-        "cargo xtask ci",
-    )
+    test.env_remove("UPDATE_EXPECT");
+    doctests.env_remove("UPDATE_EXPECT");
+    tests(&mut test, &mut doctests, "cargo xtask ci")
 }
 
 /// What `cargo metadata` says of the workspace's own packages, as JSON.
-fn metadata(cargo: &Cargo) -> Result<String> {
-    let metadata = cargo.cmd(&["metadata", "--format-version", "1", "--no-deps", "--locked"]);
-    Ok(metadata.read()?)
+fn metadata() -> Result<String> {
+    let mut metadata = cargo(&["metadata", "--format-version", "1", "--no-deps", "--locked"]);
+    read(&mut metadata, STEP_TIMEOUT)
 }
 
-/// Runs `test` and `doctests` at once, and prints what `doctests` printed, if it failed, once
-/// `test` has ended. Fails if either fails, saying to run `again`.
-fn tests(test: Cmd<'_>, doctests: Cmd<'_>, again: &str) -> Result<()> {
-    let (test_line, doctests_line) = (test.to_string(), doctests.to_string());
-    let doctests = Command::from(doctests)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let doctests =
-        doctests.map_err(|error| format!("starting `{doctests_line}` failed: {error}"))?;
-    let tested = Command::from(test).status();
-    let tested = tested.map_err(|error| format!("running `{test_line}` failed: {error}"))?;
-    let doctested = doctests.wait_with_output();
-    let doctested =
-        doctested.map_err(|error| format!("waiting for `{doctests_line}` failed: {error}"))?;
-    if doctested.status.success() {
-        println!("xtask: `{doctests_line}` passed");
-    } else {
-        eprint!("{}", String::from_utf8_lossy(&doctested.stderr));
-        print!("{}", String::from_utf8_lossy(&doctested.stdout));
+/// The target directory, as `cargo metadata` reports it.
+fn target_dir() -> Result<PathBuf> {
+    let metadata: serde_json::Value = serde_json::from_str(&metadata()?)?;
+    match metadata["target_directory"].as_str() {
+        Some(dir) => Ok(dir.into()),
+        None => Err("`cargo metadata` reported no target directory: expected its path".into()),
     }
-    let ended = [(test_line, tested), (doctests_line, doctested.status)];
-    let failed: Vec<_> = (ended.iter().filter(|(_, status)| !status.success()))
-        .map(|(line, status)| format!("`{line}` ended with {status}"))
-        .collect();
-    if failed.is_empty() {
-        return Ok(());
+}
+
+/// Runs `test`, then `doctests`, each to its end. It fails if either fails, saying to run
+/// `again`.
+// One after the other, so that a terminal's Ctrl-C reaches both. The doctests take seconds.
+fn tests(test: &mut Command, doctests: &mut Command, again: &str) -> Result<()> {
+    let tested = process::run(test, step(BUILD_TIMEOUT).named("cargo nextest run"));
+    let doctested = process::run(doctests, step(BUILD_TIMEOUT).named("cargo test --doc"));
+    let mut failed = Vec::new();
+    for ran in [tested, doctested] {
+        match ran {
+            Ok(_) => {}
+            Err(Failure::Exited { name, output, .. }) => {
+                failed.push(format!("`{name}` failed with {}", output.status));
+            }
+            Err(failure) => return Err(failure.to_string().into()),
+        }
     }
+    let they = match failed.len() {
+        0 => return Ok(()),
+        1 => "it",
+        _ => "they",
+    };
     let failed = failed.join(", and ");
-    Err(format!("{failed}: fix what it printed above, and run `{again}` again").into())
+    Err(format!("{failed}: fix what {they} printed above, and run `{again}` again").into())
 }
 
 /// Runs the tests of `package`, those whose names hold `filter` if it is given, with
-/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs; then prints `git diff --stat`,
-/// also if a test failed.
-fn refill(cargo: &Cargo, package: &str, filter: Option<&str>) -> Result<()> {
-    star::link(cargo)?;
+/// `UPDATE_EXPECT=1`, which rewrites each snapshot that differs. Then it prints
+/// `git diff --stat`, also if a test failed.
+fn refill(package: &str, filter: Option<&str>) -> Result<()> {
+    star::link()?;
     let test = ["nextest", "run", "--locked", "--package", package];
-    let test = cargo.subcommand(tools::NEXTEST, &test)?;
-    let test = test.args(filter).env("UPDATE_EXPECT", "1");
-    let ran = test.run();
-    cargo.sh.cmd("git").args(["diff", "--stat"]).run()?;
-    Ok(ran?)
+    let mut test = subcommand(tools::NEXTEST, &test)?;
+    test.args(filter).env("UPDATE_EXPECT", "1");
+    let tested = ran(&mut test, step(BUILD_TIMEOUT).named("cargo nextest run"));
+    let repo = Repo { root: root() };
+    // Git's pager would wait for a key, as git gets no `TERM`.
+    ran(
+        &mut repo.command(["--no-pager", "diff", "--stat"]),
+        step(STEP_TIMEOUT),
+    )?;
+    tested.map(drop)
 }
 
 /// Runs cargo-mutants on the working tree's changes since `rev`, `origin/main` by default, below
 /// `paths` alone if there are any. If the changes leave the source below `paths` as it is, it
-/// mutates that source whole, then runs the mutants missed again on the merge base, to name those
-/// that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
-fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
-    let buildifier = star::link(cargo)?;
-    // cargo-mutants runs `cargo nextest`, which runs the first cargo-nextest on `PATH`. The
-    // pinned one goes first here. Cargo puts its own `bin`, where `cargo install` puts one,
-    // before it only if `PATH` doesn't name that `bin`.
-    let nextest = tools::fetched(cargo, tools::NEXTEST)?;
-    let dir = nextest.parent().map(Path::to_path_buf);
-    let path = env::var_os("PATH").unwrap_or_default();
-    let path = env::join_paths(dir.into_iter().chain(env::split_paths(&path)))?;
-    let cargo_mutants = |args: &[&str]| {
-        let run = cargo.subcommand(tools::MUTANTS, &[&["mutants"], args].concat());
-        run.map(|run| run.env("PATH", &path))
-    };
+/// mutates that source whole. Then it runs the mutants missed again on the merge base, to name
+/// those that the changes left uncaught. Missed mutants and timeouts are findings, not failures.
+fn mutants(paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
+    let buildifier = star::link()?;
     let mut again = "cargo xtask mutants".to_owned();
     for path in paths {
         again = format!("{again} {}", path.display());
@@ -513,14 +532,12 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     if let Some(rev) = rev {
         again = format!("{again} --in-diff {rev}");
     }
-    let sh = &cargo.sh;
-    let rev = rev.unwrap_or("origin/main");
-    let base = cmd!(sh, "git merge-base {rev} HEAD").read()?;
     let repo = Repo { root: root() };
+    let base = repo.git(["merge-base", rev.unwrap_or("origin/main"), "HEAD"])?;
     let diff = diff::since(&repo, &base, paths, &again)?;
-    let scratch = sh.create_temp_dir()?;
+    let scratch = tempfile::tempdir().context("making a scratch directory failed")?;
     let diff_path = scratch.path().join("changes.diff");
-    sh.write_file(&diff_path, diff)?;
+    fs::write(&diff_path, diff).context(format_args!("writing {} failed", diff_path.display()))?;
     // A glob with a slash matches the whole path in cargo-mutants, so a directory needs its `**`.
     let files = paths
         .iter()
@@ -528,15 +545,17 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     let files: Vec<_> = files
         .flat_map(|glob| ["--file".into(), glob.into_os_string()])
         .collect();
-    let list = cargo_mutants(&["--list-files"])?;
-    let whole = !paths.is_empty() && unchanged(sh, list, &base, &files)?;
-    let run = if whole {
-        cargo_mutants(&[])?.args(&files)
+    let mut list = cargo_mutants()?;
+    list.arg("--list-files");
+    let whole = !paths.is_empty() && unchanged(&repo, list, &base, &files)?;
+    let mut run = cargo_mutants()?;
+    if whole {
+        run.args(&files);
     } else {
-        cargo_mutants(&["--in-diff"])?.arg(&diff_path)
-    };
+        run.arg("--in-diff").arg(&diff_path);
+    }
     let report = root().join("mutants.out");
-    if !missed(run, &again)? {
+    if !missed(&mut run, &again)? {
         return Ok(());
     }
     if !whole {
@@ -549,16 +568,13 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     }
     // The source is as it is on `base`, so each mutant there has the name it has here, and
     // `--iterate` tests there only those that weren't caught or unviable here.
-    let archive = scratch.path().join("base.tar");
-    cmd!(sh, "git archive --output {archive} {base}").run()?;
-    let tree = sh.create_dir(scratch.path().join("base"))?;
-    cmd!(sh, "tar --extract --file {archive} --directory {tree}").run()?;
-    // Its tests find the formatter by the link in their own tree, which the archive doesn't hold.
-    let bin = sh.create_dir(tree.join("bin"))?;
-    std::os::unix::fs::symlink(&buildifier, bin.join("buildifier"))?;
-    let run = cargo_mutants(&["--iterate", "--dir"])?.arg(&tree);
+    let tree = tree(&repo, &base, scratch.path(), &buildifier)?;
+    let mut run = cargo_mutants()?;
+    run.args(["--iterate", "--dir"]).arg(&tree);
     missed(run.arg("--output").arg(root()).args(&files), &again)?;
-    let brought = sh.read_file(report.join("caught.txt"))?;
+    let caught = report.join("caught.txt");
+    let brought =
+        fs::read_to_string(&caught).context(format_args!("reading {} failed", caught.display()))?;
     let brought = if brought.is_empty() {
         "none\n"
     } else {
@@ -572,44 +588,83 @@ fn mutants(cargo: &Cargo, paths: &[PathBuf], rev: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// A `cargo mutants` that runs the pinned cargo-nextest.
+fn cargo_mutants() -> Result<Command> {
+    // cargo-mutants runs `cargo nextest`, which runs the first cargo-nextest on `PATH`. The
+    // pinned one goes first here. Cargo puts its own `bin`, where `cargo install` puts one,
+    // before it only if `PATH` doesn't name that `bin`.
+    let nextest = tools::fetched(tools::NEXTEST)?;
+    let dir = nextest.parent().map(Path::to_path_buf);
+    let path = env::var_os("PATH").unwrap_or_default();
+    let path = env::join_paths(dir.into_iter().chain(env::split_paths(&path)))?;
+    let mut run = subcommand(tools::MUTANTS, &["mutants"])?;
+    run.env("PATH", path);
+    Ok(run)
+}
+
+/// Writes the tree of `base` into `scratch` and returns its path. The tree holds the link to
+/// `buildifier` that its tests find.
+fn tree(repo: &Repo<'_>, base: &str, scratch: &Path, buildifier: &Path) -> Result<PathBuf> {
+    let archive = scratch.join("base.tar");
+    let archived = ["archive", "--output"].map(OsStr::new);
+    repo.git(
+        archived
+            .into_iter()
+            .chain([archive.as_os_str(), OsStr::new(base)]),
+    )?;
+    let tree = scratch.join("base");
+    // The archive doesn't hold the link, which is ignored.
+    let bin = tree.join("bin");
+    fs::create_dir_all(&bin).context(format_args!("making {} failed", bin.display()))?;
+    tools::unpack(&archive, &tree)?;
+    let link = bin.join("buildifier");
+    let linked = std::os::unix::fs::symlink(buildifier, &link);
+    linked.context(format_args!("making {} failed", link.display()))?;
+    Ok(tree)
+}
+
 /// Whether the source files that `files`, cargo-mutants' `--file` arguments, select are the same
-/// in the working tree as on `base`, and there are any.
-fn unchanged(sh: &Shell, list: Cmd<'_>, base: &str, files: &[OsString]) -> Result<bool> {
-    let listed = list.args(files).read()?;
+/// in the working tree as on `base`, and there are any. `list` is cargo-mutants' `--list-files`.
+fn unchanged(repo: &Repo<'_>, mut list: Command, base: &str, files: &[OsString]) -> Result<bool> {
+    let listed = read(list.args(files), STEP_TIMEOUT)?;
     let sources: Vec<&str> = listed.lines().collect();
     if sources.is_empty() {
         return Ok(false);
     }
-    let diff = cmd!(sh, "git diff --quiet {base} -- {sources...}")
-        .quiet()
-        .ignore_status();
-    Ok(diff.output()?.status.success())
+    let mut diff = repo.command(["diff", "--quiet", base, "--"].into_iter().chain(sources));
+    match process::run(
+        &mut diff,
+        Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent),
+    ) {
+        Ok(_) => Ok(true),
+        // `--quiet` makes git exit with 1 where the files differ.
+        Err(Failure::Exited { output, .. }) if output.status.code() == Some(1) => Ok(false),
+        Err(failure) => Err(failure.to_string().into()),
+    }
 }
 
 /// Runs `run`, a cargo-mutants command, and returns whether it missed a mutant or one timed out.
-fn missed(run: Cmd<'_>, again: &str) -> Result<bool> {
+fn missed(run: &mut Command, again: &str) -> Result<bool> {
     // Relative, so that each copy of the tree cargo-mutants builds has its own: in a shared one,
     // cargo would take a mutant's artifacts as fresh for the unmutated tree.
-    let run = run.env("CARGO_TARGET_DIR", "target");
-    let line = run.to_string();
-    let status = Command::from(run).status();
-    let status = status.map_err(|error| format!("running `{line}` failed: {error}"))?;
-    match status.code() {
-        Some(0) => Ok(false),
+    run.env("CARGO_TARGET_DIR", "target");
+    match process::run(run, step(MUTANTS_TIMEOUT).named("cargo mutants")) {
+        Ok(_) => Ok(false),
         // cargo-mutants exits with 2 when it missed a mutant and with 3 when one timed out.
-        Some(2 | 3) => Ok(true),
-        _ => Err(format!(
-            "`{line}` ended with {status}: fix what it printed above, and run `{again}` again"
-        )
-        .into()),
+        Err(Failure::Exited { output, .. }) if matches!(output.status.code(), Some(2 | 3)) => {
+            Ok(true)
+        }
+        Err(failure @ Failure::Exited { .. }) => {
+            Err(format!("{failure}, and run `{again}` again").into())
+        }
+        Err(failure) => Err(failure.to_string().into()),
     }
 }
 
 /// Builds the workspace's tests, as `cargo nextest run` then finds them, and returns the
 /// `pumpkin` that they run.
-fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
-    let build = cargo.cmd(&["test", "--workspace", "--locked", "--no-run"]);
-    let artifacts = executables(build)?;
+fn tests_pumpkin() -> Result<PathBuf> {
+    let artifacts = executables(cargo(&["test", "--workspace", "--locked", "--no-run"]))?;
     let mut named = artifacts.iter().filter(|built| {
         built["target"]["name"] == "pumpkin" && built["target"]["kind"][0] == "bin"
     });
@@ -621,47 +676,40 @@ fn tests_pumpkin(cargo: &Cargo) -> Result<PathBuf> {
 
 /// Builds the static `sandboxd` that every sandbox runs, and the static `ec2-boot`, which cargo
 /// puts beside it, where the EC2 provider finds it, and returns `sandboxd`'s path.
-fn sandboxd(cargo: &Cargo) -> Result<PathBuf> {
-    release_binary(cargo, "ec2-boot", MUSL)?;
-    release_binary(cargo, "sandboxd", MUSL)
+fn sandboxd() -> Result<PathBuf> {
+    release_binary("ec2-boot", MUSL)?;
+    release_binary("sandboxd", MUSL)
 }
 
-/// Builds the release binary of `package`, which has its name, for `target`,
-/// and returns the path cargo reports for it, so that the path is right wherever cargo's
-/// configuration puts the target directory.
-fn release_binary(cargo: &Cargo, package: &str, target: &str) -> Result<PathBuf> {
-    let build = cargo.cmd(&["build", "--release", "--locked", "--package", package]);
-    let build = build.args(["--target", target]);
-    let build = if package == "pumpkin" && target == MUSL {
-        tools::musl_cc(cargo, build)?
-    } else {
-        build
-    };
-    let build = build.args(["--message-format", "json-render-diagnostics"]);
-    // One JSON message per line; diagnostics are rendered on standard error instead.
-    for line in build.read()?.lines() {
-        let message: serde_json::Value = serde_json::from_str(line)
-            .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;
-        if message["reason"] == "compiler-artifact"
-            && message["target"]["name"] == package
-            && let Some(path) = message["executable"].as_str()
-        {
-            return Ok(path.into());
-        }
+/// Builds the release binary of `package`, which has its name, for `target`, and returns the path
+/// that cargo reports for it.
+fn release_binary(package: &str, target: &str) -> Result<PathBuf> {
+    let mut build = cargo(&["build", "--release", "--locked", "--package", package]);
+    build.args(["--target", target]);
+    if package == "pumpkin" && target == MUSL {
+        tools::musl_cc(&mut build)?;
     }
-    Err(format!(
-        "cargo reported no {package} executable: expected a compiler-artifact message for it"
-    )
-    .into())
+    let artifacts = executables(build)?;
+    let mut named = artifacts
+        .iter()
+        .filter(|built| built["target"]["name"] == package);
+    match named.find_map(|built| built["executable"].as_str()) {
+        Some(path) => Ok(path.into()),
+        None => Err(format!(
+            "cargo reported no {package} executable: expected a compiler-artifact message for it"
+        )
+        .into()),
+    }
 }
 
 /// Runs `build`, a cargo command that builds, and returns cargo's compiler-artifact message for
-/// each executable it built or found fresh, so that each path is right wherever cargo's
-/// configuration puts the target directory.
-fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
-    let build = build.args(["--message-format", "json-render-diagnostics"]);
+/// each executable it built or found fresh. So each path is right wherever cargo's configuration
+/// puts the target directory.
+fn executables(mut build: Command) -> Result<Vec<serde_json::Value>> {
+    // One JSON message per line. Diagnostics are rendered on standard error instead.
+    build.args(["--message-format", "json-render-diagnostics"]);
     let mut executables = Vec::new();
-    for line in build.read()?.lines() {
+    for line in read(&mut build, BUILD_TIMEOUT)?.lines() {
         let message: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("cargo printed `{line}`, which isn't JSON: {error}"))?;
         if message["reason"] == "compiler-artifact" && message["executable"].is_string() {
@@ -676,7 +724,7 @@ fn executables(build: Cmd<'_>) -> Result<Vec<serde_json::Value>> {
 /// buildifier ([`star::buildifier`]), in `<root>/bin`, made if need be, replacing what is there:
 /// `root` made absolute, or this checkout's `.pumpkin`. Prints each one's path, and, without a
 /// `root`, says if `<root>/bin` is not on `PATH`.
-fn build(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
+fn build(root: Option<PathBuf>, target: &str) -> Result<()> {
     let default_root = root.is_none();
     let root = root.unwrap_or_else(|| self::root().join(".pumpkin"));
     let bin = root.join("bin");
@@ -686,10 +734,10 @@ fn build(cargo: &Cargo, root: Option<PathBuf>, target: &str) -> Result<()> {
     // names it looks for.
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/modal/helper");
     let mut built = vec![
-        ("pumpkin", release_binary(cargo, "pumpkin", target)?, 0o755),
-        ("buildifier", star::buildifier(cargo)?, 0o755),
+        ("pumpkin", release_binary("pumpkin", target)?, 0o755),
+        ("buildifier", star::buildifier()?, 0o755),
     ];
-    let sandboxd = sandboxd(cargo)?;
+    let sandboxd = sandboxd()?;
     built.extend([
         ("ec2-boot", sandboxd.with_file_name("ec2-boot"), 0o755),
         ("sandboxd", sandboxd, 0o755),

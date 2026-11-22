@@ -1,13 +1,17 @@
 //! A release ships a launcher, its one-line pin and the static archive named by the pin.
 //! Publication checks all three against the tag before attaching them to a draft.
 
-use std::fs;
+use std::ffi::OsStr;
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
+use std::process::Command;
 
 use stdx::Context as _;
-use xshell::{Shell, cmd};
+use stdx::process::{self, Bound, Echo, Environment, Run};
 
-use crate::{Cargo, MUSL, Result, build, root};
+use crate::repo::{Repo, STEP_TIMEOUT};
+use crate::{MUSL, Result, build, ran, read, root, step, tools};
 
 struct Release<'a> {
     tag: &'a str,
@@ -17,17 +21,14 @@ struct Release<'a> {
 }
 
 impl Release<'_> {
-    fn pin(&self, sh: &Shell) -> Result<String> {
-        let archive = &self.archive;
-        let sum = cmd!(sh, "sha256sum {archive}").read()?;
-        let (digest, _) = sum
-            .split_once(' ')
-            .ok_or("sha256sum omitted the archive name")?;
+    /// The pin of the archive in `dir`.
+    fn pin(&self, dir: &Path) -> Result<String> {
+        let digest = tools::sha256(&read_file(&dir.join(&self.archive))?);
         Ok(format!("{} {} {digest}\n", self.tag, self.commit))
     }
 }
 
-pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
+pub(super) fn run(tag: &str, publish: bool) -> Result<()> {
     if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
         || !tag
             .bytes()
@@ -40,14 +41,15 @@ pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
         .into());
     }
 
-    let sh = cargo.sh.clone();
+    let repo = Repo { root: root() };
     let revision = if publish {
         format!("refs/tags/{tag}^{{commit}}")
     } else {
         "HEAD".to_owned()
     };
-    let commit = cmd!(sh, "git rev-parse --verify {revision}").read()?;
-    let launcher = cmd!(sh, "git show {commit}:dist/pumpkin").output()?.stdout;
+    let commit = repo.git(["rev-parse", "--verify", &revision])?;
+    let mut show = repo.command(["show", &format!("{commit}:dist/pumpkin")]);
+    let launcher = captured(&mut show)?;
     let release = Release {
         tag,
         commit,
@@ -57,34 +59,46 @@ pub(super) fn run(cargo: &Cargo, tag: &str, publish: bool) -> Result<()> {
 
     let output = root().join("target/release-assets").join(tag);
     if publish {
-        sh.change_dir(output);
-        return publish_assets(&sh, &release);
+        return publish_assets(&output, &release);
     }
 
-    sh.create_dir(&output)?;
-    sh.change_dir(&output);
-    // Stage beside the outputs so a checked archive can replace a previous one by rename.
-    let scratch = cmd!(sh, "mktemp --directory .build.XXXXXXXX").read()?;
-    sh.change_dir(scratch);
-    let built = package(cargo, &sh, &output, &release);
-    let cleaned = sh.remove_path(sh.current_dir());
+    fs::create_dir_all(&output).context(format_args!("making {} failed", output.display()))?;
+    // Staged beside the outputs, so that a checked archive replaces a previous one by a rename.
+    let staging = tempfile::Builder::new()
+        .prefix(".build.")
+        .tempdir_in(&output);
+    let staging = staging.context(format_args!(
+        "making a directory in {} failed",
+        output.display()
+    ))?;
+    let built = package(staging.path(), &output, &release);
+    let cleaned = staging
+        .close()
+        .context("removing the staging directory failed");
     built?;
     Ok(cleaned?)
 }
 
-fn package(cargo: &Cargo, sh: &Shell, output: &Path, release: &Release<'_>) -> Result<()> {
+/// Builds the archive and the launcher in `dir` and checks them. Then it moves them and their
+/// pin to `output`.
+fn package(dir: &Path, output: &Path, release: &Release<'_>) -> Result<()> {
     let archive = &release.archive;
     let commit = &release.commit;
-    build(cargo, Some(sh.current_dir().join("dist")), MUSL)?;
-    sh.write_file("dist/commit", format!("{commit}\n"))?;
-    sh.copy_file(
-        root().join("dist/buildifier-LICENSE"),
-        "dist/buildifier-LICENSE",
-    )?;
+    let dist = dir.join("dist");
+    build(Some(dist.clone()), MUSL)?;
+    write(&dist.join("commit"), format!("{commit}\n"))?;
+    let license = root().join("dist/buildifier-LICENSE");
+    fs::copy(&license, dist.join("buildifier-LICENSE"))
+        .context(format_args!("copying {} failed", license.display()))?;
     // The upstream formatter includes compressed Go debug sections in its release binary.
-    cmd!(sh, "strip --strip-debug dist/bin/buildifier").run()?;
+    let mut strip = program("strip", dir);
+    ran(
+        strip.args(["--strip-debug", "dist/bin/buildifier"]),
+        step(STEP_TIMEOUT),
+    )?;
 
-    cmd!(sh, "tar --create --file {archive} --directory dist")
+    let mut tar = program("tar", dir);
+    tar.args(["--create", "--file", archive, "--directory", "dist"])
         .args([
             "--sort=name",
             "--mtime=@0",
@@ -94,36 +108,53 @@ fn package(cargo: &Cargo, sh: &Shell, output: &Path, release: &Release<'_>) -> R
         ])
         .arg("--mode=u=rwX,go=rX")
         .args(["--use-compress-program", "xz --threads=1"])
-        .args(["bin", "buildifier-LICENSE", "commit"])
-        .run()?;
-    sh.create_dir("unpacked")?;
-    cmd!(
-        sh,
-        "tar --extract --xz --file {archive} --directory unpacked"
-    )
-    .run()?;
-    check(sh, commit)?;
+        .args(["bin", "buildifier-LICENSE", "commit"]);
+    ran(&mut tar, step(STEP_TIMEOUT))?;
+    let unpacked = dir.join("unpacked");
+    fs::create_dir(&unpacked).context(format_args!("making {} failed", unpacked.display()))?;
+    let mut tar = program("tar", dir);
+    tar.args([
+        "--extract",
+        "--xz",
+        "--file",
+        archive,
+        "--directory",
+        "unpacked",
+    ]);
+    ran(&mut tar, step(STEP_TIMEOUT))?;
+    check(&unpacked, commit)?;
 
-    sh.write_file("pumpkin", &release.launcher)?;
-    cmd!(sh, "chmod 0755 pumpkin").run()?;
-    sh.write_file("pumpkinversion", release.pin(sh)?)?;
-    cmd!(
-        sh,
-        "mv --target-directory {output} pumpkin pumpkinversion {archive}"
-    )
-    .run()?;
+    let launcher = dir.join("pumpkin");
+    write(&launcher, &release.launcher)?;
+    // Through std, not `chmod`, as TigerBeetle's scripts make a file executable:
+    // https://github.com/tigerbeetle/tigerbeetle/blob/3cd7cf4799f65c81ffbc36eda788b8b26fd7da72/src/shell.zig#L251-L258
+    fs::set_permissions(&launcher, Permissions::from_mode(0o755)).context(format_args!(
+        "making {} executable failed",
+        launcher.display()
+    ))?;
+    write(&dir.join("pumpkinversion"), release.pin(dir)?)?;
+    for name in ["pumpkin", "pumpkinversion", archive] {
+        let (from, to) = (dir.join(name), output.join(name));
+        fs::rename(&from, &to).context(format_args!(
+            "moving {} to {} failed",
+            from.display(),
+            to.display()
+        ))?;
+    }
     Ok(())
 }
 
-fn check(sh: &Shell, commit: &str) -> Result<()> {
-    let _dir = sh.push_dir("unpacked");
-    if sh.read_file("commit")? != format!("{commit}\n") {
+/// Fails unless the archive unpacked at `dir` names `commit`. Its programs must be static x86-64
+/// executables that run.
+fn check(dir: &Path, commit: &str) -> Result<()> {
+    if read_text(&dir.join("commit"))? != format!("{commit}\n") {
         return Err(format!("archived commit differs from the checkout's {commit}").into());
     }
     for program in ["pumpkin", "sandboxd", "ec2-boot", "buildifier"] {
-        let elf = cmd!(sh, "file --brief bin/{program}")
-            .env("LC_ALL", "C")
-            .read()?;
+        let mut file = self::program("file", dir);
+        file.args(["--brief", &format!("bin/{program}")])
+            .env("LC_ALL", "C");
+        let elf = read(&mut file, STEP_TIMEOUT)?;
         if !(elf.starts_with("ELF 64-bit")
             && elf.contains("x86-64")
             && ["statically linked", "static-pie linked", "static linked"]
@@ -134,13 +165,15 @@ fn check(sh: &Shell, commit: &str) -> Result<()> {
         }
     }
     for helper in ["pumpkin-modal.py", "pumpkin-modal.py.lock"] {
-        let path = sh.current_dir().join("bin").join(helper);
+        let path = dir.join("bin").join(helper);
         if fs::metadata(&path).context(path.display())?.len() == 0 {
             return Err(format!("archived bin/{helper} is empty").into());
         }
     }
-    cmd!(sh, "bin/buildifier --version").run()?;
-    let version = cmd!(sh, "bin/pumpkin --version").read()?;
+    let mut buildifier = program(dir.join("bin/buildifier"), dir);
+    ran(buildifier.arg("--version"), step(STEP_TIMEOUT))?;
+    let mut pumpkin = program(dir.join("bin/pumpkin"), dir);
+    let version = read(pumpkin.arg("--version"), STEP_TIMEOUT)?;
     if !version.contains(&format!("({commit:.9} ")) {
         return Err(
             format!("archived pumpkin reports {version:?}: expected commit {commit}").into(),
@@ -150,35 +183,81 @@ fn check(sh: &Shell, commit: &str) -> Result<()> {
     Ok(())
 }
 
-fn publish_assets(sh: &Shell, release: &Release<'_>) -> Result<()> {
+fn publish_assets(dir: &Path, release: &Release<'_>) -> Result<()> {
     let Release {
         tag,
         commit,
         archive,
         launcher,
     } = release;
-    if sh.read_binary_file("pumpkin")? != *launcher {
+    if read_file(&dir.join("pumpkin"))? != *launcher {
         return Err(format!("pumpkin differs from dist/pumpkin at tag {tag}").into());
     }
-    if sh.read_file("pumpkinversion")? != release.pin(sh)? {
+    if read_text(&dir.join("pumpkinversion"))? != release.pin(dir)? {
         return Err(
             format!("pumpkinversion differs from the pin for tag {tag} and {archive}").into(),
         );
     }
-    let archived = cmd!(sh, "tar --extract --to-stdout --xz --file {archive} commit").output()?;
-    if archived.stdout != format!("{commit}\n").as_bytes() {
+    let mut tar = program("tar", dir);
+    tar.args([
+        "--extract",
+        "--to-stdout",
+        "--xz",
+        "--file",
+        archive,
+        "commit",
+    ]);
+    if captured(&mut tar)? != format!("{commit}\n").as_bytes() {
         return Err(format!("the commit in {archive} differs from tag {tag} ({commit})").into());
     }
-    cmd!(
-        sh,
-        "gh release create {tag} --draft --verify-tag --title {tag} --generate-notes"
-    )
-    .run()?;
-    cmd!(
-        sh,
-        "gh release upload {tag} pumpkin pumpkinversion {archive}"
-    )
-    .run()?;
-    cmd!(sh, "gh release edit {tag} --draft=false --latest=true").run()?;
+    let mut create = program("gh", dir);
+    create.args([
+        "release",
+        "create",
+        tag,
+        "--draft",
+        "--verify-tag",
+        "--title",
+        tag,
+    ]);
+    ran(create.arg("--generate-notes"), step(STEP_TIMEOUT))?;
+    let mut upload = program("gh", dir);
+    upload.args([
+        "release",
+        "upload",
+        tag,
+        "pumpkin",
+        "pumpkinversion",
+        archive,
+    ]);
+    ran(&mut upload, step(STEP_TIMEOUT))?;
+    let mut edit = program("gh", dir);
+    edit.args(["release", "edit", tag, "--draft=false", "--latest=true"]);
+    ran(&mut edit, step(STEP_TIMEOUT))?;
     Ok(())
+}
+
+/// `program`, run in `dir`.
+fn program(program: impl AsRef<OsStr>, dir: &Path) -> Command {
+    let mut command = process::command(program, Environment::Inherited);
+    command.current_dir(dir);
+    command
+}
+
+/// What `command` printed, as it printed it.
+fn captured(command: &mut Command) -> Result<Vec<u8>> {
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Silent);
+    Ok(ran(command, how)?.stdout)
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    Ok(fs::read(path).context(format_args!("reading {} failed", path.display()))?)
+}
+
+fn read_text(path: &Path) -> Result<String> {
+    Ok(fs::read_to_string(path).context(format_args!("reading {} failed", path.display()))?)
+}
+
+fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    Ok(fs::write(path, contents).context(format_args!("writing {} failed", path.display()))?)
 }
