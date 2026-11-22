@@ -10,33 +10,9 @@
 // poll, and the log's last window is read again from the byte it starts at, its records past the
 // last read taken.
 
-import {
-  POLL_MS,
-  Refused,
-  STATIC,
-  bytes,
-  byId,
-  clock,
-  count,
-  fill,
-  follow,
-  get,
-  grip,
-  h,
-  plural,
-  post,
-  route,
-  sentence,
-  setKeys,
-  setQuery,
-  show,
-  span,
-  svg,
-  tone,
-  typing,
-  utc,
-} from "./h.js";
+import { byId, bytes, card, cardRows, clock, count, fill, follow, get, grip, h, plural, POLL_MS, post, Refused, route, sentence, setKeys, setQuery, show, span, span as lasted, STATIC, tone, typing, utc } from "./h.js";
 import { drawKinds, folded, holds, lanesOf, pastWindow, recordRow, saidOf, windowAt } from "./records.js";
+import { drawResult } from "./returned.js";
 import { RowList } from "./rows.js";
 import { jsonText, payloadLink, payloadOf } from "./payload.js";
 import { drawTalk, laneRole } from "./talk.js";
@@ -50,6 +26,7 @@ import { failureBox, failureParts, laneMark } from "./failure.js";
  * @property {string} state
  * @property {boolean} has_result
  * @property {string} verdict
+ * @property {{ name: string, time: string, bound: string } | null} [stage] the stage of a run that goes on, as `ls` shows it: its name, how long it has lasted, and ` of ` how long it may, or nothing
  * @property {{ values: { name: string, value: any }[] } | null} result the values a run that finished with a result shows, in the order the body returned them
  * @property {Failure | null} failure how a run that ended without a result ended; null for a run with a result, one that is live, and one that is lost
  * @property {Failure[]} failures each failure the log states, of a call, an agent, a lease, a shared sandbox or a model request
@@ -117,6 +94,8 @@ import { failureBox, failureParts, laneMark } from "./failure.js";
 // turns into `--label` in its monospace.
 const LABEL_MIN_CHARS = 18;
 const LABEL_MAX_CHARS = 48;
+// The bounds of the log's columns of who and of kind, in characters.
+const [WHO_MIN_CHARS, WHO_MAX_CHARS, KIND_MIN_CHARS, KIND_MAX_CHARS] = [8, 28, 8, 32];
 // How many records the log's list is drawn again after while the log is read from its start.
 const DRAW_EVERY_RECORDS = 2000;
 // How often a cancel under way is read.
@@ -141,19 +120,18 @@ export async function runView(id) {
   const counted = h("span", { class: "counted" });
   const all = h("span", {});
   const kinds = /** @type {HTMLSelectElement} */ (h("select", { title: "Show the records of one kind" }));
-  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Keep the records that hold…", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
+  const search = /** @type {HTMLInputElement} */ (h("input", { type: "search", class: "search", placeholder: "Filter records", title: "Keep the records that hold this text (/ to type, Esc to leave the box)", value: query.get("q") || "" }));
   const verdict = h("div", { class: "verdict" });
   const result = h("div", { class: "result" });
   const failed = h("div", { class: "failure" });
   const facts = h("div", { class: "facts" });
-  const dropped = h("div", { class: "dropped" });
   const again = h("div", { class: "again" });
   const traces = h("div", { class: "traces" });
   const cancelBox = h("div", { class: "cancel" });
   const unread = h("div", { class: "unread" });
   const startedOver = h("p", { class: "empty" });
   const lanes = h("div", { class: "lanes panel" });
-  const talk = h("div", { class: "talk panel" });
+  const talk = h("div", { class: "talk" });
   const filter = h("div", { class: "filter" }, kinds, search, counted, all);
   const inspector = h("div", { class: "inspector panel" });
   const callList = h("details", {});
@@ -177,8 +155,10 @@ export async function runView(id) {
     lanes: grip({ name: "run.lanes", across: "y", sized: lanes, on: lanes, property: "--pane", stepPx: lanePx, title: "Drag to size the lanes" }),
     talk: grip({ name: "run.talk", across: "y", sized: talk, on: talk, property: "--pane", title: "Drag to size the diagram" }),
   };
-  fill(split, h("div", { class: "left" }, lanes, grips.lanes, filter, list.node), grips.side, h("div", { class: "right" }, talk, grips.talk, inspector));
-  show(verdict, result, failed, facts, dropped, again, traces, cancelBox, unread, startedOver, split);
+  // The diagram of who talks to whom, on a panel of its own above the inspector.
+  const diagram = h("section", { class: "roles panel" }, talk, grips.talk);
+  fill(split, h("div", { class: "left" }, lanes, grips.lanes, h("section", { class: "log panel" }, filter, list.node)), grips.side, h("div", { class: "right" }, diagram, result, inspector));
+  show(h("section", { class: "head panel" }, h("div", { class: "headline" }, verdict, traces, again, cancelBox), facts, failed, unread), startedOver, split);
 
   // Selects `record`: the lanes and the diagram light what it concerns.
   const select = (/** @type {LogRecord} */ record) => {
@@ -237,11 +217,8 @@ export async function runView(id) {
     const distance = (/** @type {LogRecord} */ record) => Math.abs((record.when ?? 0) - time);
     if (of.length) select(of.reduce((best, record) => (distance(record) < distance(best) ? record : best)));
   };
-  // The inspector with nothing selected: how to select, and the run's summary.
-  const unselected = () => [
-    h("p", { class: "empty" }, "Select a record (j and k step), a lane or a role, or drag across the lanes to keep the records of a stretch of time; Esc clears them."),
-    state.data && state.data.summary ? h("pre", { class: "summary" }, state.data.summary) : null,
-  ];
+  // The inspector with nothing selected: the run's summary.
+  const unselected = () => (state.data && state.data.summary ? h("pre", { class: "summary" }, state.data.summary) : null);
 
   const pickLane = (/** @type {Lane} */ lane) => {
     const off = route().query.get("lane") === lane.lane;
@@ -315,6 +292,7 @@ export async function runView(id) {
     // one the run ended with.
     const picked = data.failures.find((failure) => String(failure.mark.record) === selected) ?? (data.lanes || []).find((l) => l.lane === lane)?.failure ?? data.failure;
     const items = folded(shown, state.open);
+    fitColumns();
     list.set(items, holder ? items.indexOf(holder) : -1);
     drawTalk(talk, data, lit, role, picked, (name) => {
       const off = name === null || name === role;
@@ -327,16 +305,39 @@ export async function runView(id) {
     state.selected = selected;
   };
 
+  // The log's columns of who and of kind are as wide as the longest of each in the whole log, within
+  // bounds, so that no kind is cut short while the text beside it has room. Each record is
+  // measured once, as the log is read.
+  const fit = { seen: 0, who: WHO_MIN_CHARS, kind: KIND_MIN_CHARS };
+  const fitColumns = () => {
+    if (state.records.length < fit.seen) Object.assign(fit, { seen: 0, who: WHO_MIN_CHARS, kind: KIND_MIN_CHARS });
+    for (; fit.seen < state.records.length; fit.seen++) {
+      const record = state.records[fit.seen];
+      fit.kind = Math.max(fit.kind, saidOf(record)[0].length);
+      fit.who = Math.max(fit.who, [...lanesOf(record)].join(" ").length);
+    }
+    list.node.style.setProperty("--who-chars", String(Math.min(WHO_MAX_CHARS, fit.who)));
+    list.node.style.setProperty("--kind-chars", String(Math.min(KIND_MAX_CHARS, fit.kind)));
+  };
+
   // Draws the run's verdict and facts, which change with its clock.
   const drawHeading = () => {
     const data = /** @type {Run} */ (state.data);
     const failure = data.failure;
-    fill(verdict, h("span", { class: "mark " + tone(data) }), h("span", {}, data.result ? "Finished with a result" : failure ? sentence(failure.state) : data.verdict));
+    // How the run ended is its mark's colour; the words are in the mark's card.
+    const [how, more] = verdictOf(data);
+    const mark = card(h("span", { class: "state", tabindex: 0 }, h("span", { class: "mark " + tone(data) })), () =>
+      cardRows([
+        ["State", how],
+        ["", more],
+        ["Run", data.id],
+        ["Made by", data.other_build ? "pumpkin " + data.other_build : null],
+      ]),
+    );
+    fill(verdict, mark, h("span", { class: "task" }, data.task || data.id));
     drawOnce(result, data.result, () => drawResult(result, data.result));
     drawOnce(failed, failure, () => fill(failed, failure ? failureParts(data.id, failure, { base, started: data.times?.started_unix, pick: pickFailure }) : null));
     drawFacts(facts, data);
-    const headers = data.model ? data.model.dropped_headers : [];
-    drawOnce(dropped, [headers, data.model?.more_dropped_headers], () => drawDropped(dropped, headers, !!data.model?.more_dropped_headers));
   };
   // Draws the run: its heading, the command that runs it again, its cancel.
   const drawRun = () => {
@@ -437,7 +438,7 @@ export async function runView(id) {
     const live = !!state.data && state.data.live;
     const said = cancel.said ? h("pre", {}, cancel.said) : null;
     const to = (/** @type {typeof cancel.phase} */ phase) => () => ((cancel.phase = phase), drawCancel());
-    const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run…");
+    const ask = h("button", { class: "danger", title: "Stop this run: asks you to confirm first", onclick: to("confirm") }, "Cancel run");
     if (cancel.phase === "idle") return fill(cancelBox, live && !STATIC ? ask : null);
     if (cancel.phase === "confirm") {
       return fill(
@@ -446,7 +447,7 @@ export async function runView(id) {
           "div",
           { class: "sure" },
           h("p", {}, "Cancel run ", h("code", {}, id), "? It stops the run, waits until it has ended, removes what it left, and writes its outcome.json. This ends a real run and can't be undone."),
-          h("button", { class: "danger", title: "Send the cancel now", onclick: startCancel }, "Cancel run"),
+          h("button", { class: "danger", title: "Send the cancel now", onclick: startCancel }, "Yes, cancel"),
           h("button", { title: "Leave the run as it is", onclick: to("idle") }, "Keep it running"),
         ),
       );
@@ -456,7 +457,7 @@ export async function runView(id) {
     if (cancel.phase === "done") return fill(cancelBox, h("div", { class: "sure" }, h("p", {}, how), said, h("button", { title: "Close this", onclick: to("idle") }, "OK")));
     return fill(
       cancelBox,
-      h("div", { class: "sure" }, h("p", { class: "error" }, cancel.error), live ? h("button", { class: "danger", title: "Ask to cancel again", onclick: to("confirm") }, "Cancel run…") : null, h("button", { title: "Close this", onclick: to("idle") }, "OK")),
+      h("div", { class: "sure" }, h("p", { class: "error" }, cancel.error), live ? h("button", { class: "danger", title: "Ask to cancel again", onclick: to("confirm") }, "Cancel run") : null, h("button", { title: "Close this", onclick: to("idle") }, "OK")),
     );
   };
 
@@ -621,81 +622,91 @@ function drawOnce(node, key, draw) {
   draw();
 }
 
-// A number as `pumpkin ls` shows one: two decimals from 1 up, four below, no trailing zeros.
-/** @param {number} number */
-function shownNumber(number) {
-  const shown = number.toFixed(Math.abs(number) >= 1 ? 2 : 4).replace(/0+$/, "").replace(/\.$/, "");
-  return shown === "-0" ? "0" : shown;
-}
-
-// The page displays objects and lists as folded JSON. The workflow gives the values meaning.
-/** @param {HTMLElement} node @param {Run["result"]} result */
-function drawResult(node, result) {
-  if (!result) return fill(node);
-  const scalar = (/** @type {any} */ value) => value === null || typeof value !== "object";
-  const values = result.values.filter(({ value }) => scalar(value));
-  const objects = result.values.filter(({ value }) => !scalar(value));
-  fill(
-    node,
-    values.length
-      ? h(
-          "div",
-          { class: "values" },
-          values.map(({ name, value }) =>
-            h("div", { class: "kv" }, h("span", { class: "k" }, name), h("span", { class: typeof value === "number" ? "v num" : "v" }, typeof value === "number" ? shownNumber(value) : typeof value === "string" ? value : String(value))),
-          ),
-        )
-      : null,
-    objects.map(({ name, value }) => {
-      const fields = Array.isArray(value) ? plural(value.length, "item") : plural(Object.keys(value).length, "field");
-      return h("details", { class: "object" }, h("summary", {}, h("span", { class: "mono" }, name), h("span", { class: "hint" }, fields)), h("pre", { class: "json" }, jsonText(value)));
-    }),
-  );
-}
-
-// The request headers that the route left behind, folded under their count.
-/** @param {HTMLElement} node @param {string[]} headers @param {boolean} more */
-function drawDropped(node, headers, more) {
-  if (!headers.length) return fill(node);
-  fill(node, h("details", {}, h("summary", {}, plural(headers.length, "request header") + (more ? " and more" : "") + " the route dropped"), h("code", {}, headers.join(", ") + (more ? ", and more" : ""))));
+// How long a run ran, with its units, as the list of runs and the run's state write it: `42s`,
+// `8m24s`, `1h08m`. A
+// time on the axis or in the log is a place since the run's start, and keeps the clock's form.
+/** @param {number | null | undefined} seconds */
+function lastedFor(seconds) {
+  if (seconds === null || seconds === undefined) return "–";
+  const whole = Math.floor(seconds);
+  const [hours, minutes, secs] = [Math.floor(whole / 3600), Math.floor((whole % 3600) / 60), whole % 60];
+  if (hours) return hours + "h" + String(minutes).padStart(2, "0") + "m";
+  return minutes ? minutes + "m" + String(secs).padStart(2, "0") + "s" : secs + "s";
 }
 
 function drawFacts(facts, data) {
   const times = data.times;
   const model = data.model;
-  const fact = (/** @type {string} */ name, /** @type {string} */ value, /** @type {string | null} */ title = null) => h("span", { class: "fact", title }, h("span", { class: "name" }, name), h("span", { class: "value" }, value));
+  // A number of the run: the figure, what qualifies it in small beside it, its name below, and a
+  // card of what matters less about it.
+  /** @param {string} name @param {string} value @param {Array<[string, import("./h.js").Child] | null | false>} rows @param {string} [small] @param {string} [tone] */
+  const fact = (name, value, rows, small = "", tone = "") =>
+    card(h("div", { class: "tile fact", tabindex: 0 }, h("div", { class: "v" }, value, small ? h("small", { class: tone }, small) : null), h("div", { class: "l" }, name)), () => cardRows(rows));
   const ran = times && (times.end ?? times.now ?? times.last);
+  const stage = data.live ? data.stage : null;
   const failed = model ? model.failed.reduce((sum, f) => sum + f.count, 0) : 0;
   // How long each request in flight has gone unanswered, to now, or to the end of a run that ended.
   const at = times ? (times.now ?? times.end ?? times.last) : 0;
   const flying = model ? [...model.in_flight].sort((a, b) => a.since - b.since) : [];
   const notOk = "not forwarded whole with a 2xx status: cut short, refused, barred or abandoned by the route, or answered with another status";
+  const number = (/** @type {number | null | undefined} */ n) => count(n, "").trimEnd();
+  const dropped = model && model.dropped_headers.length ? model.dropped_headers.join(", ") + (model.more_dropped_headers ? ", and more" : "") : null;
   fill(
     facts,
-    fact("Task", data.task || "-"),
-    times ? fact("Started", utc(times.started_unix, 0).slice(0, 19) + " UTC") : null,
-    fact("Ran", clock(ran), times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null),
-    fact("Hard end", clock(times && times.hard_end)),
+    // The first figure is the time that matters now: of a run that goes on, how long its stage has
+    // lasted, of how long it may, under the stage's name, as `ls` shows them; of a run that ended,
+    // how long it ran. The card has the rest.
+    fact(
+      stage ? sentence(stage.name) : "Ran",
+      stage ? stage.time : lastedFor(ran),
+      [
+        ["Run", stage && times ? lastedFor(ran) + " so far" : null],
+        ["Hard end", clock(times && times.hard_end)],
+        ["Used", times && times.hard_end ? Math.round((100 * (ran ?? 0)) / times.hard_end) + "% of the hard end" : null],
+      ],
+      stage ? stage.bound : "",
+    ),
+    times ? fact("Started", utc(times.started_unix, 0).slice(5, 16), [["Started", utc(times.started_unix, 0).slice(0, 19) + " UTC"]], "UTC") : null,
     model
       ? fact(
           "Requests",
-          count(model.requests, "req") + (failed ? ", " + failed + " failed" : "") + (model.not_2xx ? ", " + model.not_2xx.toLocaleString("en-US") + " not 2xx" : ""),
-          [model.failed.map((f) => f.count + " " + f.code).join(", "), model.not_2xx ? plural(model.not_2xx, "answer") + " " + notOk : ""].filter(Boolean).join("; ") || null,
+          number(model.requests),
+          [
+            ["Failed", model.failed.map((f) => f.count + " " + f.code).join(", ")],
+            ["Not 2xx", model.not_2xx ? plural(model.not_2xx, "answer") + " " + notOk : null],
+            ["Median took", model.took.median !== null ? span(model.took.median) + ", of " + plural(model.took.count, "answer") : null],
+            ["First token", model.first_token.median !== null ? span(model.first_token.median) + ", the median of " + plural(model.first_token.count, "answer") : null],
+            ["In flight", flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", ")],
+            ["Headers the route dropped", dropped],
+          ],
+          [failed ? failed + " failed" : "", model.not_2xx ? model.not_2xx.toLocaleString("en-US") + " not 2xx" : ""].filter(Boolean).join(", "),
+          failed ? "error" : "",
         )
       : null,
-    model ? fact("Tokens", count(model.tokens.input, "tok") + " in · " + count(model.tokens.output, "tok") + " out", model.tokens.input === null ? "Unknown: no response reported its tokens" : model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input cached" : null) : null,
-    data.cost ? fact("Cost", data.cost.shown, data.cost.said) : null,
-    model && model.took.median !== null ? fact("Median took", span(model.took.median), "Of " + plural(model.took.count, "answer")) : null,
-    model && model.first_token.median !== null ? fact("First token", span(model.first_token.median), "Median, of " + plural(model.first_token.count, "answer")) : null,
-    flying.length
-      ? fact(
-          "In flight",
-          plural(flying.length, "request") + ", the oldest for " + span(at - flying[0].since),
-          flying.map((f) => "Request " + f.request + " for " + span(at - f.since)).join(", "),
-        )
+    model
+      ? fact("Tokens in · out", number(model.tokens.input) + " · " + number(model.tokens.output), [
+          ["Input", model.tokens.input === null ? "Unknown: no response reported its tokens" : count(model.tokens.input, "tok")],
+          ["Cached", model.tokens.cached !== null ? count(model.tokens.cached, "tok") + " of the input" : null],
+          ["Output", model.tokens.output === null ? null : count(model.tokens.output, "tok")],
+        ])
       : null,
-    data.other_build ? fact("Made by", "pumpkin " + data.other_build) : null,
+    data.cost ? fact("Cost", data.cost.shown, [["Cost", data.cost.said]]) : null,
   );
+}
+
+// A run's verdict in two: a few words, and the rest of the sentence. A run with a result says
+// that; a run that failed, its failure's state, then its verdict; any other, its verdict less the
+// run's id, which the page's address shows, up to its first colon.
+/** @param {Run} data @returns {[string, string]} */
+function verdictOf(data) {
+  if (data.result) return ["Finished with a result", ""];
+  if (data.failure) return [sentence(data.failure.state), data.verdict];
+  const lead = "Run " + data.id + " ";
+  const ended = data.verdict.startsWith(lead);
+  const text = ended ? data.verdict.slice(lead.length).replace(/^(was|is) /, "") : data.verdict;
+  const at = text.indexOf(": ");
+  if (at < 0) return [sentence(text), ""];
+  return [sentence(text.slice(0, at)), ended ? sentence(text.slice(at + 2)) + "." : text.slice(at + 2)];
 }
 
 // The command that runs the run again from here, with a copy button, or why there is none; nothing
@@ -705,12 +716,10 @@ function drawAgain(node, data) {
   node.hidden = data.again === undefined;
   if (data.again === undefined) return;
   const command = data.again.command;
-  if (command === undefined) return fill(node, h("span", { class: "name" }, "Again"), h("span", { class: "why", title: data.again.error ?? "" }, "-"));
+  if (command === undefined) return fill(node, card(h("button", { disabled: true }, "Copy command"), () => data.again?.error ?? "No command runs this run again."));
   fill(
     node,
-    h("span", { class: "name" }, "Again"),
-    h("code", { title: command }, command),
-    h("button", { title: "Copy the command that runs this run again", onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy"),
+    card(h("button", { onclick: () => navigator.clipboard && navigator.clipboard.writeText(command) }, "Copy command"), () => [h("p", { class: "why" }, "The command that runs this run again"), h("code", {}, command)]),
   );
 }
 
@@ -720,12 +729,14 @@ function drawTraces(node, data) {
   const callers = (data.lanes || []).filter((lane) => (lane.kind === "agent" || lane.kind === "target") && lane.answers && lane.answers.count > 0);
   fill(
     node,
-    callers.length ? h("span", { class: "name" }, "Traces") : null,
+    // Each says what it opens, and looks like what it is: a link to that caller's trace.
     callers.map((lane) =>
       h(
         "a",
         { href: "#/run/" + encodeURIComponent(data.id) + "/trace?caller=" + encodeURIComponent(lane.caller ?? ""), class: "kind " + lane.kind, title: "What " + lane.lane + " and the model said to each other: " + plural(lane.answers?.count ?? 0, "answer") },
-        lane.kind === "agent" && lane.role ? lane.role : lane.lane,
+        h("span", { class: "mark" }),
+        "Trace of " + (lane.kind === "agent" && lane.role ? lane.role : lane.lane),
+        h("span", { class: "go" }, "→"),
       ),
     ),
   );
@@ -776,15 +787,29 @@ function drawLanes(node, data, jobs, view, picked, change, pick, pickFailure) {
     const { asked, started, gone } = lane.sandbox;
     const end = gone ?? known;
     const parts = [];
+    // What a bar's card says first: whose lane it is, and where it runs.
+    /** @type {Array<[string, string]>} */
+    const where = [
+      ["Lane", labels[index].name],
+      ["On", lane.sandbox.place],
+    ];
     if (started !== null) {
-      parts.push(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }));
-      parts.push(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) }, title: lane.said }));
+      parts.push(card(h("div", { class: "span starting", style: { left: at(asked), width: width(asked, started) } }), () => cardRows([...where, ["Asked for", clock(asked)], ["Starting", lasted(started - asked)]])));
+      parts.push(
+        card(h("div", { class: "span" + (gone === null ? " open" : ""), style: { left: at(started), width: width(started, end) } }), () =>
+          cardRows([...where, ["Started", clock(started)], [gone === null ? "Running" : "Ran", lasted(end - started)], gone === null ? null : ["Gone", clock(gone)], ["", lane.said]]),
+        ),
+      );
     } else {
-      parts.push(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) }, title: lane.said }));
+      parts.push(
+        card(h("div", { class: "span starting" + (gone === null ? " open" : ""), style: { left: at(asked), width: width(asked, end) } }), () =>
+          cardRows([...where, ["Asked for", clock(asked)], [gone === null ? "Starting" : "Never started", lasted(end - asked)], ["", lane.said]]),
+        ),
+      );
     }
     for (const work of lane.work || []) {
       const failed = work.end && (work.end.failed || (work.end.exited && work.end.exited.code !== 0) || typeof work.end === "string");
-      parts.push(h("div", { class: "work" + (failed ? " failed" : ""), style: { left: at(work.from), width: width(work.from, work.to ?? known) }, title: work.kind + " " + work.label }));
+      parts.push(card(h("div", { class: "work" + (failed ? " failed" : ""), style: { left: at(work.from), width: width(work.from, work.to ?? known) } }), () => cardRows([[work.kind, work.label], ["From", clock(work.from)], [work.to == null ? "So far" : "Took", lasted((work.to ?? known) - work.from)]])));
     }
     const callsHere = jobs.get(lane.lane) || [];
     for (const job of callsHere) {

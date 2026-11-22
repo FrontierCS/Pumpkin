@@ -10,7 +10,7 @@
 {
   const SCHEMES = ["system", "light", "dark"];
   /** @type {Record<string, string>} */
-  const WORDS = { system: "System", light: "Light", dark: "Dark" };
+  const WORDS = { system: "the browser's setting", light: "light", dark: "dark" };
   const root = document.documentElement;
   // Storage can be refused, as in a private window: the choice is then not kept.
   let kept = "";
@@ -22,18 +22,27 @@
   const asked = new URLSearchParams(location.search).get("scheme") ?? "";
   root.dataset.scheme = SCHEMES.includes(asked) ? asked : SCHEMES.includes(kept) ? kept : "system";
   document.addEventListener("DOMContentLoaded", () => {
-    const choice = /** @type {HTMLSelectElement} */ (document.getElementById("scheme"));
-    for (const scheme of SCHEMES) choice.add(new Option(WORDS[scheme], scheme));
-    choice.value = root.dataset.scheme ?? "system";
-    choice.addEventListener("change", () => {
-      root.dataset.scheme = choice.value;
+    // One button, whose icon is the scheme chosen (the style shows it by `data-scheme`); a press
+    // takes the next of the three.
+    const choice = /** @type {HTMLButtonElement} */ (document.getElementById("scheme"));
+    const name = () => {
+      const now = root.dataset.scheme ?? "system";
+      const next = SCHEMES[(SCHEMES.indexOf(now) + 1) % SCHEMES.length];
+      choice.title = "The page's colours: " + WORDS[now] + ". Press for " + WORDS[next] + ".";
+      choice.setAttribute("aria-label", choice.title);
+    };
+    name();
+    choice.addEventListener("click", () => {
+      const chosen = SCHEMES[(SCHEMES.indexOf(root.dataset.scheme ?? "system") + 1) % SCHEMES.length];
+      root.dataset.scheme = chosen;
+      name();
       try {
-        localStorage.setItem("pumpkin.scheme", choice.value);
+        localStorage.setItem("pumpkin.scheme", chosen);
       } catch {
         // Not kept: the address still holds it.
       }
       const address = new URL(location.href);
-      address.searchParams.set("scheme", choice.value);
+      address.searchParams.set("scheme", chosen);
       history.replaceState(null, "", address);
     });
   });

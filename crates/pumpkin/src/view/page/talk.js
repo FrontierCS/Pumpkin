@@ -1,7 +1,7 @@
 // The run page's diagram of who talks to whom: its roles in layers, the lines between them, and
 // what went along each.
 
-import { bytes, fill, h, plural, svg } from "./h.js";
+import { bytes, card, cardRows, fill, h, plural, svg } from "./h.js";
 import { talkMark } from "./failure.js";
 
 /**
@@ -66,6 +66,16 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
     if (!byName.has(from) || !byName.has(to) || from === to || links.has(to + "\u0000" + from)) continue;
     links.set(from + "\u0000" + to, { from, to });
   }
+  // What passed from `from` to `to`: each kind's count and its bytes there and back.
+  const said = (/** @type {string} */ from, /** @type {string} */ to) =>
+    (pairs.get(from + "\u0000" + to) || [])
+      .map((edge) => {
+        let text = plural(edge.count, edge.kind);
+        if (edge.bytes !== null) text += " " + bytes(edge.bytes);
+        if (edge.back_bytes !== null) text += ", " + bytes(edge.back_bytes) + " back";
+        return text;
+      })
+      .join(" · ");
   const between = (/** @type {string} */ a, /** @type {string} */ b) => [...(pairs.get(a + "\u0000" + b) || []), ...(pairs.get(b + "\u0000" + a) || [])];
   // Layers: the longest path from a role nothing reaches, along the links but the model's and
   // those that close a cycle, which a depth-first search finds.
@@ -107,7 +117,7 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
     had.set(role, (had.get(role) ?? 0) + 1);
     if (lane.sandbox.started !== null && lane.sandbox.gone === null) running.set(role, (running.get(role) ?? 0) + 1);
   }
-  const [boxH, gapX, gapY, bow, stack] = [34, 64, 12, 28, 6];
+  const [boxH, gapX, gapY, bow, stack] = [34, 64, 18, 28, 6];
   const chipOf = (/** @type {string} */ name) => ((had.get(name) ?? 0) > 1 ? "×" + had.get(name) : "");
   const placeOf = (/** @type {Role} */ n) => {
     const now = n.kind === "agent" ? 0 : (running.get(n.name) ?? 0);
@@ -200,36 +210,32 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
     const none = n.kind !== "model" && !had.has(n.name) && data.lanes !== null;
     const chip = chipOf(n.name);
     const dim = lit && !lit.roles.has(n.name) && !(lit.focus && touch(lit.focus, n.name));
-    return svg(
+    const box = svg(
       "g",
       { class: ["node", n.kind, n.name === picked ? "on" : "", none ? "idle" : "", dim ? "dim" : ""].join(" "), transform: "translate(" + n.x + "," + n.y + ")", onclick: () => pick(n.name) },
-      svg("title", {}, n.name + (n.final_target ? " (the final call's target)" : "") + (n.place ? " on " + n.place : "") + (many ? ", " + had.get(n.name) + " sandboxes" : none ? ", no sandbox yet" : "")),
-      many ? svg("rect", { class: "stack", x: stack, y: stack, width: n.w, height: boxH, rx: 6 }) : null,
-      many ? svg("rect", { class: "stack", x: stack / 2, y: stack / 2, width: n.w, height: boxH, rx: 6 }) : null,
-      svg("rect", { width: n.w, height: boxH, rx: 6 }),
+      many ? svg("rect", { class: "stack", x: stack, y: stack, width: n.w, height: boxH, rx: 2 }) : null,
+      many ? svg("rect", { class: "stack", x: stack / 2, y: stack / 2, width: n.w, height: boxH, rx: 2 }) : null,
+      svg("rect", { width: n.w, height: boxH, rx: 2 }),
       n.final_target ? svg("rect", { class: "final", x: 6, y: 6, width: 8, height: 8, rx: 2 }) : null,
       svg("text", { x: n.final_target ? 20 : 6, y: 14 }, n.name),
       svg("text", { x: 6, y: 27, class: "place" }, placeOf(n)),
-      chip ? svg("rect", { class: "chip", x: n.w - chip.length * 6.5 - 14, y: 4, width: chip.length * 6.5 + 8, height: 14, rx: 7 }) : null,
+      chip ? svg("rect", { class: "chip", x: n.w - chip.length * 6.5 - 14, y: 4, width: chip.length * 6.5 + 8, height: 14, rx: 2 }) : null,
       chip ? svg("text", { class: "chip", x: n.w - chip.length * 3.25 - 10, y: 14.5, "text-anchor": "middle" }, chip) : null,
+    );
+    // The role's card: where it is, and what passed on each line that joins it.
+    return card(box, () =>
+      cardRows([
+        ["Role", n.name + (n.final_target ? " (the final call's target)" : "")],
+        ["On", n.place || null],
+        ["Sandboxes", many ? String(had.get(n.name)) : none ? "None yet" : null],
+        .../** @type {Array<[string, string]>} */ ([...pairs.keys()].map((key) => key.split("\u0000")).filter(([from, to]) => from === n.name || to === n.name).map(([from, to]) => [from + " → " + to, said(from, to)])),
+      ]),
     );
   });
   const on = failed && failed.mark.between ? middles.get(failed.mark.between.join("\u0000")) : undefined;
   const box = failed && failed.mark.role ? nodes.get(failed.mark.role) : undefined;
   // On a box, the mark sits on its top right corner, clear of its name.
   const mark = failed && on ? talkMark(failed, on[0], on[1]) : failed && box ? talkMark(failed, box.x + box.w, box.y + 1) : null;
-  const items = [...pairs.entries()]
-    .filter(([key]) => touches(...(/** @type {[string, string]} */ (key.split("\u0000")))))
-    .map(([key, list]) => {
-      const [from, to] = key.split("\u0000");
-      const what = list.map((edge) => {
-        let text = plural(edge.count, edge.kind);
-        if (edge.bytes !== null) text += " " + bytes(edge.bytes);
-        if (edge.back_bytes !== null) text += ", " + bytes(edge.back_bytes) + " back";
-        return text;
-      });
-      return h("li", {}, h("span", { class: "pair" }, from + " → " + to), " " + what.join(" · "));
-    });
   fill(
     node,
     svg(
@@ -247,6 +253,6 @@ export function drawTalk(node, data, lit, picked, failed, pick) {
       boxes,
       mark,
     ),
-    items.length ? h("ul", {}, items) : h("p", { class: "empty" }, lit ? "No line joins the lit roles." : "The log shows no op or model request between roles yet."),
+    pairs.size ? null : h("p", { class: "empty" }, "The log shows no op or model request between roles yet."),
   );
 }

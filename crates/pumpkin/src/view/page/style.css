@@ -1,49 +1,52 @@
-/* An instrument, not a site: quiet and exact, in the type of https://frontier-cs.org, whose tasks
-   the runs are of. Its face, Hanken Grotesk, for the interface, the system's monospace for what
-   is machine-made; hairlines, no cards, no shadows but a tooltip's; colour only as a mark of
-   data, one colour to each meaning, the same on every page. Every colour, face, size and space is
-   a property here, and nothing below names one of its own. Each colour is its light value and its
-   dark one, which `light-dark()` picks by the root's `color-scheme`
+/* An instrument, not a site: quiet and exact. Its face, Hanken Grotesk, for the interface,
+   JetBrains Mono for what is machine-made; one white ground and no boxes: space sets the parts
+   apart, one rule under the header and one under a table's head, a fill where a control is,
+   no shadows but a tooltip's and a card's; colour only as a mark of data, one colour to each meaning, the same on every page. Every colour,
+   face, size and space is a property here, and nothing below names one of its own. Each colour is
+   its light value and its dark one, which `light-dark()` picks by the root's `color-scheme`
    (https://developer.mozilla.org/en-US/docs/Web/CSS/color_value/light-dark): both, for the
    browser's setting to pick, unless `data-scheme` on the root element names one. */
 :root {
   color-scheme: light dark;
   /* surfaces and lines */
-  --bg: light-dark(#ffffff, #202124); --panel: light-dark(#ffffff, #202124); --hover: light-dark(#f1f3f4, #303134); --select: light-dark(#ecf2fb, #2b3a55); --mark: light-dark(#fdd663, #6b5a1a);
-  --line: light-dark(#dadce0, #3c4043); --line-soft: light-dark(#eceff1, #2c2d30); --mark-bar: light-dark(#e3a008, #fdd663); --rule: light-dark(#3c4043, #9aa0a6); --edge: #80868b;
+  --bg: light-dark(#ffffff, #202124); --panel: light-dark(#ffffff, #202124); --hover: light-dark(#f1f3f4, #303134); --select: light-dark(#ecf2fb, #2b3a55); --mark: light-dark(#fde68a, #5c4a12);
+  --line: light-dark(#dadce0, #3c4043); --line-soft: light-dark(#eceff1, #2c2d30); --mark-bar: light-dark(#e3a008, #f2c14e); --rule: light-dark(#3c4043, #9aa0a6); --edge: light-dark(#a3a9b3, #6b7280);
   /* text */
-  --text: light-dark(#1f1f1f, #e8eaed); --text-2: light-dark(#3c4043, #bdc1c6); --dim: light-dark(#5f6368, #9aa0a6);
+  --text: light-dark(#14171c, #e9ebef); --text-2: light-dark(#3a404a, #c3c8d0); --dim: light-dark(#6b7280, #8b929d); --faint: light-dark(#a3a9b3, #5c636e);
   /* accent and state */
-  --accent: light-dark(#0b57d0, #8ab4f8); --accent-hover: light-dark(#0842a0, #aecbfa); --live: light-dark(#d01884, #ff8bcb); --focus: light-dark(#0b57d0, #8ab4f8);
-  --ok: light-dark(#137333, #81c995); --fail: light-dark(#c5221f, #f28b82); --warn: light-dark(#6d4c41, #bcaaa4);
-  --ok-bar: light-dark(#1e8e3e, #81c995); --fail-bar: light-dark(#d93025, #f28b82); --warn-bar: light-dark(#8d6e63, #bcaaa4);
+  --accent: light-dark(#2d6fcd, #7aacf6); --accent-hover: light-dark(#1256b2, #a0c6ff); --live: light-dark(#bf50a0, #e486c6); --focus: light-dark(#2d6fcd, #7aacf6);
+  --ok: light-dark(#1f8a4c, #6fd39a); --fail: light-dark(#d0342c, #ff7b72); --warn: light-dark(#7e5a42, #caaa92);
+  --ok-bar: light-dark(#429c5a, #76c788); --fail-bar: light-dark(#d0342c, #f2695f); --warn-bar: light-dark(#a37d64, #b0927a);
   /* entities: fills for marks and lines, inks for text */
-  --agent: light-dark(#3c4043, #dadce0); --target: light-dark(#9334e6, #c58af9); --runner: light-dark(#0e8fa0, #4ecde6); --model: light-dark(#d56a00, #fa903e);
-  --agent-ink: light-dark(#202124, #e8eaed); --target-ink: light-dark(#681da8, #d7aefb); --runner-ink: light-dark(#0b6b78, #78d9ec); --model-ink: light-dark(#9a5b00, #fcad70);
+  --agent: light-dark(#3a404a, #c3c8d0); --target: light-dark(#8459c3, #b28fef); --runner: light-dark(#0099a0, #56c4ca); --model: light-dark(#e56f17, #fc984c);
+  --agent-ink: light-dark(#14171c, #e9ebef); --target-ink: light-dark(#6b3baa, #c7aff5); --runner-ink: light-dark(#00717c, #83d4d8); --model-ink: light-dark(#ab5200, #f9b379);
   --on-bar: light-dark(rgba(255, 255, 255, 0.85), rgba(32, 33, 36, 0.85));
-  /* type: the site's face and type scale, two weights */
+  /* the logo: its ring and name, and its tile */
+  --logo-ink: light-dark(#1f1f1f, #ececec); --tile: #e8710a;
+  /* type: the faces and the type scale */
   --sans: "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
-  --fs: 15px; --fs-mono: 13px; --fs-title: 18px; --fs-verdict: 20px;
-  --lh: 22px; --lh-verdict: 28px;
-  /* space in steps of 4 px, the rows' height, the controls' heights, the shapes; the site's
-     tables have 48 px rows, and a log keeps more of itself in view in rows of 32 px */
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --fs: 14px; --fs-mono: 12.5px; --fs-label: 11px; --fs-title: 16px; --fs-verdict: 20px;
+  --lh: 20px; --lh-verdict: 28px;
+  /* space in steps of 4 px, the rows' height, the controls' heights, the shapes */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
   --row: 32px; --lane: 28px; --axis: 28px; --bar: 56px;
   /* the most of the split's width or a column's height that a grip may give a pane, so that a
      length kept in a larger window leaves the panes beside it room in a smaller one */
   --grip-max: 60%;
-  /* the diagram of who talks to whom, whose boxes are sized for this size */
-  --fs-diagram: 12px;
+  /* the diagram of who talks to whom, whose boxes are sized for 7.3 px a character
+     (`talk.js`), which JetBrains Mono, 0.64 of its size wide, is at this size */
+  --fs-diagram: 11.4px;
   --control: 30px; --field: 32px; --tab: 36px;
   /* so that a trace's toolbar keeps its counts on its line at 1100 px */
   --search: 14em;
-  --r-box: 4px; --r-panel: 6px;
-  --pop: 0 6px 18px light-dark(rgba(32, 33, 36, 0.14), rgba(0, 0, 0, 0.5));
+  --r-box: 3px; --r-panel: 0px;
+  --pop: 0 6px 20px light-dark(rgba(16, 24, 40, 0.16), rgba(0, 0, 0, 0.5));
 }
 :root[data-scheme="light"] { color-scheme: light; }
 :root[data-scheme="dark"] { color-scheme: dark; }
 @font-face { font-family: "Hanken Grotesk"; src: url("hanken-grotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("jetbrains-mono.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text-2); font: 400 var(--fs)/var(--lh) var(--sans); display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
@@ -62,10 +65,10 @@ p { margin: 0; }
    something keeps a frame, so that it stands apart from the quiet ones. */
 button { font: inherit; background: none; color: var(--text-2); border: 1px solid transparent; border-radius: var(--r-box); padding: 0 var(--s2); height: var(--control); cursor: pointer; }
 button:hover { color: var(--text); background: var(--hover); }
-button.danger { color: var(--fail); border-color: var(--line); }
-button.danger:hover { color: var(--fail); border-color: var(--fail); background: none; }
-input, select { font: inherit; height: var(--field); padding: 0 var(--s2); border: 1px solid var(--line); border-radius: var(--r-box); background: var(--bg); color: var(--text); }
-input:hover, select:hover { border-color: var(--edge); }
+button.danger { color: var(--fail); }
+button.danger:hover { color: var(--fail); background: var(--hover); }
+input, select { font: inherit; height: var(--field); padding: 0 var(--s2); border: 1px solid transparent; border-radius: var(--r-box); background: var(--hover); color: var(--text); }
+input:hover, select:hover { background: var(--line-soft); }
 
 /* A mark of state: a 10 px square beside a neutral word. */
 .mark { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: var(--s2); vertical-align: -1px; background: var(--edge); flex: none; }
@@ -75,19 +78,34 @@ input:hover, select:hover { border-color: var(--edge); }
 
 /* The header: wordmark, where, and whether the page follows a live run. */
 .bar { flex: none; display: flex; gap: var(--s3); align-items: center; height: var(--bar); padding: 0 var(--s4); border-bottom: 1px solid var(--line); }
-.home { font-weight: 600; color: var(--text); }
-.home:hover { text-decoration: none; }
-.crumbs { display: flex; gap: var(--s2); align-items: baseline; color: var(--dim); min-width: 0; }
-.crumbs .sep { color: var(--edge); }
-.crumbs .id { color: var(--text); }
+/* The wordmark, as FrontierCS sets its own: the mark 24 px high, 9 px, then the name in Instrument
+   Sans Medium at 23 px, drawn as its outline, so that the page needs no third face. */
+.home { flex: none; display: inline-flex; align-items: center; color: var(--logo-ink); }
+.home:hover { color: var(--logo-ink); }
+.logo { display: block; flex: none; overflow: visible; }
+.logo .ring { fill: none; stroke: currentColor; stroke-width: 20.18px; stroke-linecap: round; }
+.logo .tile { fill: var(--tile); }
+.logo .name { fill: currentColor; }
+.crumbs { display: flex; gap: var(--s2); align-items: baseline; color: var(--dim); min-width: 0; padding-left: var(--s2); line-height: 18px; }
+.crumbs .sep { color: var(--faint); }
+.crumbs .id { color: var(--text); font-family: var(--mono); font-size: var(--fs-mono); }
 .follow { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); white-space: nowrap; }
 .follow .mark { margin: 0; }
 .published { margin-left: auto; display: flex; align-items: center; gap: var(--s2); color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .published .mark { margin: 0; }
 .published + .follow { margin-left: 0; }
-.bar .scheme, .bar .colour-key-button { flex: none; height: var(--control); }
+.bar .scheme, .bar .colour-key-button { flex: none; height: var(--control); border: none; border-radius: var(--r-box); background: none; color: var(--text-2); font-size: 13px; }
+/* The key's button shows what it opens: four of the page's colours, as the marks they colour. */
+.bar .colour-key-button::before { content: ""; display: inline-block; width: 38px; height: 8px; margin-right: var(--s2); background: linear-gradient(90deg, var(--ok-bar) 0 8px, transparent 8px 10px, var(--fail-bar) 10px 18px, transparent 18px 20px, var(--live) 20px 28px, transparent 28px 30px, var(--target) 30px 38px); }
+/* The scheme's button: the icon of the scheme chosen, of the three it holds. */
+.bar .scheme { display: inline-flex; align-items: center; justify-content: center; width: var(--control); padding: 0; }
+.scheme svg { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.scheme svg .half { fill: currentColor; stroke: none; }
+.scheme svg g { display: none; }
+:root[data-scheme="system"] .scheme .of-system, :root[data-scheme="light"] .scheme .of-light, :root[data-scheme="dark"] .scheme .of-dark { display: inline; }
+.bar .scheme:hover, .bar .colour-key-button:hover { background: var(--hover); color: var(--text); }
 .notice { flex: none; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); }
-.notice button { border-color: var(--line); }
+.notice button { background: var(--hover); }
 
 /* The colour key, under the top bar at its right: each colour's swatch and its meaning. */
 .colour-key { position: fixed; z-index: 3; top: calc(var(--bar) - var(--s1)); right: var(--s4); max-height: calc(100vh - var(--bar) - var(--s4)); overflow: auto; padding: var(--s3) var(--s4); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-panel); box-shadow: var(--pop); color: var(--text-2); }
@@ -101,46 +119,102 @@ input:hover, select:hover { border-color: var(--edge); }
 .colour-key .sw-bar { height: 10px; border-radius: 2px; }
 .colour-key .sw-tick { width: 2px; height: 14px; margin: 0 11px; }
 .colour-key .sw-ink { font-family: var(--mono); font-size: var(--fs-mono); font-weight: 600; text-align: center; }
-main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: var(--s3) var(--s4); gap: var(--s2); overflow: auto; }
+main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: var(--s3) var(--s4) var(--s4); gap: var(--s3); overflow: auto; }
 
-/* The runs: a dark rule under the head, hairlines between rows, numbers right-aligned. */
-table.runs { border-collapse: collapse; width: 100%; }
-table.runs th, table.runs td { height: var(--row); padding: 0 var(--s3) 0 0; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--line-soft); }
+/* The runs: a dark rule under the head, no line between rows, numbers right-aligned. */
+table.runs { border-collapse: collapse; width: 100%; flex: none; }
+table.runs th, table.runs td { height: var(--row); padding: 0 var(--s3) 0 0; text-align: left; white-space: nowrap; }
 table.runs th { font-weight: 600; color: var(--text-2); border-bottom: 1px solid var(--rule); }
 table.runs .num { text-align: right; }
-table.runs td.id { color: var(--text); }
+table.runs td.task { color: var(--text); font-weight: 600; max-width: 22em; overflow: hidden; text-overflow: ellipsis; }
+table.runs td.id { color: var(--dim); }
+table.runs td.none { color: var(--faint); }
+table.runs th.num, table.runs td.num, table.runs td.mono { padding-right: var(--s4); }
 table.runs td.rest { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
 table.runs tr.link { cursor: pointer; }
+/* A run with a result: the word that opens it, and the result under the row, a level in. */
+table.runs td.toggle { color: var(--text-2); cursor: pointer; }
+table.runs td.toggle:hover { color: var(--text); }
+table.runs tr.detail > td { height: auto; padding: var(--s1) 0 var(--s4) var(--s5); white-space: normal; }
 table.runs tr.link:hover { background: var(--hover); }
-table.runs tr.on { background: var(--select); box-shadow: inset 2px 0 0 var(--accent); }
+table.runs tr.on { background: var(--select); box-shadow: inset 3px 0 0 var(--accent); }
 table.runs td.state { color: var(--text-2); }
 table.runs td.error { color: var(--fail); white-space: normal; }
-.more { padding: var(--s2) 0; }
+.more { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s1); font-size: 13px; }
+.more .empty { color: var(--faint); }
 
-/* A run: the verdict, the facts, the command again. */
-.verdict { display: flex; align-items: flex-start; font-weight: 600; color: var(--text); font-size: var(--fs-verdict); line-height: var(--lh-verdict); }
-.verdict .mark { width: 12px; height: 12px; border-radius: 3px; margin-top: calc((var(--lh-verdict) - 12px) / 2); }
+/* A run's head, on the ground, in the levels its reader gave. What matters most is large: the task,
+   how long the run ran and when it started, its requests, tokens and cost, the values it returned,
+   and the ways to its traces. What matters next is quiet: the values that are objects. What matters
+   less is in the card of the part it belongs to (`h.js`), which shows while the pointer or the
+   focus is on that part: how the run ended is the colour of its mark, and the words are the
+   mark's card. */
+/* One line: the task at the left, the run's numbers at the right; a failure, or what of the log
+   can't be read, on a line of its own under them. */
+.head.panel { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s5); padding: var(--s1) 0 var(--s4); border: none; }
+/* The headline's parts lie on the head's own line: the task, the run's numbers beside it, and
+   the buttons at the right end. */
+.head > .headline { display: contents; }
+.head .verdict { flex: 0 1 auto; order: 0; }
+.head > .facts { order: 1; margin-right: auto; }
+.head .traces, .head .again, .head .cancel { order: 2; }
+.head > .failure, .head > .unread, .head > .title, .head > .within { flex: 1 1 100%; order: 4; }
+.head > .title + .within { max-height: 30vh; overflow: auto; }
+.headline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); }
+.verdict { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--text); }
+.verdict .state { flex: none; display: inline-flex; padding: var(--s1); margin: calc(-1 * var(--s1)); border-radius: var(--r-box); }
+.verdict .state .mark { width: 14px; height: 14px; border-radius: 4px; margin: 0; }
+.verdict .state:focus-visible { outline: 2px solid var(--focus); }
+.verdict .task { min-width: 0; font-weight: 600; font-size: var(--fs-verdict); line-height: var(--lh-verdict); letter-spacing: -0.005em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The ways to the run's traces: a chip each, in its caller's colour. */
+.traces { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.traces:empty { display: none; }
+/* A link to a caller's trace: a control, so it has a fill; a square in the caller's colour, the
+   words in the page's ink, an arrow that says it leads elsewhere. */
+.traces a.kind { display: inline-flex; align-items: center; height: 28px; padding: 0 var(--s2); border-radius: var(--r-box); background: var(--hover); font-size: 13px; color: var(--text); }
+.traces a.kind .mark { background: currentColor; margin-right: var(--s2); }
+.traces a.kind.agent .mark { background: var(--agent); } .traces a.kind.target .mark { background: var(--target); } .traces a.kind.runner .mark { background: var(--runner); }
+.traces a.kind .go { margin-left: var(--s2); color: var(--dim); }
+.traces a.kind:hover { text-decoration: none; background: var(--line-soft); }
+.traces a.kind:hover .go { color: var(--text); }
 /* A caller's page: the caller as its title, and under it, muted, the run it is in. */
 .title { margin: 0; font-size: var(--fs-verdict); line-height: var(--lh-verdict); font-weight: 600; color: var(--text); }
 .within { color: var(--dim); }
 .within .mark { margin-right: var(--s1); }
-/* The run's facts in a row that wraps, each name above its value, each as wide as its value. */
-.facts { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }
+/* The facts in a row that wraps: in a run's head each name beside its value, on one line with
+   the ways to its traces; elsewhere each name above its value. */
+.facts { display: flex; flex-wrap: wrap; gap: var(--s3) 28px; }
 .fact { display: flex; flex-direction: column; min-width: 0; }
-.fact .name { color: var(--dim); font-size: var(--fs-mono); }
-.again .name { color: var(--dim); margin-right: var(--s1); }
+.fact .name { color: var(--faint); font-size: var(--fs-label); line-height: 16px; }
 .fact .value { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); overflow-wrap: anywhere; }
-/* Scalars appear together, with each object folded under its name. */
-.result, .failure { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
-.result:empty, .failure:empty { display: none; }
-.result .values, .failure .values { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: var(--s1) var(--s5); padding: var(--s2) 0; border-block: 1px solid var(--line-soft); }
-.result .kv, .failure .kv { display: flex; flex-direction: column; min-width: 0; }
-.result .k { font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
-.result .v, .failure .v { color: var(--text); overflow-wrap: anywhere; }
-.result .v.num, .failure .v.num { font-family: var(--mono); font-size: var(--fs-mono); }
-.result summary, .dropped summary, .failure summary { cursor: pointer; color: var(--accent); }
-.result summary .mono { color: var(--text-2); }
-.result summary .hint, .failure .hint { color: var(--dim); margin-left: var(--s2); }
+/* A run's numbers side by side, each a light figure over its name, a hairline between two. */
+.head > .facts { flex: none; gap: var(--s3) 0; }
+.head > .facts .tile:last-child { padding-right: 0; margin-right: 0; }
+/* A result's values side by side, each a light figure over its name, a hairline between two;
+   then each value that is an object, a chip of its name, which opens to its JSON below. */
+/* What the run returned, in the right column, between who talks to whom and what is selected: no
+   higher than two fifths of the window, and scrolled past that. */
+.right > .result { flex: none; max-height: 40vh; overflow: auto; }
+.right > .result:empty { display: none; }
+.result .values { flex: 1 1 100%; }
+.tile { display: flex; flex-direction: column; min-width: 0; padding: 0 var(--s5) 0 0; margin-right: var(--s3); }
+.tile .v { display: flex; align-items: baseline; height: 30px; font: 300 24px/30px var(--mono); letter-spacing: -0.03em; color: var(--text); white-space: nowrap; }
+.tile .v small { margin-left: var(--s2); font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--dim); }
+.tile .v small.error { color: var(--fail); }
+.tile .l { font-size: 12px; line-height: 16px; color: var(--dim); }
+.tile.fact:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+.result summary, .failure summary { cursor: pointer; color: var(--accent); }
+.result summary .mono { color: var(--text); }
+.result summary .hint { margin-left: var(--s1); color: var(--dim); font-size: var(--fs-mono); font-weight: 400; }
+/* A failure of the run, in its head: below its numbers, on a red rule, all of it shown. */
+.head > .failure { padding: var(--s1) 0 var(--s1) var(--s3); border-left: 3px solid var(--fail-bar); }
+.failure { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.failure:empty, .head > .failure:empty { display: none; }
+.failure .values { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: var(--s1) var(--s5); padding: var(--s2) var(--s3); border-radius: var(--r-box); background: var(--hover); }
+.failure .kv { display: flex; flex-direction: column; min-width: 0; }
+.failure .v { color: var(--text); overflow-wrap: anywhere; }
+.failure .v.num { font-family: var(--mono); font-size: var(--fs-mono); }
+.failure .hint { color: var(--dim); margin-left: var(--s2); }
 /* A failure, the same parts in the same places whatever failed: whose fault, the subject and the
    time under their names; then what the subject left and the reason, folded. A part that the
    record doesn't give says so, dim. In the inspector, a size smaller. */
@@ -158,14 +232,44 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .failure.small .verdict .mark { width: 10px; height: 10px; border-radius: 2px; margin-top: calc((var(--lh) - 10px) / 2); }
 .failure.small details { margin: 0; padding: 0; border: none; }
 .failure.small summary { color: var(--accent); font-family: var(--sans); font-size: var(--fs); }
-.result pre.json { margin: var(--s2) 0 0; padding: var(--s2) var(--s3); background: var(--hover); border-radius: var(--r-box); overflow-x: auto; }
-.dropped:empty { display: none; }
-.dropped code { display: block; margin-top: var(--s1); overflow-wrap: anywhere; color: var(--dim); }
-.again { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
-.again code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.again .why { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.again button { flex: none; }
+/* What the run returned, folded under a quiet line that names it: its values by their shape, on
+   the ground. */
+.result details.returned { flex: 1 1 100%; min-width: 0; }
+.result details.returned > summary { list-style: none; display: inline-flex; align-items: baseline; gap: var(--s1); font-size: var(--fs-title); line-height: 24px; font-weight: 600; color: var(--text); cursor: pointer; }
+.result details.returned > summary:hover { color: var(--text); }
+.result details.returned > summary::-webkit-details-marker { display: none; }
+.result details.returned > summary::before { content: "▸"; width: 1em; color: var(--dim); }
+.result details.returned[open] > summary::before { content: "▾"; }
+.result details.returned[open] > summary { margin-bottom: var(--s2); }
+.opened { flex: 1 1 100%; display: flex; flex-direction: column; gap: var(--s2); font-family: var(--mono); font-size: 13px; line-height: 20px; color: var(--text); overflow-x: auto; }
+.opened .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px var(--s4); align-items: baseline; }
+.opened .kv > .k { color: var(--dim); }
+/* In the list of runs, a number keeps to the values' column, not to the right as a count does. */
+.opened .kv > .num { text-align: left; }
+.opened .kv > :not(.k):not(.group):not(.nest) { overflow-wrap: anywhere; }
+.opened .kv > .group { grid-column: 1 / -1; margin-top: var(--s2); color: var(--text); font-weight: 600; }
+.opened .kv > .group:first-child { margin-top: 0; }
+.opened .kv > .nest { grid-column: 1 / -1; padding-left: var(--s3); min-width: 0; overflow-x: auto; }
+.opened .items { display: flex; flex-wrap: wrap; gap: 0 var(--s3); }
+.opened table.grid { border-collapse: collapse; width: max-content; }
+.opened table.grid th, .opened table.grid td { height: 22px; padding: 0 var(--s4) 0 0; border-bottom: none; text-align: right; white-space: nowrap; font-weight: 400; }
+.opened table.grid thead th { color: var(--dim); font-size: var(--fs-label); border-bottom: 1px solid var(--line); }
+.opened table.grid tbody th { text-align: left; color: var(--text); }
+.opened pre.jsonview { margin: 0; }
+.again { flex: none; }
+/* The buttons in a run's head have a fill, as every control that isn't a link does. */
+.again button, .cancel > button { height: 28px; border-radius: var(--r-box); background: var(--hover); font-size: 13px; }
+.again button:hover, .cancel > button:hover { background: var(--line-soft); }
+.again button:disabled { color: var(--faint); cursor: default; background: none; }
 .again[hidden] { display: none; }
+.head .cancel:has(.sure) { flex: 1 1 100%; order: 3; }
+/* A card: what a part of the page holds back until the pointer or the focus is on it. */
+.card { position: fixed; z-index: 10; left: 0; top: 0; max-width: min(440px, calc(100vw - 16px)); padding: 10px var(--s3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-box); box-shadow: var(--pop); color: var(--text-2); font-size: 12.5px; line-height: 18px; pointer-events: none; }
+.card dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px var(--s3); margin: 0; }
+.card dt { color: var(--faint); font-size: var(--fs-label); }
+.card dd { margin: 0; font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.card code { display: block; font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.card .why { color: var(--dim); margin-bottom: var(--s1); }
 .cancel:empty, .unread:empty, p.empty:empty { display: none; }
 .cancel .sure { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .cancel .sure p { flex: 1 1 100%; }
@@ -173,30 +277,33 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .warn { color: var(--text-2); }
 
 /* The split: lanes, filter and log at left; roles and inspector at right. */
-.split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px min(clamp(280px, var(--side, min(32%, 520px)), 900px), var(--grip-max)); column-gap: var(--s1); }
-.left, .right { min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
-.panel { border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--panel); }
+.split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px min(clamp(280px, var(--side, min(40%, 640px)), 900px), var(--grip-max)); column-gap: var(--s3); }
+/* The log: on the ground, its filter at its head. */
+.log { flex: 1; min-height: 200px; display: flex; flex-direction: column; overflow: hidden; }
+.log .filter { padding: 0 0 var(--s2); }
+.log .filter select, .log .filter input { height: 28px; font-size: 13px; }
+.left, .right { min-height: 0; display: flex; flex-direction: column; gap: var(--s4); }
+.panel { background: var(--panel); }
 
 /* The lanes of a run's sandboxes, the run's time across. At most two fifths of the window high,
    or as high as their grip sets, and no more than `--grip-max` of their column, in whole lanes. */
-/* A monospace character is about 0.61 of its size wide. */
-.lanes { --label: calc(var(--label-chars) * 0.61 * var(--fs-mono) + var(--s3)); flex: none; overflow-y: auto; max-height: calc(var(--axis) + round(down, min(max(80px, var(--pane, 40vh)), var(--grip-max)) - var(--axis), var(--lane))); user-select: none; padding: 0 var(--s2); }
-.lane { display: grid; grid-template-columns: var(--label) 1fr; align-items: center; height: var(--lane); border-bottom: 1px solid var(--line-soft); }
-.lane:last-child { border-bottom: none; }
+/* A character of JetBrains Mono is 0.64 of its size wide. */
+.lanes { --label: calc(var(--label-chars) * 0.64 * var(--fs-mono) + var(--s3)); flex: none; overflow-y: auto; max-height: calc(var(--axis) + round(down, min(max(80px, var(--pane, 40vh)), var(--grip-max)) - var(--axis), var(--lane))); user-select: none; }
+.lane { display: grid; grid-template-columns: var(--label) 1fr; align-items: center; height: var(--lane); }
 .lane .name { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding-right: var(--s2); }
 .lane .name:hover { color: var(--accent); }
-.lane .name .place { color: var(--dim); }
+.lane .name .place { color: var(--faint); }
 .lane.on .name { font-weight: 600; } .lane.dim { opacity: 0.35; }
 .lane.agent { --kind: var(--agent); } .lane.target { --kind: var(--target); } .lane.runner { --kind: var(--runner); }
 .lane.lit .name { box-shadow: inset 2px 0 0 var(--kind); padding-left: var(--s1); }
 .track { position: relative; height: 14px; }
-.axis { position: sticky; top: 0; z-index: 1; height: var(--axis); padding-left: var(--label); background: var(--panel); border-bottom: 1px solid var(--line); color: var(--dim); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--axis); }
+.axis { position: sticky; top: 0; z-index: 1; height: var(--axis); padding-left: var(--label); background: var(--panel); color: var(--faint); font-family: var(--mono); font-size: var(--fs-label); line-height: var(--axis); }
 .axis .ticks { position: relative; height: 100%; }
 .axis span { position: absolute; transform: translateX(-50%); }
 .axis span:first-of-type { transform: none; } .axis span:last-of-type { transform: translateX(-100%); }
 .tracks { position: relative; }
-.guide { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--line-soft); pointer-events: none; }
-.span { position: absolute; top: 2px; height: 10px; border-radius: 2px; background: var(--kind); }
+.guide { display: none; }
+.span { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: var(--kind); }
 .span.starting { opacity: 0.4; }
 .span.open { border-right: 2px dashed var(--bg); }
 .work { position: absolute; top: 5px; height: 4px; background: var(--on-bar); min-width: 1px; }
@@ -219,18 +326,18 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .filter { flex: none; display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; color: var(--dim); }
 .filter input.search { flex: 0 1 var(--search); min-width: 8em; }
 .filter select { max-width: 14em; }
-.filter .counted { font-family: var(--mono); font-size: var(--fs-mono); }
+.filter .counted { font-family: var(--mono); font-size: var(--fs-mono); color: var(--faint); }
 
 /* The log: one `--row` line a record, only those in view drawn. */
 .list { flex: 1; min-height: 160px; overflow-y: auto; position: relative; border-top: 1px solid var(--rule); }
 .list:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 .list .rows { position: relative; height: calc(var(--count, 0) * var(--row)); }
-.row { position: absolute; left: 0; right: 0; height: var(--row); display: flex; gap: var(--s3); align-items: center; padding: 0 var(--s2); white-space: nowrap; cursor: pointer; border-bottom: 1px solid var(--line-soft); }
+.row { position: absolute; left: 0; right: 0; height: var(--row); display: flex; gap: var(--s3); align-items: center; padding: 0 var(--s2); white-space: nowrap; cursor: pointer; }
 .row:hover { background: var(--hover); }
-.row.on { background: var(--select); box-shadow: inset 2px 0 0 var(--accent); }
-.row .t { color: var(--dim); width: 7.5ch; flex: none; text-align: right; }
-.row .who { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); width: 13ch; flex: none; overflow: hidden; text-overflow: ellipsis; }
-.row .kind { width: 16ch; flex: none; overflow: hidden; text-overflow: ellipsis; }
+.row.on { background: var(--select); box-shadow: inset 3px 0 0 var(--accent); }
+.row .t { color: var(--faint); width: 10ch; flex: none; text-align: right; }
+.row .who { font-family: var(--mono); font-size: var(--fs-mono); color: var(--text); width: calc(var(--who-chars, 13) * 1ch); flex: none; overflow: hidden; text-overflow: ellipsis; }
+.row .kind { width: calc(var(--kind-chars, 16) * 1ch); flex: none; overflow: hidden; text-overflow: ellipsis; }
 .row .text { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; color: var(--text-2); }
 .row .times { flex: none; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
 .row.fold .text { color: var(--dim); }
@@ -243,7 +350,9 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .row.refused .kind { color: var(--warn); } .row.failed .kind { color: var(--fail); }
 
 /* Who talks to whom. */
-.talk { flex: none; padding: var(--s2) var(--s3); max-height: min(max(80px, var(--pane, 40vh)), var(--grip-max)); overflow: auto; }
+.roles { flex: none; display: flex; flex-direction: column; }
+/* Its height is its own, or what its grip sets, and no more than half the window. */
+.talk { flex: none; padding: 0; max-height: min(max(80px, var(--pane, 40vh)), 50vh); overflow: auto; }
 .talk svg { max-width: 100%; height: auto; display: block; }
 .talk .node { cursor: pointer; }
 .talk .node rect { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
@@ -259,15 +368,15 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .talk .node rect.stack { stroke-opacity: 0.5; }
 .talk .node.idle > rect:not(.final):not(.chip) { stroke-dasharray: 4 3; }
 .talk .node rect.chip { fill: var(--line-soft); stroke: none; }
-.talk .node text.chip { font-size: 10.5px; font-weight: 600; fill: var(--text-2); }
+.talk .node text.chip { font-size: 10px; font-weight: 600; fill: var(--text-2); }
 .talk rect.failmark { fill: var(--fail-bar); stroke: var(--panel); stroke-width: 1.5; }
-.talk ul { list-style: none; margin: var(--s2) 0 0; padding: 0; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
-.talk li { line-height: var(--lh); }
-.talk li .pair { color: var(--text); }
 
 /* The inspector of what is selected. */
-.inspector { flex: 1; min-height: 0; overflow: auto; padding: var(--s2) var(--s3); }
-.inspector h3 { display: flex; gap: var(--s2); align-items: baseline; padding-bottom: var(--s2); margin-bottom: var(--s2); border-bottom: 1px solid var(--line); color: var(--text); }
+.inspector { flex: 1; min-height: 0; overflow: auto; }
+/* With nothing selected it holds the run's summary alone, quiet, on the ground. */
+.inspector:empty { visibility: hidden; }
+.inspector > pre.summary { margin: 0; padding: 0; border-top: none; font-size: 12px; line-height: 18px; color: var(--dim); }
+.inspector h3 { display: flex; gap: var(--s2); align-items: baseline; margin-bottom: var(--s2); color: var(--text); }
 .inspector h3 .kind { font-weight: 600; }
 .inspector .said { margin-bottom: var(--s2); }
 .inspector dl { display: grid; grid-template-columns: max-content 1fr; gap: 0 var(--s3); margin: 0 0 var(--s2); line-height: calc(var(--lh) + 2px); }
@@ -278,23 +387,17 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .inspector .links button { height: auto; padding: 0; color: var(--accent); background: none; }
 .inspector .links button:hover { color: var(--accent-hover); text-decoration: underline; }
 .inspector .links button + button::before { content: "·"; display: inline-block; margin: 0 var(--s2); color: var(--dim); }
-.inspector pre { margin: 0; padding: var(--s2) 0 0; border-top: 1px solid var(--line-soft); white-space: pre-wrap; word-break: break-word; color: var(--text); line-height: var(--lh); }
-.inspector .summary { margin-top: var(--s2); }
+.inspector pre { margin: 0; padding: var(--s2) 0 0; white-space: pre-wrap; word-break: break-word; color: var(--text); line-height: var(--lh); }
 .inspector ul { list-style: none; margin: 0; padding: 0; }
 .inspector .route + .route { margin-top: var(--s1); }
 .inspector .route .name { color: var(--dim); }
 .inspector li button { text-align: left; padding: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* The links from a run to its callers' traces. */
-.traces { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); }
-.traces:empty { display: none; }
-.traces .name { color: var(--dim); }
-.traces a.kind:hover { text-decoration: underline; }
-
 /* A trace: its tabs, its toolbar, then the ledger and the inspector side by side. */
 .tabs { flex: none; display: flex; align-items: flex-end; gap: var(--s1); border-bottom: 1px solid var(--line); }
 .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; height: var(--tab); padding: 0 var(--s2); color: var(--dim); }
-.tabs button.on { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+.tabs button.on { color: var(--text); font-weight: 600; border-bottom-color: var(--text); }
+.tabs button:hover { background: none; color: var(--text); }
 .tabs .callers { margin-left: auto; display: flex; gap: var(--s3); align-items: baseline; padding-bottom: var(--s1); }
 .tabs .callers a.on { font-weight: 600; text-decoration: underline; }
 .tabs.small { margin: 0 0 var(--s2); }
@@ -305,14 +408,16 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .dim { color: var(--dim); }
 .trace-split { flex: 1; min-height: 320px; display: grid; grid-template-columns: minmax(0, 1fr) 8px min(clamp(320px, var(--inspector, min(34%, 440px)), 720px), var(--grip-max)); }
 .trace-split .left { min-width: 0; }
-.trace-split .list { border: 1px solid var(--line); border-top: 1px solid var(--rule); border-radius: 0 0 var(--r-panel) var(--r-panel); }
+.trace-split .list { border-top: 1px solid var(--rule); }
 /* A touch drag on a grip sizes its pane, in place of scrolling the page. */
 .grip { cursor: col-resize; position: relative; touch-action: none; }
-.grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms; }
+/* A grip shows as a short handle at its middle, never as a line across: a faint mark that says
+   the parts beside it can be sized, in the accent while the pointer or the focus is on it. */
+.grip::after { content: ""; position: absolute; top: calc(50% - 14px); left: 3px; width: 2px; height: 28px; border-radius: 1px; background: var(--line); transition: background-color 120ms; }
 .grip:hover::after, .grip:focus-visible::after { background: var(--accent); }
 .grip:focus-visible { outline: none; }
 .grip.across-y { cursor: row-resize; flex: none; height: 8px; margin: calc(-1 * var(--s1)) 0; }
-.grip.across-y::after { top: 3px; bottom: auto; left: 0; right: 0; width: auto; height: 2px; }
+.grip.across-y::after { top: 3px; left: calc(50% - 14px); width: 28px; height: 2px; }
 
 /* A trace's tab: the Steps tab's toolbar and split, or the Statistics or Log tab, below the tabs. */
 .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
@@ -321,7 +426,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 /* The Statistics tab: the caller's totals, then a row a step or a thread, numbers right-aligned in
    columns, the head sorting by one; the model time over a bar of its share of the longest. */
 .stats, .tlog { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--s2); }
-.stats .table { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-panel); }
+.stats .table { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .stats .list { border-top: 1px solid var(--rule); }
 .srow { display: flex; gap: var(--s3); align-items: center; font-family: var(--mono); font-size: var(--fs-mono); }
 .srow > * { flex: none; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -338,7 +443,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 
 /* The Log tab: the caller's records at left, the one selected at right. */
 .log-split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 34%); gap: var(--s3); }
-.tlog .list { border: 1px solid var(--line); border-top: 1px solid var(--rule); border-radius: 0 0 var(--r-panel) var(--r-panel); }
+.tlog .list { border-top: 1px solid var(--rule); }
 .tlog .row.of-step .kind { text-decoration: underline dotted; }
 
 /* The ledger: every row one line, numbers in columns, kinds as mono words in their ink. */
@@ -365,7 +470,7 @@ table.runs td.error { color: var(--fail); white-space: normal; }
 .lrow.step .note { color: var(--text-2); }
 .lrow.step .note::before { content: "※ "; color: var(--dim); }
 .lrow.step.live .calls { color: var(--live); }
-.lrow.thread { border-top: 1px solid var(--rule); border-bottom-color: var(--line); color: var(--text-2); }
+.lrow.thread { border-top: 1px solid var(--line); border-bottom-color: var(--line); color: var(--text-2); }
 .lrow.thread .name { width: 14ch; color: var(--text); font-weight: 600; }
 .lrow.thread .said { flex: 0 1 52ch; min-width: 0; }
 .lrow.thread .t { width: auto; text-align: left; color: var(--dim); }
@@ -428,16 +533,16 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 
 /* A trace's timeline: three lanes, the axis, and the strip of the whole trace, drawn on canvases
    in these tokens; the labels at left. */
-.timeline { --tl-lane: calc(var(--row) * 5 / 8); --tl-label: 6ch; flex: none; display: grid; grid-template-columns: var(--tl-label) minmax(0, 1fr); column-gap: var(--s2); padding: var(--s1) var(--s2); user-select: none; }
-.tl-labels { position: relative; font-family: var(--mono); font-size: var(--fs-mono); color: var(--dim); }
+.timeline { --tl-lane: calc(var(--row) * 5 / 8); --tl-label: 6ch; flex: none; display: grid; grid-template-columns: var(--tl-label) minmax(0, 1fr); column-gap: var(--s2); padding: var(--s2) var(--s3); user-select: none; }
+.tl-labels { position: relative; font-family: var(--mono); font-size: var(--fs-label); color: var(--faint); }
 .tl-lane { height: var(--tl-lane); line-height: var(--tl-lane); }
 .tl-axis { height: var(--lh); }
 .tl-axis .tl-unit { height: var(--lh); padding: 0; border: none; background: none; font: inherit; color: var(--accent); text-decoration: underline dotted; }
 .tl-strip-label { height: var(--s4); line-height: var(--s4); }
 .tl-tracks { position: relative; min-width: 0; }
 .tl-lanes { display: block; width: 100%; cursor: crosshair; }
-.tl-strip { display: block; width: 100%; height: var(--s4); cursor: grab; border-top: 1px solid var(--line-soft); }
-.tl-tip { position: absolute; z-index: 2; pointer-events: none; padding: var(--s1) var(--s2); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-box); box-shadow: var(--pop); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--lh); color: var(--text-2); white-space: nowrap; }
+.tl-strip { display: block; width: 100%; height: var(--s4); cursor: grab; }
+.tl-tip { position: absolute; z-index: 2; pointer-events: none; padding: var(--s2) var(--s3); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-box); box-shadow: var(--pop); font-family: var(--mono); font-size: var(--fs-mono); line-height: var(--lh); color: var(--text-2); white-space: nowrap; }
 .tl-tip .head { color: var(--text); font-weight: 600; }
 .lrow.out { opacity: 0.4; }
 

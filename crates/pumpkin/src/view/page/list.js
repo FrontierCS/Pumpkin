@@ -3,6 +3,7 @@
 // so that a selection of a row's text stays.
 
 import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, tone, typing } from "./h.js";
+import { returnedView } from "./returned.js";
 
 /**
  * @typedef {{ runs: Array<ListedRun | Unlisted>, next: string | null }} Runs
@@ -25,18 +26,33 @@ import { POLL_MS, count, fill, follow, get, h, plural, sentence, setKeys, show, 
 
 const COLUMNS = [
   ["State", ""],
+  ["Task", ""],
   ["Run", ""],
   ["Time", "num"],
   ["Bound", ""],
   ["Cost", "num"],
   ["Requests", "num"],
   ["Tokens in", "num"],
-  ["Out", "num"],
+  ["Tokens out", "num"],
   ["", "rest"],
 ];
 
 // After the run's id, when some run names its member.
 const MEMBER = ["Member", ""];
+
+// A run's `rest`, as `ls` writes it, in two: its task, a word before the first ": ", and what
+// follows it; a `rest` that begins with no such word, as a sentence does, is all the second.
+/** @param {string} rest @returns {[string, string]} */
+function taskOf(rest) {
+  const at = rest.indexOf(": ");
+  const task = at < 0 ? rest : rest.slice(0, at);
+  if (task === "-" || /\s/.test(task)) return ["", rest];
+  return [task, at < 0 ? "" : rest.slice(at + 2)];
+}
+
+// A cell's class: `none` added for a count of nothing or one unknown, which the style fades.
+/** @param {string} cls @param {string} text */
+const faded = (cls, text) => (text === "-" || text === "0" || text === "" ? cls + " none" : cls);
 
 export async function runsView() {
   const body = h("tbody");
@@ -46,13 +62,28 @@ export async function runsView() {
   // Whether the columns hold the member's, as `ls` shows it only when some run names one.
   /** @type {boolean | null} */
   let membered = null;
-  const columns = () => (membered ? [...COLUMNS.slice(0, 2), MEMBER, ...COLUMNS.slice(2)] : COLUMNS);
+  const columns = () => (membered ? [...COLUMNS.slice(0, 3), MEMBER, ...COLUMNS.slice(3)] : COLUMNS);
   /** @type {{ first: Array<ListedRun | Unlisted>, older: Array<ListedRun | Unlisted>, next: string | null, cursor: number }} */
   const state = { first: [], older: [], next: null, cursor: -1 };
   // Each run's row, by its id, made once and changed after.
   /** @type {Map<string, HTMLTableRowElement>} */
   const rows = new Map();
   const open = (/** @type {string} */ id) => (location.hash = "#/run/" + encodeURIComponent(id));
+  // The runs whose result is open under their row, each with that row, which is made once and
+  // filled when the run's page has been read.
+  /** @type {Map<string, HTMLTableRowElement>} */
+  const opened = new Map();
+  const toggle = (/** @type {string} */ id) => {
+    if (!opened.delete(id)) {
+      const cell = h("td", { class: "detail" }, h("span", { class: "empty" }, "Reading the result…"));
+      opened.set(id, /** @type {HTMLTableRowElement} */ (h("tr", { class: "detail" }, cell)));
+      get("/api/runs/" + encodeURIComponent(id)).then(
+        (run) => fill(cell, run.result ? returnedView(run.result) : h("span", { class: "empty" }, "The run returned nothing.")),
+        (error) => fill(cell, h("span", { class: "error" }, "Reading it failed: " + (error instanceof Error ? error.message : String(error)))),
+      );
+    }
+    draw();
+  };
   // Whether a run's page can be opened: not for one whose record can't be read, or is another
   // build's.
   const opens = (/** @type {ListedRun | Unlisted} */ run) => run.error === undefined && run.state !== "unread";
@@ -63,8 +94,9 @@ export async function runsView() {
     if (run.error !== undefined) {
       return /** @type {Cell[]} */ ([
         { cls: "", title: null, text: "" },
+        { cls: "task", title: null, text: "" },
         { cls: "id", title: null, text: run.id },
-        { cls: "error", title: null, text: run.error, span: columns().length - 2 },
+        { cls: "error", title: null, text: run.error, span: columns().length - 3 },
       ]);
     }
     const listed = /** @type {ListedRun} */ (run);
@@ -72,17 +104,23 @@ export async function runsView() {
     const noLog = "Unknown: the run's log says nothing of its model requests yet";
     const noTokens = "Unknown: no response reported its tokens";
     const counted = (/** @type {number | null | undefined} */ n) => (n === null || n === undefined ? (tokens === null ? noLog : noTokens) : null);
+    const [task, said] = taskOf(listed.rest);
+    // A count alone: its unit is its column's head.
+    const number = (/** @type {number | null | undefined} */ n) => count(n, "").trimEnd();
     return /** @type {Cell[]} */ ([
       { cls: "state", title: null, text: sentence(listed.state), mark: "mark " + tone(listed) },
+      { cls: "task", title: task || null, text: task },
       { cls: "id", title: null, text: listed.id },
       ...(membered ? [{ cls: "", title: null, text: listed.member ?? "-" }] : []),
       { cls: "num", title: null, text: listed.time },
-      { cls: "mono", title: null, text: listed.bound },
-      { cls: "num", title: null, text: listed.usd },
-      { cls: "num", title: listed.requests === null ? noLog : null, text: count(listed.requests, "req") },
-      { cls: "num", title: counted(tokens && tokens.input), text: count(tokens && tokens.input, "tok") },
-      { cls: "num", title: counted(tokens && tokens.output), text: count(tokens && tokens.output, "tok") },
-      { cls: "rest", title: listed.rest, text: listed.rest },
+      { cls: faded("mono", listed.bound), title: null, text: listed.bound },
+      { cls: faded("num", listed.usd), title: null, text: listed.usd },
+      { cls: faded("num", number(listed.requests)), title: listed.requests === null ? noLog : null, text: number(listed.requests) },
+      { cls: faded("num", number(tokens && tokens.input)), title: counted(tokens && tokens.input), text: number(tokens && tokens.input) },
+      { cls: faded("num", number(tokens && tokens.output)), title: counted(tokens && tokens.output), text: number(tokens && tokens.output) },
+      // A run with a result says so, in a word that opens the result under its row; any other run
+      // says what it is doing, or how it ended.
+      listed.has_result ? { cls: "rest toggle", title: "Show or hide what the run returned", text: (opened.has(listed.id) ? "▾" : "▸") + " Result" } : { cls: "rest", title: said || null, text: said },
     ]);
   };
   // Sets `value` as `node`'s attribute `name`, null removing it, only where it differs.
@@ -95,7 +133,9 @@ export async function runsView() {
     const want = cells(run);
     let tr = rows.get(run.id);
     if (!tr || tr.children.length !== want.length) {
-      tr = /** @type {HTMLTableRowElement} */ (h("tr", { onclick: () => opens(run) && open(run.id) }));
+      tr = /** @type {HTMLTableRowElement} */ (
+        h("tr", { onclick: (/** @type {MouseEvent} */ event) => (event.target instanceof Element && event.target.closest("td.toggle") ? toggle(run.id) : opens(run) && open(run.id)) })
+      );
       for (const cell of want) tr.append(h("td", {}, cell.mark !== undefined ? h("span") : null, ""));
       rows.set(run.id, tr);
     }
@@ -121,7 +161,12 @@ export async function runsView() {
       membered = members;
       head.replaceChildren(...columns().map(([name, cls]) => h("th", { class: cls }, name)));
     }
-    const shown = runs.map(row);
+    // Each run's row, and under it the row of its result, if that is open.
+    const shown = runs.flatMap((run, index) => {
+      const detail = opened.get(run.id);
+      if (detail) /** @type {HTMLTableCellElement} */ (detail.firstElementChild).colSpan = columns().length;
+      return detail ? [row(run, index), detail] : [row(run, index)];
+    });
     // Rows are moved only where the order changed, and the rows of unlisted runs removed.
     shown.forEach((tr, index) => {
       if (body.children[index] !== tr) body.insertBefore(tr, body.children[index] || null);
@@ -129,13 +174,14 @@ export async function runsView() {
     while (body.children.length > shown.length) /** @type {Element} */ (body.lastElementChild).remove();
     const ids = new Set(runs.map((run) => run.id));
     for (const id of rows.keys()) if (!ids.has(id)) rows.delete(id);
+    for (const id of opened.keys()) if (!ids.has(id)) opened.delete(id);
     fill(
       more,
       h("span", { class: "empty" }, plural(runs.length, "run") + (state.next ? " shown, the newest; older ones left out " : "")),
       state.next ? h("button", { title: "Read the next page of runs, those older than the last one shown", onclick: older }, "Older runs") : null,
     );
     if (!table.isConnected) show(table, more);
-    body.children[state.cursor]?.scrollIntoView({ block: "nearest" });
+    rows.get(runs[state.cursor]?.id)?.scrollIntoView({ block: "nearest" });
   };
   const older = async () => {
     const last = state.older.length ? state.older[state.older.length - 1] : state.first[state.first.length - 1];

@@ -79,6 +79,68 @@ export function fill(node, ...children) {
 /** @param {...(Child | Child[])} nodes */
 export const show = (...nodes) => fill(byId("app"), ...nodes);
 
+// ---- a card of what matters less: what a part of the page holds back until the pointer or the
+// focus is on it, drawn beside it, above everything else. A card takes no pointer, so it holds
+// only what is read, never a control.
+
+/** @type {WeakMap<Element, () => Child | Child[]>} */
+const cards = new WeakMap();
+/** @type {{ node: HTMLElement | null, of: Element | null }} */
+const carded = { node: null, of: null };
+
+// Gives `node` the card that `content` draws when it is asked for. Returns `node`.
+/** @template {Element} T @param {T} node @param {() => Child | Child[]} content @returns {T} */
+export function card(node, content) {
+  cards.set(node, content);
+  node.classList.add("carded");
+  return node;
+}
+
+// The rows of a card: each name beside its value, and no row for a value that is null.
+/** @param {Array<[string, Child] | null | false>} rows */
+export const cardRows = (rows) =>
+  h(
+    "dl",
+    {},
+    rows.flatMap((row) => (row && row[1] !== null && row[1] !== undefined && row[1] !== "" ? [h("dt", {}, row[0]), h("dd", {}, row[1])] : [])),
+  );
+
+function hideCard() {
+  carded.node?.remove();
+  carded.node = carded.of = null;
+}
+
+// Shows the card of the nearest carded element at or above `target`, below it, or above it where
+// the window ends first; none hides the card shown.
+/** @param {EventTarget | null} target */
+function showCard(target) {
+  let of = target instanceof Element ? target : null;
+  while (of && !cards.has(of)) of = of.parentElement;
+  if (of === carded.of && (!of || carded.node?.isConnected)) return;
+  hideCard();
+  const content = of && cards.get(of);
+  if (!of || !content) return;
+  const node = h("div", { class: "card", role: "tooltip" }, content());
+  // A card whose every row is empty has nothing to show.
+  if (!node.textContent) return;
+  document.body.append(node);
+  const [at, box, gap] = [of.getBoundingClientRect(), node.getBoundingClientRect(), 6];
+  const left = Math.max(8, Math.min(at.left, innerWidth - box.width - 8));
+  const below = at.bottom + gap + box.height <= innerHeight - 8 || at.top - gap - box.height < 8;
+  node.style.setProperty("left", left + "px");
+  node.style.setProperty("top", (below ? at.bottom + gap : at.top - gap - box.height) + "px");
+  [carded.node, carded.of] = [node, of];
+}
+
+addEventListener("mouseover", (event) => showCard(event.target));
+addEventListener("focusin", (event) => showCard(event.target));
+addEventListener("focusout", hideCard);
+// What a card is of can be drawn anew under the pointer, or scrolled from under it.
+addEventListener("mousemove", () => carded.of && !carded.of.isConnected && hideCard());
+addEventListener("scroll", hideCard, true);
+addEventListener("mousedown", hideCard);
+document.documentElement.addEventListener("mouseleave", hideCard);
+
 // ---- the address: `#/` the runs, `#/run/<id>` a run, with what is selected in its query
 
 export function route() {
@@ -500,7 +562,7 @@ export const seconds = (nanos) => (nanos === null || nanos === undefined ? null 
 // A setting of this browser's, such as a panel's width, which the page works without: storage
 // can be refused, as in a private window.
 /** @param {string} name @returns {string | null} */
-function setting(name) {
+export function setting(name) {
   try {
     return localStorage.getItem("pumpkin." + name);
   } catch {
@@ -508,7 +570,7 @@ function setting(name) {
   }
 }
 /** @param {string} name @param {string} value */
-function keepSetting(name, value) {
+export function keepSetting(name, value) {
   try {
     localStorage.setItem("pumpkin." + name, value);
   } catch {
