@@ -144,6 +144,14 @@ impl Ec2<'_> {
             // instance, whatever its template says, so that nothing of it runs on, or is billed.
             "--instance-initiated-shutdown-behavior",
             "terminate",
+            // The instance serves its metadata only with a token, and the response travels one
+            // hop. So a container behind the instance's bridge, a hop further, gets none,
+            // whatever the template or the account's defaults say. A launch's options replace its
+            // template's:
+            // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/ec2/2016-11-15/service-2.json#L48295-L48305
+            // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/ec2/2016-11-15/service-2.json#L70862-L70864
+            "--metadata-options",
+            "HttpEndpoint=enabled,HttpTokens=required,HttpPutResponseHopLimit=1",
             "--tag-specifications",
             tags,
             "--user-data",

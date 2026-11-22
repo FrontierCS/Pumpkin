@@ -124,7 +124,7 @@ pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
     let (Some(instance), None) = (instances.next(), instances.next()) else {
         return Err(format!(
             "no one instance in {} carries the tag {TAG}={name}: name the controller that \
-             `deploy/aws` made, with the `name` and `region` it was applied with",
+             `deploy/aws` made, with the `name` and the region it was applied with",
             region.as_str()
         ));
     };

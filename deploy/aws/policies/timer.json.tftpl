@@ -1,0 +1,26 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "ec2:TerminateInstances"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "ec2:InstanceProfile": [
+            "${sandbox_profile_arn}"
+          ]
+        },
+        "Null": {
+          "ec2:ResourceTag/pumpkin:run": [
+            "false"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "arn:${partition}:ec2:${region}:${account}:instance/*"
+      ]
+    }
+  ],
+  "Version": "2012-10-17"
+}

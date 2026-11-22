@@ -348,9 +348,8 @@ fn reached(settings: &Settings) -> Result<()> {
         &mut aws(settings, &["sts", "get-caller-identity"]),
         Some(credentials),
     )?;
-    // A client whose policy can't list schedules is refused here, before a run, not at its end.
-    let policy = "give the client the policy that `deploy/aws` makes, which lets it list \
-                  `EventBridge` Scheduler's schedules, by applying it again, and run this again";
+    // Credentials that can't list schedules are refused here, before a run, not at its end.
+    let policy = "grant these credentials `scheduler:ListSchedules` on `*`, and run this again";
     schedules(settings, "no-such-run", Some(policy))?;
     if let Some(modal) = &settings.modal {
         let token = format!(

@@ -13,6 +13,12 @@ const LAUNCH_TEMPLATES: List = List::new(
     "the ARNs of the envelope's launch templates",
 );
 
+/// The instance types of the envelope's launch templates, the only ones a create launches.
+const INSTANCE_TYPES: List = List::new(
+    "instance_types",
+    "the instance types of the envelope's launch templates",
+);
+
 /// The role of the instance profile of the envelope's launch templates.
 const SANDBOX_ROLE: Placeholder =
     Placeholder::new("sandbox_role_arn", "the ARN of the sandbox instances' role");
@@ -92,6 +98,17 @@ pub(crate) const CALLS: Calls = Calls {
                 Test::Bool,
                 Key::Named("ec2:IsLaunchTemplateResource"),
                 Values::Are(&[Part::Text("true")]),
+            ),
+            // A launch may override a template's instance type, which is no resource. So the
+            // statement holds the instance to the templates' types. Of RunInstances' resource
+            // types, only the instance has this key. IAM's guide holds a launch's type in one
+            // statement on `*` this way:
+            // https://github.com/salesforce/policy_sentry/blob/2575f2b873e1c1f0fb604a448dee392f39ad74ad/policy_sentry/shared/data/iam-definition.json#L112478-L112507
+            // https://github.com/awsdocs/iam-user-guide/blob/e2b8637a825b9f292bb04af61277d067dfcc5676/doc_source/reference_policies_elements_condition_operators.md?plain=1#L332-L374
+            Condition::new(
+                Test::StringEqualsIfExists,
+                Key::Named("ec2:InstanceType"),
+                Values::Listed(&INSTANCE_TYPES),
             ),
         ]),
     )

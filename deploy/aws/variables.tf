@@ -8,11 +8,6 @@ variable "name" {
   }
 }
 
-variable "region" {
-  description = "The region of everything the module makes, such as `us-west-1`."
-  type        = string
-}
-
 variable "vpc_id" {
   description = "The VPC of the sandboxes and of the controller that runs them."
   type        = string
@@ -39,14 +34,12 @@ variable "modal_workspace" {
 # `usd_per_hour` is what its instance type costs an hour in the region, as AWS's pricing page
 # gives it.
 variable "classes" {
-  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars, its instances' root volume, in GiB, which is `root_volume_gib` without it, and the most seconds an instance's start may take, its images' pulls among them, which is 1740 without it."
+  description = "The classes of sandbox, by name: each one's instance type, CPU flags and, for roles that require it alone, CPU model; and, if given, what an instance costs an hour, in US dollars."
   type = map(object({
-    instance_type   = string
-    cpu_features    = set(string)
-    cpu_model       = optional(string)
-    usd_per_hour    = optional(number)
-    root_volume_gib = optional(number)
-    startup_seconds = optional(number)
+    instance_type = string
+    cpu_features  = set(string)
+    cpu_model     = optional(string)
+    usd_per_hour  = optional(number)
   }))
 
   # Each name is a bare TOML key of the settings and a Pumpkin name.
@@ -81,7 +74,7 @@ variable "classes" {
 }
 
 variable "root_volume_gib" {
-  description = "The root volume of a sandbox's instance, in GiB, for a class that gives none, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' 45 GB images."
+  description = "The root volume of each sandbox's instance, in GiB, which holds its images and its workspace or scratch: 100 fits the GPU tasks' reference agents' 45 GB images."
   type        = number
   default     = 100
 }
@@ -150,28 +143,6 @@ variable "members" {
   validation {
     condition     = alltrue([for key in flatten(values(var.members)) : !strcontains(key, "\n")])
     error_message = "A member's key holds a newline, which would list a line of its own: give each key as the one line of its machine's `~/.config/pumpkin/ssh/key.pub`."
-  }
-}
-
-variable "client_roles" {
-  description = "The names of the IAM roles of the members' machines, each of which gets the client policy; leave empty when the roles live elsewhere and an administrator attaches `client_policy_arn` by hand."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for r in var.client_roles : can(regex("^[A-Za-z0-9+=,.@_-]{1,64}$", r))])
-    error_message = "A client role is not an IAM role name (1 to 64 of A-Z, a-z, 0-9 and `+=,.@_-`, with no path): give one such as `alice-laptop`."
-  }
-}
-
-variable "client_users" {
-  description = "The names of the IAM users of the members' machines, each of which gets the client policy; leave empty when the users live elsewhere and an administrator attaches `client_policy_arn` by hand."
-  type        = list(string)
-  default     = []
-
-  validation {
-    condition     = alltrue([for u in var.client_users : can(regex("^[A-Za-z0-9+=,.@_-]{1,64}$", u))])
-    error_message = "A client user is not an IAM user name (1 to 64 of A-Z, a-z, 0-9 and `+=,.@_-`, with no path): give one such as `alice`."
   }
 }
 

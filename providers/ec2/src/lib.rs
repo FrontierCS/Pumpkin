@@ -16,9 +16,9 @@
 //! built for, which runs cloud-init and systemd, as AL2023 does, and holds Docker, ECR's
 //! credential helper, nftables and curl, as the instance's boot installs none; has each network
 //! interface and EBS volume of its instances deleted when the instance is terminated, so that a
-//! sandbox is freed with its instance; serves its instances' metadata only with a token,
-//! within one hop of the instance; and launches an instance type built on the Nitro System, the
-//! only kind whose latest serial console EC2 reads ([`Provider::console`]).
+//! sandbox is freed with its instance; and launches an instance type built on the Nitro System,
+//! the only kind whose latest serial console EC2 reads ([`Provider::console`]). A template's
+//! metadata options don't matter: each launch sets its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
@@ -92,9 +92,29 @@ struct Timer {
     role_arn: RoleArn,
 }
 
-/// The name of an `EventBridge` Scheduler schedule group, such as `pumpkin`.
+/// The name of an `EventBridge` Scheduler schedule group, such as `pumpkin`, in Scheduler's
+/// grammar of names.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "String")]
 struct GroupName(String);
+
+impl TryFrom<String> for GroupName {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        // Scheduler's grammar: 1 to 64 of ASCII letters, digits, `-`, `_` and `.`:
+        // https://github.com/boto/botocore/blob/45d5dde95e31f22f0ffeea5a790ea2ea79d1035c/botocore/data/scheduler/2021-06-30/service-2.json#L1134-L1139
+        let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte);
+        if !(1..=64).contains(&name.len()) || !name.bytes().all(allowed) {
+            return Err(format!(
+                "`{}` is not a schedule group's name: use one such as `pumpkin`, of 1 to 64 \
+                 ASCII letters, digits, `-`, `_` and `.`",
+                name.escape_debug()
+            ));
+        }
+        Ok(Self(name))
+    }
+}
 
 /// The envelope's image repositories, one for each kind of image a sandbox pulls, each as a `T`.
 // Without `deny_unknown_fields`, as `Settings`.
@@ -172,9 +192,31 @@ fn reserved_mib(memory_mib: u64) -> u64 {
     reserved
 }
 
-/// The ID of an EC2 launch template, such as `lt-0123456789abcdef0`.
+/// The ID of an EC2 launch template, such as `lt-0123456789abcdef0`: `lt-` and 17 lowercase
+/// hexadecimal digits.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "String")]
 struct TemplateId(String);
+
+impl TryFrom<String> for TemplateId {
+    type Error = String;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        // The check keeps a `,` or `=` out of `--launch-template`'s shorthand. EC2 describes a
+        // launch template's ID in this form:
+        // https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/examples/ec2/describe-launch-templates.rst#L21
+        let hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+        let digits = id.strip_prefix("lt-").filter(|digits| digits.len() == 17);
+        if !digits.is_some_and(|digits| digits.bytes().all(hex)) {
+            return Err(format!(
+                "`{}` is not a launch template's ID: use one such as `lt-0123456789abcdef0`, \
+                 as `aws ec2 describe-launch-templates` lists it",
+                id.escape_debug()
+            ));
+        }
+        Ok(Self(id))
+    }
+}
 
 /// The EC2 envelope, reached, which every sandbox of the provider's runs in, and the operator's
 /// Docker engine, which holds what they pull until it is pushed.

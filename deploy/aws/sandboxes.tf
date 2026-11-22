@@ -13,16 +13,9 @@ resource "aws_iam_role" "sandbox" {
 resource "aws_iam_role_policy" "sandbox" {
   name = "pull"
   role = aws_iam_role.sandbox.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      { Effect = "Allow", Action = "ecr:GetAuthorizationToken", Resource = "*" },
-      {
-        Effect   = "Allow"
-        Action   = local.ecr_pull
-        Resource = [for repository in aws_ecr_repository.images : repository.arn]
-      },
-    ]
+  policy = templatefile("${path.module}/policies/sandbox.json.tftpl", {
+    roles_repository_arn    = aws_ecr_repository.images["roles"].arn
+    sandboxd_repository_arn = aws_ecr_repository.images["sandboxd"].arn
   })
 }
 
@@ -50,13 +43,6 @@ resource "aws_launch_template" "class" {
     arn = aws_iam_instance_profile.sandbox.arn
   }
 
-  # Tokens required, within one hop, so a container behind the instance's bridge gets none.
-  metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
-  }
-
   # A public address, through which pulls reach ECR over the internet gateway.
   network_interfaces {
     device_index                = 0
@@ -70,7 +56,7 @@ resource "aws_launch_template" "class" {
     device_name = data.aws_ami.al2023.root_device_name
 
     ebs {
-      volume_size           = coalesce(each.value.root_volume_gib, var.root_volume_gib)
+      volume_size           = var.root_volume_gib
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
@@ -117,21 +103,12 @@ resource "aws_iam_role" "timer" {
 }
 
 resource "aws_iam_role_policy" "timer" {
-  name   = "terminate"
-  role   = aws_iam_role.timer.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [local.terminate_sandboxes] })
-}
-
-locals {
-  # Terminate an instance that a run of this envelope launched, as its `pumpkin:run` tag and its
-  # instance profile say, so that no other envelope's in the account is reached.
-  terminate_sandboxes = {
-    Effect   = "Allow"
-    Action   = "ec2:TerminateInstances"
-    Resource = "${local.ec2}:instance/*"
-    Condition = {
-      Null      = { "ec2:ResourceTag/pumpkin:run" = "false" }
-      ArnEquals = { "ec2:InstanceProfile" = aws_iam_instance_profile.sandbox.arn }
-    }
-  }
+  name = "terminate"
+  role = aws_iam_role.timer.id
+  policy = templatefile("${path.module}/policies/timer.json.tftpl", {
+    partition           = data.aws_partition.current.partition
+    region              = local.region
+    account             = local.account
+    sandbox_profile_arn = aws_iam_instance_profile.sandbox.arn
+  })
 }

@@ -1,4 +1,4 @@
-<svg width="827px" height="956px" xmlns="http://www.w3.org/2000/svg">
+<svg width="827px" height="992px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -74,55 +74,59 @@
 </tspan>
     <tspan x="10px" y="496px"><tspan>  controller_instance_arn: the ARN of the controller's instance</tspan>
 </tspan>
-    <tspan x="10px" y="514px"><tspan>  launch_template_arns: a list of the ARNs of the envelope's launch templates</tspan>
+    <tspan x="10px" y="514px"><tspan>  instance_types: a list of the instance types of the envelope's launch</tspan>
 </tspan>
-    <tspan x="10px" y="532px"><tspan>  members_parameter_arn: the ARN of the SSM parameter of the controller's</tspan>
+    <tspan x="10px" y="532px"><tspan>    templates</tspan>
 </tspan>
-    <tspan x="10px" y="550px"><tspan>    members</tspan>
+    <tspan x="10px" y="550px"><tspan>  launch_template_arns: a list of the ARNs of the envelope's launch templates</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>  modal_repository_arn: the ARN of the repository that Modal imports images from</tspan>
+    <tspan x="10px" y="568px"><tspan>  members_parameter_arn: the ARN of the SSM parameter of the controller's</tspan>
 </tspan>
-    <tspan x="10px" y="586px"><tspan>  partition: the AWS partition, such as `aws`</tspan>
+    <tspan x="10px" y="586px"><tspan>    members</tspan>
 </tspan>
-    <tspan x="10px" y="604px"><tspan>  region: the AWS region of the deployment</tspan>
+    <tspan x="10px" y="604px"><tspan>  modal_repository_arn: the ARN of the repository that Modal imports images from</tspan>
 </tspan>
-    <tspan x="10px" y="622px"><tspan>  roles_repository_arn: the ARN of the roles' images' repository</tspan>
+    <tspan x="10px" y="622px"><tspan>  partition: the AWS partition, such as `aws`</tspan>
 </tspan>
-    <tspan x="10px" y="640px"><tspan>  sandbox_profile_arn: the ARN of the sandbox instances' instance profile</tspan>
+    <tspan x="10px" y="640px"><tspan>  region: the AWS region of the deployment</tspan>
 </tspan>
-    <tspan x="10px" y="658px"><tspan>  sandbox_role_arn: the ARN of the sandbox instances' role</tspan>
+    <tspan x="10px" y="658px"><tspan>  roles_repository_arn: the ARN of the roles' images' repository</tspan>
 </tspan>
-    <tspan x="10px" y="676px"><tspan>  sandboxd_repository_arn: the ARN of the repository of the images of `sandboxd`</tspan>
+    <tspan x="10px" y="676px"><tspan>  sandbox_profile_arn: the ARN of the sandbox instances' instance profile</tspan>
 </tspan>
-    <tspan x="10px" y="694px"><tspan>  settings_parameter_arn: the ARN of the SSM parameter of the controller's</tspan>
+    <tspan x="10px" y="694px"><tspan>  sandbox_role_arn: the ARN of the sandbox instances' role</tspan>
 </tspan>
-    <tspan x="10px" y="712px"><tspan>    settings</tspan>
+    <tspan x="10px" y="712px"><tspan>  sandboxd_repository_arn: the ARN of the repository of the images of `sandboxd`</tspan>
 </tspan>
-    <tspan x="10px" y="730px"><tspan>  timer_group: the name of the timer's schedule group</tspan>
+    <tspan x="10px" y="730px"><tspan>  settings_parameter_arn: the ARN of the SSM parameter of the controller's</tspan>
 </tspan>
-    <tspan x="10px" y="748px"><tspan>  timer_role_arn: the ARN of the timer's role</tspan>
+    <tspan x="10px" y="748px"><tspan>    settings</tspan>
 </tspan>
-    <tspan x="10px" y="766px">
+    <tspan x="10px" y="766px"><tspan>  timer_group: the name of the timer's schedule group</tspan>
 </tspan>
-    <tspan x="10px" y="784px"><tspan>Each principal's placeholders:</tspan>
+    <tspan x="10px" y="784px"><tspan>  timer_role_arn: the ARN of the timer's role</tspan>
 </tspan>
-    <tspan x="10px" y="802px"><tspan>  controller: account, launch_template_arns, members_parameter_arn,</tspan>
+    <tspan x="10px" y="802px">
 </tspan>
-    <tspan x="10px" y="820px"><tspan>    modal_repository_arn, partition, region, roles_repository_arn,</tspan>
+    <tspan x="10px" y="820px"><tspan>Each principal's placeholders:</tspan>
 </tspan>
-    <tspan x="10px" y="838px"><tspan>    sandbox_profile_arn, sandbox_role_arn, sandboxd_repository_arn,</tspan>
+    <tspan x="10px" y="838px"><tspan>  controller: account, instance_types, launch_template_arns,</tspan>
 </tspan>
-    <tspan x="10px" y="856px"><tspan>    settings_parameter_arn, timer_group, timer_role_arn</tspan>
+    <tspan x="10px" y="856px"><tspan>    members_parameter_arn, modal_repository_arn, partition, region,</tspan>
 </tspan>
-    <tspan x="10px" y="874px"><tspan>  timer: account, partition, region, sandbox_profile_arn</tspan>
+    <tspan x="10px" y="874px"><tspan>    roles_repository_arn, sandbox_profile_arn, sandbox_role_arn,</tspan>
 </tspan>
-    <tspan x="10px" y="892px"><tspan>  sandbox: roles_repository_arn, sandboxd_repository_arn</tspan>
+    <tspan x="10px" y="892px"><tspan>    sandboxd_repository_arn, settings_parameter_arn, timer_group, timer_role_arn</tspan>
 </tspan>
-    <tspan x="10px" y="910px"><tspan>  modal-pull: modal_repository_arn</tspan>
+    <tspan x="10px" y="910px"><tspan>  timer: account, partition, region, sandbox_profile_arn</tspan>
 </tspan>
-    <tspan x="10px" y="928px"><tspan>  client: controller_instance_arn</tspan>
+    <tspan x="10px" y="928px"><tspan>  sandbox: roles_repository_arn, sandboxd_repository_arn</tspan>
 </tspan>
-    <tspan x="10px" y="946px">
+    <tspan x="10px" y="946px"><tspan>  modal-pull: modal_repository_arn</tspan>
+</tspan>
+    <tspan x="10px" y="964px"><tspan>  client: controller_instance_arn</tspan>
+</tspan>
+    <tspan x="10px" y="982px">
 </tspan>
   </text>
 
