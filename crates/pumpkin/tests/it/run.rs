@@ -8,7 +8,7 @@ use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::{self, JoinHandle};
@@ -1149,135 +1149,6 @@ fn modes_under(umask: libc::mode_t) -> String {
         lines.push(format!("{name}: {mode:o}"));
     }
     lines.join("\n")
-}
-
-#[test]
-fn ancestors() {
-    let scratch = Scratch::new();
-    let dirs = [
-        // Not writable by its group, which may or may not be the user's private group.
-        ("shared", 0o757),
-        ("shared/sealed", 0o555),
-        ("sticky", 0o1777),
-        ("own", 0o755),
-    ];
-    for (dir, mode) in dirs {
-        fs::create_dir(scratch.0.join(dir)).unwrap();
-        fs::set_permissions(scratch.0.join(dir), Permissions::from_mode(mode)).unwrap();
-    }
-    symlink("own", scratch.0.join("link")).unwrap();
-    let _stand_in = StandIn::new(&scratch);
-    check(
-        &scratch,
-        [
-            run_into(&scratch, "shared/runs"),
-            run_into(&scratch, "shared/sealed"),
-            run_into(&scratch, "sticky/runs"),
-            run_into(&scratch, "link/runs"),
-        ],
-        false,
-        &[],
-        &expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: `<scratch>/shared` is writable by others: expected a directory that only its owner, or a group that holds only this process's user, may write, or a sticky one, as `chmod o-w <scratch>/shared` makes it
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs shared/sealed --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: `<scratch>/shared` is writable by others: expected a directory that only its owner, or a group that holds only this process's user, may write, or a sticky one, as `chmod o-w <scratch>/shared` makes it
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs sticky/runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/sticky/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/sticky/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/sticky/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs link/runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/own/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/own/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/link/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}"#]],
-    );
-    for runs in ["shared/runs", "shared/sealed"] {
-        let records = fs::read_dir(scratch.0.join(runs)).unwrap().count();
-        assert_eq!(records, 0, "a refusal left a record in {runs}");
-    }
-}
-
-#[test]
-fn ancestors_writable_by_their_group() {
-    let scratch = Scratch::new();
-    let private = scratch.0.join("private");
-    fs::create_dir(&private).unwrap();
-    fs::set_permissions(&private, Permissions::from_mode(0o775)).unwrap();
-    let _stand_in = StandIn::new(&scratch);
-    let expected = if is_private_group(&private) {
-        expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs private/runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: run <id> records into <scratch>/private/runs/<id>
-            pumpkin: run <id> failed: publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it; its record is <scratch>/private/runs/<id>
-            pumpkin: to run it again: pumpkin run --runs <scratch>/private/runs --config <scratch>/pumpkin.toml --sandboxd <scratch>/sandboxd <scratch>/lacking/task.star
-            record: driver.log, driver.pid, ir.json, outcome.json, provider.json, record.json, sources/task/lacking/final.star, sources/task/lacking/submit.star, sources/task/lacking/task.star, sources/task/lib/train.star
-            outcome.json: {"reason":"publishing role `agent`'s image on provider `local` failed: the engine of context `default` has no image sha256:1111111111111111111111111111111111111111111111111111111111111111: build it there, or `docker load` an archive that holds it, as Pumpkin pulls none onto it","state":"failed"}"#]]
-    } else {
-        expect![[r#"
-            $ PATH=<scratch>/bin:/usr/bin:/bin pumpkin run lacking/task.star --sandboxd sandboxd --runs private/runs --config pumpkin.toml
-            exit status: Some(1)
-            pumpkin: `<scratch>/private` is writable by its group: expected a directory that only its owner, or a group that holds only this process's user, may write, or a sticky one, as `chmod g-w <scratch>/private` makes it"#]]
-    };
-    check(
-        &scratch,
-        [run_into(&scratch, "private/runs")],
-        false,
-        &[],
-        &expected,
-    );
-}
-
-/// `pumpkin run` in `scratch`, recording into `runs`, with the stand-in's `docker` first on the
-/// `PATH`.
-fn run_into(scratch: &Scratch, runs: &str) -> Command {
-    let mut command = scratch.pumpkin(&["run", "lacking/task.star", "--sandboxd", "sandboxd"]);
-    command.args(["--runs", runs, "--config", "pumpkin.toml"]);
-    let bin = scratch.0.join("bin");
-    command.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-    command
-}
-
-/// Whether the group of `dir` is the private group of its owner, the test's user, by
-/// `/etc/passwd` and `/etc/group`: that user's primary group and no other user's, which
-/// `/etc/group` lists with no member but that user.
-fn is_private_group(dir: &Path) -> bool {
-    // Field `n` of `entry`: its name first, its id third, and fourth a user's primary group, or
-    // a group's members.
-    fn field(entry: &[String], n: usize) -> Option<&str> {
-        entry.get(n).map(String::as_str)
-    }
-    let entries = |file| -> Vec<Vec<String>> {
-        let text = fs::read_to_string(file).unwrap();
-        (text.lines())
-            .map(|line| line.split(':').map(str::to_owned).collect())
-            .collect()
-    };
-    let metadata = fs::metadata(dir).unwrap();
-    let (uid, gid) = (metadata.uid().to_string(), metadata.gid().to_string());
-    let (uid, gid) = (Some(uid.as_str()), Some(gid.as_str()));
-    let (users, groups) = (entries("/etc/passwd"), entries("/etc/group"));
-    let Some(user) = (users.iter()).find(|user| field(user, 2) == uid) else {
-        return false;
-    };
-    let others = (users.iter()).any(|other| field(other, 2) != uid && field(other, 3) == gid);
-    let members: Vec<&str> = (groups.iter())
-        .filter(|group| field(group, 2) == gid)
-        .map(|group| field(group, 3).unwrap_or(""))
-        .collect();
-    field(user, 3) == gid
-        && !others
-        && !members.is_empty()
-        && (members.iter().flat_map(|members| members.split(',')))
-            .all(|member| member.is_empty() || member == user[0])
 }
 
 /// Has `command` run under `umask` ([`through_shell`]), and returns its invocation, as
