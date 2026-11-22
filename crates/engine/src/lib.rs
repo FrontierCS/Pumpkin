@@ -779,9 +779,9 @@ fn image_id(context: &ContextName, reference: &str) -> Result<Option<String>, Fa
 /// `failure`, of a `docker` command that failed for a reason its caller doesn't foresee, and what
 /// to do about it.
 ///
-/// That is to check the engine, if the command was killed at its bound, as Docker reported
-/// nothing; nothing, if its deadline had passed before it could start, which only the caller can
-/// say what to do about; or else what `failure` says.
+/// If the command was killed at its bound, Docker reported nothing, so it is to check the engine.
+/// If its deadline had passed before it could start, it is nothing: only the caller can say what to
+/// do then. Otherwise it is what `failure` says.
 pub fn fix_reported(failure: &Failure) -> String {
     match failure {
         Failure::Unended { started: true, .. } => format!(
@@ -808,8 +808,8 @@ where
 /// Runs `docker` against `context` alone with `args`, killing it at `bound`, and returns its
 /// output.
 ///
-/// Of the environment, `docker` gets only `HOME`, `PATH` and `DOCKER_CONFIG`, and the context as
-/// `DOCKER_CONTEXT`, so that the context named alone steers it.
+/// Of the environment, `docker` gets only `HOME`, `PATH` and `DOCKER_CONFIG`. It gets the context
+/// as `DOCKER_CONTEXT`. So the context named alone steers it.
 ///
 /// A [`Failure`] says whether `docker` didn't start, failed or was killed at `bound`, and what
 /// Docker reported, for the caller to add what that means.
@@ -830,7 +830,7 @@ where
     let kept = Environment::Only(&["HOME", "PATH", "DOCKER_CONFIG"]);
     let mut command = stdx::process::command("docker", kept);
     // In the environment, rather than as `--context`, so that the name a failure gives the command
-    // is its own: `docker` takes `DOCKER_CONTEXT` as it takes `--context`, but for a `DOCKER_HOST`
+    // is its own. `docker` takes `DOCKER_CONTEXT` as it takes `--context`, unless `DOCKER_HOST` is
     // set, which this environment never holds.
     // https://github.com/docker/cli/blob/f9ced58158d5e0b358052432244b483774a1983d/cli/command/cli.go#L453-L471
     command.env("DOCKER_CONTEXT", context.as_str()).args(args);

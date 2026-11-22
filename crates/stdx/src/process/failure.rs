@@ -80,7 +80,7 @@ impl Failure {
     }
 
     /// What went wrong, as the failure's message says it, without what was expected or what to
-    /// fix: for a caller that says what to do itself.
+    /// fix. It serves a caller that says what to do itself.
     pub fn unadvised(&self) -> String {
         self.parts().0
     }
