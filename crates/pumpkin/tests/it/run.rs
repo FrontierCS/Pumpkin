@@ -477,19 +477,9 @@ fn refusals() {
     scratch.write_task_in("it's broken", "tasks", &ir);
     scratch.write_task_in("a~b", "tasks", &ir);
     write_configurations(&scratch);
-    let given =
-        |cpus: &str| format!("[docker]\ncontext = \"default\"\ncpus = \"{cpus}\"\n\n{LOCAL}");
-    scratch.write("backward.toml", &given("3-1"));
-    scratch.write("empty.toml", &given(""));
     let run = |entry, config: &str| {
         let mut command = scratch.pumpkin(&["run", entry, "--sandboxd", "sandboxd"]);
         command.args(["--runs", "runs", "--config", config]);
-        command
-    };
-    // Their CPU lists don't parse, which is refused before `docker` runs: none is on their `PATH`.
-    let unreached = |config: &str| {
-        let mut command = run("workflow/task.star", config);
-        command.env("PATH", scratch.0.join("nowhere"));
         command
     };
     // Paths that need quoting for a space alone, and for a newline, which makes the command
@@ -504,8 +494,6 @@ fn refusals() {
         Step::from(run("budgeted/task.star", "conf/uncached.toml")),
         Step::from(run("budgeted/task.star", "conf/unwritten.toml")),
         Step::from(run("budgeted/task.star", "conf/uncosted.toml")),
-        Step::from(unreached("backward.toml")),
-        Step::from(unreached("empty.toml")),
     ];
     check(
         &scratch,
@@ -562,23 +550,7 @@ fn refusals() {
             $ pumpkin run budgeted/task.star --sandboxd sandboxd --runs runs --config conf/uncosted.toml
             exit status: Some(1)
             pumpkin: conf/uncosted.toml: `agent` has a model budget, but `gpt-6-astra` has no price for `cached` or `cache_write` tokens: price them in its `usd_per_mtok` in the configuration, or remove the budget
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star
-            $ PATH=<scratch>/nowhere pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config backward.toml
-            exit status: Some(1)
-            pumpkin: backward.toml: TOML parse error at line 3, column 8
-              |
-            3 | cpus = "3-1"
-              |        ^^^^^
-            `3-1` is no CPU list: expected one such as `0-3,8`
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/backward.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star
-            $ PATH=<scratch>/nowhere pumpkin run workflow/task.star --sandboxd sandboxd --runs runs --config empty.toml
-            exit status: Some(1)
-            pumpkin: empty.toml: TOML parse error at line 3, column 8
-              |
-            3 | cpus = ""
-              |        ^^
-            the CPU list is empty: name one CPU at least, such as `0`
-            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/empty.toml --sandboxd <scratch>/sandboxd <scratch>/workflow/task.star"#]],
+            pumpkin: to run it again: pumpkin run --runs <scratch>/runs --config <scratch>/conf/uncosted.toml --sandboxd <scratch>/sandboxd <scratch>/budgeted/task.star"#]],
     );
     assert!(!scratch.0.join("runs").exists(), "a refusal made a record");
 }

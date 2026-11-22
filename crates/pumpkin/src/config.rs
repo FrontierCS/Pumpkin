@@ -9,7 +9,6 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use docker::CpuList;
 use engine::ContextName;
 use gateway::GatewayAddress;
 use route::{Headers, Key, Serving, UpstreamUrl};
@@ -90,7 +89,6 @@ pub(crate) struct SentModal {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Docker {
     pub(crate) context: ContextName,
-    pub(crate) cpus: Option<CpuList>,
 }
 
 #[derive(Deserialize)]

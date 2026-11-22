@@ -434,7 +434,7 @@ fn config_path(given: Option<String>) -> Result<PathBuf, String> {
 
 fn configured_engine(path: &Path, reader: Reader) -> Result<Engine, String> {
     let config::Config {
-        docker: config::Docker { context, cpus: _ },
+        docker: config::Docker { context },
         providers: _,
         gateway: _,
         upstreams: _,

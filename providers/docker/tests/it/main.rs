@@ -251,7 +251,7 @@ fn reached() -> &'static Result<Engine, String> {
 
 fn connected() -> &'static Result<Docker<'static>, String> {
     static PROVIDER: OnceLock<Result<Docker<'static>, String>> = OnceLock::new();
-    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?, None))
+    PROVIDER.get_or_init(|| Docker::connect(reached().as_ref().map_err(String::clone)?))
 }
 
 // Shared by every run of the tests, as a machine's runs share their workspace's.
@@ -785,7 +785,7 @@ struct Platform;
 
 impl Subject for Platform {
     fn connect(&self) -> Result<Box<dyn Provider + '_>, String> {
-        Ok(Box::new(Docker::connect(engine(), None)?))
+        Ok(Box::new(Docker::connect(engine())?))
     }
 
     fn locals(&self, dir: &Path) -> Locals {

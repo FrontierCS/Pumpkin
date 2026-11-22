@@ -173,9 +173,6 @@ Example, of a machine whose runs go to the person's controller, and Modal:
 
 [docker] is the machine's Docker engine:
   context       The context that reaches it, as `docker context ls` lists it.
-  cpus          The CPUs that its sandboxes may use, as the kernel lists CPUs,
-                such as \"1-7,9-15\". Each run gets whole cores of its own.
-                Without it, sandboxes may use every online CPU.
 
 [providers.<name>.<kind>] is a provider that the machine's runs may place roles
 on. <name> names it, and <kind> is its kind. Its table holds the kind's
@@ -184,8 +181,8 @@ settings:
                 settings. A docker provider must be the configuration's only
                 provider: a machine runs its roles either on its own engine or
                 on providers of kind ec2 and modal. Its one class,
-                `container`, offers the CPUs that sandboxes may use and the
-                machine's memory. It offers the CPU flags that /proc/cpuinfo
+                `container`, offers the machine's online CPUs and its
+                memory. It offers the CPU flags that /proc/cpuinfo
                 lists for every CPU, no CPU model and no GPU.
   ec2           Sandboxes on EC2 instances of their own, in the envelope that
                 its settings name. The instances pull their images from the

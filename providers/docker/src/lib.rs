@@ -38,8 +38,6 @@ use crate::cpus::Cpus;
 
 mod cpus;
 
-pub use cpus::CpuList;
-
 /// The name of the provider's one class of sandbox, a container on the engine's host, which
 /// gives a role as many CPUs as the provider gives sandboxes, and as much memory as the host has.
 const CLASS: Name = Name::from_static("container");
@@ -67,10 +65,9 @@ pub struct Docker<'e> {
 }
 
 impl<'e> Docker<'e> {
-    /// The provider on `engine`, whose sandboxes are given the CPUs of `cpus`, or else all that
-    /// are online. It refuses an engine that can't enforce every container's limits, and `cpus`
-    /// that aren't online.
-    pub fn connect(engine: &'e Engine, cpus: Option<&CpuList>) -> Result<Self, String> {
+    /// The provider on `engine`, whose sandboxes are given the CPUs that are online. It refuses an
+    /// engine that can't enforce every container's limits.
+    pub fn connect(engine: &'e Engine) -> Result<Self, String> {
         let report = engine.report();
         let &engine::Host {
             memory_limit,
@@ -93,7 +90,7 @@ impl<'e> Docker<'e> {
         )?;
         // The engine runs on this machine's kernel, as its containers mount this machine's paths,
         // so its CPUs are those the kernel here lists.
-        let cpus = Cpus::of_machine(id, cpus)?;
+        let cpus = Cpus::of_machine(id)?;
         let offers = Offers {
             cpu_millis: cpus.cpu_millis(),
             memory_bytes,
