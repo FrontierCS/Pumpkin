@@ -7,6 +7,9 @@ The rules for Pumpkin's rustdoc, comments, commit messages and pull request text
   has none by default, and a test has none: a `//` of a line or two, only for a why
 - WRITE a doc as the contract, in plain sentences: what the caller gets and must give, never how
   it works. Write `# Errors` and `# Panics` only for a condition the caller can act on
+- WRITE one idea per sentence, subject and verb first: split a sentence that chains clauses
+  with commas or semicolons. Say an action with its verb, not a noun made from it, and drop a
+  qualifier that changes nothing the reader does
 - KEEP a comment to the code it sits by: say the condition, never which callers, roles or
   features reach it, and never what another module does
 - WRITE each rule once, at its home. Elsewhere, name it only where a reader would otherwise
