@@ -13,10 +13,10 @@ use aws::{Bound, Cli, Region};
 use jiff::Timestamp;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use stdx::process::Environment;
+use stdx::process::{self, Echo, Environment, Run};
 use stdx::{Context as _, Deadline};
 
-use super::{Name, SHORT_TIMEOUT, bounded};
+use super::{Name, SHORT_TIMEOUT};
 use crate::iam::CLIENT;
 use crate::say;
 
@@ -99,13 +99,11 @@ pub(super) fn kept() -> Result<PathBuf, String> {
         .permissions(fs::Permissions::from_mode(0o700));
     let made = made.tempdir_in(&config);
     let made = made.context(config.display())?;
-    let mut keygen = stdx::process::command("ssh-keygen", Environment::Only(&["PATH"]));
+    let mut keygen = process::command("ssh-keygen", Environment::Only(&["PATH"]));
     keygen.args(["-q", "-t", "ed25519", "-N", "", "-C", "pumpkin", "-f"]);
-    bounded(
-        keygen.arg(made.path().join("key")),
-        "ssh-keygen",
-        SHORT_TIMEOUT,
-    )?;
+    keygen.arg(made.path().join("key"));
+    let how = Run::new(process::Bound::Within(SHORT_TIMEOUT), Echo::Silent);
+    process::run(&mut keygen, how).map_err(|failure| failure.to_string())?;
     if let Err(error) = fs::rename(made.path(), &kept)
         && !kept.join("key.pub").exists()
     {

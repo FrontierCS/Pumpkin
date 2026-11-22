@@ -38,10 +38,9 @@ use provider::RunTag;
 use runtime::Record;
 use schema::ir::{Image, Sha256Digest};
 use stdx::Context as _;
-use stdx::process::Environment;
+use stdx::process::{Bound, Echo, Environment, Failure, Run};
 
 use crate::cli::Exit;
-use crate::controller::bounded;
 use crate::iam::JOB;
 use crate::manifest::{Entry, INCOMING, Kind, MANIFESTS, Manifest};
 use crate::workspace::{self, Workspace};
@@ -474,22 +473,26 @@ fn addresses() -> Result<(Ipv4Addr, Ipv4Addr), String> {
 fn curl(args: &[&str]) -> Result<String, String> {
     // Only `PATH`, so that no proxy variable sends it elsewhere.
     let mut curl = stdx::process::command("curl", Environment::Only(&["PATH"]));
-    let seconds = IMDS_SECONDS.to_string();
     curl.args([
         "--disable",
         "--silent",
         "--show-error",
         "--fail",
         "--max-time",
-        &seconds,
+        &IMDS_SECONDS.to_string(),
     ]);
     curl.args(args);
     let shown = format!("curl {}", args.last().copied().unwrap_or_default());
     let timeout = Duration::from_secs(2 * IMDS_SECONDS);
-    let printed = bounded(&mut curl, &shown, timeout).map_err(|error| {
-        format!("{error}: expected the instance metadata service to answer, as on an EC2 instance")
+    let how = Run::new(Bound::Within(timeout), Echo::Silent).named(&shown);
+    let printed = stdx::process::run(&mut curl, how).map_err(|failure| match failure {
+        Failure::Unstarted { .. } | Failure::Unwatched { .. } => failure.to_string(),
+        Failure::Unended { .. } | Failure::Exited { .. } => format!(
+            "{}: expected the instance metadata service to answer, as on an EC2 instance",
+            failure.unadvised()
+        ),
     })?;
-    Ok(String::from_utf8_lossy(&printed).trim().to_owned())
+    Ok(String::from_utf8_lossy(&printed.stdout).trim().to_owned())
 }
 
 /// The ids below `dir`, each a job's or a tree's, by name, which sort as their starts do: the names
@@ -809,8 +812,9 @@ pub(crate) fn disk(path: &str) -> Result<Disk, String> {
     // Only `PATH`, so that no locale changes what it prints.
     let mut df = stdx::process::command("df", Environment::Only(&["PATH"]));
     df.args(["--block-size=1", "--output=size,avail", "--", path]);
-    let printed = bounded(&mut df, &format!("df {path}"), DF_TIMEOUT)?;
-    let printed = String::from_utf8_lossy(&printed);
+    let how = Run::new(Bound::Within(DF_TIMEOUT), Echo::Silent);
+    let printed = stdx::process::run(&mut df, how).map_err(|failure| failure.to_string())?;
+    let printed = String::from_utf8_lossy(&printed.stdout);
     // A line of headings, then the sizes.
     let sizes = printed.lines().nth(1).unwrap_or_default();
     let sizes: Vec<Option<u64>> = (sizes.split_whitespace())
@@ -818,7 +822,7 @@ pub(crate) fn disk(path: &str) -> Result<Disk, String> {
         .collect();
     let [Some(size_bytes), Some(free_bytes)] = sizes[..] else {
         return Err(format!(
-            "`df {path}` printed `{}`: expected a line of headings, then the size and what is \
+            "`df` printed `{}`: expected a line of headings, then the size and what is \
              available, in bytes, as GNU `df` prints them",
             printed.trim().escape_debug()
         ));

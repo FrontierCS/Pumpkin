@@ -21,10 +21,10 @@ use std::time::{Duration, Instant};
 use provider::RunTag;
 use schema::workflow::Workflow;
 use stdx::Context as _;
-use stdx::process::Environment;
+use stdx::process::{Bound, Echo, Environment, Failure, Run};
 
 use super::linking::Build;
-use super::{Name, Reached, SHORT_TIMEOUT, bounded};
+use super::{Name, Reached, SHORT_TIMEOUT};
 use crate::link::{JobStart, StartAnswer, StartRequest};
 use crate::manifest::store::Missing;
 use crate::{config, manifest, say};
@@ -55,10 +55,19 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
     let git = |dir: &Path, args: &[&str]| {
         let mut git = stdx::process::command("git", Environment::Only(&["HOME", "PATH"]));
         git.arg("-C").arg(dir).args(args);
-        bounded(&mut git, &format!("git {}", args.join(" ")), SHORT_TIMEOUT)
+        // Named by its subcommand, which `-C` comes before.
+        let name = format!("git {}", args[0]);
+        let how = Run::new(Bound::Within(SHORT_TIMEOUT), Echo::Silent).named(&name);
+        stdx::process::run(&mut git, how).map(|output| output.stdout)
     };
-    let top = git(dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
-        format!("{entry}: {error}: a run on the controller sends the entry's git repository: put it in one")
+    let top = git(dir, &["rev-parse", "--show-toplevel"]).map_err(|failure| match failure {
+        Failure::Exited { .. } => format!(
+            "{entry}: {}: a run on the controller sends the entry's git repository: put it in one",
+            failure.unadvised()
+        ),
+        Failure::Unstarted { .. } | Failure::Unwatched { .. } | Failure::Unended { .. } => {
+            format!("{entry}: {failure}")
+        }
     })?;
     let top = Path::new(OsStr::from_bytes(top.strip_suffix(b"\n").unwrap_or(&top)));
     let top = fs::canonicalize(top).context(top.display())?;
@@ -84,7 +93,8 @@ pub(super) fn tree(entry: &crate::star::Entry, args: &lang::Args) -> Result<Tree
             "--others",
             "--exclude-standard",
         ],
-    )?;
+    )
+    .map_err(|failure| failure.to_string())?;
     let reach = match crate::star::reached(entry, args)? {
         Ok(reach) => reach,
         Err(problems) => return Err(crate::task_problems(entry, &problems)),

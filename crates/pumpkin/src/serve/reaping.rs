@@ -9,7 +9,7 @@ use members::Member;
 use provider::RunTag;
 use runtime::Writer;
 use stdx::Context as _;
-use stdx::process::Environment;
+use stdx::process::{Bound, Echo, Environment, Run};
 use tempfile::NamedTempFile;
 
 use crate::link::{CancelAnswer, CancelRequest};
@@ -99,9 +99,10 @@ fn stop(id: &RunTag, held: &Path) -> Result<(), String> {
         ]),
     );
     ctl.arg("--user").arg("stop").arg(&unit);
-    if let Err(error) = crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10)) {
+    let how = Run::new(Bound::Within(Duration::from_mins(10)), Echo::Silent);
+    if let Err(failure) = stdx::process::run(&mut ctl, how) {
         return if super::exists(held)? {
-            Err(error)
+            Err(failure.to_string())
         } else {
             Ok(())
         };

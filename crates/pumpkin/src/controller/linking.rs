@@ -8,7 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use schema::ir::Sha256Digest;
-use stdx::{Context as _, Deadline};
+use stdx::Context as _;
+use stdx::process::{Bound, Echo, Failure, Run};
 
 use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
@@ -313,24 +314,24 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
     let mut ssh = Reached::ssh_command();
     ssh.arg("-E").arg(diagnostics.path());
     reached.remote(&mut ssh, at, &link::installing(&build.hashed.manifest));
-    let installed = stdx::process::fed(&mut ssh, &archive, Deadline::after(SHORT_TIMEOUT));
-    match installed {
-        Ok(Some(result)) if result.status.success() => Ok(()),
-        Ok(Some(result)) if !result.stderr.is_empty() => Err(Unlinked::Failed(format!(
-            "installing serve failed: {}",
-            String::from_utf8_lossy(&result.stderr).trim_end()
-        ))),
-        Ok(None) => Err(Unlinked::Failed(format!(
-            "installing serve timed out after {} s",
-            SHORT_TIMEOUT.as_secs()
-        ))),
-        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(Unlinked::Failed(
-            format!("installing serve failed: {error}"),
-        )),
-        Ok(Some(_)) | Err(_) => Err(unlinked(
+    let how = Run::new(Bound::Within(SHORT_TIMEOUT), Echo::Silent).input(&archive);
+    match stdx::process::run(&mut ssh, how) {
+        Ok(_) => Ok(()),
+        // Only the install writes to standard error, as `ssh` writes its diagnostics to a file.
+        Err(failure @ Failure::Exited { .. }) if !failure.reported().is_empty() => Err(
+            Unlinked::Failed(format!("installing serve failed: {}", failure.unadvised())),
+        ),
+        Err(Failure::Exited { .. }) => Err(unlinked(
             reached,
             &diagnostics,
             Unanswered::Unreached("ended during the install".to_owned()),
         )),
+        Err(
+            failure @ (Failure::Unstarted { .. }
+            | Failure::Unwatched { .. }
+            | Failure::Unended { .. }),
+        ) => Err(Unlinked::Failed(format!(
+            "installing serve failed: {failure}"
+        ))),
     }
 }
