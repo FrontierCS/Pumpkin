@@ -1202,10 +1202,6 @@ fn machine(context: &str) -> String {
     format!("{}\n{LOCAL}", docker_table(context))
 }
 
-// What `docker info` prints of the stand-in's engine: a rootless one that enforces every limit,
-// on a host of 8 GiB of memory, and keeps its images in the containerd image store.
-const INFO: &str = r#"{"MemoryLimit":true,"SwapLimit":true,"CpuCfsQuota":true,"CPUSet":true,"PidsLimit":true,"DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"SecurityOptions":["name=seccomp,profile=builtin","name=rootless"],"KernelVersion":"6.0","OperatingSystem":"stand-in","ServerVersion":"29.0.0","ClientInfo":{"Version":"29.0.0"},"MemTotal":8589934592}"#;
-
 /// `command` run by a shell after `setup`, in a process group of its own.
 fn through_shell(command: &Command, setup: &str) -> Command {
     let mut shell = stdx::process::command("/bin/sh", Environment::Inherited);
