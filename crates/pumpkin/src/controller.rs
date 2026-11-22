@@ -1,6 +1,8 @@
-//! Direct SSH connections to a controller. A workspace keeps its last known address. A command
-//! tries the actual request there first and repairs a failed opening under the workspace's lock.
-//! Each link owns its SSH process. Dropping it frees the connection.
+//! SSH connections to a controller, each to its private address, or through the EC2 Instance
+//! Connect Endpoint in its subnet, as the machine's configuration says (`Connection`). A workspace
+//! keeps its last known address. A command tries the actual request there first and repairs a
+//! failed opening under the workspace's lock. Each link owns its SSH process. Dropping it frees
+//! the connection.
 
 mod aws;
 mod commands;
@@ -30,11 +32,15 @@ pub(crate) use viewing::{Unviewed, Viewing};
 
 use self::aws::{Located, find, kept};
 pub(crate) use self::aws::{instances, live, tag, tagged};
+use crate::config::Connection;
+use crate::iam::CLIENT;
 use crate::workspace::Workspace;
 use crate::{config, next, say};
 
 /// The controller's user, which runs every Pumpkin process there.
 pub(crate) const USER: &str = "pumpkin";
+/// The variable that names the file of a tunnel's standard error, in its `ssh`'s environment.
+const TUNNEL_LOG: &str = "PUMPKIN_TUNNEL_LOG";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT_TIMEOUT: Duration = Duration::from_mins(10);
 
@@ -121,6 +127,7 @@ fn private(path: &Path) -> Result<File, String> {
 pub(crate) struct Reached {
     region: Region,
     name: Name,
+    connection: Connection,
     alias: String,
     kept: PathBuf,
     location: Location,
@@ -132,6 +139,7 @@ impl Reached {
         let config::Controller {
             name,
             region,
+            connection,
             modal: _,
         } = settings;
         let alias = format!("{name}.{}", region.as_str());
@@ -140,6 +148,7 @@ impl Reached {
         Ok(Self {
             region: region.clone(),
             name: name.clone(),
+            connection: *connection,
             alias,
             kept,
             location,
@@ -151,9 +160,9 @@ impl Reached {
         self.location.recent()?;
         match self.location.found()? {
             Some(found) => Ok(found),
-            None => self
-                .location
-                .repair(&self.name, None, || find(&self.region, &self.name)),
+            None => self.location.repair(&self.name, None, || {
+                find(&self.region, &self.name, self.connection)
+            }),
         }
     }
 
@@ -182,22 +191,62 @@ impl Reached {
 
     fn repair(&self, previous: &Found, said: &str) -> Result<Found, String> {
         self.location.repair(&self.name, Some(previous), || {
-            let probe = aws::answers(previous.at.address);
-            find(&self.region, &self.name).map_err(|error| match probe {
+            // Through the endpoint, this machine doesn't reach the address.
+            let probe = match self.connection {
+                Connection::Direct => aws::answers(previous.at.address),
+                Connection::Endpoint => Ok(()),
+            };
+            let found = find(&self.region, &self.name, self.connection);
+            found.map_err(|error| match probe {
                 Ok(()) => format!("{said}; finding the controller again: {error}"),
                 Err(probe) => format!("{said}; SSH at its last private address: {probe}: {}; finding the controller again: {error}", aws::unanswered(&probe)),
             })
         })
     }
 
-    fn ssh_command() -> Command {
-        stdx::process::command("ssh", Environment::Only(&["HOME", "PATH"]))
-    }
-
-    fn remote(&self, ssh: &mut Command, at: &Located, remote: &str) {
-        ssh.args(self.ssh_options())
+    /// `ssh` of `remote` on the controller at `at`, by this machine's [`Connection`], with the
+    /// files that it and its tunnel write their diagnostics to.
+    fn ssh(&self, at: &Located, remote: &str) -> Result<(Command, Diagnostics), String> {
+        let ssh = self.location.diagnostics()?;
+        let (mut command, tunnel) = match self.connection {
+            Connection::Direct => {
+                let command = stdx::process::command("ssh", Environment::Only(&["HOME", "PATH"]));
+                (command, None)
+            }
+            Connection::Endpoint => {
+                let tunnel = self.location.diagnostics()?;
+                let (mut command, line) = self.tunnel(at);
+                command.env(TUNNEL_LOG, tunnel.path()).arg("-o").arg(line);
+                (command, Some(tunnel))
+            }
+        };
+        command.arg("-E").arg(ssh.path());
+        command
+            .args(self.ssh_options())
             .arg(format!("{USER}@{}", at.address))
             .arg(remote);
+        Ok((command, Diagnostics { ssh, tunnel }))
+    }
+
+    /// `ssh`, and its `ProxyCommand` option, which opens a tunnel through the endpoint to port 22
+    /// of the controller at `at`, with the tunnel's standard error to the file that
+    /// [`TUNNEL_LOG`] names.
+    // As EC2's guide connects OpenSSH, and `aws ec2-instance-connect ssh` runs `open-tunnel`, but
+    // given the instance alone, so that `aws` finds the endpoint of its subnet:
+    // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-using-eice.html#ssh-single-connection
+    // https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/customizations/ec2instanceconnect/ssh.py#L332-L372
+    // https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/customizations/ec2instanceconnect/ssh.py#L431-L437
+    fn tunnel(&self, at: &Located) -> (Command, String) {
+        let args = ["--instance-id", &at.instance, "--remote-port", "22"];
+        let (ssh, line) = ::aws::Cli::proxied("ssh", &self.region, &CLIENT.tunnel, &args);
+        // `ssh` reads `%` as a token's start, and `%%` as a `%`. The log goes by a variable, which
+        // `sh` expands and `ssh` leaves alone, so its path needs no quoting. Else the tunnel's
+        // errors go to the remote command's standard error, which is the person's.
+        let option = format!(
+            "ProxyCommand={} 2>\"${TUNNEL_LOG}\"",
+            line.replace('%', "%%")
+        );
+        (ssh, option)
     }
 
     fn ssh_options(&self) -> Vec<String> {
@@ -231,4 +280,11 @@ impl Reached {
         ]);
         words
     }
+}
+
+/// The files that an `ssh` writes its own diagnostics to, and the tunnel that it runs, if any,
+/// its standard error.
+struct Diagnostics {
+    ssh: tempfile::NamedTempFile,
+    tunnel: Option<tempfile::NamedTempFile>,
 }

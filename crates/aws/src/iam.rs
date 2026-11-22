@@ -96,7 +96,12 @@ pub enum Resource {
 pub enum Test {
     ArnEquals,
     Bool,
+    /// The key's address is in a value's CIDR block. A value of an address alone is its `/32`.
+    // As IAM reads it:
+    // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html#Conditions_IPAddress
+    IpAddress,
     Null,
+    NumericEquals,
     StringEquals,
     /// `StringEquals` where the resource's context holds the key, and true where it doesn't. A
     /// statement uses it for a key that only some of its resource types have.

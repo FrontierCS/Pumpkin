@@ -1,4 +1,4 @@
-<svg width="740px" height="3638px" xmlns="http://www.w3.org/2000/svg">
+<svg width="740px" height="3692px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -382,41 +382,47 @@
 </tspan>
     <tspan x="10px" y="3304px"><tspan>The client uses AWS CLI v2, ssh, ssh-keygen and git from PATH. It sends the</tspan>
 </tspan>
-    <tspan x="10px" y="3322px"><tspan>task's files and starts its job over SSH to the controller's private address.</tspan>
+    <tspan x="10px" y="3322px"><tspan>task's files and starts its job over SSH to the controller's private address. It</tspan>
 </tspan>
-    <tspan x="10px" y="3340px"><tspan>It uses up to four connections for large task uploads. The machine is in the</tspan>
+    <tspan x="10px" y="3340px"><tspan>uses up to four connections for large task uploads. A machine outside the</tspan>
 </tspan>
-    <tspan x="10px" y="3358px"><tspan>controller's VPC, or reaches it through a VPN that translates its addresses</tspan>
+    <tspan x="10px" y="3358px"><tspan>controller's VPC sets `connection = "endpoint"`. It then connects through the</tspan>
 </tspan>
-    <tspan x="10px" y="3376px"><tspan>into the VPC's. The first command creates a key. The controller admits the key</tspan>
+    <tspan x="10px" y="3376px"><tspan>EC2 Instance Connect Endpoint that deploy/aws makes, with AWS CLI 2.12.0 or</tspan>
 </tspan>
-    <tspan x="10px" y="3394px"><tspan>once its admin lists it under the person's name in deploy/aws's `members`.</tspan>
+    <tspan x="10px" y="3394px"><tspan>later. The first command creates a key. The controller admits the key once its</tspan>
 </tspan>
-    <tspan x="10px" y="3412px"><tspan>Until then, each command is refused with the line to send the admin. The client</tspan>
+    <tspan x="10px" y="3412px"><tspan>admin lists it under the person's name in deploy/aws's `members`. Until then,</tspan>
 </tspan>
-    <tspan x="10px" y="3430px"><tspan>keeps that key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
+    <tspan x="10px" y="3430px"><tspan>each command is refused with the line to send the admin. The client keeps that</tspan>
 </tspan>
-    <tspan x="10px" y="3448px"><tspan>  name          The `name` that deploy/aws was applied with.</tspan>
+    <tspan x="10px" y="3448px"><tspan>key and the pinned host key in $HOME/.config/pumpkin/ssh/.</tspan>
 </tspan>
-    <tspan x="10px" y="3466px"><tspan>  region        The region it was applied in.</tspan>
+    <tspan x="10px" y="3466px"><tspan>  name          The `name` that deploy/aws was applied with.</tspan>
 </tspan>
-    <tspan x="10px" y="3484px">
+    <tspan x="10px" y="3484px"><tspan>  region        The region it was applied in.</tspan>
 </tspan>
-    <tspan x="10px" y="3502px"><tspan>[controller.modal] is the Modal provider that the controller's runs may place</tspan>
+    <tspan x="10px" y="3502px"><tspan>  connection    How SSH reaches the controller: "direct", the default, to its</tspan>
 </tspan>
-    <tspan x="10px" y="3520px"><tspan>roles on, if any. It takes the settings of a provider of kind modal, but</tspan>
+    <tspan x="10px" y="3520px"><tspan>                private address, or "endpoint", through the endpoint.</tspan>
 </tspan>
-    <tspan x="10px" y="3538px"><tspan>`images`, which the module's settings give, and `dials_from`, which each run</tspan>
+    <tspan x="10px" y="3538px">
 </tspan>
-    <tspan x="10px" y="3556px"><tspan>sets:</tspan>
+    <tspan x="10px" y="3556px"><tspan>[controller.modal] is the Modal provider that the controller's runs may place</tspan>
 </tspan>
-    <tspan x="10px" y="3574px"><tspan>  profile       As modal's. The profile is in Modal's configuration file,</tspan>
+    <tspan x="10px" y="3574px"><tspan>roles on, if any. It takes the settings of a provider of kind modal, but</tspan>
 </tspan>
-    <tspan x="10px" y="3592px"><tspan>                ~/.modal.toml. Each run is sent that file if it is there.</tspan>
+    <tspan x="10px" y="3592px"><tspan>`images`, which the module's settings give, and `dials_from`, which each run</tspan>
 </tspan>
-    <tspan x="10px" y="3610px"><tspan>  classes       As modal's.</tspan>
+    <tspan x="10px" y="3610px"><tspan>sets:</tspan>
 </tspan>
-    <tspan x="10px" y="3628px">
+    <tspan x="10px" y="3628px"><tspan>  profile       As modal's. The profile is in Modal's configuration file,</tspan>
+</tspan>
+    <tspan x="10px" y="3646px"><tspan>                ~/.modal.toml. Each run is sent that file if it is there.</tspan>
+</tspan>
+    <tspan x="10px" y="3664px"><tspan>  classes       As modal's.</tspan>
+</tspan>
+    <tspan x="10px" y="3682px">
 </tspan>
   </text>
 

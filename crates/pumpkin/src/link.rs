@@ -20,8 +20,11 @@ pub(crate) mod store;
 
 use std::io::{self, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use members::Member;
+use rustix::process::{Pid, Signal, kill_process};
 use schema::frame::{self, MAX_BODY_BYTES};
 use schema::ir::Sha256Digest;
 use serde::de::DeserializeOwned;
@@ -794,9 +797,31 @@ impl Link {
     }
 }
 
+// How long a dropped link's `ssh` has to exit on SIGTERM before it is killed, as `docker stop`
+// waits for a container:
+// https://github.com/moby/moby/blob/1f98bfc8473f1c9753cbc80bdc30c04dfea266e3/daemon/config/config_linux.go#L40
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
 impl Drop for Link {
     fn drop(&mut self) {
         // What it was asked is answered or given up on, and a `serve` still there ends with it.
+        // SIGTERM first, on which `ssh`'s client loop exits and ends its `ProxyCommand`, a tunnel
+        // through the endpoint. A SIGKILL would leave the tunnel open, holding one of the
+        // endpoint's connections:
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L1533-L1534
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L1707-L1710
+        // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/clientloop.c#L2900-L2908
+        let _ = kill_process(Pid::from_child(&self.child), Signal::TERM);
+        let by = Instant::now() + STOP_GRACE;
+        let mut pause = Duration::from_millis(1);
+        while Instant::now() < by {
+            match self.child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(_)) | Err(_) => return,
+            }
+            thread::sleep(pause);
+            pause = (pause * 2).min(Duration::from_millis(10));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -9,6 +9,7 @@ Its state is in an S3 bucket of the account, so no laptop can lose it.
 | --- | --- |
 | the sandboxes' security group: out to HTTPS and to the controller's ephemeral ports; nothing in | sandboxes pull from ECR and dial the gateway at port 0's pick, and reach nothing else |
 | the controller's security group: in from the sandboxes on the ephemeral ports, and from the VPC's IPv4 blocks on port 22; out to HTTPS | the gateway, and `sshd`, which admits for `pumpkin` the members' keys alone |
+| an EC2 Instance Connect Endpoint in the controller's subnet, without client IP preservation, and its security group: out to the controller's port 22 alone | `ssh` from a member's machine outside the VPC, through a tunnel that IAM allows a principal, as the client policy does |
 | ECR `pumpkin-<name>/roles` and `/sandboxd`, immutable tags, untagged images expire after 14 days | private images, pushed tagged by digest |
 | a launch template per class: the AMI, the type, a root volume deleted with the instance | the EC2 classes, and what the `ec2` provider relies on; the provider's launch sets the metadata options |
 | the sandboxes' role: ECR pulls only | each sandbox's pulls |
@@ -90,9 +91,10 @@ output "client_config" {
 Give an `output` likewise for each other output that "What the outputs feed" or "Versions" names
 and the admin reads. `pumpkin` reaches the controller at its private address. Machines in the
 controller's VPC reach its port 22, and `sshd` admits for `pumpkin` only the keys that `members`
-lists. A machine elsewhere needs a route into the VPC that gives its traffic one of the VPC's
-addresses, such as a VPN that translates its addresses into the VPC's. A team of one lists its own
-key.
+lists. A machine elsewhere goes through the endpoint, as "Machines outside the VPC" says. A VPC
+holds one endpoint at most, so each team's controller needs a VPC that holds no other endpoint
+([considerations](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-with-ec2-instance-connect-endpoint.html#ec2-instance-connect-endpoint-prerequisites)).
+A team of one lists its own key.
 
 Then, in that directory:
 
@@ -159,6 +161,39 @@ reaches the controller from a member's machine.
 `sshd` logs `AuthorizedKeysCommand path is not absolute` for each key that the list lacks, as it
 reads `none` as the command's path. It refuses the key, as it should.
 
+## Machines outside the VPC
+
+A member's machine outside the controller's VPC, such as a laptop, reaches the controller through
+the endpoint. Its `~/.config/pumpkin/pumpkin.toml` sets `connection = "endpoint"` in
+`[controller]`, beside `client_config`'s `name` and `region`. Each of its connections then goes
+through the endpoint: `ssh` runs `aws ec2-instance-connect open-tunnel` as its `ProxyCommand`, as
+AWS's guide connects with OpenSSH
+([single connection](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-using-eice.html#ssh-single-connection)).
+Nothing is opened to the internet: EC2 Instance Connect admits a tunnel only for an IAM principal
+whose policy allows it `ec2-instance-connect:OpenTunnel` on the endpoint. The client policy allows
+it only to port 22 of the controller's private address. A policy that allows the action on every
+resource, as an administrator's does, allows it too. Such a principal may also push a key with EC2
+Instance Connect, which `sshd` admits for `ubuntu`, and so log in as `ubuntu` from anywhere. The
+endpoint's security group reaches only the controller's port 22. The machine needs:
+
+- AWS CLI v2, 2.12.0 or later, the first with `open-tunnel`
+  ([2.12.0](https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/.changes/2.12.0.json)),
+  and credentials that it finds without `AWS_PROFILE`, such as its default profile's, of an IAM
+  user or role that the client policy is attached to. `pumpkin` passes `aws` none of its own
+  variables but those of where its configuration is.
+- `pumpkin`'s Linux x86-64 build, which each member's machine runs, with ssh, ssh-keygen and git,
+  as `pumpkin help config` says.
+- Its key, `~/.config/pumpkin/ssh/key.pub`, listed in `members`, as "Members" says.
+- `connection = "endpoint"` in `[controller]`, as above.
+
+An endpoint carries 20 connections at once, for the whole team, each for an hour at most, and
+throttles high volumes
+([considerations](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-with-ec2-instance-connect-endpoint.html#ec2-instance-connect-endpoint-prerequisites)).
+`pumpkin` opens a connection again when one ends, so a `wait` of a longer run carries on, and a
+large task's upload is slower than from the VPC. A command that starts a stopped controller waits
+for its `sshd` only through the retries of its connections. `sshd` logs each login through the
+endpoint from the endpoint's address. CloudTrail logs each tunnel with its principal.
+
 ## What the outputs feed
 
 Each is the module's output of that name. `terraform output` reads it where the root gives it as
@@ -173,7 +208,8 @@ an `output` of its own.
   needs. The team's root attaches it to the machine's role or user, or an administrator attaches it
   by hand, as `aws iam attach-role-policy --role-name <role> --policy-arn <arn>` (or
   `attach-user-policy`). `policies/client.json.tftpl` says what it allows. The machine reaches
-  port 22 at the controller's private address from the controller's VPC.
+  port 22 at the controller's private address from the controller's VPC, or through the endpoint
+  from elsewhere.
 - `terraform output -raw contributor_policy_arn` is the managed IAM policy that a contributor's
   machine needs for `cargo xtask live`, which the root attaches to it as it does any policy.
   `policies/contributor.json.tftpl` says what it allows: the client's, what `pumpkin-admin

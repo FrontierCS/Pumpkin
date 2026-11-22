@@ -33,7 +33,8 @@ resource "aws_vpc_security_group_egress_rule" "sandbox_gateway" {
   referenced_security_group_id = aws_security_group.controller.id
 }
 
-# The controller's `sshd` is reached only from its VPC, and its gateway only from the sandboxes.
+# The controller's `sshd` is reached only from its VPC, through the endpoint from elsewhere, and
+# its gateway only from the sandboxes.
 # The group's description stays as it is, since the provider replaces a group whose description
 # changes, with every rule in it.
 resource "aws_security_group" "controller" {
@@ -55,8 +56,8 @@ data "aws_vpc" "this" {
   id = var.vpc_id
 }
 
-# Each IPv4 block associated with the VPC reaches port 22. rust-lang's EFS module admits its VPC's
-# primary block, read the same way
+# Each IPv4 block associated with the VPC reaches port 22, the endpoint's address among them.
+# rust-lang's EFS module admits its VPC's primary block, read the same way
 # (https://github.com/rust-lang/simpleinfra/blob/75291a2cdf0dd5ba60860701274f9500703102da/terraform/shared/modules/efs-filesystem/main.tf#L23-L48).
 # A block that is still being associated gets its rule at the next apply. `sshd` admits for
 # `pumpkin` only the keys that `members` lists, and for `ubuntu` only a key that EC2 Instance
@@ -80,4 +81,35 @@ resource "aws_vpc_security_group_egress_rule" "controller_https" {
   from_port         = 443
   to_port           = 443
   cidr_ipv4         = "0.0.0.0/0"
+}
+
+# The way to the controller's `sshd` from a machine outside the VPC, for an IAM principal whose
+# policy allows `ec2-instance-connect:OpenTunnel` on it, as the client's does. It is in the
+# controller's subnet, so its traffic meets no network ACL. Without client IP preservation, a
+# tunnel's traffic comes from the endpoint's address in the subnet, which `controller_ssh` admits
+# (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/eice-security-groups.html#resource-security-group-rules).
+# A VPC holds one endpoint at most, so this module can't be applied twice in one VPC
+# (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-with-ec2-instance-connect-endpoint.html#ec2-instance-connect-endpoint-prerequisites).
+resource "aws_ec2_instance_connect_endpoint" "controller" {
+  subnet_id          = var.subnet_id
+  security_group_ids = [aws_security_group.endpoint.id]
+  preserve_client_ip = false
+}
+
+# The endpoint's group admits what reaches it from EC2 Instance Connect, whatever its rules, and
+# sends only to the controller's port 22. Without a group of its own, the endpoint takes the VPC's
+# default group, which may send anywhere.
+resource "aws_security_group" "endpoint" {
+  name        = "${local.prefix}-endpoint"
+  description = "Pumpkin controller endpoint: out to ssh on the controller"
+  vpc_id      = var.vpc_id
+}
+
+resource "aws_vpc_security_group_egress_rule" "endpoint_ssh" {
+  security_group_id            = aws_security_group.endpoint.id
+  description                  = "ssh to the controller"
+  ip_protocol                  = "tcp"
+  from_port                    = 22
+  to_port                      = 22
+  referenced_security_group_id = aws_security_group.controller.id
 }

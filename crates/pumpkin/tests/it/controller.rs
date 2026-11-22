@@ -2117,6 +2117,36 @@ fn ls_answered_there() {
 }
 
 #[test]
+fn endpoint_connection_tunnels() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    let config = scratch.0.join("client/.config/pumpkin/pumpkin.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    let endpoint = "region = \"us-west-1\"\nconnection = \"endpoint\"\n";
+    fs::write(
+        &config,
+        text.replacen("region = \"us-west-1\"\n", endpoint, 1),
+    )
+    .unwrap();
+    connect(&scratch, &client);
+    served(&scratch);
+    let ls = ls_ran(&scratch, &client, &[]);
+    assert!(ls.contains("exit status: Some(0)"), "{ls}");
+    let argv = fs::read_to_string(scratch.0.join("bin/argv")).unwrap();
+    let proxies = argv
+        .lines()
+        .filter(|line| line.starts_with("ProxyCommand="));
+    check(
+        &scratch,
+        &proxies.collect::<Vec<_>>().join("\n"),
+        &[(INSTANCE, "<instance>")],
+        &expect![[
+            r#"ProxyCommand=aws ec2-instance-connect open-tunnel --instance-id <instance> --remote-port 22 --no-cli-pager --output json --region us-west-1 2>"$PUMPKIN_TUNNEL_LOG""#
+        ]],
+    );
+}
+
+#[test]
 fn ls_lists_other_formats_unread() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);

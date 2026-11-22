@@ -318,6 +318,10 @@ fn contexts(conditions: &[Condition], filling: &Filling) -> Result<Vec<Context>,
                 ("string", choices)
             }
             Test::Bool => ("boolean", choices),
+            // The value as the context's address, which is in the value's range if the value is
+            // an address alone.
+            Test::IpAddress => ("ip", choices),
+            Test::NumericEquals => ("numeric", choices),
             // `Null` with `false` holds when the key has any value, and with `true` when it has
             // none.
             Test::Null if choices == [vec!["false".to_owned()]] => {

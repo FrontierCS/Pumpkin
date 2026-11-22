@@ -44,7 +44,8 @@ through the driver first.
 
 The controller is the same `pumpkin`, under `pumpkin controller`, on the EC2 instance that
 `deploy/aws` makes. A machine whose configuration names `[controller]` sends `run` there over `ssh`
-to its private address. It follows, lists, stops, reaps and views the runs there. The client's
+to its private address, or through the EC2 Instance Connect Endpoint in its subnet, as the
+machine's configuration says. It follows, lists, stops, reaps and views the runs there. The client's
 `controller serve` receives the files by content and starts jobs. It streams their output, copies
 ended records, and handles the commands that inspect or stop runs. Each job runs in its own systemd
 unit, from the install of its build that the client uploaded for `serve`. On boot,
@@ -492,8 +493,8 @@ reads a task's source below its root (`Root`) and serves the standard library's.
 driver process. `run` starts a run and drives it in that process. `ending` follows a run and says
 how it ended. `reaping` stops runs and removes what they left. `controller` reaches the controller,
 which its `aws` finds and starts. The controller admits the keys that its admin lists. A command
-keeps one direct SSH connection for its requests (`Reached`). The workspace saves the controller's
-address and serialises repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
+keeps one SSH connection for its requests (`Reached`), direct or through the endpoint
+(`Connection`). The workspace saves the controller's address and serialises repairs. `controller`'s `send` sends a run's job. It shares large task uploads by digest across up
 to four connections, then starts the job on the first. Its `copy` receives an ended record file by
 file, `record.json` last. Its `listing` lists the runs there for `ls`. Its `viewing` carries
 `view`'s requests there (`Viewing`). Each goes over a `Link` that its `linking` opens. Its `follow`
@@ -622,8 +623,8 @@ developer installs.
 The Terraform module that makes one team's Pumpkin on AWS, as [its README](deploy/aws/README.md)
 says. The admin lists the team's members by key. The module makes the EC2 envelope that `ec2`
 relies on, the repositories that runs push to, Modal's pull role, the sandboxes' AMI, and the
-controller. The controller comes with the SSM parameters of its jobs' settings and its members'
-keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
+controller with the endpoint that reaches it from outside its VPC. The controller comes with the
+SSM parameters of its jobs' settings and its members' keys. Its first boot installs the packages that its jobs run, and then runs a pinned release's
 `pumpkin-admin install`. The module is a child module. An admin's root calls it at a Pumpkin
 release's tag, so a release's `pumpkin-admin install` and its module agree. The root holds the
 provider's configuration, the backend and the lock file, and the provider's region is the module's.

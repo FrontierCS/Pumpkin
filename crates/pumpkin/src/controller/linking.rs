@@ -1,4 +1,4 @@
-//! Direct SSH connections to this build's `serve`. A command keeps its first for its requests.
+//! SSH connections to this build's `serve`. A command keeps its first for its requests.
 //! An opening repairs the destination if needed, and a cut request is retried from its progress.
 
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use schema::ir::Sha256Digest;
 use stdx::Context as _;
 use stdx::process::{Bound, Echo, Failure, Run};
 
-use super::{AGAIN, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
+use super::{AGAIN, Diagnostics, Found, Located, OPENINGS, Reached, SHORT_TIMEOUT, when};
 use crate::link::{self, Link, Request, Unanswered};
 use crate::{manifest, say, workspace};
 
@@ -80,8 +80,9 @@ impl From<String> for Unlinked {
 
 pub(super) struct Linked {
     link: Link,
-    // OpenSSH puts only its own diagnostics here. The remote command's stderr stays the user's.
-    diagnostics: tempfile::NamedTempFile,
+    // OpenSSH puts only its own diagnostics, and its tunnel's, here. The remote command's stderr
+    // stays the user's.
+    diagnostics: Diagnostics,
 }
 
 impl Linked {
@@ -135,10 +136,7 @@ impl Linked {
         key: &Sha256Digest,
         at: &Located,
     ) -> Result<Option<Self>, Unlinked> {
-        let diagnostics = reached.location.diagnostics()?;
-        let mut ssh = Reached::ssh_command();
-        ssh.arg("-E").arg(diagnostics.path());
-        reached.remote(&mut ssh, at, &link::command(key));
+        let (ssh, diagnostics) = reached.ssh(at, &link::command(key))?;
         match Link::open(ssh) {
             Ok(link) => Ok(link.map(|link| Self { link, diagnostics })),
             Err(error) => Err(unlinked(reached, &diagnostics, error)),
@@ -259,22 +257,22 @@ impl Reached {
     }
 }
 
-fn unlinked(
-    reached: &Reached,
-    diagnostics: &tempfile::NamedTempFile,
-    error: Unanswered,
-) -> Unlinked {
+fn unlinked(reached: &Reached, diagnostics: &Diagnostics, error: Unanswered) -> Unlinked {
     let name = &reached.name;
     match error {
         Unanswered::Unreached(ended) => {
-            let line = last_line(diagnostics);
+            let Diagnostics { ssh, tunnel } = diagnostics;
+            let line = last_line(ssh);
             // OpenSSH's fatal when the server's host key cannot be verified.
             // https://github.com/openssh/openssh-portable/blob/5dba72adacbd39736960543373737bc01e35f778/sshconnect2.c#L104
             let host_refused = line.as_deref() == Some("Host key verification failed.");
             let denied = line
                 .as_ref()
                 .is_some_and(|line| line.contains("Permission denied ("));
-            let said = line.map_or(ended, |line| format!("ssh says: {line}"));
+            let mut said = line.map_or(ended, |line| format!("ssh says: {line}"));
+            if let Some(line) = tunnel.as_ref().and_then(last_line) {
+                said = format!("{said}; its tunnel through the endpoint says: {line}");
+            }
             let said = format!("controller `{name}` didn't answer: {said}");
             if host_refused {
                 Unlinked::HostKey(reached.host_refused(&said))
@@ -310,14 +308,12 @@ fn install(reached: &Reached, build: &Build, at: &Located) -> Result<(), Unlinke
         "controller `{name}` has no serve of this pumpkin: installing it there"
     ));
     let archive = manifest::archive(&build.files)?;
-    let diagnostics = reached.location.diagnostics()?;
-    let mut ssh = Reached::ssh_command();
-    ssh.arg("-E").arg(diagnostics.path());
-    reached.remote(&mut ssh, at, &link::installing(&build.hashed.manifest));
+    let (mut ssh, diagnostics) = reached.ssh(at, &link::installing(&build.hashed.manifest))?;
     let how = Run::new(Bound::Within(SHORT_TIMEOUT), Echo::Silent).input(&archive);
     match stdx::process::run(&mut ssh, how) {
         Ok(_) => Ok(()),
-        // Only the install writes to standard error, as `ssh` writes its diagnostics to a file.
+        // Only the install writes to standard error, as `ssh` and its tunnel write their
+        // diagnostics to files.
         Err(failure @ Failure::Exited { .. }) if !failure.reported().is_empty() => Err(
             Unlinked::Failed(format!("installing serve failed: {}", failure.unadvised())),
         ),

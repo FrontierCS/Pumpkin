@@ -5,8 +5,9 @@
 //! It never starts a stopped controller on its own, as the page asks every few seconds, which
 //! would otherwise start it again and again, and pay for it, with no one reading: once a link
 //! can't be opened, it asks EC2 whether the controller runs, and while it is stopped or on its
-//! way to running or to being stopped, or its `sshd` doesn't answer, each request asks EC2 and
-//! that `sshd` again in place of opening a link; the controller starts only when
+//! way to running or to being stopped, or its `sshd` doesn't answer at its private address on a
+//! direct connection, each request asks EC2 and that `sshd` again in place of opening a link; the
+//! controller starts only when
 //! [`Viewing::start`] is called. A request opens a link with one attempt, as the page asks again
 //! after a pause of its own, and the view answers no other request while one waits.
 
@@ -15,6 +16,7 @@ use ::aws::Cli;
 use super::aws::{self, Located, answers, unanswered};
 use super::linking::{Build, Linked, Unlinked};
 use super::{Name, Reached};
+use crate::config::Connection;
 use crate::link::{ViewRequest, Viewed};
 use crate::{config, say};
 
@@ -133,7 +135,8 @@ impl Viewing {
         aws::start(connected(cli, reached)?, id)
     }
 
-    /// Whether the controller runs, as EC2 says, and its `sshd` answers where it was found.
+    /// Whether the controller runs, as EC2 says, and, on a direct connection, its `sshd` answers
+    /// where it was found. Through the endpoint, only a link says whether `sshd` answers.
     fn answerable(&mut self) -> Result<(), Unviewed> {
         let Self { reached, cli, .. } = self;
         let name = &reached.name;
@@ -142,6 +145,7 @@ impl Viewing {
             connected(cli, reached).and_then(|cli| aws::state(cli, name, &located.instance));
         let address = located.address;
         let down = match state.map_err(Unviewed::Failed)?.as_str() {
+            "running" if matches!(reached.connection, Connection::Endpoint) => return Ok(()),
             "running" => match answers(address) {
                 Ok(()) => return Ok(()),
                 Err(error) => format!(

@@ -56,7 +56,24 @@ struct Tables {
 pub(crate) struct Controller {
     pub(crate) name: crate::controller::Name,
     pub(crate) region: aws::Region,
+    #[serde(default)]
+    pub(crate) connection: Connection,
     pub(crate) modal: Option<ClientModal>,
+}
+
+/// How this machine's SSH reaches its controller's `sshd`.
+// The choice that `aws ec2-instance-connect ssh` takes as `--connection-type`, which its help
+// recommends naming. No `auto`: a probe goes unanswered from outside the VPC and while the
+// controller boots alike.
+// https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/customizations/ec2instanceconnect/ssh.py#L76-L108
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Connection {
+    /// To its private address, from its VPC.
+    #[default]
+    Direct,
+    /// Through the EC2 Instance Connect Endpoint in its subnet, which `deploy/aws` makes.
+    Endpoint,
 }
 
 /// The Modal provider of a client's jobs. A job completes it with `images`, which the

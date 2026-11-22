@@ -4,7 +4,9 @@
 //! makes its jobs' calls: they run the providers and read their settings. The providers'
 //! other principals make their own calls. A client's calls reach its controller.
 
-use aws::iam::{self, Allow, Call, Fill, Placeholder, Resource};
+use aws::iam::{
+    self, Allow, Call, Condition, Fill, Key, Part, Placeholder, Resource, Test, Values,
+};
 use clap::ValueEnum;
 
 /// A principal of a deployment of the controller, or a part of one, whose policy
@@ -36,6 +38,16 @@ pub(crate) const SETTINGS: Placeholder = Placeholder::new(
 pub(crate) const CONTROLLER: Placeholder = Placeholder::new(
     "controller_instance_arn",
     "the ARN of the controller's instance",
+);
+
+pub(crate) const ENDPOINT: Placeholder = Placeholder::new(
+    "instance_connect_endpoint_arn",
+    "the ARN of the EC2 Instance Connect Endpoint in the controller's subnet",
+);
+
+pub(crate) const CONTROLLER_ADDRESS: Placeholder = Placeholder::new(
+    "controller_private_ip",
+    "the controller's private IPv4 address",
 );
 
 pub(crate) const MEMBERS: Placeholder = Placeholder::new(
@@ -84,17 +96,45 @@ const READ_MEMBERS: Allow = Allow::new(&["ssm:GetParameter"], &[Resource::Arn(&M
 pub(crate) struct Client {
     pub(crate) describe: Call,
     pub(crate) start: Call,
+    /// The tunnel to the controller's `sshd` through the endpoint, which `ssh` runs.
+    pub(crate) tunnel: Call,
 }
 
+const DESCRIBE_INSTANCES: Allow = Allow::new(&["ec2:DescribeInstances"], &[Resource::Any]);
+
 pub(crate) const CLIENT: Client = Client {
-    describe: Call::new(
-        ["ec2", "describe-instances"],
-        Allow::new(&["ec2:DescribeInstances"], &[Resource::Any]),
-    ),
+    describe: Call::new(["ec2", "describe-instances"], DESCRIBE_INSTANCES),
     start: Call::new(
         ["ec2", "start-instances"],
         Allow::new(&["ec2:StartInstances"], &[Resource::Arn(&CONTROLLER)]),
     ),
+    // To port 22 of the controller's private address alone, the conditions that EC2's guide
+    // recommends. `open-tunnel` given an instance describes it, and the endpoints of its VPC:
+    // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/permissions-for-ec2-instance-connect-endpoint.html#iam-OpenTunnel
+    // https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/customizations/ec2instanceconnect/opentunnel.py#L113-L140
+    tunnel: Call::new(
+        ["ec2-instance-connect", "open-tunnel"],
+        Allow::new(
+            &["ec2-instance-connect:OpenTunnel"],
+            &[Resource::Arn(&ENDPOINT)],
+        )
+        .when(&[
+            Condition::new(
+                Test::NumericEquals,
+                Key::Named("ec2-instance-connect:remotePort"),
+                Values::Are(&[Part::Text("22")]),
+            ),
+            Condition::new(
+                Test::IpAddress,
+                Key::Named("ec2-instance-connect:privateIpAddress"),
+                Values::Are(&[Part::Fill(&CONTROLLER_ADDRESS)]),
+            ),
+        ]),
+    )
+    .also(&[
+        DESCRIBE_INSTANCES,
+        Allow::new(&["ec2:DescribeInstanceConnectEndpoints"], &[Resource::Any]),
+    ]),
 };
 
 /// The calls that `pumpkin-admin check` makes of its own. Each is a read.
@@ -156,8 +196,12 @@ pub(crate) fn allows(principal: Principal) -> Vec<&'static Allow> {
         Principal::Sandbox => ec2::iam::sandbox().collect(),
         Principal::ModalPull => modal::iam::puller().collect(),
         Principal::Client => {
-            let Client { describe, start } = &CLIENT;
-            [describe, start]
+            let Client {
+                describe,
+                start,
+                tunnel,
+            } = &CLIENT;
+            [describe, start, tunnel]
                 .into_iter()
                 .flat_map(Call::allows)
                 .collect()

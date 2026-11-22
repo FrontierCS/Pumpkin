@@ -11,6 +11,27 @@
     },
     {
       "Action": [
+        "ec2-instance-connect:OpenTunnel"
+      ],
+      "Condition": {
+        "IpAddress": {
+          "ec2-instance-connect:privateIpAddress": [
+            "${controller_private_ip}"
+          ]
+        },
+        "NumericEquals": {
+          "ec2-instance-connect:remotePort": [
+            "22"
+          ]
+        }
+      },
+      "Effect": "Allow",
+      "Resource": [
+        "${instance_connect_endpoint_arn}"
+      ]
+    },
+    {
+      "Action": [
         "ssm:GetParameter"
       ],
       "Effect": "Allow",
@@ -38,6 +59,7 @@
     },
     {
       "Action": [
+        "ec2:DescribeInstanceConnectEndpoints",
         "ec2:DescribeInstances",
         "ec2:DescribeLaunchTemplateVersions",
         "iam:GetInstanceProfile",

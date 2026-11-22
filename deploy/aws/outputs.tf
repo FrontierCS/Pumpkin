@@ -9,13 +9,15 @@ output "client_config" {
 }
 
 # What a member's machine needs to reach the controller: find it by its tag and start it, then
-# reach its `sshd` from its VPC with a key that `members` lists. The machine pushes no key, as
-# the admin's list is the only way in.
+# reach its `sshd` from its VPC, or through the endpoint, with a key that `members` lists. The
+# machine pushes no key, as the admin's list is the only way in.
 resource "aws_iam_policy" "client" {
   name        = "${local.prefix}-client"
   description = "What the machine of a person needs to reach its Pumpkin controller"
   policy = templatefile("${path.module}/policies/client.json.tftpl", {
-    controller_instance_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
+    controller_instance_arn       = "${local.ec2}:instance/${aws_instance.controller.id}"
+    controller_private_ip         = aws_instance.controller.private_ip
+    instance_connect_endpoint_arn = aws_ec2_instance_connect_endpoint.controller.arn
   })
 }
 
@@ -31,10 +33,12 @@ resource "aws_iam_policy" "contributor" {
   name        = "${local.prefix}-contributor"
   description = "What the machine of a contributor needs to run the live checks on its Pumpkin controller"
   policy = templatefile("${path.module}/policies/contributor.json.tftpl", {
-    controller_instance_arn = "${local.ec2}:instance/${aws_instance.controller.id}"
-    members_parameter_arn   = aws_ssm_parameter.members.arn
-    sandbox_profile_arn     = aws_iam_instance_profile.sandbox.arn
-    settings_parameter_arn  = aws_ssm_parameter.settings.arn
+    controller_instance_arn       = "${local.ec2}:instance/${aws_instance.controller.id}"
+    controller_private_ip         = aws_instance.controller.private_ip
+    instance_connect_endpoint_arn = aws_ec2_instance_connect_endpoint.controller.arn
+    members_parameter_arn         = aws_ssm_parameter.members.arn
+    sandbox_profile_arn           = aws_iam_instance_profile.sandbox.arn
+    settings_parameter_arn        = aws_ssm_parameter.settings.arn
   })
 }
 

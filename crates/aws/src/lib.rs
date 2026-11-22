@@ -575,25 +575,48 @@ impl Cli {
         pusher.push(image, &login, &repository.name.0, image.hex())
     }
 
+    /// `program`, such as `ssh`, found on `PATH`, and the line of `call` with `args`, its options,
+    /// in `region`, as `sh` reads it, for `program` to run, as `ssh` runs a `ProxyCommand`.
+    /// `program` gets only the environment that `aws` gets, so that the `aws` that it runs finds
+    /// its own configuration alone.
+    pub fn proxied(
+        program: &str,
+        region: &Region,
+        call: &'static Call,
+        args: &[&str],
+    ) -> (Command, String) {
+        let line = process::shown(&command(region, call, args));
+        (configured(program), line)
+    }
+
     fn command(&self, call: &Call, args: &[&str]) -> Command {
-        let mut command = aws();
-        // After `args`, so that a failure is named by the command they give, as `aws` takes its
-        // global options anywhere: its parser of them reads every argument, and leaves the rest
-        // to the command.
-        // https://github.com/aws/aws-cli/blob/7372e144ac4a20def37cc46ba60f1bcce4aec215/awscli/clidriver.py#L454-L460
-        command.args(call.command()).args(args).args([
-            "--no-cli-pager",
-            "--output",
-            "json",
-            "--region",
-            &self.region.0,
-        ]);
-        command
+        command(&self.region, call, args)
     }
 }
 
+fn command(region: &Region, call: &Call, args: &[&str]) -> Command {
+    let mut command = aws();
+    // After `args`, so that a failure is named by the command they give, as `aws` takes its
+    // global options anywhere: its parser of them reads every argument, and leaves the rest to
+    // the command.
+    // https://github.com/aws/aws-cli/blob/7372e144ac4a20def37cc46ba60f1bcce4aec215/awscli/clidriver.py#L454-L460
+    command.args(call.command()).args(args).args([
+        "--no-cli-pager",
+        "--output",
+        "json",
+        "--region",
+        &region.0,
+    ]);
+    command
+}
+
 fn aws() -> Command {
-    let mut command = stdx::process::command("aws", CALL_ENVIRONMENT);
+    configured("aws")
+}
+
+/// `program` with the environment that `aws` gets.
+fn configured(program: &str) -> Command {
+    let mut command = stdx::process::command(program, CALL_ENVIRONMENT);
     command.envs(RETRIES);
     command
 }

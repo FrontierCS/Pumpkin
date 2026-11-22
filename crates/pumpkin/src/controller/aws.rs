@@ -1,5 +1,5 @@
 //! Finding a controller's EC2 instance by its tag, starting it, and waiting until its `sshd`
-//! answers at its private address.
+//! answers at its private address, for a direct connection.
 
 use std::fs::{self, DirBuilder};
 use std::net::{IpAddr, SocketAddr, TcpStream};
@@ -17,6 +17,7 @@ use stdx::process::{self, Echo, Environment, Run};
 use stdx::{Context as _, Deadline};
 
 use super::{Name, SHORT_TIMEOUT};
+use crate::config::Connection;
 use crate::iam::CLIENT;
 use crate::say;
 
@@ -112,9 +113,13 @@ pub(super) fn kept() -> Result<PathBuf, String> {
     Ok(kept)
 }
 
-/// Finds controller `name` in `region` by its tag, starts it if it is stopped, and waits until its
-/// `sshd` answers, and returns where it is.
-pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
+/// Finds controller `name` in `region` by its tag, starts it if it is stopped, and waits until it
+/// runs, and for a `connection` that is direct until its `sshd` answers, and returns where it is.
+pub(super) fn find(
+    region: &Region,
+    name: &Name,
+    connection: Connection,
+) -> Result<Located, String> {
     let cli = Cli::connect(region.clone())?;
     let live = |instance: &Instance| live(&instance.state.name);
     let found: Vec<Instance> = instances(&cli, &CLIENT.describe, &tagged(name))?;
@@ -126,7 +131,7 @@ pub(super) fn find(region: &Region, name: &Name) -> Result<Located, String> {
             region.as_str()
         ));
     };
-    ready(&cli, name, &instance.id)
+    ready(&cli, name, &instance.id, connection)
 }
 
 /// The filter of `aws ec2 describe-instances` that matches the instances of controller `name` by
@@ -161,13 +166,13 @@ pub(crate) fn instances<T: DeserializeOwned>(
         .collect())
 }
 
-fn ready(cli: &Cli, name: &Name, id: &str) -> Result<Located, String> {
+fn ready(cli: &Cli, name: &Name, id: &str, connection: Connection) -> Result<Located, String> {
     let by = Deadline::after(START_TIMEOUT);
     let mut started = None;
     loop {
         let instance = instance(cli, name, id)?;
         match instance.state.name.as_str() {
-            "running" => return answering(name, instance, started),
+            "running" => return answering(name, instance, started, connection),
             "stopped" if started.is_none() => {
                 say(format_args!(
                     "starting controller `{name}`, {id}, which is stopped"
@@ -217,7 +222,17 @@ fn instance(cli: &Cli, name: &Name, id: &str) -> Result<Instance, String> {
 
 /// Waits until the `sshd` of `instance`, which runs, answers at its private address, until
 /// `START_TIMEOUT` after its launch, and says how long that took if this command `started` it.
-fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Result<Located, String> {
+/// Through the endpoint, it returns at once.
+// This machine doesn't reach the address, and the openings' retries wait in its place. No probe
+// through the endpoint stands in: `open-tunnel` takes the end of its standard input for no end,
+// unlike a socket's, so a probe would hold the tunnel open:
+// https://github.com/aws/aws-cli/blob/1e29ade904104db39b204e32edb566b008140f23/awscli/customizations/ec2instanceconnect/websocket.py#L68-L112
+fn answering(
+    name: &Name,
+    instance: Instance,
+    started: Option<Instant>,
+    connection: Connection,
+) -> Result<Located, String> {
     let Instance {
         id,
         state: _,
@@ -230,6 +245,12 @@ fn answering(name: &Name, instance: Instance, started: Option<Instant>) -> Resul
              subnet that `deploy/aws` gives it"
         ));
     };
+    if let Connection::Endpoint = connection {
+        return Ok(Located {
+            instance: id,
+            address,
+        });
+    }
     let launched: Timestamp = launch_time.parse().map_err(|error| {
         format!(
             "the launch time that `aws ec2 describe-instances` printed, `{launch_time}`, isn't \
@@ -277,8 +298,8 @@ pub(super) fn unanswered(error: &io::Error) -> &'static str {
         | io::ErrorKind::HostUnreachable
         | io::ErrorKind::NetworkUnreachable => {
             "this machine doesn't reach the controller from an address of the controller's VPC: \
-             run the command from a machine in that VPC, or through a VPN that translates its \
-             addresses into the VPC's"
+             run the command from a machine in that VPC, or set `connection = \"endpoint\"` in \
+             `[controller]` to go through the endpoint that `deploy/aws` makes"
         }
         _ => "run the command again",
     }
