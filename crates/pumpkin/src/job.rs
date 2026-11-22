@@ -28,7 +28,6 @@ use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io, thread};
 
@@ -41,6 +40,7 @@ use schema::ir::{Image, Sha256Digest};
 use stdx::Context as _;
 use stdx::process::Environment;
 
+use crate::cli::Exit;
 use crate::controller::bounded;
 use crate::iam::JOB;
 use crate::manifest::{Entry, INCOMING, Kind, MANIFESTS, Manifest};
@@ -120,7 +120,7 @@ const IMDS_SECONDS: u64 = 10;
 /// Runs job `job` in its tree, as its unit does. It assembles the job's configuration and prunes.
 /// It builds the task's images under the controller's build slots. Then it runs the task, as the
 /// job's `run` says. Returns the run's exit status.
-pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
+pub(crate) fn job(job: cli::Job) -> Result<Exit, String> {
     let cli::Job { id, tree, run } = job;
     let home = crate::home("run the job as the controller's user")?;
     let working = std::env::current_dir().context("finding the job's working directory failed")?;
@@ -160,7 +160,7 @@ pub(crate) fn job(job: cli::Job) -> Result<ExitCode, String> {
     // Only one who follows the run reads the job's log.
     let exit = crate::start(&id, run, crate::Reader::Follower)?;
     // The run's end is the job's, so that the unit lasts as long as the run.
-    if exit == ExitCode::SUCCESS {
+    if exit == Exit::Success {
         let runs = crate::default_runs()?;
         let record = Record::open(&Path::new(&runs).join(id.as_str()))?;
         drop(record.wait(|| {})?);

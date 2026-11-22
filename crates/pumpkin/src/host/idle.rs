@@ -4,13 +4,13 @@
 
 use std::fs::{self, File};
 use std::io;
-use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use stdx::Context as _;
 use stdx::process::Failure;
 
 use super::{command, ran, run};
+use crate::cli::Exit;
 use crate::controller::USER;
 use crate::job::UNIT_PREFIX;
 
@@ -24,14 +24,14 @@ const DIR: &str = "/var/lib/pumpkin";
 const BUSY: &str = "/var/lib/pumpkin/busy";
 
 /// Checks whether the controller is idle, and powers it off if so, as the module says.
-pub(crate) fn idle() -> Result<ExitCode, String> {
+pub(crate) fn idle() -> Result<Exit, String> {
     if jobs()? || ssh()? {
         fs::create_dir_all(DIR).context(DIR)?;
         let touched = File::options().create(true).append(true).open(BUSY);
         touched
             .and_then(|busy| busy.set_modified(SystemTime::now()))
             .context(BUSY)?;
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     let busy_lately = match fs::metadata(BUSY) {
         // A time ahead of the clock counts as a busy check too.
@@ -42,7 +42,7 @@ pub(crate) fn idle() -> Result<ExitCode, String> {
     if !busy_lately && crate::serve::up_seconds()? >= IDLE.as_secs() {
         ran("systemctl", &["poweroff"])?;
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// Whether a job's unit is active, among the units of `USER`'s systemd.

@@ -18,7 +18,6 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
-use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use engine::prune::Disk;
@@ -29,6 +28,7 @@ use rustix::io::Errno;
 use schema::frame;
 use stdx::Context as _;
 
+use crate::cli::Exit;
 use crate::job::{JOBS, WAITING};
 use crate::link::copy::CopiedRequest;
 use crate::link::{
@@ -47,14 +47,14 @@ pub(crate) const IDLE: Duration = Duration::from_mins(1);
 const UPTIME: &str = "/proc/uptime";
 
 /// Answers a client's link on the standard input and output, as the module says, for `member`.
-pub(crate) fn serve(member: &Member) -> Result<ExitCode, String> {
+pub(crate) fn serve(member: &Member) -> Result<Exit, String> {
     let home = crate::home("run `serve` as the controller's user, whose home holds the runs")?;
     marked();
     let stdin = io::stdin().as_fd().try_clone_to_owned();
     let mut input = BufReader::new(File::from(stdin.context("the standard input")?));
     let mut output = io::stdout().lock();
     if !delivered(frame::write(&mut output, &Hello::Serving, &[]))? {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     requests(&mut input, &mut output, &home, member)
 }
@@ -64,7 +64,7 @@ fn requests(
     output: &mut impl Write,
     home: &Path,
     member: &Member,
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     // Kept for the link's life: it holds what it read of the live runs.
     let mut view = Answering::new(home);
     while arrives(input)? {
@@ -133,7 +133,7 @@ fn requests(
             break;
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// The runs' jobs in `home`, each with its member, for a link that acts for `member`.
@@ -161,13 +161,10 @@ fn request_head(input: &mut impl io::Read) -> io::Result<Option<Ask>> {
     }
 }
 
-fn invalid_request(
-    output: &mut impl Write,
-    error: impl std::fmt::Display,
-) -> Result<ExitCode, String> {
+fn invalid_request(output: &mut impl Write, error: impl std::fmt::Display) -> Result<Exit, String> {
     let message = format!("{error}: expected a request of this pumpkin");
     delivered(link::refuse(output, message))?;
-    Ok(ExitCode::FAILURE)
+    Ok(Exit::Failure)
 }
 
 fn missing(home: &Path, request: &link::store::Lacks, body: &[u8]) -> Result<Vec<Missing>, String> {

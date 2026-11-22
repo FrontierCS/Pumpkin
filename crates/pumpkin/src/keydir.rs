@@ -7,13 +7,14 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::ExitCode;
 
 use members::Members;
 use stdx::Context as _;
 
+use crate::cli::Exit;
+
 /// Checks the keys of the members' files in `dir`, as the controller parses them. Returns 0.
-pub(crate) fn check(dir: &Path) -> Result<ExitCode, String> {
+pub(crate) fn check(dir: &Path) -> Result<Exit, String> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).context(dir.display())? {
         let path = entry.context(dir.display())?.path();
@@ -53,5 +54,5 @@ pub(crate) fn check(dir: &Path) -> Result<ExitCode, String> {
         .iter()
         .map(|(at, name, key)| (at.clone(), &**name, key.as_str()));
     Members::of_keys(keys)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }

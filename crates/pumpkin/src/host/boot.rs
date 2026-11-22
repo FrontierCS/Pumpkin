@@ -7,21 +7,22 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, Stdio};
+use std::process::Stdio;
 
 use stdx::Context as _;
 use stdx::process::Environment;
 
+use crate::cli::Exit;
 use crate::job::BOOT_LOG;
 use crate::workspace;
 
 /// Runs each installed build's boot, as the module says. Returns 0, or 1 if a boot failed, which
 /// the log then says.
-pub(crate) fn boot_all() -> Result<ExitCode, String> {
+pub(crate) fn boot_all() -> Result<Exit, String> {
     let home = crate::home("run it as the controller's user, whose home holds the builds")?;
     let boots = boots(&home);
     if boots.as_ref().is_ok_and(Vec::is_empty) {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     let path = home.join(BOOT_LOG);
     let opened = OpenOptions::new()
@@ -59,11 +60,11 @@ pub(crate) fn boot_all() -> Result<ExitCode, String> {
         failed.push(format!("{} ({why})", boot.display()));
     }
     if failed.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     let failed = failed.join(" ");
     writeln!(log, "controller boot failed for {failed}").context(path.display())?;
-    Ok(ExitCode::FAILURE)
+    Ok(Exit::Failure)
 }
 
 /// The `pumpkin` of each build installed below `home`, in order.

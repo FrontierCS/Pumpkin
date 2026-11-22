@@ -26,13 +26,13 @@
 
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::process::ExitCode;
 
 use aws::iam::Filling;
 use aws::{Cli, ParameterArn, Problem, Region};
 use instance::{Described, Instance, ProfileNamed};
 use members::Members;
 
+use crate::cli::Exit;
 use crate::config::{self, Config, Kind};
 use crate::controller::{self, Name};
 use crate::iam::{self, CHECK, Principal};
@@ -51,8 +51,8 @@ mod instance;
 mod simulation;
 
 /// Checks the deployment whose settings are SSM parameter `settings`, says each problem, and
-/// returns 1 if there is any, 0 otherwise.
-pub(crate) fn check(settings: &ParameterArn) -> Result<ExitCode, String> {
+/// returns [`Exit::Failure`] if there is any, [`Exit::Success`] otherwise.
+pub(crate) fn check(settings: &ParameterArn) -> Result<Exit, String> {
     let cli = Cli::connect(settings.region().clone())?;
     let mut found = Found::default();
     let partition = settings.partition();
@@ -92,9 +92,9 @@ pub(crate) fn check(settings: &ParameterArn) -> Result<ExitCode, String> {
         say(problem);
     }
     Ok(if problems.is_empty() {
-        ExitCode::SUCCESS
+        Exit::Success
     } else {
-        ExitCode::FAILURE
+        Exit::Failure
     })
 }
 

@@ -4,13 +4,12 @@
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
-use std::process::ExitCode;
 use std::time::Duration;
 
 use stdx::process::Environment;
 use stdx::{Context as _, Deadline};
 
-use crate::cli;
+use crate::cli::{self, Exit};
 use crate::link::Boot;
 
 // The bound of `systemctl show`, which reads a unit's properties from systemd.
@@ -24,7 +23,7 @@ pub(crate) const BOOT_LOG: &str = "boot.log";
 
 /// Reaps what this build's ended or lost runs may have left, using each job's configuration.
 /// Returns the reap's exit status, 0 though a provider can't be reached.
-pub(crate) fn boot() -> Result<ExitCode, String> {
+pub(crate) fn boot() -> Result<Exit, String> {
     // No prune, which each job's start makes: a client may start a job as soon as the
     // controller's `sshd` admits logins, before the boot is done, and the boot, a unit of the
     // system's, can't see that it runs, as systemd names the user's runtime directory, which

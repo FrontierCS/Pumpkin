@@ -80,7 +80,7 @@
 </tspan>
     <tspan x="10px" y="550px"><tspan class="fg-bright-green bold">Topics:</tspan>
 </tspan>
-    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">config</tspan><tspan>      The machine's configuration, pumpkin.toml</tspan>
+    <tspan x="10px" y="568px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">config</tspan><tspan>  The machine's configuration, pumpkin.toml</tspan>
 </tspan>
     <tspan x="10px" y="586px">
 </tspan>
@@ -92,7 +92,7 @@
 </tspan>
     <tspan x="10px" y="658px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">2</tspan><tspan>  A usage error.</tspan>
 </tspan>
-    <tspan x="10px" y="676px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  An outcome that the help of `wait`, `cancel` and `reap` says.</tspan>
+    <tspan x="10px" y="676px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">3</tspan><tspan>  An outcome short of success, which the command's help says.</tspan>
 </tspan>
     <tspan x="10px" y="694px">
 </tspan>

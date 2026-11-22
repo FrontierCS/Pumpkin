@@ -2,7 +2,6 @@
 //! summary, and the commands to run next.
 
 use std::path::Path;
-use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use std::{fmt, fs};
 
@@ -11,6 +10,7 @@ use schema::ir::Name;
 use serde_json::Value;
 use stdx::Context;
 
+use crate::cli::Exit;
 use crate::{advise, next, print, progress, say, to_stderr};
 
 /// What a command that says how a run ended prints on the standard output.
@@ -44,7 +44,7 @@ pub(crate) fn follow(
     command: &str,
     runs: Option<&str>,
     printed: Printed,
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     let ending = if let Some(ending) = record.ending()? {
         ending
     } else {
@@ -158,20 +158,21 @@ pub(crate) fn following(record: &Record, command: &str) {
 }
 
 /// Prints what `printed` asks for, then says how the run ended, with the commands to run next,
-/// and gives the exit code: success if the run finished with a result, 3 if it finished without
-/// one, and failure if it failed, was interrupted or was lost. `args` are those that run it again.
+/// and gives the exit status: success if the run finished with a result, [`Exit::Partial`] if it
+/// finished without one, and failure if it failed, was interrupted or was lost. `args` are those
+/// that run it again.
 pub(crate) fn end(
     record: &Record,
     ending: &Ending,
     printed: Printed,
     runs: Option<&str>,
     args: &[String],
-) -> Result<ExitCode, String> {
+) -> Result<Exit, String> {
     let id = record.id();
     let (exit, how) = match ending {
-        Ending::Returned { values } => (ExitCode::SUCCESS, returned(values)),
-        Ending::NoResult(why) => (ExitCode::from(3), why.clone()),
-        Ending::Stopped(stopped) => (ExitCode::FAILURE, stopped.to_string()),
+        Ending::Returned { values } => (Exit::Success, returned(values)),
+        Ending::NoResult(why) => (Exit::Partial, why.clone()),
+        Ending::Stopped(stopped) => (Exit::Failure, stopped.to_string()),
         // It has no `outcome.json` to print.
         Ending::Lost => {
             let how = "is lost: its driver ended without writing outcome.json, so nothing says \
@@ -184,7 +185,7 @@ pub(crate) fn end(
                 "remove what every run that has ended left",
                 &next::reap(runs),
             );
-            return Ok(ExitCode::FAILURE);
+            return Ok(Exit::Failure);
         }
     };
     printed.print(record.dir())?;

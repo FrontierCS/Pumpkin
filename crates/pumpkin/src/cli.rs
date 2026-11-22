@@ -9,12 +9,13 @@
 //! `pumpkin-admin`'s command line is [`admin`]'s. What a command does is left to its own module.
 
 pub(crate) mod admin;
+mod exit;
 mod notes;
 
 use std::ffi::OsString;
-use std::iter;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
+use std::{iter, mem};
 
 use clap::builder::styling::{AnsiColor, Effects, Style, Styles};
 use clap::builder::{OsStringValueParser, StyledStr, TypedValueParser};
@@ -26,10 +27,8 @@ use members::Member;
 use provider::RunTag;
 use schema::ir::Sha256Digest;
 
-use self::notes::{
-    CONFIG, cancel_notes, check_notes, controller_notes, fmt_notes, help_notes, ls_notes,
-    reap_notes, run_notes, view_notes, wait_notes,
-};
+pub(crate) use self::exit::Exit;
+use self::notes::{ADMIN, CONFIG, Layout, NOTES, Notes, section};
 use crate::ending::Printed;
 use crate::star::Entry;
 
@@ -55,7 +54,6 @@ enum Parsed {
     /// lints the files it read. It says every problem in every task, and prints nothing when it
     /// finds none. It reads only files below each task's root. It reaches no Docker engine,
     /// network or configuration, so an image's build can still fail.
-    #[command(after_help = check_notes())]
     Check(Check),
     /// Format `.star` files.
     ///
@@ -64,7 +62,6 @@ enum Parsed {
     /// directory, it skips names that start with `.` and anything a symbolic link leads to. If a
     /// file can't be formatted, `fmt` says why and formats the others. It prints nothing on
     /// success.
-    #[command(after_help = fmt_notes())]
     Fmt(Fmt),
     /// Build a task and start a run of it.
     ///
@@ -75,7 +72,6 @@ enum Parsed {
     /// With `[controller]` in the configuration, `run` sends the task to the controller, which
     /// builds and runs it. `run` then prints the id at once and returns before the build.
     /// `pumpkin wait` follows the build and the run. `--runs` and `--sandboxd` are refused.
-    #[command(after_help = run_notes())]
     Run(Run),
     /// Wait for a run to end and say how it ended.
     ///
@@ -85,7 +81,6 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `wait` follows the run on the
     /// controller. It then copies the record into the default runs directory.
-    #[command(after_help = wait_notes())]
     Wait(Wait),
     /// List runs and their states.
     ///
@@ -95,7 +90,6 @@ enum Parsed {
     /// gives its state, how long it ran and its result's values. If a run can't be listed, `ls`
     /// says why and lists the others. With `[controller]` in the configuration and no `--runs`,
     /// `ls` lists the controller's runs beside this machine's copies.
-    #[command(after_help = ls_notes())]
     Ls(Ls),
     /// Stop a run and remove what it left.
     ///
@@ -105,7 +99,6 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `cancel` stops the run on the
     /// controller. It then copies a started run's record here, as `pumpkin wait` does.
-    #[command(after_help = cancel_notes())]
     Cancel(CancelRun),
     /// Serve the runs to this machine's browser.
     ///
@@ -115,12 +108,10 @@ enum Parsed {
     /// whom and its log. The page changes a run only by a cancel, which runs `pumpkin cancel`.
     /// With `[controller]` in the configuration and no `--runs`, `view` serves the controller's
     /// runs.
-    #[command(after_help = view_notes())]
     View(View),
     /// Print the help of a command or a topic.
     ///
     /// Without a command or a topic, `help` prints what `pumpkin --help` does.
-    #[command(after_help = help_notes())]
     Help {
         /// A command, or the topic `config`.
         #[arg(value_name = "topic")]
@@ -135,14 +126,14 @@ enum Parsed {
     ///
     /// With `[controller]` in the configuration and no `--runs`, `reap` reaps the controller's
     /// runs that this build made.
-    #[command(hide = true, after_help = reap_notes())]
+    #[command(hide = true)]
     Reap(Reap),
     /// Run the controller's own commands.
     ///
     /// These actions run on the controller. `serve` answers a client's `ssh` link and starts each
     /// `job` in a unit of its own. The controller's boot runs `boot` of each installed build. The
     /// controller's admin has its own commands, `pumpkin-admin`'s.
-    #[command(hide = true, after_help = controller_notes())]
+    #[command(hide = true)]
     #[command(disable_help_subcommand = true, subcommand_value_name = "action")]
     #[command(subcommand_help_heading = "Actions")]
     Controller {
@@ -189,8 +180,9 @@ enum Action {
 }
 
 /// What a command line asks for. `Job`, `Boot` and `Serve` are the controller's own side,
-/// `pumpkin controller <action>`. `Install`, `BootAll`, `Idle` and `Members` are `pumpkin-admin`'s.
-/// `Print` holds help, the version or a policy, for the standard output.
+/// `pumpkin controller <action>`. `Install`, `CheckDeployment`, `BootAll`, `Idle`, `Members` and
+/// `CheckMembers` are `pumpkin-admin`'s. `Help` and `Print` are for the standard output: `Print`
+/// holds the version, a topic or a policy.
 pub(crate) enum Command {
     Run(Run),
     Wait(Wait),
@@ -209,7 +201,73 @@ pub(crate) enum Command {
     Members,
     CheckMembers(PathBuf),
     Serve(Member),
+    Help(Help),
     Print(StyledStr),
+}
+
+/// The help of `program`, of a command that `name` names, or of the controller's `action`.
+pub(crate) struct Help {
+    program: Program,
+    name: Option<String>,
+    action: Option<String>,
+}
+
+impl Help {
+    pub(crate) fn render(&self) -> StyledStr {
+        // The help's data is fixed, so a debug build checks it each time it prints a help, and the
+        // tests, which build with debug assertions, run the check. A release build never parses
+        // its examples, nor panics on one, as clap's own check of a command is debug-only:
+        // https://github.com/clap-rs/clap/blob/13f2db5072d600c11d8d6298e4e9ba53ffc6c1ab/clap_builder/src/builder/command.rs#L4487-L4488
+        // As `parse` renders no help, the check can't recurse.
+        if cfg!(debug_assertions) {
+            notes::check();
+        }
+        let Self {
+            program,
+            name,
+            action,
+        } = self;
+        help(&mut program.command(), name.as_deref(), action.as_deref())
+    }
+}
+
+/// The program that a command line is for. One executable runs as either, by its name.
+#[derive(Clone, Copy)]
+enum Program {
+    Pumpkin,
+    Admin,
+}
+
+impl Program {
+    const ALL: [Self; 2] = [Self::Pumpkin, Self::Admin];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pumpkin => "pumpkin",
+            Self::Admin => admin::NAME,
+        }
+    }
+
+    fn command(self) -> clap::Command {
+        match self {
+            Self::Pumpkin => command(),
+            Self::Admin => admin::command(),
+        }
+    }
+
+    fn notes(self) -> &'static [Notes] {
+        match self {
+            Self::Pumpkin => NOTES,
+            Self::Admin => ADMIN,
+        }
+    }
+
+    fn parse(self, args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
+        match self {
+            Self::Pumpkin => parse(args),
+            Self::Admin => admin::parse(args),
+        }
+    }
 }
 
 const ARG: &str = "arg";
@@ -510,8 +568,8 @@ pub(crate) struct Refusal {
 }
 
 /// Reads `args`, which leave out the program's name, into the command that they ask for.
-/// `-h` or `--help` before `--`, and `-V` or `--version` before the command, are answered as
-/// [`Command::Print`], not refused.
+/// `-h` or `--help` before `--` is answered as [`Command::Help`], and `-V` or `--version` before
+/// the command as [`Command::Print`], not refused.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Refusal> {
     let args: Vec<OsString> = args.into_iter().collect();
     let mut cli = command();
@@ -526,9 +584,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
             controller.is_some_and(|controller| controller.find_subcommand(word).is_some())
         })
         .map(str::to_owned);
-    if let Some(print) = printed("pumpkin", &args, first, || {
-        help(&mut cli, named.as_deref(), action.as_deref())
-    }) {
+    let printing = printed(
+        Program::Pumpkin,
+        &args,
+        first,
+        named.as_deref(),
+        action.as_deref(),
+    );
+    if let Some(print) = printing {
         return Ok(print);
     }
     let refusal = |error| Refusal {
@@ -566,21 +629,27 @@ fn first_word(cli: &clap::Command, args: &[OsString]) -> (Option<usize>, Option<
     (first, named.map(|command| command.get_name().to_owned()))
 }
 
-/// What `args`, a command line of `program` without its name, ask it to print: `help()` for `-h`
-/// or `--help` before `--`, or its version for `-V` or `--version` before the word at `first`.
+/// What `args`, a command line of `program` without its name, ask it to print: the help of the
+/// command that `named` and `action` name, for `-h` or `--help` before `--`, or the version, for
+/// `-V` or `--version` before the word at `first`.
 fn printed(
-    program: &str,
+    program: Program,
     args: &[OsString],
     first: Option<usize>,
-    help: impl FnOnce() -> StyledStr,
+    named: Option<&str>,
+    action: Option<&str>,
 ) -> Option<Command> {
     let mut options = args.iter().take_while(|arg| *arg != "--");
     if options.any(|arg| arg == "-h" || arg == "--help") {
-        return Some(Command::Print(help()));
+        return Some(Command::Help(Help {
+            program,
+            name: named.map(str::to_owned),
+            action: action.map(str::to_owned),
+        }));
     }
     let before = &args[..first.unwrap_or(args.len())];
     if before.iter().any(|arg| arg == "-V" || arg == "--version") {
-        let version = format!("{program} {}\n", runtime::BUILD);
+        let version = format!("{} {}\n", program.name(), runtime::BUILD);
         return Some(Command::Print(version.into()));
     }
     None
@@ -633,6 +702,7 @@ fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap:
         | Command::Members
         | Command::CheckMembers(_)
         | Command::Serve(_)
+        | Command::Help(_)
         | Command::Print(_) => {
             let problem = "the job's command isn't `run`: give one";
             let controller = cli.find_subcommand_mut("controller");
@@ -648,7 +718,11 @@ fn job_run(cli: &mut clap::Command, command: Vec<OsString>) -> Result<Run, clap:
 
 fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap::Error> {
     let Some(topic) = topic else {
-        return Ok(Command::Print(help(cli, None, None)));
+        return Ok(Command::Help(Help {
+            program: Program::Pumpkin,
+            name: None,
+            action: None,
+        }));
     };
     if topic == "config" {
         return Ok(Command::Print(CONFIG.into()));
@@ -658,7 +732,11 @@ fn help_of(cli: &mut clap::Command, topic: Option<&str>) -> Result<Command, clap
         .map(|command| format!("`{}`", command.get_name()))
         .collect();
     if names.iter().any(|name| name.trim_matches('`') == topic) {
-        return Ok(Command::Print(help(cli, Some(topic), None)));
+        return Ok(Command::Help(Help {
+            program: Program::Pumpkin,
+            name: Some(topic.to_owned()),
+            action: None,
+        }));
     }
     let problem = format!(
         "there is no help for `{topic}`: expected a command ({}) or a topic (`config`)",
@@ -705,45 +783,48 @@ fn flagged(cli: clap::Command) -> clap::Command {
 
 fn command() -> clap::Command {
     let cli = flagged(Parsed::command());
-    let width = (cli.get_subcommands())
-        .filter(|command| listed(command))
-        .map(|command| command.get_name().len())
-        .max()
-        .unwrap_or_default();
-    let rare: Vec<String> = (cli.get_subcommands())
+    let rare: Vec<(String, String)> = (cli.get_subcommands())
         .filter(|command| RARE.contains(&command.get_name()))
         .map(|command| {
             let about = command.get_about().map(ToString::to_string);
-            let name = command.get_name();
-            // The padding is unstyled, as in clap's own list of commands.
-            let pad = width - name.len();
-            format!(
-                "  {LITERAL}{name}{LITERAL:#}{:pad$}  {}\n",
-                "",
-                about.unwrap_or_default()
-            )
+            (command.get_name().to_owned(), about.unwrap_or_default())
         })
         .collect();
-    let rare = rare.concat();
-    cli.after_help(format!(
-        "\
-{HEADER}Rarely needed:{HEADER:#}
-{rare}
-{HEADER}Topics:{HEADER:#}
-  {LITERAL}config{LITERAL:#}{:pad$}  The machine's configuration, pumpkin.toml
+    let rare: Vec<(&str, &str)> = (rare.iter())
+        .map(|(name, about)| (name.as_str(), about.as_str()))
+        .collect();
+    let topics = [("config", "The machine's configuration, pumpkin.toml")];
+    let lists = [
+        section("Rarely needed", &rare, Layout::Columns),
+        section("Topics", &topics, Layout::Columns),
+    ];
+    noted(cli.after_help(lists.join("\n\n")), NOTES)
+}
 
-{HEADER}Exit status:{HEADER:#}
-  {LITERAL}0{LITERAL:#}  Success.
-  {LITERAL}1{LITERAL:#}  An error. A `pumpkin:` line on the standard error says why.
-  {LITERAL}2{LITERAL:#}  A usage error.
-  {LITERAL}3{LITERAL:#}  An outcome that the help of `wait`, `cancel` and `reap` says.
+/// `cli` with each of `notes` ending the help of the command that it names.
+fn noted(mut cli: clap::Command, notes: &[Notes]) -> clap::Command {
+    for notes in notes {
+        ended(&mut cli, notes.command, &notes.render());
+    }
+    cli
+}
 
-`pumpkin help <command>` prints a command's help, and `pumpkin help <topic>`
-prints a topic. The guide to running workflows is docs/running.md:
-https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md",
-        "",
-        pad = width - "config".len()
-    ))
+/// Ends the help of the subcommand of `command` that `path` names, which it has, with `text`,
+/// below what already ends it.
+fn ended(command: &mut clap::Command, path: &[&str], text: &str) {
+    match path {
+        [] => {
+            // The styles of what already ends the help stay as they are.
+            let above = command.get_after_help();
+            let above = above.map_or_else(String::new, |above| format!("{}\n\n", above.ansi()));
+            *command = mem::take(command).after_help(format!("{above}{text}"));
+        }
+        [name, rest @ ..] => {
+            if let Some(command) = command.find_subcommand_mut(name) {
+                ended(command, rest, text);
+            }
+        }
+    }
 }
 
 fn help(cli: &mut clap::Command, name: Option<&str>, action: Option<&str>) -> StyledStr {

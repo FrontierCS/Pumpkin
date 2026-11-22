@@ -4,11 +4,11 @@
 //! names its member ([`Members::authorized_keys`]). A list that fails to parse changes nothing.
 
 use std::path::Path;
-use std::process::ExitCode;
 
 use aws::{Cli, ParameterArn};
 use members::Members;
 
+use crate::cli::Exit;
 use crate::iam::HOST;
 use crate::job::Deployment;
 
@@ -20,9 +20,9 @@ pub(super) const MEMBERS: &str = "/etc/ssh/pumpkin/members";
 
 /// Copies the members' keys, as the module says, for the controller whose settings the host file
 /// names. Returns 0.
-pub(crate) fn members() -> Result<ExitCode, String> {
+pub(crate) fn members() -> Result<Exit, String> {
     copy(&super::settings()?)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// Copies the members' keys, as the module says, for the controller whose settings are SSM

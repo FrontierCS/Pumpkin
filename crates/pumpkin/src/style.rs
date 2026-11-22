@@ -8,13 +8,14 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::{fs, io};
 
 use lang::Finding;
 use serde::Deserialize;
 use stdx::process::Environment;
 
+use crate::cli::Exit;
 use crate::{absolute_utf8, cli, next, say};
 
 // No configuration file, so that every `.star` file is written alike, wherever it is; and each
@@ -276,7 +277,7 @@ impl Formatter {
     }
 }
 
-pub(crate) fn fmt(flags: cli::Fmt) -> Result<ExitCode, String> {
+pub(crate) fn fmt(flags: cli::Fmt) -> Result<Exit, String> {
     let cli::Fmt { paths, check } = flags;
     let formatter = Formatter::beside()?;
     let mut files = Vec::new();
@@ -303,7 +304,7 @@ pub(crate) fn fmt(flags: cli::Fmt) -> Result<ExitCode, String> {
         failed.push(file);
     }
     if failed.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     let failed: Result<Vec<String>, String> = (failed.iter())
         .map(|file| match file.to_str() {

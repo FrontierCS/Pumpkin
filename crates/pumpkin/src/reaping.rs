@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 use docker::Docker;
 use ec2::Ec2;
@@ -16,6 +15,7 @@ use schema::ir::Name;
 use serde::{Deserialize, Serialize};
 use stdx::Context;
 
+use crate::cli::Exit;
 use crate::ending::{Printed, end};
 use crate::workspace::Workspace;
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Stops the run, waits for it to end, and reaps it, as `pumpkin cancel` does.
-pub(crate) fn cancel(flags: cli::CancelRun) -> Result<ExitCode, String> {
+pub(crate) fn cancel(flags: cli::CancelRun) -> Result<Exit, String> {
     let cli::CancelRun {
         cancel: flags,
         any_member,
@@ -50,9 +50,9 @@ pub(crate) fn cancel(flags: cli::CancelRun) -> Result<ExitCode, String> {
             "remove what it left once its provider can be reached",
             &next::reap(named),
         );
-        return Ok(ExitCode::from(UNREACHED));
+        return Ok(Exit::Partial);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 pub(crate) struct Cancelled {
@@ -108,9 +108,6 @@ pub(crate) fn cancelled(flags: cli::Cancel, reader: Reader) -> Result<Cancelled,
     })
 }
 
-/// The exit code of a command that could not reach a provider to remove what a run left on it.
-pub(crate) const UNREACHED: u8 = 3;
-
 struct Swept {
     /// Whether the run had left anything, now removed.
     left: bool,
@@ -123,8 +120,8 @@ struct Swept {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reaper {
     /// `pumpkin reap` or `pumpkin cancel`: every run that has ended or is lost; a provider that
-    /// can't be reached makes the exit status [`UNREACHED`], and the reap says how to reap again
-    /// once it can be.
+    /// can't be reached makes the exit status [`Exit::Partial`], and the reap says how to reap
+    /// again once it can be.
     Command,
     /// A client's request: the ended or lost runs this build wrote.
     Controller,
@@ -139,7 +136,7 @@ pub(crate) enum Reaper {
 /// ([`Record::reap`]), of the runs that `reaper` takes, printing the id of each that had left
 /// something; leaves each live run to its driver. The exit status is `reap`'s, but 0 for
 /// [`Reaper::Boot`] though a provider can't be reached.
-pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<ExitCode, String> {
+pub(crate) fn reap(flags: cli::Reap, reaper: Reaper) -> Result<Exit, String> {
     let cli::Reap { runs, modal_config } = flags;
     if reaper == Reaper::Command
         && runs.is_none()
@@ -226,7 +223,7 @@ fn printed_id(id: &str) -> Result<(), String> {
 }
 
 impl ReapedRuns {
-    pub(crate) fn report(self, named: Option<&str>, reaper: Reaper) -> Result<ExitCode, String> {
+    pub(crate) fn report(self, named: Option<&str>, reaper: Reaper) -> Result<Exit, String> {
         let Self {
             ids,
             unreaped,
@@ -248,7 +245,7 @@ impl ReapedRuns {
                 "{runs} can't be reaped, as said above: fix what each says, and reap again"
             ));
             advise("reap again", &next::reap(named));
-            return Ok(ExitCode::FAILURE);
+            return Ok(Exit::Failure);
         }
         if unreached > 0 && reaper != Reaper::Boot {
             let runs = counted(unreached, "run");
@@ -257,9 +254,9 @@ impl ReapedRuns {
              there may remain"
             ));
             advise("reap again once it can be reached", &next::reap(named));
-            return Ok(ExitCode::from(UNREACHED));
+            return Ok(Exit::Partial);
         }
-        Ok(ExitCode::SUCCESS)
+        Ok(Exit::Success)
     }
 }
 

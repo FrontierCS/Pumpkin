@@ -1,4 +1,4 @@
-<svg width="860px" height="920px" xmlns="http://www.w3.org/2000/svg">
+<svg width="860px" height="974px" xmlns="http://www.w3.org/2000/svg">
   <style>
     .fg { fill: #AAAAAA }
     .bg { fill: #000000 }
@@ -106,19 +106,25 @@
 </tspan>
     <tspan x="10px" y="784px"><tspan class="fg-bright-green bold">Examples:</tspan>
 </tspan>
-    <tspan x="10px" y="802px"><tspan>  pumpkin run tasks/bench/task.star --arg model=model-a</tspan>
+    <tspan x="10px" y="802px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a</tspan>
 </tspan>
-    <tspan x="10px" y="820px"><tspan>  pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome \</tspan>
+    <tspan x="10px" y="820px"><tspan>          Start a run of a task, and print its id</tspan>
 </tspan>
-    <tspan x="10px" y="838px"><tspan>    &gt; outcome.json</tspan>
+    <tspan x="10px" y="838px">
 </tspan>
-    <tspan x="10px" y="856px">
+    <tspan x="10px" y="856px"><tspan>  </tspan><tspan class="fg-bright-cyan bold">pumpkin run tasks/bench/task.star --arg model=model-a --wait --outcome</tspan><tspan> \</tspan>
 </tspan>
-    <tspan x="10px" y="874px"><tspan>How a run is placed and how it outlives a logout:</tspan>
+    <tspan x="10px" y="874px"><tspan>    </tspan><tspan class="fg-bright-cyan bold">&gt; outcome.json</tspan>
 </tspan>
-    <tspan x="10px" y="892px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running</tspan>
+    <tspan x="10px" y="892px"><tspan>          Start a run, follow it to its end, and save its outcome.json</tspan>
 </tspan>
     <tspan x="10px" y="910px">
+</tspan>
+    <tspan x="10px" y="928px"><tspan>How a run is placed and how it outlives a logout:</tspan>
+</tspan>
+    <tspan x="10px" y="946px"><tspan>https://github.com/FrontierCS/Pumpkin/blob/main/docs/running.md#running</tspan>
+</tspan>
+    <tspan x="10px" y="964px">
 </tspan>
   </text>
 

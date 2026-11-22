@@ -28,7 +28,7 @@ mod members;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::Command;
 use std::time::Duration;
 use std::{fs, io};
 
@@ -41,6 +41,7 @@ pub(crate) use members::members;
 use stdx::Context as _;
 use stdx::process::{Bound, Echo, Environment, Failure, Run};
 
+use crate::cli::Exit;
 use crate::controller::USER;
 use crate::{say, whole};
 
@@ -111,7 +112,7 @@ const SYSTEM_TIMEOUT: Duration = Duration::from_mins(2);
 /// provisioner's part is missing, or if a step fails. The steps before the failed one stay done.
 /// The install copies the members' keys first, so settings that name no members' keys change
 /// nothing, and a copy that fails leaves `sshd` as it was.
-pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
+pub(crate) fn install(settings: &ParameterArn) -> Result<Exit, String> {
     if !rustix::process::geteuid().is_root() {
         return Err(
             "this `pumpkin-admin install` doesn't run as root: run it as root, as with sudo"
@@ -147,7 +148,7 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
         }
     }
     if written.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(Exit::Success);
     }
     // Ubuntu's `ssh.service` checks the configuration before its reload signals `sshd`. If no
     // `sshd` runs, the next connection starts one, as `ssh.socket` does.
@@ -165,7 +166,7 @@ pub(crate) fn install(settings: &ParameterArn) -> Result<ExitCode, String> {
              put back the ones it replaced"
         ));
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(Exit::Success)
 }
 
 /// The file that holds the host's range of ephemeral ports, which a listen on port 0 picks from.

@@ -31,7 +31,6 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -47,6 +46,7 @@ use self::failure::Failures;
 use self::http::{Method, Request, Response, Sent};
 use self::json::{listed_json, live_row, record_json, run_json, tokens_json};
 use self::talk::Talk;
+use crate::cli::Exit;
 use crate::controller::{Unviewed, Viewing};
 use crate::link::Viewed;
 use crate::progress::{self, Listed};
@@ -72,7 +72,7 @@ const HELD_ENDED_RUNS: usize = 8;
 
 /// Serves the runs in the directory `flags` name, or else, with `[controller]` in the
 /// configuration, the controller's runs, until the process is stopped.
-pub(crate) fn view(flags: cli::View) -> Result<ExitCode, String> {
+pub(crate) fn view(flags: cli::View) -> Result<Exit, String> {
     let cli::View { runs, port } = flags;
     let (source, serving) = if runs.is_none()
         && let Some(client) = config::client(None)?
