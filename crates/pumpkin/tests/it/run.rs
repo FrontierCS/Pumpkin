@@ -75,7 +75,7 @@ fn usage() {
         pumpkin(&["run", "a.star", "--arg", "model"]),
         pumpkin(&["run", "a.star", "--arg", "a=1", "--arg", "a=2"]),
         pumpkin(&["run", "--outcome", "a.star"]),
-        pumpkin(&["cancel", "--force=yes", "6a"]),
+        pumpkin(&["cancel", "--any-member=yes", "6a"]),
         pumpkin(&["reap", "6a"]),
         not_utf8("wait $'\\xff'", &[b"wait", b"\xff"]),
         not_utf8("wait $'\\xff/x'", &[b"wait", b"\xff/x"]),
@@ -217,11 +217,11 @@ fn usage() {
 
             Usage: pumpkin run --wait --outcome <entry>
             pumpkin: to read how to use it: pumpkin help run
-            $ pumpkin cancel --force=yes 6a
+            $ pumpkin cancel --any-member=yes 6a
             exit status: Some(2)
-            error: unexpected value 'yes' for '--force' found; no more were expected
+            error: unexpected value 'yes' for '--any-member' found; no more were expected
 
-            Usage: pumpkin cancel --force <run>
+            Usage: pumpkin cancel --any-member <run>
             pumpkin: to read how to use it: pumpkin help cancel
             $ pumpkin reap 6a
             exit status: Some(2)

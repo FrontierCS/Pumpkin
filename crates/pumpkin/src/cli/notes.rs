@@ -45,10 +45,6 @@ The phases and states: https://github.com/FrontierCS/Pumpkin/blob/main/docs/runn
 pub(super) const CANCEL_NOTES: &str = "\
 Examples:
   pumpkin cancel 126a
-  pumpkin cancel --force 126a
-
-After --force, a create that the driver gave up on can still make a sandbox. `pumpkin reap` \
-removes it.
 
 Exit status:
   0  The run has ended, and nothing that it left remains.

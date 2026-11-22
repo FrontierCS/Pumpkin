@@ -277,7 +277,6 @@ pub(crate) fn build(client: &config::Client, flags: cli::Build) -> Result<ExitCo
 pub(crate) fn cancel(
     client: &config::Client,
     run: &str,
-    force: bool,
     any_member: bool,
 ) -> Result<ExitCode, String> {
     let mut reached = Reached::reach(&client.controller)?;
@@ -286,7 +285,6 @@ pub(crate) fn cancel(
     let modal = client.modal_file()?;
     let request = CancelRequest {
         id: id.clone(),
-        force,
         any_member,
         modal_bytes: modal.as_ref().map(Vec::len),
     };

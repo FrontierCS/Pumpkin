@@ -1470,14 +1470,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
     let pumpkin = install(&scratch, &format!("home/.pumpkin/{PINNED}/bin"));
     let own = scratch.0.join(format!("home/jobs/{id}/pumpkin"));
     symlink(pumpkin, &own).unwrap();
-    let args = [
-        "controller",
-        "cancel",
-        "--force",
-        "--modal-config",
-        "modal.toml",
-        &id,
-    ];
+    let args = ["controller", "cancel", "--modal-config", "modal.toml", &id];
     let mut cancel = scratch.program(own, &args);
     let invoked = invocation(&cancel);
     let output = cancel.output().unwrap();
@@ -1486,7 +1479,7 @@ fn shell_client_cancels_with_the_jobs_executable() {
         &report(invoked, &output, &scratch.0, false),
         &[(&id, "<id>")],
         &expect![[r#"
-            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --force --modal-config modal.toml <id>
+            $ <scratch>/home/jobs/<id>/pumpkin controller cancel --modal-config modal.toml <id>
             exit status: Some(102)"#]],
     );
 }
@@ -1506,7 +1499,7 @@ echo "$*" >> "${0%/*}/units"
     scratch.write_executable("bin/systemctl", ctl.as_bytes());
     let mut lines = Vec::new();
     for _ in 0..2 {
-        let cancel = on_client(&scratch, &client, &["cancel", "--force", &id])
+        let cancel = on_client(&scratch, &client, &["cancel", &id])
             .output()
             .unwrap();
         lines.push(format!(
@@ -1522,10 +1515,9 @@ echo "$*" >> "${0%/*}/units"
         &lines.join("\n"),
         &[(&id, "<id>")],
         &expect![[r#"
-        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
-        exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
-        --user kill --signal=KILL pumpkin-job-<id>
-        --user stop pumpkin-job-<id>"#]],
+            exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+            exit status: 0: pumpkin: run <id>'s job on controller `alice` is stopped, before the run started
+            --user stop pumpkin-job-<id>"#]],
     );
 }
 
@@ -2714,7 +2706,7 @@ fn cancel_full_id_refused() {
     let args = ["cancel", &id];
     let by_bob = ran_by(&scratch, on_repo(&scratch, "repo-bob", &bob, &args), &args);
     // As a build of Bob's that skips its own check asks it.
-    let cancel = json!({ "type": "cancel", "id": id, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel = json!({ "type": "cancel", "id": id, "any_member": false, "modal_bytes": null });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     let served = serve_fed_for(&scratch, &["--member", "bob"], &asked);
@@ -2850,7 +2842,8 @@ fn member_unread() {
         on_repo(&scratch, "repo-bob", &bob, &args),
         &args,
     ));
-    let cancel = json!({ "type": "cancel", "id": unread, "force": false, "any_member": false, "modal_bytes": null });
+    let cancel =
+        json!({ "type": "cancel", "id": unread, "any_member": false, "modal_bytes": null });
     let mut asked = Vec::new();
     schema::frame::write(&mut asked, &cancel, &[]).unwrap();
     lines.push(serve_fed_for(&scratch, &["--member", "bob"], &asked));

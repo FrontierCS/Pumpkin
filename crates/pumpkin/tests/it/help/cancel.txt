@@ -18,9 +18,6 @@ Options:
       --runs <dir>
           The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)
 
-      --force
-          Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed
-
       --any-member
           Match the run among every member's runs on the controller, not only this member's and
           those that no member started
@@ -30,10 +27,6 @@ Options:
 
 Examples:
   pumpkin cancel 126a
-  pumpkin cancel --force 126a
-
-After --force, a create that the driver gave up on can still make a sandbox. `pumpkin reap` removes
-it.
 
 Exit status:
   0  The run has ended, and nothing that it left remains.

@@ -13,9 +13,6 @@ Options:
       --runs <dir>
           The directory to look the run up in (default: `runs` in the repository's `.pumpkin`)
 
-      --force
-          Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed
-
   -h, --help
           Print help
 

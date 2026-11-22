@@ -55,7 +55,7 @@ pub(super) fn cancel(
     let held = jobs.join(id);
     let record = home.join(job::runs()).join(id);
     if !super::exists(&record)? {
-        stop(&tag, &held, request.force)?;
+        stop(&tag, &held)?;
         // The driver can publish its record between the first check and the stop.
         if !super::exists(&record)? {
             return Ok(CancelAnswer::Unstarted);
@@ -65,7 +65,7 @@ pub(super) fn cancel(
         Ok(Writer::This) => {}
         writer => {
             // The unit can be stopped even when its record's writer cannot be read.
-            stop(&tag, &held, request.force)?;
+            stop(&tag, &held)?;
             let writer = match writer {
                 Ok(Writer::Other(build)) => Some(build),
                 _ => None,
@@ -77,7 +77,6 @@ pub(super) fn cancel(
     let cancel = cli::Cancel {
         run: cli::RunName::Prefix(id.to_owned()),
         runs: None,
-        force: request.force,
         modal_config: modal.as_ref().map(|file| file.path().to_owned()),
     };
     let cancelled = crate::cancelled(cancel, crate::Reader::Follower)?;
@@ -88,38 +87,30 @@ pub(super) fn cancel(
     })
 }
 
-fn stop(id: &RunTag, held: &Path, force: bool) -> Result<(), String> {
+fn stop(id: &RunTag, held: &Path) -> Result<(), String> {
     let unit = job::unit_name(id);
-    let calls: &[&[&str]] = if force {
-        &[&["kill", "--signal=KILL"], &["stop"]]
-    } else {
-        &[&["stop"]]
-    };
-    for &args in calls {
-        if !super::exists(held)? {
-            return Ok(());
-        }
-        let mut ctl = stdx::process::command(
-            "systemctl",
-            Environment::Only(&[
-                "HOME",
-                "PATH",
-                "XDG_RUNTIME_DIR",
-                "DBUS_SESSION_BUS_ADDRESS",
-            ]),
-        );
-        ctl.arg("--user").args(args).arg(&unit);
-        if let Err(error) =
-            crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10))
-        {
-            return if super::exists(held)? {
-                Err(error)
-            } else {
-                Ok(())
-            };
-        }
+    if !super::exists(held)? {
+        return Ok(());
     }
-    // A concurrent SIGKILL to the unit can interrupt ExecStopPost while it removes the keys.
+    let mut ctl = stdx::process::command(
+        "systemctl",
+        Environment::Only(&[
+            "HOME",
+            "PATH",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ]),
+    );
+    ctl.arg("--user").arg("stop").arg(&unit);
+    if let Err(error) = crate::controller::bounded(&mut ctl, "systemctl", Duration::from_mins(10)) {
+        return if super::exists(held)? {
+            Err(error)
+        } else {
+            Ok(())
+        };
+    }
+    // ExecStopPost, which removes the keys, may not have run whole, as when systemd's stop timeout
+    // killed it.
     match fs::remove_dir_all(held) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         removed => removed.context(held.display()),

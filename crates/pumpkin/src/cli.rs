@@ -449,9 +449,6 @@ pub(crate) struct Cancel {
     pub(crate) run: RunName,
     #[arg(long, value_name = "dir", value_parser = utf8(RUNS_NAMED_NEXT), help = RUNS_HELP)]
     pub(crate) runs: Option<String>,
-    /// Kill the run's driver with SIGKILL, which leaves the run lost and records it as failed.
-    #[arg(long)]
-    pub(crate) force: bool,
     #[arg(long, hide = true, value_name = "file", help = MODAL_CONFIG_HELP)]
     pub(crate) modal_config: Option<PathBuf>,
 }

@@ -437,7 +437,6 @@ impl Request for StartRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CancelRequest {
     pub(crate) id: String,
-    pub(crate) force: bool,
     pub(crate) any_member: bool,
     pub(crate) modal_bytes: Option<usize>,
 }
