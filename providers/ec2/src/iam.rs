@@ -191,7 +191,6 @@ const TIMER_SCHEDULES: &[Resource] = &[Resource::In(
     ],
 )];
 
-/// The calls that [`crate::envelope`] makes to read the envelope. Each is a read.
 pub(crate) struct Checks {
     pub(crate) templates: Call,
     pub(crate) profile: Call,

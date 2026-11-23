@@ -131,8 +131,6 @@ fn attestation(document: &str, signature: &str) -> Attestation {
     Attestation::try_from(serde_json::to_vec(&identity).unwrap()).unwrap()
 }
 
-/// The cases of hellos, each an attestation and where it comes from, for the launched instance's
-/// check.
 fn hellos() -> Vec<(&'static str, Attestation, IpAddr)> {
     let launched = document(ACCOUNT, REGION, INSTANCE);
     let signature = signed(&launched);

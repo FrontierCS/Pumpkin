@@ -48,7 +48,7 @@ mod user_data;
 
 /// The most seconds a sandbox's start takes, as a class's [`Class::startup_seconds`] declares it
 /// unless its settings give another (`InstanceClass::startup_seconds`): the shares of the launch,
-/// the boot, and Docker's install and the images' pulls, then the container's create and start,
+/// the boot, and Docker's start and the images' pulls, then the container's create and start,
 /// and its `sandboxd`'s dial and set-up. The boot's steps are bounded by the create's deadline
 /// alone, so a start asked with less than this ahead is still tried.
 const STARTUP_SECONDS: NonZeroU64 = NonZeroU64::new(600 + 300 + 300 + 240 + 180 + 120).unwrap();
@@ -81,9 +81,6 @@ impl Settings {
     /// The classes of sandbox that the envelope offers, by name, which [`Provider::ready`] gives
     /// once [`Ec2::connect`] has reached it.
     pub fn classes(&self) -> BTreeMap<Name, Class> {
-        // Each instance class is a class of sandbox, which offers a role what its instance type
-        // leaves one ([`InstanceClass::role_limits`]), and the CPU's flags and model that the
-        // settings state.
         let classes = (self.classes.iter()).map(|(name, class)| {
             let (cpu_millis, memory_bytes) = class.role_limits();
             let offers = Offers {
@@ -107,12 +104,6 @@ impl Settings {
 /// The sandboxes' timer, which ends each instance soon after its run's hard end, outside its guest,
 /// so also one whose guest hangs: the schedule group, and the role that each schedule's target runs
 /// with, which `EventBridge` Scheduler assumes, and which may terminate run instances.
-///
-/// A create that returns an instance has made its one-shot schedule in the group, named by the
-/// run's tag and the ID ([`launch::timer_name`]), which terminates it after the boot's own timer
-/// ([`launch::HardEnd::timer`]), then deletes itself. A create that can't make it fails and leaves
-/// the instance, as its errors say ([`Ec2::create_instance`]); a delete deletes it once the
-/// instance is terminated, and one a lost run leaves fires on an instance gone already.
 // Without `deny_unknown_fields`, as `Settings`.
 #[derive(Clone, Debug, Deserialize)]
 struct Timer {
@@ -197,8 +188,7 @@ impl InstanceClass {
 }
 
 /// The memory, in MiB, that an instance with `memory_mib` keeps for itself, out of a role's
-/// reach, for its kernel, its operating system and its Docker: 25% of the first 4 GiB, 20% of
-/// the next 4, 10% of the next 8, 6% of the next 112, and 2% of the rest.
+/// reach, for its kernel, its operating system and its Docker.
 // An instance type's nominal memory is more than its kernel reports, and the kernel, the
 // operating system and Docker keep some of what it reports, a share that shrinks as memory
 // grows: the tiers leave them that, with room to spare.
@@ -263,7 +253,6 @@ pub struct Ec2<'e> {
     repositories: Repositories<Repository>,
     /// The timer's role, which each instance's schedule runs with.
     timer_role: RoleArn,
-    /// What [`Provider::ready`] gives: what names the account, and the classes of sandbox.
     ready: Ready,
     /// The identity documents of the envelope's instances, which admit their sandboxes.
     documents: Documents,
@@ -407,7 +396,6 @@ struct Identity {
     arn: String,
 }
 
-/// `repositories`, with their URIs.
 fn described_repositories(
     cli: &Cli,
     repositories: &Repositories<RepositoryName>,
