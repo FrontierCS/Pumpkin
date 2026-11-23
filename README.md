@@ -396,9 +396,8 @@ provider that offers what it needs, such as its CPUs, its memory or its GPU.
 The controller is the same `pumpkin`, on an EC2 instance that
 [`deploy/aws`](deploy/aws/README.md) makes, or in a container on any Linux x86-64 host with a
 Docker engine, which [`deploy/docker`](deploy/docker/README.md) makes. A machine whose
-configuration names `[controllers.<name>]` uploads its Pumpkin install and sends jobs over SSH: to
-the EC2 controller's private address, which it finds by its `region`, or to the `address` that the
-configuration names. The controller builds task images and runs the drivers in systemd units. The operator can close
+configuration names `[controllers.<name>]` uploads its Pumpkin install and sends jobs over SSH.
+The controller builds task images and runs the drivers in systemd units. The operator can close
 the connection and use the same commands to follow, list, stop, reap or view those runs later.
 [docs/providers.md](docs/providers.md) says how the pieces fit.
 

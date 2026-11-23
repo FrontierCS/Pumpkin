@@ -25,7 +25,7 @@ use expect_test::{Expect, expect};
 use gateway::{Arrival, IncomingModelRequest, Op, Process, Put, Registration, Session, Sockets};
 use provider::{
     Create, Created, Creator, Listed, Provider, Reservation, Role, RunTag, SandboxId, Sweep,
-    UnixTime, Unreserved,
+    UnixTime,
 };
 use recipe::Given;
 use schema::frame::MAX_MESSAGE_BYTES;
@@ -641,22 +641,15 @@ fn cpus() {
             // One core more than the others leave.
             let left = threads * (cores as u64 - held + 1);
             let left = provider().reserve(&wide, &[vec![sized("wide", left)]]);
-            let refused = match left.unwrap_err() {
-                Unreserved::Busy(why) => format!("waits: {why}"),
-                Unreserved::Failed(why) => format!("fails: {why}"),
-            };
+            let refused = left.unwrap_err();
             let named = [first, &fixture.run]
                 .iter()
                 .all(|run| refused.contains(run.as_str()));
-            let busy = refused.starts_with("waits: ");
             lines.push(format!(
-                "one that needs more than are left: refused as busy: {busy}, naming them: {named}"
+                "one that needs more than are left: refused, naming them: {named}"
             ));
             let more = provider().reserve(&wide, &[vec![sized("wide", count + 1)]]);
-            let more = match more.unwrap_err() {
-                Unreserved::Busy(why) => format!("waits: {why}"),
-                Unreserved::Failed(why) => format!("fails: {why}"),
-            };
+            let more = more.unwrap_err();
             let more = more.replace(&(count + 1).to_string(), "<cpus + 1>");
             let more = more.replace(&format!("{count} CPUs"), "<cpus> CPUs");
             let more = more.replace(&cores.to_string(), "<cores>");
@@ -671,8 +664,8 @@ fn cpus() {
             another runner: on whole cores: true, as it sees them: true
             another run's role: on whole cores: true, as it sees them: true
             each apart from the others: true
-            one that needs more than are left: refused as busy: true, naming them: true
-            one that needs more than the machine has: fails: the roles that run at once need more whole cores than the <cores> that sandboxes get, <cpus> CPUs in all, as each sandbox holds whole cores for its CPUs (`wide` <cpus + 1>): change their needs, or run it where sandboxes are larger"#]],
+            one that needs more than are left: refused, naming them: true
+            one that needs more than the machine has: the roles that run at once need more whole cores than the <cores> that sandboxes get, <cpus> CPUs in all, as each sandbox holds whole cores for its CPUs (`wide` <cpus + 1>): change their needs, or run it where sandboxes are larger"#]],
     );
 }
 

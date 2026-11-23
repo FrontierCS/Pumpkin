@@ -23,7 +23,7 @@ use std::process::Output;
 use engine::{ContextName, Engine, REMOVE_TIMEOUT, confinement, docker, docker_to, fix_reported};
 use provider::{
     Console, Create, Created, Creator, ImageRef, Listed, Meeting, Provider, Ready, Reservation,
-    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted, Unreserved,
+    Role, RunTag, SandboxId, SandboxdRef, Sweep, Undeleted,
 };
 use schema::ir::{Image, Name};
 use schema::sandbox::{SANDBOXCTL_PATH, SANDBOXD_PATH, SOCKET_NAME, SocketDial};
@@ -149,7 +149,7 @@ impl Provider for Docker<'_> {
         &self.ready
     }
 
-    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, Unreserved> {
+    fn reserve(&self, run: &RunTag, phases: &[Vec<Role>]) -> Result<Reservation, String> {
         cpus::reserve(&self.cpus, run, phases)
     }
 

@@ -4,10 +4,9 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use docker::Docker;
 use ec2::Ec2;
@@ -32,10 +31,6 @@ use crate::{
     Reader, absolute_utf8, advise, arg_flags, cli, closing_problems, config, config_path,
     controller, driver, modal_helper, next, print, runs_dir, say, star, task_problems,
 };
-
-/// How long a run that waits for room pauses before it tries again: each try reads a few small
-/// files of a provider's, and a run that waits starts at most this late once there is room.
-const ROOM_AGAIN: Duration = Duration::from_secs(5);
 
 pub(crate) fn run(flags: cli::Run) -> Result<Exit, String> {
     if let Some(client) = config::client(flags.config.as_deref(), flags.controller.as_ref())? {
@@ -195,8 +190,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
         servings: &servings,
         budgets,
     };
-    let (runs, mut room) = (Path::new(&runs), room(id.as_str(), waiting(&id, reader)?));
-    let run = Run::prepare(&System, placed, on, runs, id, models, kept, &mut room)?;
+    let run = Run::prepare(&System, placed, on, Path::new(&runs), id, models, kept)?;
     let (id, dir) = (run.id().to_owned(), run.dir().to_owned());
     begun(&id, &dir, &names, reader);
     driver::locked(&id)?;
@@ -216,41 +210,6 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
         return Ok(Exit::Failure);
     }
     Ok(Exit::Success)
-}
-
-/// Where a controller's job marks that run `id` waits, as for a build slot, so that `ls` lists it
-/// as waiting until its record lists it: `None` for a run of the operator's.
-fn waiting(id: &RunTag, reader: Reader) -> Result<Option<PathBuf>, String> {
-    match reader {
-        Reader::Operator => Ok(None),
-        Reader::Follower => Ok(Some(
-            crate::job::jobs()?
-                .join(id.as_str())
-                .join(crate::job::WAITING),
-        )),
-    }
-}
-
-/// The wait of run `id` for room that [`Run::prepare`] takes: it marks `waiting`, if given, says
-/// what holds the room each time that changes, then pauses for `ROOM_AGAIN`.
-fn room(id: &str, waiting: Option<PathBuf>) -> impl FnMut(&str) -> Result<(), String> + use<> {
-    let id = id.to_owned();
-    let mut said = None;
-    move |held: &str| {
-        if said.is_none()
-            && let Some(waiting) = &waiting
-        {
-            fs::File::create(waiting).context(waiting.display())?;
-        }
-        if said.as_deref() != Some(held) {
-            say(format_args!(
-                "run {id} waits for room {held}: it starts once there is"
-            ));
-            said = Some(held.to_owned());
-        }
-        std::thread::sleep(ROOM_AGAIN);
-        Ok(())
-    }
 }
 
 /// Says to `reader` that run `id` is begun: to the operator, where it is recorded, `dir`, before
@@ -532,7 +491,8 @@ pub(crate) fn never_fits_controller(
         gateway: _,
         upstreams: _,
     } = config::read(config)?;
-    reached(workflow, providers, engine, &Offered::Controller(controller))?;
+    let offered = Offered::Controller(controller);
+    reached(workflow, providers, engine, &offered)?;
     Ok(())
 }
 
