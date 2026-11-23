@@ -328,11 +328,21 @@ fn held(mut wait: Command, id: &str, leases: usize) -> Result<()> {
 /// Kills the unit of job `id` on the controller at `host` and `port`, 22 if `None`, to leave a lost
 /// run, with the key and the host key pinned as `alias` of the client whose home is `home`.
 fn kill_job(home: &Path, host: &str, port: Option<u16>, alias: &str, id: &str) -> Result<()> {
-    let destination = format!("pumpkin@{host}");
     let kill = format!("systemctl --user kill --signal=KILL pumpkin-job-{id}");
+    let mut ssh = member_ssh(home, host, port, alias);
+    ssh.arg(&kill);
+    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
+    // when killed at the bound or ended by a fatal error.
+    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
+    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
+    Ok(())
+}
+
+/// An `ssh` to the controller's user at `host` and `port`, 22 if `None`, with the key and the host
+/// key pinned as `alias` of the client whose home is `home`, which the command to run then ends.
+fn member_ssh(home: &Path, host: &str, port: Option<u16>, alias: &str) -> Command {
     let kept = home.join(".config/pumpkin/ssh");
     let known_hosts = format!("UserKnownHostsFile={}", kept.join("known_hosts").display());
-    let alias = format!("HostKeyAlias={alias}");
     let mut ssh = process::command("ssh", Environment::Inherited);
     ssh.args(["-F", "/dev/null", "-i"])
         .arg(kept.join("key"))
@@ -346,17 +356,13 @@ fn kill_job(home: &Path, host: &str, port: Option<u16>, alias: &str, id: &str) -
             "-o",
             &known_hosts,
             "-o",
-            &alias,
+            &format!("HostKeyAlias={alias}"),
         ]);
     if let Some(port) = port {
         ssh.args(["-o", &format!("Port={port}")]);
     }
-    ssh.args([&destination, &kill]);
-    // Its output captured, as `ssh` makes its standard streams non-blocking, and leaves them so
-    // when killed at the bound or ended by a fatal error.
-    let how = Run::new(Bound::Within(STEP_TIMEOUT), Echo::Line).named("ssh");
-    process::run(&mut ssh, how).map_err(|failure| failure.to_string())?;
-    Ok(())
+    ssh.arg(format!("pumpkin@{host}"));
+    ssh
 }
 
 /// Fails, saying what to give, unless the credentials that the smoke's checks use reach AWS,

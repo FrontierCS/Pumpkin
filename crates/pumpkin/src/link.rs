@@ -172,7 +172,8 @@ impl Request for HealthRequest {
     }
 }
 
-/// What the controller's machine reads of itself: how long it has been up, its disk and its boot.
+/// What the controller's machine reads of itself: how long it has been up, since its PID 1
+/// started in a container, its disk and its boot.
 /// It judges nothing: it reads the same whether or not the controller can run a job.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Health {
