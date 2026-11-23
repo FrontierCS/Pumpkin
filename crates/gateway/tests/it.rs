@@ -61,6 +61,10 @@ const PAUSE: Duration = Duration::from_millis(30);
 // that peer's only outcome.
 const HELLO_BOUND: Duration = Duration::from_millis(50);
 
+// The most hellos the listener reads at once: `crowd` holds that many silent, and `turns` sends one
+// more than that, each once the one before has been answered.
+const HELLOS_AT_ONCE: usize = 100;
+
 // What a case writes in its directory at its event, which a `Still` of the case reads: the fake
 // sandbox's stall, or what the case's action marks.
 const STALLED: &str = "stalled";
@@ -1484,10 +1488,8 @@ fn answered(connection: &mut TcpStream) -> String {
     }
 }
 
-/// A hello's message and its body.
 type Said = (Value, Vec<u8>);
 
-/// A hello of this version that presents `attestation`.
 fn attesting(attestation: &str) -> Said {
     let hello = serde_json::to_value(hello()).unwrap();
     (hello, attestation.as_bytes().to_vec())
@@ -1739,8 +1741,7 @@ fn meet(address: SocketAddr, attestation: &str, waiting: JoinHandle<String>) -> 
 
 fn crowd() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
-    // The most hellos the listener reads at once.
-    let silent: Vec<TcpStream> = (0..100).map(|_| dial(address)).collect();
+    let silent: Vec<TcpStream> = (0..HELLOS_AT_ONCE).map(|_| dial(address)).collect();
     let heard = answered(&mut dial(address));
     drop(silent);
     format!("one past the hellos read at once: heard {heard}")
@@ -1749,9 +1750,10 @@ fn crowd() -> String {
 fn turns() -> String {
     let (_listener, address) = listen(HELLO_TIMEOUT);
     let hello = (json!({ "version": PROTOCOL_VERSION }), Vec::new());
-    let mut heard: Vec<String> = (0..=100).map(|_| present(address, &hello)).collect();
+    let hellos = HELLOS_AT_ONCE + 1;
+    let mut heard: Vec<String> = (0..hellos).map(|_| present(address, &hello)).collect();
     heard.dedup();
-    format!("101 hellos, each in turn: {}", heard.join("; "))
+    format!("{hellos} hellos, each in turn: {}", heard.join("; "))
 }
 
 #[test]

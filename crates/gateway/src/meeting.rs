@@ -262,7 +262,7 @@ impl Drop for Listener {
 }
 
 /// A registration of a [`Listener`]'s that awaits the check that admits its sandbox's hello,
-/// which the provider makes only as it creates the sandbox.
+/// which can be made only once the sandbox is created.
 #[derive(Debug)]
 pub struct Unattested {
     awaiting: Awaiting,
@@ -478,8 +478,8 @@ impl Dialer {
     }
 
     /// Issues the grant of one sandbox, in the [`Listening`] that its `sandboxd` is given, and an
-    /// [`Unreached`] that takes the sandbox's endpoint, which the provider learns only by creating
-    /// the sandbox, and so after the grant is given.
+    /// [`Unreached`] that takes the sandbox's endpoint, which is known only once the sandbox is
+    /// created, and so after the grant is given.
     pub fn issue(&self) -> io::Result<(Listening, Unreached)> {
         let grant = random_grant()?;
         let unreached = Unreached {
