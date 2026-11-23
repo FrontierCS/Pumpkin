@@ -1,7 +1,10 @@
 """One private Codex session and its grants per participant."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
+load("//budget.star", "budgeted")
 load("//hypergraph-benchmark/workflow.star", "GRANTS")
+
+MODEL = arg("model", str)
 
 PROMPT = """
 You are {role}, one of alice, bob, carol, dan and eve. Your team has up to 5,400 seconds to
@@ -43,7 +46,7 @@ def participant(role, base):
     """
     harness = codex(
         base,
-        model = "glm-5.3-flash",
+        model = MODEL,
         tools = "native",
         effort = "low",
         workspace = "/workspace",
@@ -60,7 +63,7 @@ def participant(role, base):
         "needs": {"cpu_millis": 8000, "memory_bytes": 32 * GiB},
         "runtime": {"agent": runtime | {
             "command": command | {"argv": ["python3", "/opt/team/start.py"] + command["argv"]},
-            "egress": {"model": [entry | {"budget": {"microusd": 5 * USD}} for entry in route]},
+            "egress": {"model": budgeted(route)},
             "grants": GRANTS,
         }},
     }

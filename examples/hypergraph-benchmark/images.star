@@ -1,13 +1,10 @@
-"""Images built from the pinned native benchmark source."""
+"""Images built from the benchmark's starter and Ligra's source, which a pinned commit fetches."""
 
-def _native(role):
-    generated = image("Dockerfile", context = "//hypergraph-benchmark/generation", mount = {
-        "source": "//benchmark-input/generation",
-    })
-    return image("Dockerfile", context = "//benchmark-input/native-" + role, contexts = {
-        "generated": generated,
-        "shared": image("Dockerfile", context = "//benchmark-input/" + role + "-base"),
-    })
+_DIR = "//hypergraph-benchmark/"
+
+def _contexts():
+    ligra = image("Dockerfile", context = _DIR + "ligra")
+    return {"ligra": ligra, "base": image("Dockerfile", context = _DIR + "base", contexts = {"ligra": ligra})}
 
 def agent_image():
     """Builds the agent image with its native packager.
@@ -15,9 +12,7 @@ def agent_image():
     Returns:
       The native C++ development environment for Codex.
     """
-    return image("Dockerfile", context = "//hypergraph-benchmark/agent", mount = {
-        "binding": "//benchmark-input/agent",
-    }, contexts = {"native": _native("agent")})
+    return image("Dockerfile", context = _DIR + "agent", contexts = {"base": _contexts()["base"]})
 
 def judge_image(stage):
     """Builds the development, final, or replay verifier.
@@ -28,9 +23,5 @@ def judge_image(stage):
     Returns:
       The verifier with the data for that stage.
     """
-    mounts = {"binding": "//benchmark-input/judge"}
-    if stage == "replay":
-        mounts = mounts | {"selections": "//benchmark-replay"}
-    return image("Dockerfile", context = "//hypergraph-benchmark/judge", target = stage, mount = mounts, contexts = {
-        "native": _native("verifier"),
-    })
+    mounts = {"selections": "//benchmark-replay"} if stage == "replay" else {}
+    return image("Dockerfile", context = _DIR + "judge", target = stage, mount = mounts, contexts = _contexts())

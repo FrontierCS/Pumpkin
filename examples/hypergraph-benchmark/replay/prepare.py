@@ -62,28 +62,14 @@ def main(record):
     archives["manifest.json"] = (
         json.dumps({"original_run": record.name, "entries": manifest}, indent=2) + "\n"
     ).encode()
-    if dest.exists():
-        if (
-            not dest.is_symlink()
-            and dest.is_dir()
-            and {p.name for p in dest.iterdir()} == archives.keys()
-            and all(
-                not (dest / name).is_symlink()
-                and (dest / name).is_file()
-                and (dest / name).stat().st_size == len(data)
-                and (dest / name).read_bytes() == data
-                for name, data in archives.items()
-            )
-        ):
-            return
-        raise ValueError(
-            f"{dest} already exists with different selections; use a fresh task checkout"
-        )
     with tempfile.TemporaryDirectory(dir=dest.parent) as temp:
         staged = Path(temp) / "selections"
         staged.mkdir()
         for name, data in archives.items():
             (staged / name).write_bytes(data)
+        # The selections of an earlier record go with the temporary directory.
+        if dest.is_symlink() or dest.exists():
+            dest.rename(Path(temp) / "earlier")
         staged.rename(dest)
 
 

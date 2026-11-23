@@ -1,4 +1,4 @@
-"""Run the pinned verifier once per selection and retain its native result and evidence."""
+"""Run the native verifier once per selection and retain its result and evidence."""
 
 import hashlib
 import json
@@ -8,12 +8,11 @@ import signal
 import subprocess
 import sys
 import tarfile
-import tempfile
 from pathlib import Path
 
 from receipts import check_receipt
 
-INTERFACE = Path("/opt/team/interface.json")
+VERIFIER = Path(__file__).resolve().parent / "verifier.py"
 DATASETS = Path("/opt/team/data")
 OUT = Path("/pumpkin/out")
 
@@ -28,27 +27,14 @@ def official(mode, archive, out):
     result = out / "official.json"
     evidence = out / "evidence.tar.zst"
     dataset = DATASETS / (mode + ".json")
-    interface = json.loads(INTERFACE.read_bytes())
-    names = interface["env"]
-    with tempfile.TemporaryDirectory(dir=interface["home"]) as scratch:
-        env = os.environ | {
-            "HOME": interface["home"],
-            names["mode"]: mode,
-            names["scratch"]: scratch,
-            names["payload"]: str(archive),
-            names["dataset"]: str(dataset),
-            names["result"]: str(result),
-            names["evidence"]: str(evidence),
-        }
-        with subprocess.Popen(
-            [interface["command"]], cwd=scratch, env=env, start_new_session=True
-        ) as process:
-            try:
-                code = process.wait(timeout=1810)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
+    argv = [sys.executable, VERIFIER, mode, archive, dataset, result, evidence]
+    with subprocess.Popen(argv, cwd="/scratch", start_new_session=True) as process:
+        try:
+            code = process.wait(timeout=1810)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise
     raw = json.loads(result.read_bytes())
     if code and raw.get("failure", {}).get("code") != "invalid_submission":
         raise RuntimeError(f"verifier exited {code}: {raw.get('failure')}")

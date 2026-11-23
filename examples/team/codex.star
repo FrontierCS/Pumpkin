@@ -1,6 +1,7 @@
 """Two Codex agents write C++ hypergraph solvers and cross-check a case on the shared board."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
+load("//budget.star", "budgeted")
 load("//team/workflow.star", "PARTICIPANTS", "team")
 
 MODEL = arg("model", str)
@@ -47,7 +48,7 @@ agent = codex(
     finalize_grace_seconds = 0,
 )
 runtime = agent["runtime"]["agent"]
-routes = [route | {"budget": {"microusd": USD // 4}} for route in runtime["egress"]["model"]]
+routes = budgeted(runtime["egress"]["model"])
 
 team(
     "examples/team/codex",

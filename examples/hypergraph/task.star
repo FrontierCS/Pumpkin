@@ -1,6 +1,7 @@
 """Find the core numbers of a hypergraph, with Codex on a named model."""
 
 load("@pumpkin//harness/codex/codex.star", "codex")
+load("//budget.star", "budgeted")
 load("//hypergraph/score.star", "final_score", "score")
 load("//submit.star", "submission")
 
@@ -27,7 +28,7 @@ agent = codex(
     finalize_grace_seconds = 0,
 )
 runtime = agent["runtime"]["agent"]
-routes = [route | {"budget": {"microusd": USD // 2}} for route in runtime["egress"]["model"]]
+routes = budgeted(runtime["egress"]["model"])
 judge_image = image("Dockerfile", target = "judge")
 
 workflow(
