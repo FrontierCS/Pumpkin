@@ -104,8 +104,8 @@ pub enum SessionOp {
         instance_seconds: Option<NonZeroU64>,
     },
     /// Runs `argv` in lease `lease`'s runner, once it is ready and runs no other command, killing
-    /// it once `timeout_seconds` have passed since the op arrived, its start included, if given,
-    /// which is at most what the lease has left; without one, it may run until the lease ends.
+    /// it once it has run for `timeout_seconds`, if given, which is at most what the lease has
+    /// left; without one, it may run until the lease ends.
     Run {
         lease: u64,
         argv: Argv,
