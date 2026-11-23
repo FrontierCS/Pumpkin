@@ -21,7 +21,7 @@ A user should be able to add a provider without a change to this repository.
 
 ## A schema without I/O
 
-The `#![no_std]` decision core still reaches `schema`'s I/O items.
+The `#![no_std]` decision core reaches `schema`'s I/O items.
 
 - `tree::Writer`, `frame` and the `PathBuf` paths move to a crate beside `schema`, which then builds
   as `#![no_std]`.

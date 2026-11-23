@@ -21,9 +21,9 @@
 
 ## Why Pumpkin?
 
-Running a multi-agent multi-sandbox flow requires extensive communication and error handling. 
-Naively setting up such a workflow can result in increased obscene failures and unncessary context overhead for agents.
-We built Pumpkin to provide clean abstractions so people can easily do error handling.  
+Running a multi-agent multi-sandbox flow requires extensive communication and error handling.
+Naively setting up such a workflow can result in increased obscure failures and unnecessary context overhead for agents.
+We built Pumpkin to provide clean abstractions so people can easily do error handling.
 
 | | Without Pumpkin | With Pumpkin |
 | --- | --- | --- |
@@ -62,7 +62,9 @@ $ .pumpkin/bin/pumpkin check examples/hello/task.star
 $ .pumpkin/bin/pumpkin run examples/hello/task.star
 20261116-195228-234cd166
 $ .pumpkin/bin/pumpkin wait 234c
+pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1), ...
 $ .pumpkin/bin/pumpkin ls
+20261116-195228-234cd166 finished         2s  -               -  examples/hello: score=6 lines=1
 $ .pumpkin/bin/pumpkin view
 ```
 
@@ -73,8 +75,8 @@ its id. `wait` follows a run named by a prefix of that id; ending it leaves the 
 lists the runs that are live or ended in the last day. `view` serves them to this machine's
 browser. The record is `.pumpkin/runs/<id>/`.
 
-[Run it](#run-it) shows these commands with their output.
-[docs/running.md](docs/running.md) goes through installing, configuring and each command.
+[docs/running.md](docs/running.md) goes through installing, configuring and each command, with the
+full output of each.
 
 ### Installing or upgrading a task repository
 
@@ -306,36 +308,6 @@ problem at its file, line and column. A body's own statements run only when it i
 
 [docs/workflows.md](docs/workflows.md) holds every key a workflow writes and what `sandboxctl`
 answers; [docs/language.md](docs/language.md) holds the language.
-
-## Run it
-
-The operator runs the task repository's `./pumpkin` and holds the machine's configuration and
-keys. A machine whose runs stay on its own Docker engine needs only this
-`~/.config/pumpkin/pumpkin.toml`:
-
-```toml
-[docker]
-context = "default"
-
-[providers.local.docker]
-```
-
-From the root of a Pumpkin checkout, `examples/hello`, which needs no model, goes through the
-five commands:
-
-```console
-$ .pumpkin/bin/pumpkin check examples/hello/task.star  # evaluates and checks; silent if no problem
-$ .pumpkin/bin/pumpkin run examples/hello/task.star    # builds the images, starts the run, prints its id
-20261116-195228-234cd166
-$ .pumpkin/bin/pumpkin wait 234c                       # follows the run, named by a prefix of its digits
-pumpkin: run 20261116-195228-234cd166 finished with a result (score=6 lines=1), ...
-$ .pumpkin/bin/pumpkin ls                              # lists the runs live or ended in the last day
-20261116-195228-234cd166 finished         2s  -               -  examples/hello: score=6 lines=1
-$ .pumpkin/bin/pumpkin view                            # serves the runs to this machine's browser
-```
-
-[docs/running.md](docs/running.md) goes through installing, configuring and these commands in order,
-with the full output of each.
 
 ## Architecture
 

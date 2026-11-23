@@ -34,8 +34,8 @@ model routes reach, with each model's prices, and the files that hold their keys
 runs go to controllers names each in `[controllers.<name>]` in place of the engine and the
 providers.
 `pumpkin help config` is the reference, with an example of a machine whose runs go to EC2 and
-Modal and of one whose runs go to a controller; the [README](../README.md#run-it) gives one whose
-runs stay on its own Docker engine.
+Modal and of one whose runs go to a controller; the [README](../README.md#quickstart) gives one
+whose runs stay on its own Docker engine.
 
 ## Checking a task
 
@@ -123,11 +123,10 @@ the random digits of its id are fresh each time.
 
 `pumpkin wait <run>` says each milestone of the run as its record logs it, and once it has ended,
 its summary: how long each sandbox and call took, the model requests and their tokens, what each
-budget spent, the cost, and the values its result shows. It exits 0 if the run finished with a
-result, 3 if it finished without one, and 1 if it failed, was interrupted or was lost. Ending
-`wait` does not stop the run. `run --wait` starts a run and then follows it as `wait` does. Both
-print the milestones and the summary on their standard error, and nothing on their standard output
-unless `--outcome` asks for the run's `outcome.json`, which [records](record.md) shows:
+budget spent, the cost, and the values its result shows. Ending `wait` does not stop the run.
+`run --wait` starts a run and then follows it as `wait` does. Both print the milestones and the
+summary on their standard error, and nothing on their standard output unless `--outcome` asks for
+the run's `outcome.json`, which [records](record.md) shows:
 `pumpkin wait --outcome 234cd166 > outcome.json`. A run that finishes without a result says in its
 last lines why; when its final call gave none, it also says where that call's commands' logs
 are, or that it ran no command.
@@ -182,9 +181,8 @@ workflow's bounds give, even if nothing reaps it.
 
 SIGTERM, SIGINT and SIGHUP to the driver stop the run. Its pid is in the record's `driver.pid`.
 The run removes its sandboxes, and its `outcome.json` says which signal interrupted it. A signal
-that was ignored as `run` started stays ignored. SIGKILL to the driver, as `cancel --force` sends,
-leaves the run lost with its sandboxes. A create that the driver gave up on can still make a
-sandbox after that.
+that was ignored as `run` started stays ignored. SIGKILL to the driver leaves the run lost with
+its sandboxes. A create that the driver gave up on can still make a sandbox after that.
 
 `reap`, and `cancel` after the stop, delete what a run left on each provider it ran on. On the
 Docker engine of the context that the record's `provider.json` names, they delete the containers

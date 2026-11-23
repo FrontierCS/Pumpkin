@@ -42,5 +42,6 @@ run `python3 examples/team/verify.py .pumpkin/runs/<id>`. To exercise missing su
 `--arg omit=bob` or `--arg omit=all` to the run and the matching `--omit bob` or `--omit all`
 to the checker.
 
-For controller and provider verification with Smoke, see
-[development testing](../docs/dev/testing.md).
+To verify a controller and a provider with Smoke, run `cargo xtask live ec2` or
+`cargo xtask live modal` in a Pumpkin checkout, as [development testing](../docs/dev/testing.md)
+says.

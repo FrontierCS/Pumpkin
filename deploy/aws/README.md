@@ -67,7 +67,7 @@ moved {
 `grep '^resource' *.tf` here lists them. Besides the moves, the plan creates
 `terraform_data.pumpkin_release`, updates the controller's `run` policy, the sandbox's and the
 client's to this release's, and destroys the controller's `settings` and `members` policies, which
-`run` now holds. The update and the destroys are unordered, so apply it as a cutover, with the
+`run` holds. The update and the destroys are unordered, so apply it as a cutover, with the
 drain runbook under "Versions". Once it is applied, the blocks can go.
 
 ## Members

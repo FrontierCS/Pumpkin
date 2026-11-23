@@ -2,8 +2,8 @@
 
 This page says what each key of a workflow means, what bounds it, and how a wrong value is refused;
 what a role's code sees when it calls a function; and what the record keeps of a call. The
-README's [workflow](../README.md#a-workflow) introduces the parts with `examples/hello`, which this
-page quotes; [the language](language.md) says how the files themselves are written.
+README's [workflow](../README.md#workflow-in-pumpkin) introduces the parts with `examples/hello`,
+which this page quotes; [the language](language.md) says how the files themselves are written.
 
 The IR's types in the `schema` crate's `ir` module are the reference for every key: a key that the
 IR doesn't take is refused, and an absent key means what its doc there says, never a default
@@ -272,10 +272,9 @@ body unrun, as `examples/hello`'s `final` answers:
 
 An agent, or a call-lifetime target that holds sessions, makes ops with `sandboxctl`. Pumpkin puts its
 directory first on each command's `PATH`, ahead of the path the role or image sets.
-`sandboxctl` prints the reply as one line of JSON, whose `kind` names it. It exits 0 on success,
-1 for a refused op, 2 for the status of a job that gave no result, or 124 when its own wait
-expires. `sandboxctl --help` gives each command's arguments, and the `schema` crate's
-`sandbox::op` module each reply's fields.
+`sandboxctl` prints the reply as one line of JSON, whose `kind` names it. `sandboxctl --help` gives
+each command's arguments and exit statuses, and the `schema` crate's `sandbox::op` module each
+reply's fields.
 The replies below come from `examples/hello` with its agent changed to try each, and its `count`
 grant given `"calls": 2` and `"cumulative_seconds": 120`.
 
@@ -303,12 +302,8 @@ what the body `returned`, or `errored`, with a `failure` whose `code` is `call_t
 {"kind":"status","job":0,"state":"completed","returned":{"bytes":6,"lines":1},"remaining":{"calls":1,"seconds":119}}
 ```
 
-`sandboxctl call <function> <file> --wait <seconds>` waits for the result. Give a positive
-number of seconds for admission and completion together. The command retries an uncharged
-busy refusal, then polls the admitted job and prints its terminal status. A now function
-returns its usual reply. On timeout the command exits with 124 and reports the job number
-if it received one. An admitted job continues to run. If the connection fails before the
-admission reply arrives, the call may already have started.
+`sandboxctl call <function> <file> --wait <seconds>` waits for the result, the seconds covering
+admission and completion together. `sandboxctl --help` says how it ends.
 
 Once a job has ended, `model_requests_over_budget` says how many of its target's model requests a
 spent model budget barred, if any. `hello`'s target makes none; a job whose target's budget ran out
@@ -326,18 +321,15 @@ the call has ended the work, is at most the grace:
 {"kind":"call","returned":{"state":"accepted"},"remaining_seconds":30}
 ```
 
-A session's functions are called as `<session>.<op>`: `open [--seconds <n>]` answers with the
-lease's number; `run <lease> [--timeout <seconds>] -- <program> [<arg>...]`, `put <lease> <tree>
-<to> [--replace]` and `get <lease> <from> <to>` start a command or a copy of a directory tree and
-answer at once; `status <lease>` says how the lease and its last command or copy are doing, with
-the ends of the command's output; and `close <lease>` ends it.
+A session's functions are called as `<session>.<op>`, with `open`, `run`, `put`, `get`, `status`
+and `close` as ops. Each answers at once, and `sandboxctl --help` says what each takes and does.
 
 A refusal says why, and what to do instead. Each of these is a real reply:
 
 ```json
 {"kind":"refused","message":"`count` runs one call at a time, and already has one queued, running or releasing its sandbox: call again once it has finished; this call is not charged","busy":true}
 {"kind":"refused","message":"you have no job 7: ask about a job that one of your calls returned"}
-{"kind":"refused","message":"the work was ended: make no more ops"}
+{"kind":"refused","message":"your work has ended: make no more ops"}
 ```
 
 ## How a call is bounded
@@ -406,5 +398,5 @@ A body's own statements run only when it is called, so a misspelt method fails t
 reaches it, not the check:
 
 ```text
-lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`
+lib/verify.star:2:19: `pt` is no method of a `Target`: call one of `caller`, `capture`, `get`, `put`, `run`, `with_runner`
 ```
