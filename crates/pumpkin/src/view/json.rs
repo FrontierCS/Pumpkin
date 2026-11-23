@@ -64,6 +64,9 @@ pub(super) fn live_row(held: &Held, named: Option<&str>) -> Value {
             .as_ref()
             .map(|model| tokens_json(&model.tokens, model.requests))
     );
+    if let Some(started_over) = &held.started_over {
+        row["started_over"] = json!(started_over);
+    }
     row
 }
 

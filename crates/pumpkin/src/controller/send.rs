@@ -226,7 +226,13 @@ pub(super) fn send(
             linked.ask_with_body(reached, request, &body)
         },
     )?? {
-        StartAnswer::Started | StartAnswer::AlreadyStarted => Ok(build),
+        StartAnswer::Started { unrecorded } => {
+            if let Some(unrecorded) = unrecorded {
+                say(unrecorded);
+            }
+            Ok(build)
+        }
+        StartAnswer::AlreadyStarted => Ok(build),
         StartAnswer::Unconfirmed { message } => Err(message),
     }
 }

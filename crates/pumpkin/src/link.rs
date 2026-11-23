@@ -360,7 +360,7 @@ impl StartRequest {
 }
 
 pub(crate) enum StartAnswer {
-    Started,
+    Started { unrecorded: Option<String> },
     AlreadyStarted,
     Unconfirmed { message: String },
 }
@@ -368,9 +368,15 @@ pub(crate) enum StartAnswer {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StartHead {
-    Started,
+    /// The job started, though the controller couldn't record that it did, for the reason that
+    /// `unrecorded` gives, if any.
+    Started {
+        unrecorded: Option<String>,
+    },
     AlreadyStarted,
-    Unconfirmed { message: String },
+    Unconfirmed {
+        message: String,
+    },
 }
 
 impl Request for StartRequest {
@@ -383,7 +389,7 @@ impl Request for StartRequest {
 
     fn sent(answer: StartAnswer) -> io::Result<(StartHead, Vec<u8>)> {
         Ok(match answer {
-            StartAnswer::Started => (StartHead::Started, Vec::new()),
+            StartAnswer::Started { unrecorded } => (StartHead::Started { unrecorded }, Vec::new()),
             StartAnswer::AlreadyStarted => (StartHead::AlreadyStarted, Vec::new()),
             StartAnswer::Unconfirmed { message } => {
                 (StartHead::Unconfirmed { message }, Vec::new())
@@ -393,7 +399,7 @@ impl Request for StartRequest {
 
     fn received(head: StartHead, _: &mut Link) -> Result<StartAnswer, Unanswered> {
         match head {
-            StartHead::Started => Ok(StartAnswer::Started),
+            StartHead::Started { unrecorded } => Ok(StartAnswer::Started { unrecorded }),
             StartHead::AlreadyStarted => Ok(StartAnswer::AlreadyStarted),
             StartHead::Unconfirmed { message } => Ok(StartAnswer::Unconfirmed { message }),
         }
