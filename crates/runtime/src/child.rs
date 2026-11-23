@@ -1,13 +1,10 @@
 //! The run's children: a sandbox the core starts for a part of the run, on a thread of its own,
 //! which a driver of its kind drives.
 //!
-//! [`run`] starts a child's sandbox on the run's one start path, hands it to its driver, and
-//! reports a lease's end once its sandbox is deleted, and a call's as it comes, before the delete,
-//! whose end the call's teardown reports ([`Event::CallTornDown`]); a sandbox that can't be
-//! deleted fails the run. A child's thread waits on an inbox of its own ([`Message`]), into which
-//! its session hands what its reader reads, and the loop the core's stop and its driver's orders.
-//! A stop takes effect before the child's command starts, as the thread takes what its inbox holds
-//! then, and while it waits.
+//! A child's thread waits on an inbox of its own ([`Message`]), into which its session hands what
+//! its reader reads, and the loop the core's stop and its driver's orders. A stop takes effect
+//! before the child's command starts, as the thread takes what its inbox holds then, and while it
+//! waits.
 
 use std::iter;
 use std::num::NonZeroU64;

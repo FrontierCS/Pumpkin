@@ -1,5 +1,5 @@
 //! Preparing a run through the library's entry point, [`Run`]: its record begun, or its
-//! workflow refused.
+//! workflow refused. Reading back a record that holds a log written by hand ([`Record`]).
 
 #![expect(
     clippy::unwrap_used,
@@ -458,6 +458,14 @@ fn id_form(id: &str) -> String {
     format!("{time}-{suffix}")
 }
 
+/// Makes the directory `record`, with the `record.json` of a record that this build reads, and
+/// nothing else in it.
+pub(crate) fn begin_record(record: &Path) {
+    fs::create_dir_all(record).unwrap();
+    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
+    fs::write(record.join("record.json"), version).unwrap();
+}
+
 /// Pretty-printed JSON on one line.
 pub(crate) fn compact(json: &str) -> String {
     serde_json::from_str::<Value>(json).unwrap().to_string()
@@ -498,9 +506,7 @@ pub(crate) fn compact_outcome(outcome: &str) -> String {
 fn reads_model_answers() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let answers = [
         r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":200}"#,
         r#"{"answer":{"kind":"forwarded"},"model":"m","api":"messages","upstream_status":429}"#,
@@ -603,15 +609,13 @@ fn reads_model_answers() {
     .assert_eq(&format!("{:#?}", progress.model));
 }
 
-// The form a request was kept in before fields were kept whole: its log names no `whole`, so the
-// client's `instructions`, a digest's text, stay as sent.
+// A log that names no `whole` keeps the client's `instructions`, a digest's text, as sent.
 #[test]
-fn rebuilds_requests_kept_before_whole_fields() {
+fn rebuilds_a_request_whose_log_names_no_whole_fields() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
+    begin_record(&record);
     fs::create_dir_all(record.join("model/items")).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
     let hex = "1a00".repeat(16);
     let item = r#"{"content":"hi","role":"user","type":"message"}"#;
     fs::write(record.join("model/items").join(&hex), item).unwrap();
@@ -651,9 +655,7 @@ fn rebuilds_requests_kept_before_whole_fields() {
 fn reads_unended_commands() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let ir = solver(serde_json::json!([lease("stopped"), lease("expired")]));
     fs::write(record.join("ir.json"), ir.to_string()).unwrap();
     let place = |class: &str| serde_json::json!({ "provider": "aws", "class": class });
@@ -723,9 +725,7 @@ fn reads_unended_commands() {
 fn reads_other_builds_lines() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let later = r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"later","job":0},"actions":[{"kind":"later"}]}"#;
     let unnumbered =
@@ -773,9 +773,7 @@ fn reads_other_builds_lines() {
 fn reads_agent_end() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let collected = r#"{"seq":2,"at_ns":"31000000000","event":{"kind":"agent_collected","caller":"agent-0"},"actions":[]}"#;
     let deleted = r#"{"seq":3,"at_ns":"40000000000","event":{"kind":"sandbox_deleted","sandbox":"agent-0"},"actions":[]}"#;
@@ -812,8 +810,6 @@ fn reads_agent_end() {
     .assert_eq(&read.join("\n"));
 }
 
-// Each span runs between the core's times, its `observed_ns`, but where a record has none, as
-// lease 1's delete, its `at_ns`.
 /// [`WORKFLOW`] with its agent named `solver`, holding `grants`.
 fn solver(grants: Value) -> Value {
     let mut ir: Value = serde_json::from_str(WORKFLOW).unwrap();
@@ -829,13 +825,13 @@ fn lease(name: &str) -> Value {
     } })
 }
 
+// Each span runs between the core's times, its `observed_ns`, but where a record has none, as
+// lease 1's delete, its `at_ns`.
 #[test]
 fn reads_core_times() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let workflow: Value = serde_json::from_str(WORKFLOW).unwrap();
     let train = workflow["roles"][0]["runtime"]["agent"]["grants"][0].clone();
     let ir = solver(serde_json::json!([train, lease("runner")]));
@@ -904,9 +900,7 @@ fn reads_core_times() {
 fn reads_a_growing_log() {
     let dir = TestDir::new();
     let record = dir.path().join("20261114-120000-00000001");
-    fs::create_dir(&record).unwrap();
-    let version = r#"{"record_version":"pumpkin.record/v1","args":[]}"#;
-    fs::write(record.join("record.json"), version).unwrap();
+    begin_record(&record);
     let started = r#"{"seq":0,"at_ns":"0","observed_ns":"0","event":{"kind":"run_started","unix_ns":"0","hard_end_ns":"600000000000"},"actions":[]}"#;
     let unnumbered =
         r#"{"seq":1,"at_ns":"1000000000","event":{"kind":"call_started"},"actions":[]}"#;

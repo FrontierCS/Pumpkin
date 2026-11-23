@@ -1,13 +1,8 @@
 //! Leases, each a child of the run ([`child`](super::child)): once its runner is ready, a lease
 //! runs the commands and transfers the core orders ([`Order`]), one at a time, and the core is told
-//! how each ended. A command runs in the runner's `cwd` with its `env`, its output in a directory
-//! of its own below [`log_dir()`], `log/<c>` for its `c`th, which is collected into the same path
-//! in the lease's directory of the record once the command ends. A command that runs past its
-//! timeout, if it has one, is killed alone ([`Session::kill`]). A transfer collects the tree from
-//! one sandbox into the lease's directory, [`STAGING`], puts it into the other, and removes it;
-//! whatever reaches the lease's inbox meanwhile, the core's stop or the runner's end, cuts it
-//! short. The core's stop closes the lease: its runner is frozen, and its `out`, and the log of a
-//! command that still ran, are collected.
+//! how each ended. A command that runs past its timeout, if it has one, is killed alone
+//! ([`Session::kill`]). The core's stop closes the lease: its runner is frozen, and its `out`, and
+//! the log of a command that still ran, are collected.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -125,8 +120,8 @@ fn drive<H: Host>(
 }
 
 /// Runs the commands and transfers the core orders in `child`'s sandbox, whose session is
-/// `session`, one at a time, until the core's stop, and returns the command that still runs then,
-/// if one does; or why the runner failed first.
+/// `session`, one at a time, until the core's stop, which leaves in `running` the command that
+/// still runs then, if one does; or fails with why the runner failed first.
 fn serve<H: Host>(
     leased: &Leased<'_>,
     child: &mut Child<'_, H, Order>,

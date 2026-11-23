@@ -178,7 +178,7 @@ impl Served {
     }
 
     /// Fails with the upstream's reason if the last request it answered while this route was
-    /// open failed. The driver checks it when an agent exits without finalizing its submission.
+    /// open failed.
     pub(super) fn failed_last(&self) -> Result<(), String> {
         let failing = unpoisoned(self.failing.lock());
         let failed = failing.as_ref();
