@@ -65,8 +65,10 @@ repository by its full commit; a stage that pins a step's downloads by checksum,
 `pumpkin run` starts a driver process, which builds the task's images on the Docker engine,
 places each role, reserves what the run needs on its providers, and runs it. `run` prints the
 run's id once the run has started, then returns; the run goes on without it. On a machine with a
-controller, the controller builds the images and starts the driver. `run` then prints the id at
-once, before the build, and `pumpkin wait` follows the build and the run.
+controller, the controller builds the images and starts the driver. `run` sends it the files below
+the paths that the task reaches in its Git repository, whether Git tracks them, ignores them or
+neither. `run` then prints the id at once, before the build, and
+`pumpkin wait` follows the build and the run.
 
 ```console
 $ ./pumpkin run tasks/bench/task.star --arg model=model-a

@@ -311,7 +311,7 @@ pub(crate) fn hash(top: &Path, files: &[u8]) -> Result<Hashed, String> {
         } else {
             return Err(format!(
                 "{} is neither a file nor a symbolic link, so it can't be sent to the controller: \
-                 remove it, or ignore it in git",
+                 remove it, or move it out of the directories that the task names",
                 file.display()
             ));
         };

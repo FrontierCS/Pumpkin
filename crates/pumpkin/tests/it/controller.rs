@@ -1334,6 +1334,32 @@ fn send_refusals() {
 }
 
 #[test]
+fn sends_what_the_task_reaches_whatever_git_ignores() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    scratch.write("repo/.gitignore", "/stand-in/made\n/other/\n");
+    scratch.write("repo/stand-in/made", "made by a script\n");
+    let (_, ran) = start(&scratch, &client);
+    let manifests = scratch.0.join("home/store/manifests");
+    let manifest = fs::read_to_string(manifests.join(last_tree(&scratch))).unwrap();
+    let paths = manifest
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.rsplit(' ').next());
+    let paths: Vec<&str> = paths.collect();
+    check(
+        &scratch,
+        &format!("{}\nsent: {}", sent(&ran), paths.join(" ")),
+        &[],
+        &expect![[r#"
+            $ HOME=<scratch>/client PATH=<scratch>/bin:/usr/bin:/bin pumpkin run stand-in/task.star
+            exit status: Some(0)
+            pumpkin: controller `alice` lacks all 7 of the task's files: sending 3.0 KiB
+            sent: PUMPKIN.star lib/train.star stand-in/Dockerfile stand-in/final.star stand-in/made stand-in/submit.star stand-in/task.star"#]],
+    );
+}
+
+#[test]
 fn send_changed_file() {
     let scratch = Scratch::new();
     let client = set_up_client(&scratch);

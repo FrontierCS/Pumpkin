@@ -62,8 +62,8 @@ machine finds and starts it through EC2. It admits only the keys that the module
 lists. It names each member's jobs. The machine reaches it at its private address alone. It is
 in the controller's VPC, or reaches it through a VPN that translates its addresses into the VPC's.
 A machine whose configuration names
-`[controller]` sends it each run, over ssh: `pumpkin run` sends the files of the task's
-repository that git lists and the task reaches, then starts the run's job, which builds the images and runs the driver there, in a
+`[controller]` sends it each run, over ssh: `pumpkin run` sends the files below the paths that
+the task reaches in its repository, whether git tracks or ignores them, then starts the run's job, which builds the images and runs the driver there, in a
 systemd unit of its own. `wait`, `ls`, `cancel`, `view` and `reap` work on the controller's runs
 with the same arguments, and `wait` copies an ended run's record back to the machine. A run whose
 copy there has ended needs no controller.
