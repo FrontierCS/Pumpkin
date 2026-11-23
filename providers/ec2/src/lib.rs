@@ -36,7 +36,7 @@ use schema::ir::{self, CpuFlag, CpuModel, Image, Name};
 use schema::sandbox::PrivateDial;
 use schema::workflow::{Class, Offers, UsdPerHour};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::iam::{CALLS, ECR};
 
@@ -75,6 +75,33 @@ pub struct Settings {
     classes: BTreeMap<Name, InstanceClass>,
     repositories: Repositories<RepositoryName>,
     timer: Timer,
+}
+
+impl Settings {
+    /// The classes of sandbox that the envelope offers, by name, which [`Provider::ready`] gives
+    /// once [`Ec2::connect`] has reached it.
+    pub fn classes(&self) -> BTreeMap<Name, Class> {
+        // Each instance class is a class of sandbox, which offers a role what its instance type
+        // leaves one ([`InstanceClass::role_limits`]), and the CPU's flags and model that the
+        // settings state.
+        let classes = (self.classes.iter()).map(|(name, class)| {
+            let (cpu_millis, memory_bytes) = class.role_limits();
+            let offers = Offers {
+                cpu_millis,
+                memory_bytes,
+                gpu: None,
+                cpu_features: class.cpu_features.clone(),
+                cpu_model: class.cpu_model.clone(),
+            };
+            let class = Class {
+                offers,
+                startup_seconds: class.startup_seconds.unwrap_or(STARTUP_SECONDS),
+                usd_per_hour: class.usd_per_hour,
+            };
+            (name.clone(), class)
+        });
+        classes.collect()
+    }
 }
 
 /// The sandboxes' timer, which ends each instance soon after its run's hard end, outside its guest,
@@ -278,7 +305,10 @@ impl<'e> Ec2<'e> {
             classes: classes.clone(),
             repositories,
             timer_role: role_arn,
-            ready: ready(report, classes),
+            ready: Ready {
+                report,
+                classes: settings.classes(),
+            },
             documents,
             dir: dir.to_owned(),
         })
@@ -365,34 +395,6 @@ impl Provider for Ec2<'_> {
 impl Creator<PrivateDial, (Created, Admits)> for Ec2<'_> {
     fn create(&self, create: &Create, dial: PrivateDial) -> Result<(Created, Admits), String> {
         self.create_instance(create, dial.gateway)
-    }
-}
-
-/// What [`Provider::ready`] gives of an envelope of instance classes `classes`, whose account
-/// `report` names.
-fn ready(report: Value, classes: &BTreeMap<Name, InstanceClass>) -> Ready {
-    // Each instance class is a class of sandbox, which offers a role what its instance type
-    // leaves one ([`InstanceClass::role_limits`]), and the CPU's flags and model that the
-    // settings state.
-    let classes = (classes.iter()).map(|(name, class)| {
-        let (cpu_millis, memory_bytes) = class.role_limits();
-        let offers = Offers {
-            cpu_millis,
-            memory_bytes,
-            gpu: None,
-            cpu_features: class.cpu_features.clone(),
-            cpu_model: class.cpu_model.clone(),
-        };
-        let class = Class {
-            offers,
-            startup_seconds: class.startup_seconds.unwrap_or(STARTUP_SECONDS),
-            usd_per_hour: class.usd_per_hour,
-        };
-        (name.clone(), class)
-    });
-    Ready {
-        report,
-        classes: classes.collect(),
     }
 }
 

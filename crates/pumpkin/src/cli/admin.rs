@@ -91,7 +91,6 @@ enum Parsed {
     /// `check-members` reads each `<member>.pub` file in the directory. Each of its lines is one
     /// of the member's keys, as the member's ~/.config/pumpkin/ssh/key.pub holds it. Blank lines
     /// are skipped. It refuses a name or a key that the controller refuses, and says where it is.
-    /// It refuses a file of no key, and a directory of no file, as deploy/aws does.
     #[command(name = "check-members")]
     CheckMembers {
         /// The directory of the members' files.

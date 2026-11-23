@@ -82,6 +82,17 @@ pub struct Settings {
     classes: BTreeMap<Name, SandboxClass>,
 }
 
+impl Settings {
+    /// The classes of sandbox that the settings state, by name, which [`Provider::ready`] gives
+    /// once [`Modal::connect`] has reached the workspace.
+    pub fn classes(&self) -> BTreeMap<Name, Class> {
+        let classes = self.classes.iter();
+        classes
+            .map(|(name, sandbox)| (name.clone(), sandbox.class.clone()))
+            .collect()
+    }
+}
+
 /// Where Modal imports the provider's images from: an ECR repository in `region`, which Modal
 /// pulls from with the AWS role `role_arn`, which it assumes by its own identity.
 // Without `deny_unknown_fields`, as `Settings`.
@@ -277,8 +288,6 @@ impl<'e> Modal<'e> {
         let cli = Cli::connect(images.region.clone())?;
         let [repository] = cli.repositories(&ECR, [&images.repository])?;
         let repository = repository?;
-        let declared =
-            (classes.iter()).map(|(name, sandbox)| (name.clone(), sandbox.class.clone()));
         let ready = Ready {
             report: json!({
                 "profile": profile,
@@ -287,7 +296,7 @@ impl<'e> Modal<'e> {
                 "repository": repository.uri(),
                 "dials_from": dials_from,
             }),
-            classes: declared.collect(),
+            classes: settings.classes(),
         };
         Ok(Self {
             reached: Reached { helper },

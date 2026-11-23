@@ -73,11 +73,22 @@ resource "aws_vpc_security_group_ingress_rule" "controller_ssh" {
   cidr_ipv4         = each.value
 }
 
-resource "aws_vpc_security_group_egress_rule" "controller_https" {
+# All traffic out, as the GitHub runner module's runners and terraform-aws-modules' named groups
+# allow by default
+# (https://github.com/github-aws-runners/terraform-aws-github-runner/blob/6be0ad5ca2599e3fb232db8a392972584a485acb/modules/runners/variables.tf#L412-L436,
+# https://github.com/terraform-aws-modules/terraform-aws-security-group/blob/b79bcb04decbe89fe8f5279522cf778a92ccd563/modules/ssh/auto_values.tf#L18-L22):
+# a build fetches its sources from wherever its task names, at any port.
+resource "aws_vpc_security_group_egress_rule" "controller_out" {
   security_group_id = aws_security_group.controller.id
   description       = "SSM, ECR, EC2, Modal, model upstreams, and the sources builds fetch"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
+  ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
+}
+
+# The provider modifies the rule in place, as its source stays an IPv4 block, so the controller is
+# never without a way out
+# (https://github.com/hashicorp/terraform-provider-aws/blob/bc18835a79b092336914f2105a03a200324ea6a9/internal/service/ec2/vpc_security_group_ingress_rule.go#L386-L402).
+moved {
+  from = aws_vpc_security_group_egress_rule.controller_https
+  to   = aws_vpc_security_group_egress_rule.controller_out
 }

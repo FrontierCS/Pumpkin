@@ -89,8 +89,8 @@ pumpkin: to stop it: pumpkin cancel 20261116-195228-234cd166
 ```
 
 Before it reaches the Docker engine, the driver checks the task and reads the configuration. It warns if the engine runs as root. It
-builds the task's images there, then reaches each provider that the configuration names, before
-anything starts. [Providers](providers.md#placing-a-run) says how
+places each role, then reaches each provider that it places a role on, then builds the task's
+images on the engine. [Providers](providers.md#placing-a-run) says how
 it places each role. The driver writes what it says after the start to `driver.log` in the
 record. Whatever ends `run` before the start ends the driver too. After the start, the run goes on
 without `run`.

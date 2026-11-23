@@ -4,7 +4,7 @@
 # `pumpkin_release` pins. That install sets up what Pumpkin relies on there: its user, its units,
 # `sshd`'s settings and the members' keys.
 
-# Over HTTPS, the one way out the controller's security group allows.
+# Over HTTPS.
 apt:
   primary:
     - arches: [default]

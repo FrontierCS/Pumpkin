@@ -172,22 +172,15 @@ impl Providers<Kind> {
         }
         Ok(Self(providers))
     }
-
-    /// The providers, each made a `T` by `connect` from its name and kind, in the order of their
-    /// names. Fails as the first `connect` that fails, making no more.
-    pub(crate) fn connect<T>(
-        self,
-        mut connect: impl FnMut(&Name, Kind) -> Result<T, String>,
-    ) -> Result<Providers<T>, String> {
-        let connected =
-            (self.0.into_iter()).map(|(name, kind)| Ok((name.clone(), connect(&name, kind)?)));
-        connected.collect::<Result<_, String>>().map(Providers)
-    }
 }
 
 impl<T> Providers<T> {
     pub(crate) fn by_name(&self) -> &BTreeMap<Name, T> {
         &self.0
+    }
+
+    pub(crate) fn into_by_name(self) -> BTreeMap<Name, T> {
+        self.0
     }
 
     pub(crate) fn get(&self, name: &Name) -> Option<&T> {

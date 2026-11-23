@@ -42,7 +42,11 @@ resource "aws_iam_instance_profile" "controller" {
 # Pumpkin's settings as TOML lines of dotted keys, which hold under any table's header. TOML's
 # basic strings and arrays take JSON's, so `jsonencode` writes each value.
 locals {
-  modal_images = "images = { region = ${jsonencode(local.region)}, repository = ${jsonencode(aws_ecr_repository.images["roles"].name)}, role_arn = ${jsonencode(aws_iam_role.modal_pull.arn)} }"
+  modal_settings = flatten([for role in aws_iam_role.modal_pull : [
+    "",
+    "[providers.modal.modal]",
+    "images = { region = ${jsonencode(local.region)}, repository = ${jsonencode(aws_ecr_repository.images["roles"].name)}, role_arn = ${jsonencode(role.arn)} }",
+  ]])
   ec2_settings = concat(
     [
       "region = ${jsonencode(local.region)}",
@@ -64,10 +68,10 @@ locals {
 # Each job's settings. `pumpkin controller job` reads them as it starts, so an apply that changes
 # them takes effect at the next job. Their `[deployment]` names the deployment and the members'
 # parameter. The host's members unit reads it every minute, and each job leaves it out. They name
-# the controller's Docker engine, the EC2 provider `aws`, and the `images` of the Modal provider
-# `modal`. A job drops `images` if its client sends no `[controller.modal]`. With `draining`, each
-# job is refused as it starts. Nothing else is here: the rest is each job's own or its client's.
-# The advanced tier holds 8 KB.
+# the controller's Docker engine, the EC2 provider `aws`, and, with a pull role, the `images` of
+# the Modal provider `modal`. A job drops `images` if its client sends no `[controller.modal]`.
+# With `draining`, each job is refused as it starts. Nothing else is here: the rest is each job's
+# own or its client's. The advanced tier holds 8 KB.
 resource "aws_ssm_parameter" "settings" {
   name = "/${local.prefix}/settings"
   type = "String"
@@ -86,19 +90,21 @@ resource "aws_ssm_parameter" "settings" {
       "[docker]", "context = \"default\"", "", "[providers.aws.ec2]",
     ],
     local.ec2_settings,
-    ["", "[providers.modal.modal]", local.modal_images],
+    local.modal_settings,
     [""],
   ))
 }
 
 # The members' keys, a line `<member> <key>` for each key that `members` lists. The controller
 # copies them every minute into the file of keys that its `sshd` admits, each with the forced
-# command that names its member. `pumpkin-admin install` sets that up.
+# command that names its member. `pumpkin-admin install` sets that up. A list of no key is a blank
+# line, which the controller skips, as SSM's model gives a value a minimum length of 1
+# (https://github.com/boto/botocore/blob/0519e87d43b80dd5cec553728966f99c46d7cbaf/botocore/data/ssm/2014-11-06/service-2.json#L9489-L9493).
 resource "aws_ssm_parameter" "members" {
   name  = "/${local.prefix}/members"
   type  = "String"
   tier  = "Advanced"
-  value = join("", flatten([for member, keys in var.members : [for key in keys : "${member} ${key}\n"]]))
+  value = coalesce(join("", flatten([for member, keys in var.members : [for key in keys : "${member} ${key}\n"]])), "\n")
 }
 
 # Canonical's Ubuntu 24.04 LTS, as its public parameter names the current release, whose Docker

@@ -289,6 +289,20 @@ impl<T> ByProvider<T> {
         let mapped = self.0.into_iter().map(|(name, value)| (name, f(value)));
         ByProvider(mapped.collect())
     }
+
+    pub fn as_ref(&self) -> ByProvider<&T> {
+        let borrowed = self.0.iter().map(|(name, value)| (name.clone(), value));
+        ByProvider(borrowed.collect())
+    }
+}
+
+impl<T> IntoIterator for ByProvider<T> {
+    type Item = (Name, T);
+    type IntoIter = std::collections::btree_map::IntoIter<Name, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
 }
 
 /// A role of any kind, by its place among the IR's roles.

@@ -92,7 +92,7 @@ impl Case for Placing {
         let ir = serde_json::from_value::<ir::Workflow>(self.0).unwrap();
         let offered = offered();
         let placed = Workflow::parse(&ir)
-            .and_then(|workflow| workflow.place(&offered, |classes| classes))
+            .and_then(|workflow| workflow.place(offered, |classes| classes))
             .map_err(|errors| errors.to_string());
         let (placed, providers) = match placed {
             Ok(placed) => placed,
@@ -131,7 +131,7 @@ impl Case for Needing {
         let offered = offered();
         let placed = Workflow::parse(&ir)
             .unwrap()
-            .place(&offered, |classes| classes);
+            .place(offered, |classes| classes);
         let at = match placed {
             Ok((placed, _)) => {
                 let (trainer, _) = placed.workflow().roles().nth(1).unwrap();

@@ -62,7 +62,7 @@ fn check(edit: impl FnOnce(&mut Value), script: &str, expect: &Expect) {
     let offered = offered();
     let (placed, _) = Workflow::parse(&ir)
         .unwrap()
-        .place(&offered, |classes| classes)
+        .place(offered, |classes| classes)
         .unwrap();
     let mut run = Run {
         workflow: placed.workflow(),

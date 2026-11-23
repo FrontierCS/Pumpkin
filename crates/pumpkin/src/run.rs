@@ -1,6 +1,6 @@
 //! Starting a run, and the driver that drives it: `pumpkin run`'s part, which starts the driver
-//! and says that the run has started, and the driver's, which builds the task, connects the
-//! providers, places the roles and executes the run.
+//! and says that the run has started, and the driver's, which places the roles, connects the
+//! providers that they are placed on, builds the task and executes the run.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -18,7 +18,7 @@ use runtime::{Budgets, ModelRoutes, Record, Recorded, Run, System, TokenPrices};
 use rustix::process::Signal;
 use schema::ir::{ModelName, Name};
 use schema::sandbox::HELLO_TIMEOUT;
-use schema::workflow::{ByProvider, ByRole, Placed, Workflow};
+use schema::workflow::{ByProvider, ByRole, Class, Placed, Workflow};
 use stdx::Context;
 
 use crate::bodies::{Bodies, Sources};
@@ -149,10 +149,9 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
     } = run;
     // The task, `sandboxd`, the configuration and its upstream's key are checked before the engine
     // is reached, so a mistake in one needs no engine and makes no record. The roles are placed
-    // in the classes that the providers offer once they are reached, before the record is begun,
-    // and before the private listener is bound, so a role that fits none is refused before anything
-    // is reserved. What only a provider refuses, such as a `sandboxd` it can't mount, is refused
-    // once the record exists.
+    // before any image is built, so a role that fits no class that the providers offer is refused
+    // before anything is built or reserved. What only a provider refuses, such as a `sandboxd` it
+    // can't mount, is refused once the record exists.
     let (runs, _) = runs_dir(runs)?;
     let sandboxd = Sandboxd::find(sandboxd.map(PathBuf::from))?;
     let config = config_path(config)?;
@@ -160,26 +159,19 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
     // builds the task.
     let mut engine = None;
     let prepared = star::checked(&entry, &args, |task| {
-        prepared(task, &config, &mut engine, reader)
+        prepared(task, Path::new(entry.path()), &config, &mut engine, reader)
     });
     let prepared =
         prepared.and_then(|built| built.map_err(|problems| task_problems(&entry, &problems)));
     let Prepared {
-        workflow,
+        placed,
+        placed_on,
         sources,
-        providers,
         gateway,
         servings,
         budgets,
         prices,
     } = prepared.map_err(|error| refused(error, again.as_deref()))?;
-    let (placed, placed_on) = place(
-        Path::new(entry.path()),
-        workflow,
-        &providers,
-        &config,
-        again.as_deref(),
-    )?;
     let private = listen(&placed_on, &gateway, &config)?;
     // Before the record is begun, so that a signal that comes once it is begun stops the run,
     // which records it, rather than ending the driver and leaving the run lost.
@@ -187,7 +179,7 @@ pub(crate) fn driver_run(args: Vec<OsString>) -> Result<Exit, String> {
     caught.context("setting the handlers of SIGINT, SIGTERM and SIGHUP failed")?;
     let pushed = placed_on.iter().filter(|(_, connected)| connected.pushes());
     let names: Vec<String> = pushed.map(|(name, _)| format!("`{name}`")).collect();
-    let on = placed_on.map(Connected::provider);
+    let on = placed_on.as_ref().map(Connected::provider);
     let kept = Recorded {
         args: &words,
         prices: &prices,
@@ -264,9 +256,9 @@ fn driver_started(args: Vec<OsString>) -> Result<(RunTag, Reader, cli::Run), Str
 }
 
 struct Prepared<'e> {
-    workflow: Workflow,
+    placed: Placed,
+    placed_on: ByProvider<Connected<'e>>,
     sources: Sources,
-    providers: config::Providers<Connected<'e>>,
     gateway: config::Gateway,
     servings: ByRole<Vec<route::Serving>>,
     budgets: Budgets,
@@ -275,6 +267,7 @@ struct Prepared<'e> {
 
 fn prepared<'e>(
     task: star::Task<'_>,
+    entry: &Path,
     config: &Path,
     engine: &'e mut Option<Engine>,
     reader: Reader,
@@ -294,20 +287,82 @@ fn prepared<'e>(
     let prices = upstreams.prices();
     let budgets = runtime::budgets(task.workflow(), &prices).context(config.display())?;
     let engine = &*engine.insert(crate::engine(context, reader)?);
-    // Each provider is connected before any image is built, so that an engine that can't run
-    // sandboxes is refused first.
-    let providers = providers.connect(|name, kind| Connected::new(name, kind, engine))?;
-    Ok(task
-        .build(engine, &mut ())
-        .map(|(workflow, _, sources)| Prepared {
-            workflow,
-            sources,
-            providers,
-            gateway,
-            servings,
-            budgets,
-            prices,
-        }))
+    // The engine's own provider is reached here, so that an engine that can't run sandboxes is
+    // refused before any image is built.
+    let offers = (providers.into_by_name().into_iter())
+        .map(|(name, kind)| {
+            let offer = Offer::new(&name, kind, engine)?;
+            Ok((name, offer))
+        })
+        .collect::<Result<_, String>>()?;
+    let (_, offered) = place(
+        entry,
+        task.workflow().clone(),
+        offers,
+        Offer::classes,
+        config,
+    )?;
+    // Each provider that a role is placed on is reached here, so that one that can't be reached is
+    // refused before any image is built. A provider that no role is placed on is never reached.
+    let reached = (offered.into_iter())
+        .map(|(name, offer)| {
+            let connected = Connected::new(&name, offer, engine)?;
+            Ok((name, connected))
+        })
+        .collect::<Result<_, String>>()?;
+    let (workflow, _, sources) = match task.build(engine, &mut ()) {
+        Ok(built) => built,
+        Err(problems) => return Ok(Err(problems)),
+    };
+    // Only `Workflow::place` makes a `Placed`, so the workflow with its images built is placed
+    // again, on the providers reached. A build changes no role's needs, so each role is placed
+    // where it was.
+    let (placed, placed_on) = place(entry, workflow, reached, Connected::classes, config)?;
+    Ok(Ok(Prepared {
+        placed,
+        placed_on,
+        sources,
+        gateway,
+        servings,
+        budgets,
+        prices,
+    }))
+}
+
+/// A provider that the configuration names, as the roles are placed: the machine's engine,
+/// reached, whose one class is what the engine has; or another, unreached, with the classes that
+/// its settings state.
+enum Offer<'e> {
+    Docker(Docker<'e>),
+    Ec2(ec2::Settings, BTreeMap<Name, Class>),
+    Modal(modal::Settings, BTreeMap<Name, Class>),
+}
+
+impl<'e> Offer<'e> {
+    fn new(name: &Name, kind: config::Kind, engine: &'e Engine) -> Result<Self, String> {
+        let offer = match kind {
+            config::Kind::Docker(config::Empty {}) => {
+                let docker = Docker::connect(engine);
+                Self::Docker(docker.context(format_args!("reaching provider `{name}` failed"))?)
+            }
+            config::Kind::Ec2(settings) => {
+                let classes = settings.classes();
+                Self::Ec2(settings, classes)
+            }
+            config::Kind::Modal(settings) => {
+                let classes = settings.classes();
+                Self::Modal(settings, classes)
+            }
+        };
+        Ok(offer)
+    }
+
+    fn classes(&self) -> &BTreeMap<Name, Class> {
+        match self {
+            Self::Docker(docker) => &docker.ready().classes,
+            Self::Ec2(_, classes) | Self::Modal(_, classes) => classes,
+        }
+    }
 }
 
 enum Connected<'e> {
@@ -317,13 +372,13 @@ enum Connected<'e> {
 }
 
 impl<'e> Connected<'e> {
-    fn new(name: &Name, kind: config::Kind, engine: &'e Engine) -> Result<Self, String> {
-        let connected = match kind {
-            config::Kind::Docker(config::Empty {}) => Docker::connect(engine).map(Self::Docker),
-            config::Kind::Ec2(settings) => Workspace::find()
+    fn new(name: &Name, offer: Offer<'e>, engine: &'e Engine) -> Result<Self, String> {
+        let connected = match offer {
+            Offer::Docker(docker) => Ok(Self::Docker(docker)),
+            Offer::Ec2(settings, _) => Workspace::find()
                 .and_then(|workspace| Ec2::connect(&settings, engine.pusher()?, &workspace.ec2()))
                 .map(Self::Ec2),
-            config::Kind::Modal(settings) => modal_helper()
+            Offer::Modal(settings, _) => modal_helper()
                 .and_then(|helper| {
                     let pusher = engine.pusher()?;
                     Modal::connect(&settings, &helper, &Workspace::find()?.modal(), pusher)
@@ -341,6 +396,10 @@ impl<'e> Connected<'e> {
         }
     }
 
+    fn classes(&self) -> &BTreeMap<Name, Class> {
+        &self.provider().ready().classes
+    }
+
     /// Whether publishing what its sandboxes run pushes it from the machine's engine, which may
     /// take minutes: the engine's own sandboxes run what it has.
     fn pushes(&self) -> bool {
@@ -351,16 +410,18 @@ impl<'e> Connected<'e> {
     }
 }
 
-fn place<'p, 'e>(
+/// `workflow`, the task's at `path`, placed in the classes that `classes` gives of each of
+/// `offered`, some of `config`'s providers. It comes with each provider that it places a role on.
+/// Otherwise, once it has said why each role that fits none fits none, it gives how many there
+/// are.
+fn place<P>(
     path: &Path,
     workflow: Workflow,
-    providers: &'p config::Providers<Connected<'e>>,
+    offered: BTreeMap<Name, P>,
+    classes: impl Fn(&P) -> &BTreeMap<Name, Class>,
     config: &Path,
-    again: Option<&str>,
-) -> Result<(Placed, ByProvider<&'p Connected<'e>>), String> {
-    let classes = |connected: &'p Connected<'e>| &connected.provider().ready().classes;
-    let placed = workflow.place(providers.by_name(), classes);
-    placed.map_err(|errors| {
+) -> Result<(Placed, ByProvider<P>), String> {
+    workflow.place(offered, classes).map_err(|errors| {
         let path = path.display();
         for error in errors.as_slice() {
             say(format_args!("{path}: {error}"));
@@ -369,7 +430,7 @@ fn place<'p, 'e>(
             "{path}: placing the workflow's roles in the classes that {}'s providers offer has",
             config.display()
         );
-        refused(closing_problems(has, errors.as_slice().len()), again)
+        closing_problems(has, errors.as_slice().len())
     })
 }
 
@@ -387,7 +448,7 @@ fn refused(error: String, again: Option<&str>) -> String {
 /// The listener that the sandboxes of the providers in `placed_on` dial, for those that dial over
 /// a private network, and `None` if none does.
 fn listen(
-    placed_on: &ByProvider<&Connected<'_>>,
+    placed_on: &ByProvider<Connected<'_>>,
     gateway: &config::Gateway,
     config: &Path,
 ) -> Result<Option<Listener>, String> {

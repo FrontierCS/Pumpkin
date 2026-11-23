@@ -16,8 +16,9 @@ own when runs go to a controller, whichever provider runs it, and tagged by the 
 inputs. A role's `needs` says what one sandbox of it needs: its CPUs, its memory, and
 a GPU or a CPU feature if any. The run places each role in the smallest class of sandbox, of every
 provider's in the configuration, that offers that, and refuses a role that fits none, saying why
-of each class, before anything is reserved or started. A provider whose sandboxes pull their images, EC2 or
-Modal, first pushes them to where they pull from. Every sandbox carries its run's tag, so runs
+of each class, before any image is built. Of the providers but the engine's own, it reaches only
+those that it places a role on. A provider whose sandboxes pull their images, EC2 or Modal, first
+pushes them to where they pull from. Every sandbox carries its run's tag, so runs
 that share a provider never reach each other's sandboxes.
 
 ## The Docker provider
