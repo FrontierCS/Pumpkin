@@ -27,17 +27,15 @@ pub fn caller() -> impl Iterator<Item = &'static Allow> {
 
 /// What IAM must allow the role of the settings' `images`. Modal assumes it, by its own identity,
 /// to import an image from the repository.
-// Among the reads that Modal's guide lists, those that an import makes:
+// Among the reads that Modal's guide lists, those that an import makes, which AWS's pull-only
+// policy grants too:
 // https://modal.com/docs/guide/private-registries
+// https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEC2ContainerRegistryPullOnly.html
 pub fn puller() -> impl Iterator<Item = &'static Allow> {
     static PULLS: [Allow; 2] = [
         Allow::new(&["ecr:GetAuthorizationToken"], &[Resource::Any]),
         Allow::new(
-            &[
-                "ecr:BatchCheckLayerAvailability",
-                "ecr:BatchGetImage",
-                "ecr:GetDownloadUrlForLayer",
-            ],
+            &["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
             REPOSITORY,
         ),
     ];

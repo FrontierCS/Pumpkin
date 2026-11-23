@@ -22,35 +22,39 @@ pub struct Fill {
 /// `templatefile` takes it.
 ///
 /// Statements of the same resources and conditions are one, with each of their actions. They are
-/// ordered by those resources and conditions.
+/// ordered by whether they name every resource but theirs, then by those resources and
+/// conditions.
 // `controller-gen rbac` likewise merges the rules of the same resources. iamlive merges the
 // statements of the same resources, whatever their conditions, as its statements have none:
 // https://github.com/kubernetes-sigs/controller-tools/blob/9d91b2512c200fb64555b0e5b5c4d4ee76894ef3/pkg/rbac/parser.go#L184-L213
 // https://github.com/iann0036/iamlive/blob/d8e67a2d9a422a00c9246531b3a5f3892c465585/iamlivecore/logger.go#L149-L167
 pub fn policy(allows: &[&'static Allow]) -> String {
-    // By their resources and the text of their conditions, which a `Map` isn't ordered by.
-    let mut merged: BTreeMap<(BTreeSet<String>, String), Merged> = BTreeMap::new();
+    // By whether they name every resource but theirs, their resources and the text of their
+    // conditions, which a `Map` isn't ordered by.
+    let mut merged: BTreeMap<(bool, BTreeSet<String>, String), Merged> = BTreeMap::new();
     for allow in allows {
         let Allow {
             actions,
             resources,
+            but,
             conditions,
         } = allow;
         let resources = resources.iter().map(resource).collect();
         let conditions = tested(conditions);
         let text = Value::Object(conditions.clone()).to_string();
         let (_, merged) = merged
-            .entry((resources, text))
+            .entry((*but, resources, text))
             .or_insert((conditions, BTreeSet::new()));
         merged.extend(actions.iter().map(|action| literal(action)));
     }
     let statements = merged
         .into_iter()
-        .map(|((resources, _), (conditions, actions))| {
+        .map(|((but, resources, _), (conditions, actions))| {
             let mut statement = Map::new();
             statement.insert("Effect".to_owned(), "Allow".into());
             statement.insert("Action".to_owned(), json!(actions));
-            statement.insert("Resource".to_owned(), json!(resources));
+            let key = if but { "NotResource" } else { "Resource" };
+            statement.insert(key.to_owned(), json!(resources));
             if !conditions.is_empty() {
                 statement.insert("Condition".to_owned(), Value::Object(conditions));
             }
@@ -160,6 +164,7 @@ fn key_text(key: &Key) -> String {
     match key {
         Key::Named(name) => literal(name),
         Key::Tag(service, tag) => literal(&format!("{service}:ResourceTag/{tag}")),
+        Key::RequestTag(tag) => literal(&format!("aws:RequestTag/{tag}")),
     }
 }
 

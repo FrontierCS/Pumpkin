@@ -110,6 +110,8 @@ pub enum Key {
     Named(&'static str),
     /// A service's key of a resource's tag: `<service>:ResourceTag/<tag>`.
     Tag(&'static str, &'static str),
+    /// The key of a tag that the request puts on the resource it makes: `aws:RequestTag/<tag>`.
+    RequestTag(&'static str),
 }
 
 /// The values that a condition compares its key with.
@@ -135,12 +137,14 @@ impl Condition {
     }
 }
 
-/// A statement of a policy. It allows `actions`, such as `ec2:RunInstances`, on `resources`,
-/// under every one of its conditions.
+/// A statement of a policy. It allows `actions`, such as `ec2:RunInstances`, on `resources`, or
+/// on every resource but them, under every one of its conditions.
 #[derive(Debug)]
 pub struct Allow {
     actions: &'static [&'static str],
     resources: &'static [Resource],
+    /// Whether the actions are on every resource but `resources`, as IAM's `NotResource`.
+    but: bool,
     conditions: &'static [Condition],
 }
 
@@ -149,7 +153,16 @@ impl Allow {
         Self {
             actions,
             resources,
+            but: false,
             conditions: &[],
+        }
+    }
+
+    /// A statement that allows `actions` on every resource but `resources`.
+    pub const fn all_but(actions: &'static [&'static str], resources: &'static [Resource]) -> Self {
+        Self {
+            but: true,
+            ..Self::new(actions, resources)
         }
     }
 

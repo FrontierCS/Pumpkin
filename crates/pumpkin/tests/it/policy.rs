@@ -75,6 +75,27 @@ fn check_principal() {
           "Statement": [
             {
               "Action": [
+                "iam:GetInstanceProfile"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${controller_profile_arn}"
+              ]
+            },
+            {
+              "Action": [
+                "iam:SimulatePrincipalPolicy"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                "${controller_role_arn}",
+                "${modal_pull_role_arn}",
+                "${sandbox_role_arn}",
+                "${timer_role_arn}"
+              ]
+            },
+            {
+              "Action": [
                 "ssm:GetParameter"
               ],
               "Effect": "Allow",
@@ -103,9 +124,7 @@ fn check_principal() {
             {
               "Action": [
                 "ec2:DescribeInstances",
-                "ec2:DescribeLaunchTemplateVersions",
-                "iam:GetInstanceProfile",
-                "iam:SimulatePrincipalPolicy"
+                "ec2:DescribeLaunchTemplateVersions"
               ],
               "Effect": "Allow",
               "Resource": [
