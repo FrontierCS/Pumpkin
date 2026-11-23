@@ -241,7 +241,12 @@ fn said_beside(listing: &progress::Listing, unlisted: &[progress::Unlisted]) {
         let unread = entry.row()?.unread.as_ref()?;
         Some((id, format!("run {id}: {unread}")))
     });
-    let unlisted = unlisted.iter().map(|run| (&run.id, run.message.clone()));
+    let unlisted = unlisted.iter().flat_map(|run| {
+        let unread =
+            (run.unread.as_ref()).map(|unread| (&run.id, format!("run {}: {unread}", run.id)));
+        unread.into_iter().chain([(&run.id, run.message.clone())])
+    });
+    // Stable, so that a run's note comes before why it can't be listed.
     let mut said: Vec<(&String, String)> = unread.chain(unlisted).collect();
     said.sort_by_key(|(id, _)| *id);
     for (_, message) in said {
@@ -282,6 +287,8 @@ fn listed_in(
         if !picked(prefixes, &id) {
             continue;
         }
+        // What of its log this `pumpkin` can't read, said even of a run that then can't be listed.
+        let mut unread = None;
         let listed = record
             .and_then(|record| {
                 if let Some(since) = since
@@ -289,7 +296,14 @@ fn listed_in(
                 {
                     return Ok(None);
                 }
-                progress::Listed::run(&record, record.ending()?).map(Some)
+                let ending = record.ending()?;
+                let runtime::Readout {
+                    progress,
+                    unread: parts,
+                } = record.progress()?;
+                unread = progress::unread(&parts);
+                let listed = progress::Listed::of(&record, record.task()?, ending, progress);
+                Ok(Some(listed))
             })
             .or_else(|error| {
                 let dir = runs.join(&id);
@@ -302,13 +316,18 @@ fn listed_in(
             });
         match listed {
             Ok(Some(listed)) => {
-                let row = progress::Row::of(&id, &listed, now, named);
+                let mut row = progress::Row::of(&id, &listed, now, named);
+                row.unread = unread;
                 listing.runs.insert(id, progress::Entry::Row(Box::new(row)));
             }
             Ok(None) => {
                 listing.runs.insert(id, progress::Entry::Older);
             }
-            Err(message) => unlisted.push(progress::Unlisted { id, message }),
+            Err(message) => unlisted.push(progress::Unlisted {
+                id,
+                unread,
+                message,
+            }),
         }
     }
     Ok((listing, unlisted))

@@ -311,10 +311,10 @@ fn listed(home: &Path, prefixes: &[String]) -> Result<Listed, String> {
                 true
             }
             Err(error) => {
-                let message = format!("run {id}: {error}");
                 unlisted.push(Unlisted {
                     id: id.clone(),
-                    message,
+                    unread: row.unread.take(),
+                    message: format!("run {id}: {error}"),
                 });
                 false
             }

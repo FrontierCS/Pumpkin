@@ -2734,6 +2734,39 @@ fn cancel_prefers_own_run() {
     );
 }
 
+// A run whose member can't be read is left out, with what of its log can't be read.
+#[test]
+fn ls_says_unread_lines_of_a_run_unlisted() {
+    let scratch = Scratch::new();
+    let client = set_up_client(&scratch);
+    connect(&scratch, &client);
+    served(&scratch);
+    let id = id_ago(0, "0c000003");
+    let log = [super::logged(5, json!({"kind":"work_started"}), json!([]))];
+    let failed = json!({ "state": "failed", "reason": "r" });
+    let places = super::lease_places(super::Prices::Nothing);
+    let asked = super::asked(&id, 90);
+    let dir = super::write_run(&scratch, &id, asked, &log, Some(failed), &places);
+    let mut written = fs::read_to_string(dir.join("log.jsonl")).unwrap();
+    written.push_str("{\"seq\":\n");
+    fs::write(dir.join("log.jsonl"), written).unwrap();
+    move_runs(&scratch, "home/.pumpkin/runs");
+    scratch.write(&format!("home/jobs/{id}/member"), "Bad!\n");
+    let ls = ran_by(&scratch, on_client(&scratch, &client, &["ls"]), &["ls"]);
+    check(
+        &scratch,
+        &ls,
+        &[(&id, "<id>")],
+        &expect![[r#"
+        $ pumpkin ls
+        exit status: Some(1)
+        pumpkin: run <id>: 1 part of its log can't be read by this pumpkin, the first at line 3: EOF while parsing a value, at column 7
+        pumpkin: run <id>: <scratch>/home/jobs/<id>/member: `Bad!` is not a member's name: give one of 1 to 32 of a-z, 0-9 and `-`, starting with a letter
+        pumpkin: controller `alice`: up <t>, 0 jobs, disk <n>% used
+        pumpkin: 1 run can't be listed, as said above"#]],
+    );
+}
+
 #[test]
 fn member_unread() {
     let scratch = Scratch::new();

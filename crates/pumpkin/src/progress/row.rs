@@ -80,13 +80,7 @@ impl Row {
             stage,
             spent: Spent::of(listed),
             member: None,
-            unread: match listed {
-                Listed::Run(run) => run.unread.clone(),
-                Listed::Building { .. }
-                | Listed::Waiting { .. }
-                | Listed::Unstarted
-                | Listed::Unread(_) => None,
-            },
+            unread: None,
         }
     }
 

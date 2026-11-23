@@ -57,10 +57,12 @@ pub(crate) struct Listing {
     pub(crate) runs: BTreeMap<String, Entry>,
 }
 
-/// A run that `ls` can't list, and why, as `ls` says it.
+/// A run that `ls` can't list, and why, as `ls` says it, with what of its log this `pumpkin`
+/// can't read, if it read the log and any of it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Unlisted {
     pub(crate) id: String,
+    pub(crate) unread: Option<String>,
     pub(crate) message: String,
 }
 
@@ -112,21 +114,9 @@ pub(crate) struct Run {
     ending: Option<Ending>,
     progress: Option<Progress>,
     asked: Option<Duration>,
-    /// What of its log this `pumpkin` can't read, as [`unread`] says it, if any.
-    unread: Option<String>,
 }
 
 impl Listed {
-    /// The run of `record`, with what of its log this `pumpkin` can't read.
-    pub(crate) fn run(record: &Record, ending: Option<Ending>) -> Result<Self, ReadError> {
-        let Readout { progress, unread } = record.progress()?;
-        let mut listed = Self::of(record, record.task()?, ending, progress);
-        if let Self::Run(run) = &mut listed {
-            run.unread = self::unread(&unread);
-        }
-        Ok(listed)
-    }
-
     /// The run in `dir`, whose record failed to read with `error`, if the record is in a form
     /// that this build doesn't read and another build made it; else `error`.
     pub(crate) fn unread(dir: &Path, error: ReadError) -> Result<Self, String> {
@@ -153,7 +143,6 @@ impl Listed {
             ending,
             progress,
             asked: runtime::minted(record.id()),
-            unread: None,
         }))
     }
 }
