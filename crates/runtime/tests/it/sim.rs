@@ -159,7 +159,7 @@ pub(crate) struct Sim {
 type OnceLogged = (&'static [&'static str], Arc<dyn Fn() + Send + Sync>);
 
 /// Holds the end of the first put of each sandbox until the first `sandboxes_count` sandboxes have
-/// each sent theirs whole. Then it calls `then` once, before any of them is answered.
+/// each sent theirs whole. Then it calls `then` once, and none of them is answered.
 struct SetUps {
     sandboxes_count: usize,
     put_count: Mutex<usize>,
@@ -167,9 +167,13 @@ struct SetUps {
 }
 
 impl SetUps {
-    fn pass(&self) {
+    // Whether it held this put, one of the first `sandboxes_count`.
+    fn pass(&self) -> bool {
         let mut put_count = stdx::unpoisoned(self.put_count.lock());
         *put_count += 1;
+        if *put_count > self.sandboxes_count {
+            return false;
+        }
         if *put_count == self.sandboxes_count {
             // Under the lock, so that no sandbox is answered before `then` has returned.
             (self.then)();
@@ -186,6 +190,7 @@ impl SetUps {
             thread::sleep(AWAIT_POLL);
             put_count = stdx::unpoisoned(self.put_count.lock());
         }
+        true
     }
 }
 
@@ -373,8 +378,8 @@ impl Sim {
         self
     }
 
-    /// Holds the set-ups of the first `sandboxes_count` sandboxes until each has begun, and calls
-    /// `then` before any of them ends.
+    /// Holds the set-ups of the first `sandboxes_count` sandboxes until each has sent its put
+    /// whole, then calls `then`, and leaves them unanswered.
     pub(crate) fn holding_set_ups(
         mut self,
         sandboxes_count: usize,
@@ -2076,10 +2081,17 @@ struct Served {
 }
 
 impl Served {
-    // Ends a put, which the held set-ups hold first, once the put has come whole.
-    fn end(&mut self, stream: u32, replies: &mut Vec<(FromSandbox, Vec<u8>)>) {
-        if let Some(set_ups) = self.set_up.take() {
-            set_ups.pass();
+    // Ends a put, which the held set-ups hold once it has come whole, and then leave unanswered,
+    // as the sandbox stalls.
+    fn end(
+        &mut self,
+        stream: u32,
+        replies: &mut Vec<(FromSandbox, Vec<u8>)>,
+        shared: &Mutex<Status>,
+    ) {
+        if self.set_up.take().is_some_and(|set_ups| set_ups.pass()) {
+            status(shared).stalled = true;
+            return;
         }
         self.files.end(stream, replies);
     }
@@ -2264,7 +2276,7 @@ fn serve(mut connection: Connection, model: bool, shared: &Mutex<Status>) {
             }
             ToSandbox::Entry { entry, .. } => served.files.entry(entry),
             ToSandbox::Data { .. } => served.files.data(&body),
-            ToSandbox::End { stream } => served.end(stream, &mut replies),
+            ToSandbox::End { stream } => served.end(stream, &mut replies, shared),
             ToSandbox::Freeze { stream } => {
                 let (reply, froze) = freezing.freeze(stream);
                 frozen |= froze;
