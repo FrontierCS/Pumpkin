@@ -8,10 +8,10 @@ use gateway::{Arrival, IncomingOp, Process, Session};
 use schema::ir::Name;
 use schema::sandbox::ExitStatus;
 use schema::sandbox::op::{LeaseStatusReply, OpReply, SessionOp};
+use stdx::time::Clock as _;
 
 use crate::child::{Child, Message, Report};
-use crate::host::until;
-use crate::{Clock, Host, Inbox, request};
+use crate::{Host, Inbox, request};
 
 /// Separate destinations for the sandbox's outstanding op and the body's session operation.
 pub(super) enum Order {
@@ -54,7 +54,7 @@ impl Relay {
         job: JobId,
         timeout: Duration,
         process: Process,
-        session: &mut Session,
+        session: &mut Session<H::Clock>,
     ) -> Result<Waited, String> {
         self.until(child, job, timeout, session, |arrival| match arrival {
             Arrived::Exited(exited, status) if exited == process => Some(Ok(status)),
@@ -67,7 +67,7 @@ impl Relay {
         child: &mut Child<'_, H, Order>,
         job: JobId,
         timeout: Duration,
-        session: &mut Session,
+        session: &mut Session<H::Clock>,
         grant: &Name,
         (waiting, op): (crate::scoped::Waiting, SessionOp),
     ) -> Result<Waited<LeaseStatusReply>, String> {
@@ -92,18 +92,17 @@ impl Relay {
         child: &mut Child<'_, H, Order>,
         job: JobId,
         timeout: Duration,
-        session: &mut Session,
+        session: &mut Session<H::Clock>,
         finished: impl Fn(Arrived) -> Option<Result<T, String>>,
     ) -> Result<Waited<T>, String> {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
         }
-        let by = until(&child.clock, timeout);
         loop {
             let Some(message) = child.inbox.wait(timeout) else {
                 return Ok(Waited::TimedOut);
             };
-            match self.relay(child, job, (session, &by), message)? {
+            match self.relay(child, job, (session, timeout), message)? {
                 Some(Arrived::Stopped) => return Ok(Waited::Stopped),
                 Some(arrival) => {
                     if let Some(result) = finished(arrival) {
@@ -122,7 +121,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session, &dyn Fn() -> Option<Duration>),
+        (session, by): (&mut Session<H::Clock>, Duration),
     ) -> Result<bool, String> {
         if let Some(reason) = &self.closed {
             return Err(reason.clone());
@@ -141,7 +140,7 @@ impl Relay {
         &mut self,
         child: &mut Child<'_, H, Order>,
         job: JobId,
-        (session, by): (&mut Session, &dyn Fn() -> Option<Duration>),
+        (session, by): (&mut Session<H::Clock>, Duration),
         message: Message<Order>,
     ) -> Result<Option<Arrived>, String> {
         match message {

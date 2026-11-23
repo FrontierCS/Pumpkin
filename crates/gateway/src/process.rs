@@ -6,6 +6,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use schema::sandbox::{Launch, ToSandbox};
+use stdx::time::Clock;
 
 use super::{Bound, Route, Session, Shared};
 
@@ -24,7 +25,7 @@ struct ReservedStart {
 }
 
 impl ReservedStart {
-    fn send(mut self, launch: Launch, by: Bound<'_>) -> io::Result<()> {
+    fn send(mut self, launch: Launch, by: Bound<'_, impl Clock>) -> io::Result<()> {
         self.shared.send(
             &ToSandbox::Start {
                 stream: self.stream,
@@ -48,34 +49,26 @@ impl Drop for ReservedStart {
     }
 }
 
-impl Session {
+impl<C: Clock> Session<C> {
     /// Starts a command. Its [`crate::Arrival::Exited`] names the returned process.
-    pub fn start(
-        &mut self,
-        launch: Launch,
-        left: impl Fn() -> Option<Duration>,
-    ) -> io::Result<Process> {
-        let (process, send) = self.prepare_start(&left)?;
-        send(launch, &left)?;
+    pub fn start(&mut self, launch: Launch, by: Duration) -> io::Result<Process> {
+        let (process, send) = self.prepare_start(by)?;
+        send(launch, by)?;
         Ok(process)
     }
 
     /// Reserves a command's process handle without starting it. The sender may run on another
-    /// thread while the owner handles arrivals. Its deadline, which the function it takes gives,
-    /// bounds sending the command and awaiting confirmation. Dropping the sender releases its
-    /// unused stream. Dropping the session ends the connection even if the sender still exists.
-    #[expect(
-        clippy::type_complexity,
-        reason = "the sender's type is its signature, which a name would only hide"
-    )]
+    /// thread while the owner handles arrivals. Its deadline, a time on the session's clock, bounds
+    /// sending the command and awaiting confirmation. Dropping the sender releases its unused stream. Dropping the
+    /// session ends the connection even if the sender still exists.
     pub fn prepare_start(
         &mut self,
-        left: &dyn Fn() -> Option<Duration>,
+        by: Duration,
     ) -> io::Result<(
         Process,
-        impl FnOnce(Launch, &dyn Fn() -> Option<Duration>) -> io::Result<()> + use<>,
+        impl FnOnce(Launch, Duration) -> io::Result<()> + use<C>,
     )> {
-        let (stream, replies) = self.shared.open(Route::Start, Bound { left })?;
+        let (stream, replies) = self.shared.open(Route::Start, self.by(by))?;
         let process = Process {
             session: self.id,
             stream,
@@ -86,9 +79,8 @@ impl Session {
             replies,
             running: false,
         };
-        let send = move |launch, left: &dyn Fn() -> Option<Duration>| {
-            reserved.send(launch, Bound { left })
-        };
+        let clock = self.clock.clone();
+        let send = move |launch, by| reserved.send(launch, Bound { clock: &clock, by });
         Ok((process, send))
     }
 
@@ -97,11 +89,7 @@ impl Session {
     /// # Panics
     ///
     /// Panics if `process` was started on another session.
-    pub fn kill(
-        &mut self,
-        process: Process,
-        left: impl Fn() -> Option<Duration>,
-    ) -> io::Result<()> {
+    pub fn kill(&mut self, process: Process, by: Duration) -> io::Result<()> {
         let Process { session, stream } = process;
         if session != self.id {
             unreachable!(
@@ -114,7 +102,7 @@ impl Session {
                 stream: request,
                 command: stream,
             },
-            Bound { left: &left },
+            self.by(by),
         )
     }
 }

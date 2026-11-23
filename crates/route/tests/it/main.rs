@@ -24,9 +24,9 @@ use schema::frame;
 use schema::ir::{Api, HeaderName, ModelName, Name};
 use schema::sandbox::{FromSandbox, Hello, HelloReply, SOCKET_NAME, SocketDial, ToSandbox};
 use serde_json::{Value, json};
-use stdx::Deadline;
+use stdx::time::Machine;
 use test_support::http::read_request;
-use test_support::{HUNG, TestDir};
+use test_support::{HUNG, TestDir, hung};
 
 mod kept;
 mod read;
@@ -152,8 +152,7 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
     let requests: Vec<Request> = cases.iter().map(|(_, request)| request.clone()).collect();
     let sandbox = thread::spawn(move || fake_sandbox(&socket, requests, None, None));
     let (sender, arrivals) = mpsc::channel();
-    let by = Deadline::after(HUNG);
-    let accepted = registration.accept(|| by.remaining(), None, true, sender, |a| a, || false);
+    let accepted = registration.accept((&Machine, hung()), None, true, sender, |a| a, || false);
     let session = accepted.unwrap();
     let mut first = None;
     let sent: Vec<Option<String>> = cases
@@ -161,14 +160,14 @@ fn check_apis(entries: &[(Api, &[&str])], cases: &[(&str, Request)], expect: &Ex
         .map(|(_, (_, _, _, sent))| {
             let incoming = next_model_request(&arrivals);
             let mut forwarded = false;
-            let by = Deadline::after(HUNG);
+            let by = (&Machine, hung());
             let answered = |_, _| {};
             let dropped = Dropped::default();
             route::serve(
                 &entries,
                 incoming,
                 |_| Admission::Open,
-                move || by.remaining(),
+                by,
                 &dropped,
                 || forwarded = true,
                 answered,

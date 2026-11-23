@@ -32,9 +32,9 @@ use schema::workflow::{
     Workflow,
 };
 use serde::{Deserialize, Deserializer, de};
-use stdx::{Context, Deadline};
+use stdx::{Context, Deadline, time};
 
-use super::{Clock, Host, Input, Stopped, interruption, left, log, record, until};
+use super::{Clock, Host, Input, Stopped, interruption, log, record};
 
 /// The most entries, files and directories, that the host collects from a sandbox in one tree.
 pub(super) const ENTRIES: u64 = 100_000;
@@ -163,7 +163,7 @@ pub(super) struct Sandboxes<'p, H: Host> {
     sockets: Sockets,
     record: &'p Path,
     host: &'p H,
-    logged: Sender<Input>,
+    logged: Sender<Input<H::Clock>>,
     // Every sandbox created, which tells a delete where the record keeps it. Shared by the
     // threads that start and delete sandboxes: the loop's and each child's.
     inventory: Mutex<Inventory<'p>>,
@@ -374,10 +374,10 @@ impl Unstarted {
 }
 
 /// A sandbox whose session is up, to be deleted through [`Sandboxes::delete`].
-pub(super) struct Started {
+pub(super) struct Started<C> {
     which: Which,
     id: SandboxId,
-    pub(super) session: Session,
+    pub(super) session: Session<C>,
 }
 
 impl<'p> Published<'p> {
@@ -462,7 +462,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         capacity: &'p Capacity,
         record: &'p Path,
         host: &'p H,
-        logged: Sender<Input>,
+        logged: Sender<Input<H::Clock>>,
     ) -> Self {
         let Published {
             providers,
@@ -501,18 +501,19 @@ impl<'p, H: Host> Sandboxes<'p, H> {
         hard_end: UnixTime,
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
-    ) -> Result<Started, Unstarted> {
+    ) -> Result<Started<H::Clock>, Unstarted> {
+        let name = which.name();
         let now = UnixTime::of(SystemTime::now())?;
         // The start's deadline by the machine's clock, which the provider reads, at most the hard
         // end, as the run is abandoned then.
-        let by_unix = left(clock, by).map_or(now, |left| now.saturating_add(left));
+        let by_unix = time::left(clock, by).map_or(now, |left| now.saturating_add(left));
         let role = which.role();
         let model = self.workflow().model(role).is_some();
         let placement = self.placed.placement(role);
         let hosting = self.providers.get(&placement.provider);
         let create = Create {
             run: self.run.clone(),
-            name: which.name(),
+            name,
             role: provider_role(self.workflow(), role, self.capacity.instances(role)),
             instance: which.instance(),
             class: placement.class.clone(),
@@ -523,7 +524,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             hard_end,
             by: by_unix.min(hard_end),
         };
-        let by_machine = Deadline::after(left(clock, by).unwrap_or_default());
+        let by_machine = Deadline::after(time::left(clock, by).unwrap_or_default());
         let started = hosting.meets.create(&self.sockets, &create, by_machine);
         let (Created { id }, registration) = started.inspect_err(|_| {
             let mut inventory = stdx::unpoisoned(self.inventory.lock());
@@ -553,7 +554,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             interruption::signal().is_some()
                 || looks.ended(self.between_looks, || self.ended(hosting.provider, &id))
         };
-        let accepted = registration.accept(|| left(clock, by), ops, model, arrivals, wrap, stopped);
+        let accepted = registration.accept((clock, by), ops, model, arrivals, wrap, stopped);
         let accepted = accepted.map_err(|error| match looks.found() {
             (true, _) => "it ended before it met the gateway: expected its `sandboxd` to run \
                           until it connects"
@@ -563,8 +564,7 @@ impl<'p, H: Host> Sandboxes<'p, H> {
             }
             (false, _) => error.to_string(),
         });
-        let set_up = |mut session: Session| session.set_up(until(clock, by)).map(|()| session);
-        let session = accepted.and_then(set_up);
+        let session = accepted.and_then(|mut session| session.set_up(by).map(|()| session));
         let session = session.and_then(|session| match session.gpus() {
             Some(gpus) => self.saw(which, &id, gpus).map(|()| session),
             None => Ok(session),
@@ -651,7 +651,10 @@ impl<'p, H: Host> Sandboxes<'p, H> {
     }
 
     /// Deletes the sandbox and returns its log entries and any failure of the delete or its record.
-    pub(super) fn delete(&self, started: Started) -> (Vec<log::Entry>, Result<(), String>) {
+    pub(super) fn delete(
+        &self,
+        started: Started<H::Clock>,
+    ) -> (Vec<log::Entry>, Result<(), String>) {
         let Started { which, id, session } = started;
         let provider = self.provider(which);
         let deleted = provider.delete(&self.run, std::slice::from_ref(&id));
@@ -895,19 +898,19 @@ pub(super) fn launch(command: &Command) -> Launch {
 /// directory there, within the `PUMPKIN` limits, by `by`. After a failure it holds what arrived
 /// before.
 pub(super) fn collect(
-    session: &mut Session,
+    session: &mut Session<impl Clock>,
     dir: &RelativePath,
     record: &Path,
-    by: &dyn Fn() -> Option<Duration>,
+    by: Duration,
 ) -> Result<(), String> {
     collect_as(session, dir, &record.join(dir.as_str()), by)
 }
 
 pub(super) fn collect_as(
-    session: &mut Session,
+    session: &mut Session<impl Clock>,
     dir: &RelativePath,
     into: &Path,
-    by: &dyn Fn() -> Option<Duration>,
+    by: Duration,
 ) -> Result<(), String> {
     let from = pumpkin_dir().join(dir);
     session

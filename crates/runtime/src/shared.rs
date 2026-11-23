@@ -11,12 +11,13 @@ use gateway::Arrival;
 use schema::sandbox::{log_dir, out_dir};
 use schema::workflow::TargetId;
 use stdx::Context;
+use stdx::time::Clock as _;
 
 use crate::agent::Ready;
 use crate::call::job;
 use crate::child::{Child, End, Message, Report};
 use crate::sandbox::{Sandboxes, Started, Which, collect};
-use crate::{Clock, Entry, Host, Inbox, Input, Runtime, until};
+use crate::{Entry, Host, Inbox, Input, Runtime};
 
 type Call<'r, H> = (job::Call<'r>, Child<'r, H, crate::relay::Order>);
 
@@ -152,8 +153,8 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
                     drop(ready);
                     serve(rx, bodies, sandbox.as_mut());
                     if let Some(sandbox) = sandbox {
-                        let by = until(&clock, collect_end);
-                        if let Err(reason) = tear_down(sandbox, sandboxes, &dir, &by, &inbox) {
+                        let by = collect_end;
+                        if let Err(reason) = tear_down(sandbox, sandboxes, &dir, by, &inbox) {
                             let _ = inbox.send(Input::Child(Report::Undeleted(reason)));
                             return;
                         }
@@ -172,7 +173,7 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
 fn serve<H: Host>(
     orders: Receiver<Call<'_, H>>,
     bodies: &dyn crate::Bodies,
-    mut sandbox: Option<&mut Started>,
+    mut sandbox: Option<&mut Started<H::Clock>>,
 ) {
     let mut stdin = crate::body::Stdin::default();
     for (call, mut child) in orders {
@@ -187,12 +188,12 @@ fn serve<H: Host>(
     }
 }
 
-fn tear_down(
-    mut sandbox: Started,
-    sandboxes: &Sandboxes<'_, impl Host>,
+fn tear_down<H: Host>(
+    mut sandbox: Started<H::Clock>,
+    sandboxes: &Sandboxes<'_, H>,
     dir: &Path,
-    by: &dyn Fn() -> Option<Duration>,
-    inbox: &Sender<Input>,
+    by: Duration,
+    inbox: &Sender<Input<H::Clock>>,
 ) -> Result<(), String> {
     let note = |text| {
         let _ = inbox.send(Input::Logged(Entry::Note(text)));

@@ -9,6 +9,7 @@ pub mod net;
 pub mod process;
 pub mod signal;
 pub mod slots;
+pub mod time;
 
 /// Prefixes an error with what failed, as `<context>: <error>`, rendering it as a `String`.
 ///

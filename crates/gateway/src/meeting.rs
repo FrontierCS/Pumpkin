@@ -25,6 +25,7 @@ use schema::sandbox::{
     PrivateDial, REGISTRATION_GRANT_BYTES, RegistrationGrant, SOCKET_NAME, SocketDial,
 };
 use stdx::Deadline;
+use stdx::time::{Clock, Machine};
 
 use crate::{Arrival, Bound, Connection, Session, Until, context, lock, passed};
 
@@ -330,13 +331,15 @@ fn admit(registry: &Arc<Mutex<Registry>>, stream: TcpStream, peer: IpAddr, timeo
 }
 
 fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout: Duration) {
-    let by = Deadline::after(timeout);
+    let by = Bound {
+        clock: &Machine,
+        by: Machine.now() + timeout,
+    };
     let set = stdx::net::set_options(&stream)
         .map_err(|error| context("the connection's TCP options can't be set", &error));
     let connection = Connection::Tcp(stream);
     // Only its own deadline ends the read: no accept waits on it until a check admits it.
-    let passed = || by.remaining().is_none();
-    let unopened = match set.and_then(|()| read_hello(&connection, &passed, &|| false)) {
+    let unopened = match set.and_then(|()| read_hello(&connection, by, &|| false)) {
         Ok((Hello { gpus }, attestation)) => {
             present(registry, attestation, peer, Met { connection, gpus }).err()
         }
@@ -345,7 +348,11 @@ fn register(registry: &Mutex<Registry>, stream: TcpStream, peer: IpAddr, timeout
     // No accept waits on a connection that opens no session, so its error goes no further. The
     // refusal gets a time of its own, as the hello may have waited past its own for a check.
     if let Some((connection, error)) = unopened {
-        refuse(&connection, Deadline::after(timeout), error);
+        let by = Bound {
+            clock: &Machine,
+            by: Machine.now() + timeout,
+        };
+        refuse(&connection, by, error);
     }
     // Freed last, so that the threads reading hellos, or refusing them, stay within bounds.
     lock(registry).hellos -= 1;
@@ -518,7 +525,7 @@ impl Dialed {
         format!("the gateway reached the sandbox at {}", self.endpoint)
     }
 
-    fn connected(&self, by: Bound<'_>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
+    fn connected(&self, by: Bound<'_, impl Clock>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         let endpoint = &self.endpoint;
         let late = |failed: &dyn fmt::Display| {
             io::Error::new(
@@ -541,7 +548,11 @@ impl Dialed {
             };
             // A dial gets the hello timeout at most, so that one that hangs leaves time for
             // another.
-            match self.dial(Deadline::after(left.min(HELLO_TIMEOUT)), stopped) {
+            let dial = Bound {
+                clock: &Machine,
+                by: Machine.now() + left.min(HELLO_TIMEOUT),
+            };
+            match self.dial(dial, stopped) {
                 Ok(met) => return Ok(met),
                 Err(DialError::Again(error)) => failed = Some(error),
                 Err(DialError::Never(error)) => return Err(error),
@@ -556,11 +567,11 @@ impl Dialed {
         }
     }
 
-    fn dial(&self, by: Deadline, stopped: &dyn Fn() -> bool) -> Result<Met, DialError> {
+    fn dial(&self, by: Bound<'_, Machine>, stopped: &dyn Fn() -> bool) -> Result<Met, DialError> {
         let endpoint = &self.endpoint;
-        let stream = self.connect(by, stopped)?;
+        let stream = self.connect(by.deadline(), stopped)?;
         unstopped(stopped, self.awaited(), LISTENING).map_err(DialError::Never)?;
-        let secured = self.client.connect(stream, endpoint.host(), by);
+        let secured = self.client.connect(stream, endpoint.host(), by.deadline());
         let connection = match secured {
             Ok(stream) => Connection::Tls(stream),
             // TLS's own failures are `InvalidData`, a certificate that isn't the endpoint's among
@@ -572,7 +583,7 @@ impl Dialed {
             }
             Err(error) => return Err(DialError::Again(error)),
         };
-        match read_hello(&connection, &|| by.remaining().is_none(), stopped) {
+        match read_hello(&connection, by, stopped) {
             Ok((Hello { gpus }, None)) => Ok(Met { connection, gpus }),
             Ok((_, Some(_))) => {
                 let message = "the hello presents an attestation where the gateway dialed the \
@@ -658,32 +669,32 @@ enum Meeting {
 }
 
 impl Registration {
-    /// Waits for the sandbox to meet the gateway, accepts its hello, and returns its session.
+    /// Waits for the sandbox to meet the gateway by `by`, a time on `clock`, accepts its hello, and
+    /// returns its session, which times its requests by `clock`.
     ///
     /// `ops` is the session's limit on an op's payload, none for a session that takes no ops, and
     /// `models` whether it takes model requests. The session's reader thread sends each arrival, as
     /// `wrap` makes it, to `arrivals`, and drops it once `arrivals`' receiver has gone.
-    ///
-    /// `left` gives the time left by the caller's clock, as [`Deadline::remaining`] does by the
-    /// machine's. Once it gives none the call fails with `TimedOut`, and once `stopped` says yes it
-    /// fails too. A hello that is wrong, which the sandbox is told of, fails it with `InvalidData`.
-    pub fn accept<T: Send + 'static>(
+    /// `stopped` is asked while the call waits, and once it says yes the call fails. A sandbox that
+    /// has not met the gateway by `by` fails it with `TimedOut`, and a hello that is wrong, which
+    /// the sandbox is told of, with `InvalidData`.
+    pub fn accept<C: Clock, T: Send + 'static>(
         self,
-        left: impl Fn() -> Option<Duration>,
+        (clock, by): (&C, Duration),
         ops: Option<OpPayloadLimit>,
         models: bool,
         arrivals: Sender<T>,
         wrap: impl Fn(Arrival) -> T + Send + 'static,
         stopped: impl Fn() -> bool,
-    ) -> io::Result<Session> {
-        let by = Bound { left: &left };
+    ) -> io::Result<Session<C>> {
+        let by = Bound { clock, by };
         let (Met { connection, gpus }, grant) = match self.meeting {
             Meeting::Socket(listener) => (listener.connected(by, &stopped)?, None),
             Meeting::Private(awaiting) => (awaiting.presented(by, &stopped)?, None),
             // A `sandboxd` that listens serves only a peer that answers its hello with its grant.
             Meeting::Dial(dialed) => (dialed.connected(by, &stopped)?, Some(dialed.grant)),
         };
-        welcome(&connection, by.deadline(), grant)?;
+        welcome(&connection, by, grant)?;
         // `arrivals` is unbounded, so the reader never waits on its owner; the protocol bounds what
         // a session leaves there: the op in flight, the model requests in flight, at most
         // `MAX_MODEL_REQUESTS_IN_FLIGHT`, the exit of each command the owner started, and the end.
@@ -691,7 +702,7 @@ impl Registration {
         let send = move |arrival| {
             let _ = arrivals.send(wrap(arrival));
         };
-        Session::new(connection, gpus, ops, models, Box::new(send))
+        Session::new(clock.clone(), connection, gpus, ops, models, Box::new(send))
     }
 }
 
@@ -738,7 +749,7 @@ impl SocketListener {
         Ok(Self { listener, path })
     }
 
-    fn connected(self, by: Bound<'_>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
+    fn connected(self, by: Bound<'_, impl Clock>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         let path = self.path.display();
         self.listener
             .set_nonblocking(true)
@@ -770,13 +781,13 @@ impl SocketListener {
         // read.
         drop(self);
         let connection = Connection::Unix(stream);
-        let hello = read_hello(&connection, &|| by.left().is_none(), stopped);
-        let hello = hello.map_err(|error| refuse(&connection, by.deadline(), error))?;
+        let hello = read_hello(&connection, by, stopped);
+        let hello = hello.map_err(|error| refuse(&connection, by, error))?;
         let (Hello { gpus }, None) = hello else {
             let message = "the hello presents an attestation on a socket of the sandbox's own, \
                            which identifies it: expected none there";
             let error = io::Error::new(io::ErrorKind::InvalidData, message);
-            return Err(refuse(&connection, by.deadline(), error));
+            return Err(refuse(&connection, by, error));
         };
         Ok(Met { connection, gpus })
     }
@@ -796,7 +807,7 @@ struct Awaiting {
 }
 
 impl Awaiting {
-    fn presented(&self, by: Bound<'_>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
+    fn presented(&self, by: Bound<'_, impl Clock>, stopped: &dyn Fn() -> bool) -> io::Result<Met> {
         loop {
             let awaited = "the sandbox's hello was admitted";
             unstopped(stopped, awaited, "the sandbox to say it")?;
@@ -842,10 +853,9 @@ impl Drop for Awaiting {
     }
 }
 
-// `passed` says whether the read's deadline has passed.
 fn read_hello(
     connection: &Connection,
-    passed: &dyn Fn() -> bool,
+    by: Bound<'_, impl Clock>,
     stopped: &dyn Fn() -> bool,
 ) -> io::Result<(Hello, Option<Attestation>)> {
     // Read without blocking, as the connection was waited for, so that a stop and the deadline
@@ -858,7 +868,7 @@ fn read_hello(
     })?;
     let mut polled = Polled {
         connection,
-        passed,
+        by,
         stopped,
         stop: None,
     };
@@ -892,7 +902,7 @@ fn read_hello(
     }
 }
 
-fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error {
+fn refuse(connection: &Connection, by: Bound<'_, impl Clock>, error: io::Error) -> io::Error {
     // Only a hello that is wrong is refused to the sandbox: after any other failure the connection
     // can't be trusted to carry an answer.
     if error.kind() != io::ErrorKind::InvalidData {
@@ -900,8 +910,6 @@ fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error 
     }
     let message = error.to_string();
     let reason = format!("the gateway refused the session: {message}");
-    let left = || by.remaining();
-    let by = Bound { left: &left };
     let _ = frame::write(
         &mut Until { connection, by },
         &HelloReply::Refused { message },
@@ -912,12 +920,10 @@ fn refuse(connection: &Connection, by: Deadline, error: io::Error) -> io::Error 
 
 fn welcome(
     connection: &Connection,
-    by: Deadline,
+    by: Bound<'_, impl Clock>,
     grant: Option<RegistrationGrant>,
 ) -> io::Result<()> {
     let accepted = HelloReply::Accepted { grant };
-    let left = || by.remaining();
-    let by = Bound { left: &left };
     frame::write(&mut Until { connection, by }, &accepted, &[]).map_err(|error| {
         if !passed(&error) {
             return context("the answer to the sandbox's hello can't be sent", &error);
@@ -930,16 +936,16 @@ fn welcome(
     })
 }
 
-struct Polled<'a> {
+struct Polled<'a, C> {
     connection: &'a Connection,
-    passed: &'a dyn Fn() -> bool,
+    by: Bound<'a, C>,
     stopped: &'a dyn Fn() -> bool,
     // Kept apart from the error returned, which a reader of the frame may wrap, so that the stop is
     // told by where it came from, not by its kind.
     stop: Option<io::Error>,
 }
 
-impl Read for Polled<'_> {
+impl<C: Clock> Read for Polled<'_, C> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match (&mut &*self.connection).read(buf) {
@@ -949,7 +955,7 @@ impl Read for Polled<'_> {
                         self.stop = Some(stop);
                         return Err(kind.into());
                     }
-                    if (self.passed)() {
+                    if self.by.left().is_none() {
                         return Err(io::ErrorKind::TimedOut.into());
                     }
                     thread::sleep(POLL);

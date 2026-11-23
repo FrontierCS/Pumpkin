@@ -15,10 +15,9 @@
 //!
 //! # Deadlines
 //!
-//! Every request waits on the sandbox until its caller's deadline, so a slow link makes it wait,
-//! never fail. The deadline is `left`: the longest a wait may block before it calls `left` again,
-//! none once the deadline has passed, which is the time left by the machine's clock, and less by a
-//! clock that moves while a wait blocks. A request whose deadline passes fails with
+//! Every request waits on the sandbox until its caller's deadline, a time on the session's
+//! [`Clock`], so a slow link makes it wait, never fail. A wait blocks no longer than the clock's
+//! [`Clock::look`] before it reads the clock again. A request whose deadline passes fails with
 //! [`io::ErrorKind::TimedOut`] and ends the session; so does a sandbox that closes its connection,
 //! at once. A frame may also wait behind another writer's, until that writer's deadline.
 
@@ -34,7 +33,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{fmt, fs};
 
-use bound::{Bound, Left, Until, passed};
+use bound::{Bound, Until, passed};
 pub use meeting::{Dialer, GatewayAddress, Listener, Registration, Sockets, Unattested, Unreached};
 pub use op::Op;
 pub use process::Process;
@@ -46,6 +45,7 @@ use schema::sandbox::{
     MAX_OP_PAYLOAD_BYTES, OpPayloadLimit, RelativePath, Root, ToSandbox, dir_mode, pumpkin_dir,
     pumpkin_subdirs,
 };
+use stdx::time::Clock;
 
 mod bound;
 mod meeting;
@@ -57,7 +57,8 @@ mod trees;
 // thread that makes a session shares the count.
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
-/// One sandbox's session, driven by its owner.
+/// One sandbox's session, driven by its owner, whose requests each take their deadline as a time
+/// on its clock, `C`.
 ///
 /// Once the session has ended, every call fails with `ConnectionAborted` and the reason. It ends
 /// when the sandbox ends it, when the sandbox breaks the protocol, when a call's deadline passes
@@ -65,13 +66,14 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 /// returns once the reader has sent its last arrival, the end. That waits for a collect through
 /// [`Trees`] to take the part the reader holds.
 #[derive(Debug)]
-pub struct Session {
+pub struct Session<C> {
     id: u64,
     // Shared with the reader thread, and with the responses to model requests, which stream from
     // the threads that serve them while the owner sends requests.
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
     gpus: Option<Vec<GpuModel>>,
+    clock: C,
 }
 
 #[derive(Debug)]
@@ -237,17 +239,18 @@ pub struct ModelRequest {
     pub body: Vec<u8>,
 }
 
-/// The response to a model request, streaming to its client by the deadline that
-/// [`respond`](IncomingModelRequest::respond) gave.
+/// The response to a model request, streaming to its client by the deadline, a time on `clock`,
+/// that [`respond`](IncomingModelRequest::respond) gave.
 ///
 /// A response that hasn't ended by then ends the session at its next frame, or as it drops.
 /// [`end`](Self::end) ends it whole; [`cut`](Self::cut), or dropping it unended, cuts it short, so
 /// that its client doesn't take it as whole. It can go to another thread, and its sends fail once
 /// the session has ended.
 #[derive(Debug)]
-pub struct ModelResponse {
+pub struct ModelResponse<C: Clock> {
     responder: Responder,
-    left: Left,
+    clock: C,
+    by: Duration,
     finished: bool,
 }
 
@@ -257,8 +260,9 @@ struct Responder {
     shared: Arc<Shared>,
 }
 
-impl Session {
+impl<C: Clock> Session<C> {
     fn new(
+        clock: C,
         stream: Connection,
         gpus: Option<Vec<GpuModel>>,
         limit: Option<OpPayloadLimit>,
@@ -294,6 +298,7 @@ impl Session {
             shared,
             reader: Some(reader),
             gpus,
+            clock,
         })
     }
 
@@ -311,10 +316,10 @@ impl Session {
 
     /// Puts [`pumpkin_subdirs()`] under [`pumpkin_dir()`], with [`dir_mode()`], which every sandbox
     /// needs before its first command.
-    pub fn set_up(&mut self, left: impl Fn() -> Option<Duration>) -> Result<(), String> {
+    pub fn set_up(&mut self, by: Duration) -> Result<(), String> {
         let (root, subdirs) = (pumpkin_dir(), pumpkin_subdirs());
         let puts = subdirs.into_iter().map(|dir| Put::Dir(dir, dir_mode()));
-        self.put(&root, puts, left).map_err(|error| {
+        self.put(&root, puts, by).map_err(|error| {
             let failed =
                 format!("the directories under `{root}` can't be put in the sandbox: {error}");
             // A deadline's error says what is expected.
@@ -336,18 +341,16 @@ impl Session {
         &mut self,
         dir: &AbsolutePath,
         entries: impl IntoIterator<Item = Put<'a>>,
-        left: impl Fn() -> Option<Duration>,
+        by: Duration,
     ) -> io::Result<()> {
-        self.shared
-            .put(dir, Root::Kept, entries, Bound { left: &left })
+        self.shared.put(dir, Root::Kept, entries, self.by(by))
     }
 
     /// Kills the sandbox's processes that [`ToSandbox::Freeze`] names, so that nothing collected
     /// afterwards changes, and returns once they are gone.
-    pub fn freeze(&mut self, left: impl Fn() -> Option<Duration>) -> io::Result<()> {
-        let by = Bound { left: &left };
+    pub fn freeze(&mut self, by: Duration) -> io::Result<()> {
         self.shared
-            .request(|stream| ToSandbox::Freeze { stream }, by)
+            .request(|stream| ToSandbox::Freeze { stream }, self.by(by))
     }
 
     /// Copies the tree at the sandbox's `path`, a directory's or a file's, into `into`, a new
@@ -358,9 +361,9 @@ impl Session {
         path: &AbsolutePath,
         into: &Path,
         limits: Limits,
-        left: impl Fn() -> Option<Duration>,
+        by: Duration,
     ) -> io::Result<()> {
-        let by = Bound { left: &left };
+        let by = self.by(by);
         let collected = self.shared.collect(path, into, limits, by, &mut || false);
         collected.map(drop)
     }
@@ -377,13 +380,7 @@ impl Session {
     /// # Panics
     ///
     /// Panics if `op` arrived on another session.
-    pub fn reply(
-        &mut self,
-        op: IncomingOp,
-        reply: OpReply,
-        left: impl Fn() -> Option<Duration>,
-    ) -> io::Result<()> {
-        let by = Bound { left: &left };
+    pub fn reply(&mut self, op: IncomingOp, reply: OpReply, by: Duration) -> io::Result<()> {
         let IncomingOp {
             session,
             number,
@@ -412,12 +409,7 @@ impl Session {
     /// # Panics
     ///
     /// Panics if `refused` arrived on another session.
-    pub fn refuse(
-        &mut self,
-        refused: RefusedOp,
-        left: impl Fn() -> Option<Duration>,
-    ) -> io::Result<()> {
-        let by = Bound { left: &left };
+    pub fn refuse(&mut self, refused: RefusedOp, by: Duration) -> io::Result<()> {
         let message = refused.message();
         let RefusedOp {
             session,
@@ -451,7 +443,8 @@ impl Session {
         lock(&self.shared.routes).op = None;
     }
 
-    fn answer(&mut self, number: u32, reply: OpReply, by: Bound<'_>) -> io::Result<()> {
+    fn answer(&mut self, number: u32, reply: OpReply, by: Duration) -> io::Result<()> {
+        let by = self.by(by);
         self.shared.can_send(by, Due::Request)?;
         let message = ToSandbox::OpReply { op: number, reply };
         let writer = lock(&self.shared.writer);
@@ -460,7 +453,11 @@ impl Session {
 }
 
 impl Shared {
-    fn request(&self, message: impl FnOnce(u32) -> ToSandbox, by: Bound<'_>) -> io::Result<()> {
+    fn request(
+        &self,
+        message: impl FnOnce(u32) -> ToSandbox,
+        by: Bound<'_, impl Clock>,
+    ) -> io::Result<()> {
         let (stream, replies) = self.open(Route::Reply, by)?;
         let done = self
             .send(&message(stream), &[], by)
@@ -472,7 +469,7 @@ impl Shared {
     fn open<R>(
         &self,
         route: fn(SyncSender<R>) -> Route,
-        by: Bound<'_>,
+        by: Bound<'_, impl Clock>,
     ) -> io::Result<(u32, Receiver<R>)> {
         self.can_send(by, Due::Request)?;
         // One item in every queue. A put's, a freeze's or a start's queue holds its outcome, the
@@ -499,7 +496,7 @@ impl Shared {
         lock(&self.routes).open.remove(&stream);
     }
 
-    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_>) -> io::Result<()> {
+    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_, impl Clock>) -> io::Result<()> {
         let writer = lock(&self.writer);
         // A frame too long ends the session here, though `write` leaves it open: one frame of a
         // request that spans several, such as a put's, may be too long after the first was sent.
@@ -511,21 +508,21 @@ impl Shared {
         }
     }
 
-    fn receive<R>(&self, replies: &Receiver<R>, by: Bound<'_>) -> io::Result<R> {
+    fn receive<R>(&self, replies: &Receiver<R>, by: Bound<'_, impl Clock>) -> io::Result<R> {
         // The gateway bounds no wait of its own. A slow link is latency, which only the operation
         // the request serves knows how long to wait out, as its deadline says; a sandbox that is
         // gone closes its connection, which ends the session at once. A deadline that has passed
         // fails at once, even with a frame waiting, so that a tree sent faster than it is written
         // ends by it too.
         loop {
-            let Some(left) = by.left() else {
+            let Some(wait) = by.wait() else {
                 return Err(self.timed_out(
                     "the sandbox didn't answer before the request's deadline: expected its \
                      answer while the deadline lasts"
                         .to_owned(),
                 ));
             };
-            match replies.recv_timeout(left) {
+            match replies.recv_timeout(wait) {
                 Ok(reply) => return Ok(reply),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Err(self.ended()),
@@ -533,12 +530,16 @@ impl Shared {
         }
     }
 
-    fn done(&self, replies: &Receiver<Result<(), String>>, by: Bound<'_>) -> io::Result<()> {
+    fn done(
+        &self,
+        replies: &Receiver<Result<(), String>>,
+        by: Bound<'_, impl Clock>,
+    ) -> io::Result<()> {
         self.receive(replies, by)?.map_err(io::Error::other)
     }
 }
 
-impl Drop for Session {
+impl<C> Drop for Session<C> {
     fn drop(&mut self) {
         let reason = "the owner dropped the session".to_owned();
         // Ending the session shuts the connection both ways, which wakes the reader thread's read
@@ -560,15 +561,15 @@ impl Drop for Session {
 }
 
 impl IncomingModelRequest {
-    /// Starts the response with `status` and `headers`, and returns it, to stream its body by the
-    /// deadline that `left` gives. Fails if the head is too long for a frame, which cuts the
-    /// request short without a response.
-    pub fn respond(
+    /// Starts the response with `status` and `headers`, and returns it, to stream its body by
+    /// `by`, a time on `clock`. Fails if the head is too long for a frame, which cuts the request
+    /// short without a response.
+    pub fn respond<C: Clock>(
         self,
         status: u16,
         headers: Vec<(String, String)>,
-        left: impl Fn() -> Option<Duration> + Send + 'static,
-    ) -> io::Result<ModelResponse> {
+        (clock, by): (&C, Duration),
+    ) -> io::Result<ModelResponse<C>> {
         let Self {
             request: _,
             responder,
@@ -576,7 +577,8 @@ impl IncomingModelRequest {
         let request = responder.request;
         let response = ModelResponse {
             responder,
-            left: Left(Box::new(left)),
+            clock: clock.clone(),
+            by,
             finished: false,
         };
         let head = ToSandbox::ModelResponse {
@@ -590,11 +592,7 @@ impl IncomingModelRequest {
     }
 }
 
-impl ModelResponse {
-    fn by(&self) -> Bound<'_> {
-        Bound { left: &self.left.0 }
-    }
-
+impl<C: Clock> ModelResponse<C> {
     pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         let request = self.responder.request;
         for chunk in bytes.chunks(schema::frame::MAX_BODY_BYTES) {
@@ -625,7 +623,7 @@ impl ModelResponse {
     }
 }
 
-impl Drop for ModelResponse {
+impl<C: Clock> Drop for ModelResponse<C> {
     fn drop(&mut self) {
         if !self.finished {
             // A session that has ended has no client left to tell.
@@ -635,7 +633,7 @@ impl Drop for ModelResponse {
 }
 
 impl Responder {
-    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_>) -> io::Result<()> {
+    fn send(&self, message: &ToSandbox, body: &[u8], by: Bound<'_, impl Clock>) -> io::Result<()> {
         let writer = lock(&self.shared.writer);
         // Checked with the lock held, as waiting for the lock may use up the deadline.
         self.shared.can_send(by, Due::Response)?;
@@ -661,7 +659,7 @@ impl Due {
 }
 
 impl Shared {
-    fn can_send(&self, by: Bound<'_>, due: Due) -> io::Result<()> {
+    fn can_send(&self, by: Bound<'_, impl Clock>, due: Due) -> io::Result<()> {
         if self.ended.get().is_some() {
             return Err(self.ended());
         }
@@ -685,7 +683,7 @@ impl Shared {
         _writer: &MutexGuard<'_, ()>,
         message: &ToSandbox,
         body: &[u8],
-        by: Bound<'_>,
+        by: Bound<'_, impl Clock>,
         due: Due,
     ) -> io::Result<()> {
         let connection = &self.connection;

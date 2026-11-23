@@ -1,20 +1,20 @@
 //! A run's host: what the run reads of time and waits on, and what makes its record last.
 //!
 //! Every wait of a run ends by the run's clock. A session's requests, a model response's frames
-//! and a start's wait for its sandbox take the time left as a function that reads the clock
-//! (`until`, `whole_until`, `left`), which the gateway reads again as it waits. What a run still
-//! waits on by the machine's time, whatever its host:
-//! - within a start's wait for its sandbox, each dial, its TLS and its hello, the answer to its
-//!   hello, and the private listener's wait for a check, which take the time left as they begin;
+//! and a start's wait for its sandbox take their deadlines as times on it. What a run still waits
+//! on by the machine's time, whatever its host:
+//! - within a start's wait for its sandbox, each dial, its TLS and its hello, and the private
+//!   listener's wait for a check, which take the time left as they begin;
 //! - a provider's own calls, which wait on its platform;
 //! - the model route's exchange upstream, through `ureq`, which takes the time left as it begins,
-//!   and its resolve, connect and reads, by bounds of their own;
-//! - [`Clock::unix`], the run's start by the machine's clock.
+//!   and its resolve, connect and reads, by bounds of their own.
 
 use std::fs::File;
 use std::io;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
+
+use stdx::time::Clock as _;
 
 /// The machine a run runs on, as far as the run reads time, waits, and makes its record last.
 // Sync, as each child's thread syncs the record of its sandbox's start and delete through it.
@@ -39,30 +39,16 @@ pub enum Durable {
     All,
 }
 
-/// A run's clock: the time since the run started, which the core takes with each event, and when
-/// that was by the machine's clock.
+/// A run's clock, whose origin is the run's start: the core takes its time with each event.
 ///
-/// Each of the run's threads reads it through a clone of its own, and every clone reads the same
-/// time.
+/// Each of the run's threads reads it through a clone of its own.
 // 'static, as the agent's session's reader, a thread that outlives the run's borrows, stamps each
 // of the agent's arrivals with a clone.
-pub trait Clock: Clone + Send + 'static {
+pub trait Clock: stdx::time::Clock + Send + 'static {
     type Inbox<T: Send + 'static>: Inbox<T> + Send;
-
-    fn now(&self) -> Duration;
-
-    /// When the run started, by the machine's clock.
-    fn unix(&self) -> SystemTime;
 
     /// An empty inbox, whose waits this clock times.
     fn inbox<T: Send + 'static>(&self) -> Self::Inbox<T>;
-
-    /// The longest that a wait on the machine's timers may block before it reads this clock
-    /// again, where the clock can move while the wait blocks; none where only the wait's own time
-    /// left bounds it.
-    fn look(&self) -> Option<Duration> {
-        None
-    }
 }
 
 /// What other threads send a thread, in the order they sent it, for it to wait on. It never
@@ -89,7 +75,6 @@ impl Host for System {
     fn start(&self) -> SystemClock {
         SystemClock {
             start: Instant::now(),
-            unix: SystemTime::now(),
         }
     }
 
@@ -104,19 +89,24 @@ impl Host for System {
 #[derive(Clone, Copy, Debug)]
 pub struct SystemClock {
     start: Instant,
-    unix: SystemTime,
 }
 
-impl Clock for SystemClock {
-    type Inbox<T: Send + 'static> = SystemInbox<T>;
-
+impl stdx::time::Clock for SystemClock {
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
 
-    fn unix(&self) -> SystemTime {
-        self.unix
+    fn realtime(&self) -> SystemTime {
+        SystemTime::now()
     }
+
+    fn look(&self) -> Option<Duration> {
+        None
+    }
+}
+
+impl Clock for SystemClock {
+    type Inbox<T: Send + 'static> = SystemInbox<T>;
 
     fn inbox<T: Send + 'static>(&self) -> SystemInbox<T> {
         let (sender, receiver) = mpsc::channel();
@@ -167,38 +157,4 @@ fn disconnected() -> ! {
         "an inbox disconnected, though it holds a sender of its own, so its channel can't \
          disconnect while the inbox is borrowed to wait on it"
     )
-}
-
-/// The time left until `at`, a time since the run started by `clock`: never zero, none once it
-/// has passed, and [`Duration::MAX`] if it is past what the machine's clock can hold, as
-/// [`stdx::Deadline::remaining`] gives.
-pub(super) fn left(clock: &impl Clock, at: Duration) -> Option<Duration> {
-    let left = (at.checked_sub(clock.now())).filter(|left| !left.is_zero())?;
-    Some(match Instant::now().checked_add(left) {
-        Some(_) => left,
-        None => Duration::MAX,
-    })
-}
-
-/// How long a wait for `at` may block on the machine's timers before it calls the function again,
-/// on any thread: the time left, as [`left`] gives it, at most `clock`'s [`Clock::look`].
-pub(super) fn until<C: Clock>(
-    clock: &C,
-    at: Duration,
-) -> impl Fn() -> Option<Duration> + Send + 'static + use<C> {
-    let clock = clock.clone();
-    move || {
-        let left = left(&clock, at)?;
-        Some(clock.look().map_or(left, |look| left.min(look)))
-    }
-}
-
-/// The time left until `at`, as [`left`] gives it, whole, for a bound that a wait takes once as it
-/// begins, on any thread.
-pub(super) fn whole_until<C: Clock>(
-    clock: &C,
-    at: Duration,
-) -> impl Fn() -> Option<Duration> + Send + 'static + use<C> {
-    let clock = clock.clone();
-    move || left(&clock, at)
 }

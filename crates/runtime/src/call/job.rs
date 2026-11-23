@@ -44,7 +44,7 @@ pub(crate) fn evaluate<H: Host>(
     call: Call<'_>,
     bodies: &dyn Bodies,
     child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     stdin: &mut body::Stdin,
 ) -> End {
     let Call {

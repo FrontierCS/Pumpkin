@@ -15,6 +15,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime::{Clock, Durable, Host, Inbox};
+use stdx::time::Clock as _;
 
 use crate::sim::Journal;
 
@@ -343,9 +344,7 @@ pub(crate) struct SimClock {
     state: Arc<Mutex<State>>,
 }
 
-impl Clock for SimClock {
-    type Inbox<T: Send + 'static> = SimInbox<T>;
-
+impl stdx::time::Clock for SimClock {
     fn now(&self) -> Duration {
         let mut state = stdx::unpoisoned(self.state.lock());
         let now = state.now;
@@ -358,14 +357,19 @@ impl Clock for SimClock {
         now
     }
 
-    fn unix(&self) -> SystemTime {
-        stdx::unpoisoned(self.state.lock()).unix
+    fn realtime(&self) -> SystemTime {
+        let state = stdx::unpoisoned(self.state.lock());
+        state.unix + state.now
     }
 
     // A move of the clock ends no wait on the machine's timers, which looks again this often.
     fn look(&self) -> Option<Duration> {
         Some(LOOK)
     }
+}
+
+impl Clock for SimClock {
+    type Inbox<T: Send + 'static> = SimInbox<T>;
 
     fn inbox<T: Send + 'static>(&self) -> SimInbox<T> {
         let (sender, receiver) = mpsc::channel();

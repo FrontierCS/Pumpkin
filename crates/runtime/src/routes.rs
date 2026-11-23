@@ -11,12 +11,12 @@ use gateway::IncomingModelRequest;
 use route::{Admission, Answer, Bar};
 use schema::ir::{Api, Name};
 use schema::workflow::{AgentId, RoleId};
+use stdx::time::Clock as _;
 
 use crate::budget::Budget;
-use crate::host::whole_until;
 use crate::log::{Entry, ModelAnswer};
 use crate::model::{Exchange, Served};
-use crate::{Clock, Host, Inbox, Input, Runtime, Stopped};
+use crate::{Host, Inbox, Input, Runtime, Stopped};
 
 impl<'r, H: Host + 'r> Runtime<'r, H> {
     pub(crate) fn model_request<'s>(
@@ -60,8 +60,6 @@ impl<'r, H: Host + 'r> Runtime<'r, H> {
         };
         let reports = self.inbox.sender();
         let clock = self.clock.clone();
-        // Whole, as the route bounds the exchange by it as the exchange begins.
-        let by = whole_until(&clock, by);
         let exchange = Exchange::new(self.dir, number, clock.clone());
         // A request stays in flight until its thread writes its response's end, the thread's last
         // step, so the session's bound on the requests in flight, `MAX_MODEL_REQUESTS_IN_FLIGHT`,

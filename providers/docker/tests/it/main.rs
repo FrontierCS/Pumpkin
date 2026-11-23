@@ -44,6 +44,7 @@ use schema::sandbox::{
     dir_mode, file_mode,
 };
 use stdx::process::Environment;
+use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
 use test_support::suite::{Locals, Subject, reserve_with_room};
 use test_support::{BUSYBOX, TestDir, docker, hung};
@@ -126,12 +127,12 @@ impl Fixture {
         let by = startup();
         let Created { id } = provider().create(create, dial)?;
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(|| by.remaining(), ops, model, sender, |a| a, || false);
+        let accepted = registration.accept((&Machine, by), ops, model, sender, |a| a, || false);
         let set_up = accepted
             .map_err(|error| error.to_string())
             .and_then(|mut session| {
                 session
-                    .set_up(move || by.remaining())
+                    .set_up(by)
                     .context(format_args!("sandbox {}", id.as_str()))?;
                 Ok(session)
             });
@@ -202,7 +203,7 @@ fn role(name: &str) -> Role {
 #[derive(Debug)]
 struct Started {
     id: SandboxId,
-    session: Session,
+    session: Session<Machine>,
     arrivals: Receiver<Arrival>,
 }
 
@@ -211,7 +212,7 @@ impl Started {
         self.id.as_str()
     }
 
-    fn session(&mut self) -> &mut Session {
+    fn session(&mut self) -> &mut Session<Machine> {
         &mut self.session
     }
 }
@@ -268,8 +269,8 @@ fn provider() -> &'static Docker<'static> {
     connected().as_ref().unwrap()
 }
 
-fn startup() -> Deadline {
-    Deadline::after(declared_startup())
+fn startup() -> Duration {
+    Machine.now() + declared_startup()
 }
 
 fn declared_startup() -> Duration {
@@ -1210,8 +1211,7 @@ fn refused_calls() {
             let (status, arrived) = thread::scope(|scope| {
                 let second = scope.spawn(move || {
                     let (arrivals, _) = mpsc::channel();
-                    let by = hung();
-                    second.accept(by, None, false, arrivals, |a| a, || false)
+                    second.accept((&Machine, hung()), None, false, arrivals, |a| a, || false)
                 });
                 let served = serve(&mut sandbox, process, &[]);
                 drop(second.join().unwrap().unwrap());
@@ -1485,13 +1485,17 @@ fn respond(incoming: IncomingModelRequest) -> String {
     if request.path == "/headless" {
         // A head too long for a frame, which ends the request without a response.
         let headers = vec![("x-pad".to_owned(), "a".repeat(MAX_MESSAGE_BYTES))];
-        let refused = incoming.respond(200, headers, hung()).unwrap_err();
+        let refused = incoming
+            .respond(200, headers, (&Machine, hung()))
+            .unwrap_err();
         return format!("{asked}: {:?}", refused.kind());
     }
     if request.path == "/late" {
         // Far more than the client's buffers hold, yet within what the kernel queues to send on
         // `sandboxd`'s socket, so that much of it is still queued there as `sandboxd` closes.
-        let mut response = incoming.respond(200, Vec::new(), hung()).unwrap();
+        let mut response = incoming
+            .respond(200, Vec::new(), (&Machine, hung()))
+            .unwrap();
         response.send("a".repeat(1 << 20).as_bytes()).unwrap();
         response.end().unwrap();
         return asked;
@@ -1506,7 +1510,9 @@ fn respond(incoming: IncomingModelRequest) -> String {
     let headers = (headers.iter())
         .map(|&(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let mut response = incoming.respond(status, headers, hung()).unwrap();
+    let mut response = incoming
+        .respond(status, headers, (&Machine, hung()))
+        .unwrap();
     response.send(b"data: 1\n\n").unwrap();
     match body.as_str() {
         "" => response.end().unwrap(),
@@ -1534,7 +1540,7 @@ fn payload() -> Vec<u8> {
         .collect()
 }
 
-fn reply(session: &mut Session, arrival: Arrival, payload: &[u8]) -> String {
+fn reply(session: &mut Session<Machine>, arrival: Arrival, payload: &[u8]) -> String {
     let incoming = match arrival {
         Arrival::Op(incoming) => incoming,
         Arrival::Refused(refused) => {

@@ -29,6 +29,7 @@ use provider::{
 };
 use schema::ir::{AbsolutePath, Argv, Env, Image, Name, Resources, User};
 use schema::sandbox::{Launch, RelativePath, file_mode};
+use stdx::time::{Clock as _, Machine};
 use stdx::{Context, Deadline};
 
 use crate::TestDir;
@@ -72,11 +73,13 @@ pub struct Locals {
     pub unreachable_sandboxd: PathBuf,
 }
 
+// A started sandbox's session and what its reader hands over, or why it didn't start.
+type Started = Result<(Session<Machine>, Receiver<Arrival>), String>;
+
 // A wait that nothing can end sooner, such as a put to a `sandboxd` that has stopped reading, no
 // longer than any provider's startup, so that no outcome rests on its length.
-fn soon() -> impl Fn() -> Option<Duration> {
-    let by = Deadline::after(Duration::from_secs(1));
-    move || by.remaining()
+fn soon() -> Duration {
+    Machine.now() + Duration::from_secs(1)
 }
 
 // The roles of the suite's run, each of which it starts sandboxes of only once those of the one
@@ -251,11 +254,7 @@ fn lifecycle(
 fn kills(suite: &mut Suite<'_>, image: &ImageRef, sandboxd: &SandboxdRef) -> Vec<String> {
     let (id, started) = suite.start("killed", image, sandboxd);
     let (mut session, arrivals) = started.unwrap();
-    // Each request's deadline, from as it is made.
-    let by = || {
-        let by = Deadline::after(suite.startup());
-        move || by.remaining()
-    };
+    let by = || Machine.now() + suite.startup();
     let process = session.start(sleep(), by()).unwrap();
     session.kill(process, by()).unwrap();
     let exited = match arrivals.recv_timeout(suite.startup()).unwrap() {
@@ -358,7 +357,7 @@ fn outcome<T>(session: &Result<T, String>) -> String {
     }
 }
 
-fn put(mut session: Session) -> String {
+fn put(mut session: Session<Machine>) -> String {
     // Many times what a Unix socket holds unread with the default buffers
     // (`net.core.wmem_default`), which the suite assumes of its host: buffers that held it all
     // would let the put succeed.
@@ -510,17 +509,17 @@ impl<'a> Suite<'a> {
         role: &'static str,
         image: &ImageRef,
         sandboxd: &SandboxdRef,
-    ) -> (SandboxId, Result<(Session, Receiver<Arrival>), String>) {
+    ) -> (SandboxId, Started) {
         let startup = self.startup();
-        let by = Deadline::after(startup);
+        let by = Machine.now() + startup;
         let (id, registration) = (self.create(role, image, sandboxd, from_now(startup))).unwrap();
         // Nothing stops the start, whose `sandboxd` dials.
         let (sender, arrivals) = mpsc::channel();
-        let accepted = registration.accept(|| by.remaining(), None, false, sender, |a| a, || false);
+        let accepted = registration.accept((&Machine, by), None, false, sender, |a| a, || false);
         let accepted = accepted.map_err(|error| error.to_string());
         let session = accepted.and_then(|mut session| {
             session
-                .set_up(|| by.remaining())
+                .set_up(by)
                 .context(format_args!("sandbox {}", id.as_str()))?;
             Ok((session, arrivals))
         });

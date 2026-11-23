@@ -28,9 +28,9 @@ use schema::sandbox::{
 use schema::workflow::{self, Final, JobFunction, TargetId};
 use serde_json::{Map, Value};
 use stdx::Context;
+use stdx::time::Clock as _;
 
 use crate::child::{Child, Report};
-use crate::host::until;
 use crate::lease::command_dir;
 use crate::record::{Stored, reference};
 use crate::relay::{Relay, Waited};
@@ -211,7 +211,7 @@ pub(crate) fn evaluate<H: Host>(
     bodies: &dyn Bodies,
     call: &Call<'_>,
     child: &mut Child<'_, H, crate::relay::Order>,
-    session: &mut Session,
+    session: &mut Session<H::Clock>,
     stdin: &mut Stdin,
 ) -> Ended {
     let resident = call.target.lifetime == TargetLifetime::Work;
@@ -308,9 +308,9 @@ impl Stdin {
 
     fn put(
         &mut self,
-        session: &Session,
+        session: &Session<impl Clock>,
         bytes: &[u8],
-        by: &dyn Fn() -> Option<Duration>,
+        by: (&impl Clock, Duration),
     ) -> Result<AbsolutePath, String> {
         let trees = session.trees();
         let dir = Self::DIR;
@@ -337,8 +337,8 @@ impl Stdin {
 
     fn clear(
         &mut self,
-        session: &Session,
-        by: &dyn Fn() -> Option<Duration>,
+        session: &Session<impl Clock>,
+        by: (&impl Clock, Duration),
     ) -> Result<(), String> {
         if matches!(self, Self::Staged) {
             session
@@ -355,7 +355,7 @@ impl Stdin {
 struct OnTarget<'a, 'c, 'r, H: Host> {
     call: &'a Call<'c>,
     child: &'a mut Child<'r, H, crate::relay::Order>,
-    session: &'a mut Session,
+    session: &'a mut Session<H::Clock>,
     /// When the call's timeout passes, as a time since the run started.
     timeout: Duration,
     relay: Relay,
@@ -373,12 +373,12 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     /// The deadline of the body's next ask of the target, if the call goes on: relays what the
     /// target's session handed over since the last, and fails once the core has stopped the call,
     /// or its timeout has passed.
-    fn going(&mut self) -> Result<impl Fn() -> Option<Duration> + use<H>, String> {
+    fn going(&mut self) -> Result<Duration, String> {
         if let Some(cut) = self.cut {
             return Err(cut.reason());
         }
-        let by = until(&self.child.clock, self.timeout);
-        let idle = (self.relay).idle(self.child, self.call.job, (self.session, &by));
+        let by = self.timeout;
+        let idle = (self.relay).idle(self.child, self.call.job, (self.session, by));
         match idle {
             Ok(true) => return Err(self.cut_short(Cut::Stopped)),
             Ok(false) => {}
@@ -396,7 +396,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         waiting: Waiting,
         op: SessionOp,
     ) -> Result<LeaseStatusReply, String> {
-        let _ = self.going()?;
+        self.going()?;
         let waited = self.relay.runner(
             self.child,
             self.call.job,
@@ -438,11 +438,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     }
 
     /// The recorded output directory, only once the whole command log has arrived.
-    fn collect_output(
-        &mut self,
-        command: u64,
-        by: &dyn Fn() -> Option<Duration>,
-    ) -> Result<PathBuf, String> {
+    fn collect_output(&mut self, command: u64, by: Duration) -> Result<PathBuf, String> {
         let dir = self.output_dir(command);
         let logs = self.child.dir.join(log_dir().as_str());
         let into = self.child.dir.join(command_dir(command).as_str());
@@ -466,10 +462,9 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             .now()
             .saturating_add(self.call.timeout)
             .min(self.child.deadlines.collect);
-        let by = super::host::until(&self.child.clock, until);
         if let Some((command, process)) = self.running {
-            let stopped = self.stop_client(process, until, &by);
-            let _ = self.collect_output(command, &by);
+            let stopped = self.stop_client(process, until);
+            let _ = self.collect_output(command, until);
             let status = stopped?;
             let end = if matches!(self.cut, Some(Cut::TimedOut)) {
                 CommandEnd::TimedOut
@@ -478,21 +473,16 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             };
             self.log(Targeted::Ended { command, end });
         }
-        self.stdin.clear(self.session, &by)?;
+        self.stdin.clear(self.session, (&self.child.clock, until))?;
         match self.session.ended() {
             Some(reason) => Err(format!("the shared role's session ended: {reason}")),
             None => Ok(()),
         }
     }
 
-    fn stop_client(
-        &mut self,
-        process: Process,
-        until: Duration,
-        by: &dyn Fn() -> Option<Duration>,
-    ) -> Result<ExitStatus, String> {
+    fn stop_client(&mut self, process: Process, until: Duration) -> Result<ExitStatus, String> {
         self.session
-            .kill(process, by)
+            .kill(process, until)
             .context("stopping the shared call's command failed")?;
         loop {
             match self
@@ -510,8 +500,8 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
 
     fn collect_fresh(&mut self) {
         let job = self.call.job.0;
-        let by = until(&self.child.clock, self.child.deadlines.collect);
-        match self.session.freeze(&by) {
+        let by = self.child.deadlines.collect;
+        match self.session.freeze(by) {
             Ok(()) => {}
             // Every ask of an ended session fails at once, with the reason it ended: collecting
             // would only repeat it.
@@ -523,9 +513,9 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         if self.cut.is_some()
             && let Some((command, _)) = self.running
         {
-            let _ = self.collect_output(command, &by);
+            let _ = self.collect_output(command, by);
         }
-        if let Err(error) = collect(self.session, &out_dir(), &self.child.dir, &by) {
+        if let Err(error) = collect(self.session, &out_dir(), &self.child.dir, by) {
             (self.child).note(format!("job {job}'s out is incomplete: {error}"));
         }
     }
@@ -540,12 +530,14 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
     fn stage_stdin(
         &mut self,
         slot: usize,
-        by: &dyn Fn() -> Option<Duration>,
+        by: Duration,
     ) -> Result<(AbsolutePath, PayloadRef), String> {
         let input = self.input(slot)?;
         let bytes = input.read()?;
         let supplied = input.reference.clone();
-        let put = self.stdin.put(self.session, &bytes, by);
+        let put = self
+            .stdin
+            .put(self.session, &bytes, (&self.child.clock, by));
         Ok((self.timely(put)?, supplied))
     }
 
@@ -567,15 +559,15 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
         let dir = self.output_dir(command);
         self.runs_count += 1;
         let put = if target.lifetime == TargetLifetime::Work {
-            self.session.put(&pumpkin_dir().join(&dir), [], &by)
+            self.session.put(&pumpkin_dir().join(&dir), [], by)
         } else {
             self.session
-                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], &by)
+                .put(&pumpkin_dir(), [Put::Dir(dir.clone(), dir_mode())], by)
         };
         self.timely(put.context(format_args!("making {dir} failed")))?;
         let output = |name: RelativePath| pumpkin_dir().join(&dir.join(&name));
         let (stdin, supplied) = input
-            .map(|slot| self.stage_stdin(slot, &by))
+            .map(|slot| self.stage_stdin(slot, by))
             .transpose()?
             .unzip();
         let launch = Launch {
@@ -586,7 +578,7 @@ impl<H: Host> OnTarget<'_, '_, '_, H> {
             stdout: output(const { RelativePath::from_static("command.stdout") }),
             stderr: output(const { RelativePath::from_static("command.stderr") }),
         };
-        let started = self.session.start(launch, &by);
+        let started = self.session.start(launch, by);
         let process = self.timely(started.context("the command didn't start"))?;
         self.running = Some((command, process));
         let argv = argv.clone();
@@ -702,7 +694,7 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         let payload = self.input(input_slot)?.read()?;
         let put = self
             .session
-            .put(&dir, [Put::File(name, file_mode(), &payload)], &by);
+            .put(&dir, [Put::File(name, file_mode(), &payload)], by);
         let put = put.context(format_args!("putting the payload at {path} failed"));
         self.timely(put)?;
         let put = reference(&payload);
@@ -729,13 +721,13 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
 
     fn run(&mut self, argv: &Argv) -> Result<(), String> {
         let (command, _) = self.command(argv, None)?;
-        let _ = self.collect_output(command, &until(&self.child.clock, self.timeout));
+        let _ = self.collect_output(command, self.timeout);
         Ok(())
     }
 
     fn capture(&mut self, argv: &Argv, stdin: Option<usize>) -> Result<String, String> {
         let (command, status) = self.command(argv, stdin)?;
-        let log = self.collect_output(command, &until(&self.child.clock, self.timeout));
+        let log = self.collect_output(command, self.timeout);
         match status {
             ExitStatus::Code(0) => {}
             ExitStatus::Code(code) => {
@@ -758,7 +750,7 @@ impl<H: Host> Target for OnTarget<'_, '_, '_, H> {
         }
         let text = String::from_utf8(bytes)
             .map_err(|_| format!("command {command}'s stdout is not UTF-8 text"))?;
-        let _ = self.going()?;
+        self.going()?;
         Ok(text)
     }
 

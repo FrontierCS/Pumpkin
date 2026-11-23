@@ -20,6 +20,7 @@ use decision::{CallResult, Caller, Core, Event, JobId, Request};
 use gateway::{Arrival, IncomingModelRequest, Session, Trees};
 use provider::UnixTime;
 use schema::sandbox::OpPayloadLimit;
+use stdx::time::Clock as _;
 
 use super::log::Entry;
 use super::sandbox::{Sandboxes, Which};
@@ -39,7 +40,7 @@ pub(super) struct Child<'r, H: Host, O: Send + 'static> {
     pub(super) clock: H::Clock,
     pub(super) inbox: <H::Clock as Clock>::Inbox<Message<O>>,
     /// A sender into the loop's inbox, which outlives every child's thread, so a send can't fail.
-    pub(super) reports: Sender<Input>,
+    pub(super) reports: Sender<Input<H::Clock>>,
 }
 
 /// By when each of a child's steps is to be done, as times since the run started.
@@ -135,7 +136,7 @@ impl End {
 pub(super) fn run<H: Host, O: Send + 'static>(
     child: &mut Child<'_, H, O>,
     ops: Option<OpPayloadLimit>,
-    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session) -> End,
+    drive: impl FnOnce(&mut Child<'_, H, O>, &mut Session<H::Clock>) -> End,
 ) {
     let which = child.which;
     let noun = which.noun();
