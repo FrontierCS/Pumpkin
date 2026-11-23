@@ -43,9 +43,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
 rm --recursive --force /var/lib/apt/lists/*
 # The package's host keys would be every build's. The volume keeps the container's own.
 rm --force /etc/ssh/ssh_host_*
-# The user that the install makes, at an ID that every build gives it, as the volume at /home
-# keeps its files from one container to the next. Its home is copied into an empty volume.
-useradd --uid=1001 --user-group --create-home --shell=/bin/sh --groups=docker pumpkin
 EOF
 
 # The host key, in the volume at /etc/ssh/keys, made at the first start, so that it outlives each

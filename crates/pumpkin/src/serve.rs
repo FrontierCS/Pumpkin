@@ -289,7 +289,7 @@ fn health(home: &Path) -> Result<Health, String> {
     let Disk {
         size_bytes,
         free_bytes,
-    } = crate::job::disk(crate::job::VOLUME)?;
+    } = crate::job::disk(home)?;
     Ok(Health {
         up_seconds,
         disk_size_bytes: size_bytes,

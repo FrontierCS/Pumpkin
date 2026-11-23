@@ -87,8 +87,12 @@ there.
   journal says why: `journalctl -u pumpkin-members.service`.
 - **Revoke.** Remove the line and apply. The controller refuses the key within a minute. A
   connection already open lasts until it ends. A member was root on the controller through
-  `docker`, so replace the controller to be sure they left nothing behind. `serve` ends a link that asks nothing for a minute,
-  but an open `view` page asks every few seconds until it is closed.
+  `docker`, so to be sure they left nothing behind, replace the instance and its data volume in a
+  cutover, under "Versions": `-replace=module.pumpkin.aws_instance.controller
+  -replace=module.pumpkin.aws_ebs_volume.controller`. The records that no member copied go with
+  the volume, as does the host key, which each member unpins as the refusal says. `serve` ends a
+  link that asks nothing for a minute, but an open `view` page asks every few seconds until it is
+  closed.
 - **See the logins.** On the controller,
   `sudo journalctl -u ssh --grep 'Accepted publickey for pumpkin'` lists each login with its
   key's fingerprint. `ssh-keygen -l -f /etc/ssh/pumpkin/members` lists the fingerprint of each key
@@ -134,14 +138,14 @@ running job would meet: follow the drain runbook under "Versions". A Modal class
 no apply: it is the client's `[controllers.<name>.modal]`, which each job takes.
 
 With `variables.tf`'s defaults, the controller costs about $0.94 an hour while it runs in
-us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volume at
+us-west-1, less in us-east-1 and us-west-2; stopped, about $110 a month for its volumes at
 us-east-1's rates, more in other regions; beside ECR's storage.
 
 The controller's first boot runs the install of the release that `pumpkin_release` names. The
 install sets up Pumpkin's user, its units and `sshd`'s settings, and nothing changes them later.
 So an apply that changes `pumpkin_release` replaces the controller. The new controller also takes
-the current Ubuntu release, this module's `controller.yaml` and `deploy/controller`'s `install.sh`,
-and its volume is new.
+the current Ubuntu release, this module's `controller.yaml` and `deploy/controller`'s `install.sh`.
+It mounts the data volume, which keeps the build cache, the records and the host key.
 `terraform apply -replace=module.pumpkin.aws_instance.controller` replaces it at the same
 release. Either replacement is a cutover, under "Versions".
 
@@ -168,10 +172,10 @@ members' keys. Both refuse settings without it.
   a new key beside a provider's kind in `[providers.<name>]`. So either is a major. A job keeps only
   `images` of the Modal provider's table in the settings, as the client sends the rest. It drops any
   other key there without a word in the log.
-- A release keeps nothing but the envelope across releases. It need not work with another tag's
-  module, controller install or members' clients. So at each tag, the admin applies the tag's
-  module with the tag's `pumpkin_release`, in a cutover as below. Each member then raises
-  `.pumpkinversion` to that release.
+- A release keeps nothing but the envelope and the controller's data volume across releases. It
+  need not work with another tag's module, controller install or members' clients. So at each
+  tag, the admin applies the tag's module with the tag's `pumpkin_release`, in a cutover as below.
+  Each member then raises `.pumpkinversion` to that release.
 - Each job's directory on the controller is `~pumpkin/jobs/<id>/`. Its `release` names the release
   that runs it, as `pumpkin --version` does. Its `envelope` names the envelopes it takes, such as
   `^1.1`, Cargo's caret requirement: 1.1 or a later 1.x. Step 2 of a cutover, below, lists the ids
@@ -190,16 +194,16 @@ apply of its own, outside them.
    `sudo ls /run/user/$(id --user pumpkin)/pumpkin` lists the id of each job whose unit runs.
    Each job's unit removes the job's directory there as it ends. A run's job ends by the run's
    hard end at the latest. `sudo cat ~pumpkin/jobs/<id>/release` names the release of job `<id>`.
-   Before a replacement, each member runs `pumpkin wait <id>` for each run whose record they
-   keep. A replacement discards each run's record that no member copied.
 3. Apply the change. For a release, raise the module's `ref` and `pumpkin_release` to the
    release's. Its plan replaces `module.pumpkin.aws_instance.controller`, and the new
    controller's first boot installs the release. The apply that creates
    `terraform_data.pumpkin_release` replaces nothing, as only a change of it does. So where the
-   plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. The new
-   controller has a new host key, so each member's first command after the replacement is
-   refused. Once the admin confirms the replacement, the member runs the `ssh-keygen -R` command
-   that the refusal names, and the next command pins the new key.
+   plan creates it, apply with `-replace=module.pumpkin.aws_instance.controller`. Where the plan
+   creates `module.pumpkin.aws_ebs_volume.controller`, it shrinks the root to 30 GiB, which EBS
+   can't do in place: apply it with a new `pumpkin_release` or that `-replace`. The old root goes,
+   so first each member runs `pumpkin wait <id>` for each run whose record they keep. The new
+   volume has a new host key: once the admin confirms it, each member runs the `ssh-keygen -R`
+   command that the refusal names.
 4. Once `pumpkin ls` reaches the controller, set `draining = false` and apply.
 5. At a tag, each member raises `.pumpkinversion` to its release.
 
@@ -209,7 +213,8 @@ apply of its own, outside them.
 terraform destroy
 ```
 
-This deletes the repositories with their images, so a record's images can no longer be pulled.
+This deletes the controller's data volume, with the records that no member copied, and the
+repositories with their images, so a record's images can no longer be pulled.
 The AMIs that Image Builder baked stay registered, as do their snapshots: deregister each
 `aws ec2 describe-images --owners self --filters 'Name=name,Values=pumpkin-<name>*'` lists. The
 state bucket and the OIDC provider are the account's, and stay.

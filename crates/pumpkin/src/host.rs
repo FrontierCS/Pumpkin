@@ -27,7 +27,7 @@ mod gateway_ports;
 mod idle;
 mod members;
 
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, chown};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -51,6 +51,10 @@ const ADMIN: &str = "/usr/local/sbin/pumpkin-admin";
 // The login shell of `USER`. `sshd` runs each forced command through it. It reads no startup file
 // of the user's for `-c`, so no file that a job writes in the home runs before a member's command.
 const SHELL: &str = "/bin/sh";
+
+// The UID of `USER`, the one that `useradd` picks on Ubuntu's images, after `ubuntu`'s 1000, so
+// that the files of a home that a volume keeps stay the user's on the next host.
+const UID: u32 = 1001;
 
 // The group that Docker's package makes. The engine serves its members as root.
 const DOCKER_GROUP: &str = "docker";
@@ -243,38 +247,58 @@ fn searchable(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Adds `USER` with its shell and Docker's group, and makes it linger. Skips each step that the
-/// user already has.
+/// Adds `USER` with its UID, shell and Docker's group, gives it its home, and makes it linger.
+/// Skips each step that the user already has.
 fn user() -> Result<(), String> {
     let docker = getent("group", DOCKER_GROUP)?.ok_or_else(|| {
         format!(
             "the group `{DOCKER_GROUP}` is missing: install Docker first, whose package makes it"
         )
     })?;
-    match getent("passwd", USER)? {
-        None => {
-            let groups = format!("--groups={DOCKER_GROUP}");
-            let shell = format!("--shell={SHELL}");
-            let args = ["--create-home", "--user-group", &shell, &groups, USER];
-            ran("useradd", &args)?;
-            say(format_args!("added the user {USER}"));
-        }
-        Some(entry) => {
-            // name:password:UID:GID:GECOS:home:shell, as passwd(5) says.
-            if entry.split(':').nth(6) != Some(SHELL) {
-                ran("usermod", &[&format!("--shell={SHELL}"), USER])?;
-                say(format_args!("made {SHELL} the shell of {USER}"));
-            }
-            // name:password:GID:members, the members split by commas, as group(5) says.
-            let members = docker.split(':').nth(3).unwrap_or_default();
-            if !members.split(',').any(|member| member == USER) {
-                ran(
-                    "usermod",
-                    &["--append", &format!("--groups={DOCKER_GROUP}"), USER],
-                )?;
-                say(format_args!("added {USER} to the group {DOCKER_GROUP}"));
-            }
-        }
+    let added = getent("passwd", USER)?.is_none();
+    if added {
+        let uid = format!("--uid={UID}");
+        let groups = format!("--groups={DOCKER_GROUP}");
+        let shell = format!("--shell={SHELL}");
+        let args = ["--create-home", "--user-group", &uid, &shell, &groups, USER];
+        ran("useradd", &args)?;
+        say(format_args!("added the user {USER}"));
+    }
+    let entry = getent("passwd", USER)?.unwrap_or_default();
+    // name:password:UID:GID:GECOS:home:shell, as passwd(5) says.
+    let fields: Vec<&str> = entry.trim_end().split(':').collect();
+    let parsed = match fields[..] {
+        [_, _, uid, gid, _, home, shell] => (uid.parse::<u32>().ok())
+            .zip(gid.parse::<u32>().ok())
+            .map(|(uid, gid)| (uid, gid, home, shell)),
+        _ => None,
+    };
+    let Some((uid, gid, home, shell)) = parsed else {
+        return Err(format!(
+            "`getent passwd {USER}` gives `{}`: expected an entry of passwd(5), 7 fields with a \
+             numeric UID and GID",
+            entry.trim_end().escape_debug()
+        ));
+    };
+    if !added && shell != SHELL {
+        ran("usermod", &[&format!("--shell={SHELL}"), USER])?;
+        say(format_args!("made {SHELL} the shell of {USER}"));
+    }
+    // name:password:GID:members, the members split by commas, as group(5) says.
+    let members = docker.split(':').nth(3).unwrap_or_default();
+    if !added && !members.split(',').any(|member| member == USER) {
+        ran(
+            "usermod",
+            &["--append", &format!("--groups={DOCKER_GROUP}"), USER],
+        )?;
+        say(format_args!("added {USER} to the group {DOCKER_GROUP}"));
+    }
+    // `useradd` leaves a home that already exists as it was, such as a new volume's mount point,
+    // which is root's.
+    let home = Path::new(home);
+    if fs::metadata(home).context(home.display())?.uid() != uid {
+        chown(home, Some(uid), Some(gid)).context(home.display())?;
+        say(format_args!("gave {} to {USER}", home.display()));
     }
     // `loginctl enable-linger` makes this file, whose presence is the user's lingering.
     let linger = Path::new("/var/lib/systemd/linger").join(USER);
